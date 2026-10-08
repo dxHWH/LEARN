@@ -1,0 +1,329 @@
+<div class="part-head" data-toc="第五部分 · 平台补充【P1】">
+  <div class="no">PART FIVE</div>
+  <h1>第五部分　平台补充：Linux 与 Windows【P1】</h1>
+  <p>同样是"创建一个运行另一个程序的进程"，Linux 拆成 fork + exec 两步，Windows 用 CreateProcess 一步完成。两种设计各有道理，也各有坑。</p>
+</div>
+
+<!-- ======================= CH8 ======================= -->
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>Linux：fork、exec、wait，孤儿与僵尸</h1>
+    <p class="lead">fork 复制一个自己，exec 把自己换成别的程序，wait 给死去的子进程收尸。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>准确说出 fork 后哪些东西被复制、哪些被共享，理解写时复制</li>
+    <li>说出 exec 保留了什么、替换了什么</li>
+    <li>理解僵尸进程和孤儿进程的成因、危害和处理方法</li>
+    <li>能做 fork 计数类的笔试题，并解释 stdio 缓冲带来的"多打印"现象</li>
+  </ul></div>
+
+  <h2>8.1 Shell 是怎么执行一条命令的</h2>
+  <p>在 bash 里输入 <code>ls -l</code>，bash 做了三件事：<strong>fork</strong> 出一个子进程（此时子进程还是 bash）；子进程调用 <strong>exec</strong> 把自己替换成 <code>/usr/bin/ls</code>；父进程 bash 调用 <strong>wait</strong> 等待子进程结束，拿到退出码（就是 <code>$?</code>），然后打印下一个提示符。</p>
+  <figure>
+  <svg viewBox="0 0 860 270" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="40" width="150" height="54" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="95" y="63" text-anchor="middle" class="b sm">bash (pid 100)</text><text x="95" y="82" text-anchor="middle" class="xs">读到 "ls -l"</text>
+    <line x1="170" y1="67" x2="830" y2="67" stroke="#2F5BD3" stroke-width="2" stroke-dasharray="2 0"/>
+    <rect x="250" y="44" width="90" height="46" rx="8" fill="#fff" stroke="#2F5BD3"/><text x="295" y="72" text-anchor="middle" class="mono">fork()</text>
+    <rect x="420" y="44" width="200" height="46" rx="8" fill="#fff" stroke="#2F5BD3"/><text x="520" y="66" text-anchor="middle" class="mono">waitpid(101, &amp;st, 0)</text><text x="520" y="82" text-anchor="middle" class="xs">阻塞，等子进程结束</text>
+    <rect x="700" y="44" width="130" height="46" rx="8" fill="#fff" stroke="#2F5BD3"/><text x="765" y="66" text-anchor="middle" class="xs">$? = 退出码</text><text x="765" y="82" text-anchor="middle" class="xs">打印下一个提示符</text>
+    <path d="M295 90 L295 160" stroke="#C2410C" stroke-width="1.8" marker-end="url(#ao)"/>
+    <text x="305" y="130" class="xs" style="fill:#C2410C">子进程（pid 101）：仍然是 bash 的副本</text>
+    <rect x="230" y="162" width="130" height="50" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="295" y="184" text-anchor="middle" class="xs">重定向、设置管道</text><text x="295" y="202" text-anchor="middle" class="xs">（在 exec 之前做）</text>
+    <line x1="360" y1="187" x2="408" y2="187" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <rect x="410" y="162" width="160" height="50" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="490" y="184" text-anchor="middle" class="mono">execve("/usr/bin/ls")</text><text x="490" y="202" text-anchor="middle" class="xs">映像被替换，PID 仍是 101</text>
+    <line x1="570" y1="187" x2="618" y2="187" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <rect x="620" y="162" width="110" height="50" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="675" y="184" text-anchor="middle" class="xs">ls 运行</text><text x="675" y="202" text-anchor="middle" class="xs">exit(0)</text>
+    <path d="M700 162 L740 92" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)" fill="none"/>
+    <text x="745" y="132" class="xs" style="fill:#15803D">SIGCHLD + 唤醒 wait</text>
+    <text x="430" y="252" text-anchor="middle" class="xs">fork 和 exec 之间的这段"空隙"非常有用：子进程可以先改 fd（实现 &gt; 重定向和 | 管道）、改目录、降权限，再 exec</text>
+  </svg>
+  <figcaption><b>图 8-1</b> Shell 执行命令的经典三步：fork → exec → wait</figcaption>
+  </figure>
+
+  <h2>8.2 fork：调用一次，返回两次</h2>
+<!--code:cpp:fork 的返回值-->
+pid_t pid = fork();
+if (pid < 0)       { /* 失败：进程数达到上限、内存不足 */ }
+else if (pid == 0) { /* 子进程：fork 返回 0（可用 getppid() 找父亲） */ }
+else               { /* 父进程：fork 返回子进程的 PID（父进程没有别的办法知道孩子是谁） */ }
+<!--/code-->
+  <p>fork 之后，父子进程从<strong>同一个位置（fork 返回处）</strong>继续执行，区别只在返回值。至于谁先运行，由调度器决定，<strong>程序不能依赖任何顺序</strong>。</p>
+
+  <h3>fork 之后什么被复制，什么被共享</h3>
+  <div class="tbl"><table>
+    <tr><th>项目</th><th>fork 后</th><th>说明</th></tr>
+    <tr><td>地址空间（代码、数据、堆、栈）</td><td class="mid">逻辑上复制，物理上写时复制</td><td>见下文 COW</td></tr>
+    <tr><td>文件描述符表</td><td class="mid">表复制，但指向<strong>同一个打开文件表项</strong></td><td><strong>文件偏移量和状态标志是共享的</strong>！父子进程交替写同一个 fd，内容会接在一起而不是互相覆盖</td></tr>
+    <tr><td>信号处理方式、屏蔽字</td><td>复制</td><td>待处理信号集会被清空</td></tr>
+    <tr><td>当前目录、umask、uid/gid、资源限制</td><td>复制</td><td></td></tr>
+    <tr><td>PID、PPID</td><td class="no">不同</td><td>子进程获得新 PID，PPID 是父进程</td></tr>
+    <tr><td>文件锁（fcntl 记录锁）</td><td class="no">不继承</td><td></td></tr>
+    <tr><td>定时器、CPU 时间统计</td><td class="no">清零</td><td></td></tr>
+    <tr><td><strong>线程</strong></td><td class="no"><strong>只复制调用 fork 的那一个</strong></td><td>多线程程序 fork 的大坑，见下文</td></tr>
+  </table></div>
+
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <text x="210" y="22" text-anchor="middle" class="b">fork 之后（写之前）</text>
+    <rect x="30" y="40" width="120" height="70" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="90" y="64" text-anchor="middle" class="sm b">父进程页表</text><text x="90" y="86" text-anchor="middle" class="xs">页 P：只读</text>
+    <rect x="270" y="40" width="120" height="70" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="330" y="64" text-anchor="middle" class="sm b">子进程页表</text><text x="330" y="86" text-anchor="middle" class="xs">页 P：只读</text>
+    <rect x="150" y="160" width="120" height="50" rx="8" fill="#F3F4F6" stroke="#4B5563"/><text x="210" y="182" text-anchor="middle" class="sm">物理页 X</text><text x="210" y="200" text-anchor="middle" class="xs">引用计数 = 2</text>
+    <path d="M90 110 L190 158" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/><path d="M330 110 L230 158" stroke="#C2410C" stroke-width="1.5" marker-end="url(#ao)"/>
+    <text x="210" y="238" text-anchor="middle" class="xs">只复制页表，不复制内存内容 → fork 很快</text>
+
+    <text x="640" y="22" text-anchor="middle" class="b">子进程写 g_value = 999 之后</text>
+    <rect x="460" y="40" width="120" height="70" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="520" y="64" text-anchor="middle" class="sm b">父进程页表</text><text x="520" y="86" text-anchor="middle" class="xs">页 P → X</text>
+    <rect x="700" y="40" width="120" height="70" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="760" y="64" text-anchor="middle" class="sm b">子进程页表</text><text x="760" y="86" text-anchor="middle" class="xs">页 P → Y（可写）</text>
+    <rect x="460" y="160" width="120" height="50" rx="8" fill="#F3F4F6" stroke="#4B5563"/><text x="520" y="182" text-anchor="middle" class="sm">物理页 X</text><text x="520" y="200" text-anchor="middle" class="xs">g_value = 1</text>
+    <rect x="700" y="160" width="120" height="50" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="760" y="182" text-anchor="middle" class="sm">物理页 Y（新复制）</text><text x="760" y="200" text-anchor="middle" class="xs">g_value = 999</text>
+    <path d="M520 110 L520 158" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/><path d="M760 110 L760 158" stroke="#C2410C" stroke-width="1.5" marker-end="url(#ao)"/>
+    <text x="640" y="238" text-anchor="middle" class="xs">写触发缺页异常 → 内核复制这一页，改为可写 → 重新执行写指令</text>
+  </svg>
+  <figcaption><b>图 8-2</b> 写时复制（Copy-On-Write）：只有被写的那一页才真正复制</figcaption>
+  </figure>
+  <div class="co ver"><span class="h">🎮 工程视角：COW 的妙用与代价</span>
+  <p><strong>Redis 的 RDB 持久化</strong>就是利用 fork + COW：主进程 fork 出子进程，子进程看到的是 fork 那一刻内存的"快照"，慢慢写到磁盘；主进程继续处理写请求，只有被修改的页才会被复制。代价是：如果快照期间写入很多，被复制的页会很多，内存可能接近翻倍；另外 fork 本身要复制页表，几十 GB 的实例 fork 一次可能要几十到几百毫秒，期间主进程是阻塞的。开启透明大页（THP）还会让每次 COW 复制 2MB 而不是 4KB，所以 Redis 建议关闭 THP。</p></div>
+
+  <div class="co warn"><span class="h">⚠️ 易错点：多线程程序里 fork</span>
+  <p>fork 只复制调用它的线程。假设 fork 时另一个线程恰好持有 <code>malloc</code> 内部的锁，子进程里这把锁仍然是"已锁定"状态，但持锁的线程在子进程中并不存在，<strong>永远不会解锁</strong>。子进程一调用 <code>malloc</code>（<code>printf</code> 内部也可能调用）就会死锁。因此 POSIX 规定：多线程程序 fork 后，子进程在调用 exec 之前<strong>只能调用异步信号安全的函数</strong>。实践建议：多线程程序要启动外部程序时，fork 后立刻 exec，或直接用 <code>posix_spawn</code>。<code>pthread_atfork</code> 可以注册在 fork 前后获取/释放锁的回调，但很难做到完备。</p></div>
+
+  <h2>8.3 exec：换掉灵魂，保留身份</h2>
+  <p>exec 系列函数把当前进程的程序映像<strong>整个替换</strong>为新程序：旧的代码、数据、堆、栈全部丢弃，按新程序的 ELF 文件重新建立地址空间，从新程序的入口开始执行。<strong>exec 成功后不会返回</strong>，因为调用它的代码已经不存在了。</p>
+  <div class="tbl"><table>
+    <tr><th>exec 后保留</th><th>exec 后替换 / 重置</th></tr>
+    <tr><td>PID、PPID、进程组、会话<br>文件描述符（<strong>除非设置了 <code>FD_CLOEXEC</code></strong>）<br>当前目录、umask、资源限制<br>信号屏蔽字、待处理信号<br>被设为忽略（SIG_IGN）的信号仍然忽略</td><td>代码、数据、堆、栈、内存映射<br><strong>自定义的信号处理函数恢复为默认</strong>（函数地址在新程序里没有意义了）<br><strong>除调用线程外的所有线程被销毁</strong><br>用 <code>O_CLOEXEC</code> 打开的 fd 被关闭</td></tr>
+  </table></div>
+  <p>exec 家族命名规律：<code>l</code>（list，参数逐个列出）/ <code>v</code>（vector，参数用数组）；<code>p</code>（在 PATH 中查找程序）；<code>e</code>（自己指定环境变量）。真正的系统调用只有 <code>execve</code>，其余都是 libc 包装。</p>
+  <div class="co tip"><span class="h">✅ 实践建议：fd 泄漏与 O_CLOEXEC</span><p>如果服务进程打开了数据库连接、监听 socket，fork + exec 启动一个脚本后，脚本进程会继承这些 fd。轻则资源泄漏，重则服务重启时端口一直被脚本进程占着。现代代码应该在打开 fd 时就加上 <code>O_CLOEXEC</code> / <code>SOCK_CLOEXEC</code>。</p></div>
+
+  <h2>8.4 wait / waitpid：回收子进程</h2>
+<!--code:cpp:waitpid 用法要点-->
+int status;
+pid_t w = waitpid(pid, &status, 0);        // pid=-1 表示任意子进程；options=WNOHANG 表示不阻塞
+if (WIFEXITED(status))   printf("正常退出，码=%d\n", WEXITSTATUS(status));
+if (WIFSIGNALED(status)) printf("被信号 %d 杀死\n",  WTERMSIG(status));   // 例如 SIGSEGV=11
+<!--/code-->
+  <p>wait 有两个作用：<strong>获取子进程的退出状态</strong>，以及<strong>让内核释放子进程残留的 task_struct</strong>。第二个作用引出了僵尸进程。</p>
+
+  <h2>8.5 完整示例：fork_exec_wait.c</h2>
+<!--code:cpp:demos/linux/fork_exec_wait.c-->
+int g_value = 1;
+int main(void)
+{
+    printf("[parent] pid=%d  &g_value=%p\n", getpid(), (void*)&g_value);
+    fflush(stdout);                      // 关键：fork 前清空 stdio 缓冲，否则缓冲区会被复制一份
+    pid_t pid = fork();                  // 调用一次，返回两次
+    if (pid == 0) {                      // ---- 子进程 ----
+        g_value = 999;                   // 写时复制：此刻才真正复制这一页
+        printf("[child ] pid=%d ppid=%d  &g_value=%p  g_value=%d\n",
+               getpid(), getppid(), (void*)&g_value, g_value);
+        fflush(stdout);
+        execlp("ls", "ls", "-l", "/proc/self/exe", (char*)NULL);  // 用 ls 替换自身映像，PID 不变
+        perror("execlp");                // 只有 exec 失败才会走到这里
+        _exit(127);
+    }
+    int status;
+    pid_t w = waitpid(pid, &status, 0);  // 阻塞等待并回收，避免僵尸
+    if (WIFEXITED(status))
+        printf("[parent] 回收子进程 %d，退出码=%d，g_value 仍然=%d\n", w, WEXITSTATUS(status), g_value);
+    return 0;
+}
+<!--/code-->
+  <div class="term"><div class="bar">Linux 典型输出（未在本机实测，PID 与地址会不同）</div><pre>[parent] pid=4210  &amp;g_value=<span class="hl">0x55d0c3a4e010</span>
+[child ] pid=4211 ppid=4210  &amp;g_value=<span class="hl">0x55d0c3a4e010</span>  g_value=999
+lrwxrwxrwx 1 user user 0 Oct  8 12:00 /proc/self/exe -&gt; <span class="ok">/usr/bin/ls</span>
+[parent] 回收子进程 4211，退出码=0，g_value 仍然=<span class="ok">1</span></pre></div>
+  <ul>
+    <li>父子进程 <code>&amp;g_value</code> 相同、值不同：与 Windows 的 d3 实测结论一致，同一虚拟地址、不同物理页。</li>
+    <li>第三行是 <code>ls</code> 打印的：<code>/proc/self/exe</code> 指向 <code>/usr/bin/ls</code>，说明 PID 4211 的程序映像已经被替换成了 ls。</li>
+  </ul>
+
+  <h2>8.6 僵尸进程</h2>
+  <p>子进程退出时，内核释放它的大部分资源（内存、打开的文件），但<strong>保留 <code>task_struct</code> 中的 PID、退出码和资源使用统计</strong>，因为父进程可能还要通过 wait 读取它们。在父进程调用 wait 之前，这个只剩一个"档案"的进程就是<strong>僵尸进程</strong>（Zombie），<code>ps</code> 中显示为 <code>Z</code>，命令名后带 <code>&lt;defunct&gt;</code>。</p>
+<!--code:bash:观察僵尸（demos/linux/zombie_orphan.c）-->
+$ ./zo zombie &
+child 5301 exit now
+parent 5300 不调用 wait，睡 60s；此时子进程是僵尸
+$ ps -o pid,ppid,stat,cmd --ppid 5300
+  PID  PPID STAT CMD
+ 5301  5300 Z    [zo] <defunct>
+$ kill -9 5301        # 无效：它已经死了，信号对僵尸没有意义
+$ kill 5300           # 杀掉父进程 → 僵尸被 init 收养并立即回收
+<!--/code-->
+  <h3>危害</h3>
+  <p>单个僵尸几乎不占内存，但它<strong>占用一个 PID</strong>。PID 数量有上限（<code>/proc/sys/kernel/pid_max</code>，以及 cgroup 的 <code>pids.max</code>）。一个不断创建子进程又从不回收的服务，最终会让系统无法创建新进程，报 <code>fork: Resource temporarily unavailable</code>。</p>
+  <h3>解决方法</h3>
+  <ol>
+    <li><strong>父进程同步 wait</strong>：适合父进程本来就要等待子进程结束的场景（shell）。</li>
+    <li><strong>处理 SIGCHLD，在 handler 里循环 <code>waitpid(-1, NULL, WNOHANG)</code></strong>：适合父进程有自己的工作要做的场景（服务器）。<strong>必须循环</strong>，因为多个子进程同时退出时，标准信号不排队，多个 SIGCHLD 可能只被递送一次。</li>
+    <li><strong>显式设置 <code>signal(SIGCHLD, SIG_IGN)</code></strong>：POSIX 规定此时子进程退出后由内核自动回收，不产生僵尸（代价是父进程拿不到退出码）。</li>
+    <li><strong>两次 fork</strong>：父进程 fork 出 A，A 再 fork 出 B 后立刻退出，父进程 wait 回收 A；B 成为孤儿，由 init 负责回收。传统守护进程的创建方法。</li>
+  </ol>
+<!--code:cpp:正确回收：SIGCHLD handler（zombie_orphan.c 的 reap 模式）-->
+static void on_sigchld(int sig)
+{
+    int saved = errno;                         // 信号处理函数可能打断主流程，保护 errno
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}  // 必须循环：多个 SIGCHLD 可能被合并成一个
+    errno = saved;
+}
+<!--/code-->
+
+  <h2>8.7 孤儿进程</h2>
+  <p>父进程先于子进程退出，子进程就成了<strong>孤儿进程</strong>。内核会把它<strong>过继</strong>给 init 进程（PID 1，现在通常是 systemd），或者过继给离它最近的、设置了 <code>PR_SET_CHILD_SUBREAPER</code> 的祖先进程（Linux 3.4 起支持）。新的父进程会负责 wait 它。所以<strong>孤儿进程本身无害</strong>，它会继续正常运行，退出后也会被回收。</p>
+<!--code:bash:观察孤儿（典型输出，未在本机实测）-->
+$ ./zo orphan
+child 5401: ppid=5400
+parent 5400 exit, child becomes orphan
+child 5401: ppid=1          # 或者是 systemd --user 等 subreaper 的 PID
+child 5401: ppid=1
+<!--/code-->
+  <div class="co deep"><span class="h">🔬 深入：Docker 容器中的 PID 1 问题</span>
+  <p>容器有独立的 PID 命名空间，容器里第一个进程是 PID 1，它会成为容器内所有孤儿进程的"收养者"。如果你的应用（例如一个 Node.js 或 Java 服务）作为 PID 1 运行，它通常不会去 wait 那些被过继给它的孤儿，结果它们退出后全部变成僵尸并不断累积。此外，PID 1 默认不会响应没有注册处理函数的 <code>SIGTERM</code>，导致 <code>docker stop</code> 要等超时后强杀。解决方法是用 <code>docker run --init</code> 或在镜像中用 <strong>tini</strong> / dumb-init 作为 PID 1，由它负责转发信号和回收子进程。</p></div>
+
+  <div class="tbl"><table>
+    <tr><th></th><th>僵尸进程</th><th>孤儿进程</th></tr>
+    <tr><td>成因</td><td>子先死，父没 wait</td><td>父先死，子还活着</td></tr>
+    <tr><td>状态</td><td>已终止，只剩 task_struct</td><td>正常运行</td></tr>
+    <tr><td>危害</td><td>占用 PID，累积后无法创建新进程</td><td>基本无害</td></tr>
+    <tr><td>谁来处理</td><td>父进程 wait；父进程死后由 init 回收</td><td>init / subreaper 收养</td></tr>
+    <tr><td>能否 kill</td><td>不能（已经死了），只能杀父进程</td><td>能</td></tr>
+  </table></div>
+
+  <h2>8.8 笔试题：fork 计数与缓冲区陷阱</h2>
+<!--code:cpp:经典题 1：会打印几个 "-"？-->
+int main() {
+    for (int i = 0; i < 2; ++i) {
+        fork();
+        printf("-");
+    }
+}
+<!--/code-->
+  <p><strong>答案是 8 个，不是 6 个。</strong>逐步分析：</p>
+  <ul>
+    <li>i=0：1 个进程 fork 成 2 个，各执行一次 <code>printf("-")</code>。注意 <code>"-"</code> 没有换行，而且 stdout 输出到管道或文件时是全缓冲，所以这个 "-" <strong>只是写进了各自的用户态缓冲区</strong>，并没有真正输出。</li>
+    <li>i=1：2 个进程 fork 成 4 个。<strong>fork 会复制整个地址空间，包括 stdio 缓冲区</strong>，所以 4 个进程的缓冲区里都已经有一个 "-"。每个进程再 printf 一次，缓冲区变成 "--"。</li>
+    <li>4 个进程退出时各自刷新缓冲区：4 × 2 = <strong>8</strong>。</li>
+  </ul>
+  <p>如果改成 <code>printf("-\n")</code> 并输出到终端（终端上 stdout 是行缓冲），每次 printf 都会立即输出，答案就是 2 + 4 = <strong>6</strong>。这就是 8.5 节代码里 fork 前要 <code>fflush(stdout)</code>、子进程里要用 <code>_exit</code> 而不是 <code>exit</code> 的原因。</p>
+<!--code:cpp:经典题 2：一共有几个进程（含原进程）？-->
+fork() && fork() || fork();
+<!--/code-->
+  <details class="quiz"><summary>点击查看答案：5 个</summary>
+  <p>利用短路求值：原进程执行第一个 fork（记为 A），得到父 P 和子 C1。</p>
+  <ul>
+    <li>P 中 A&gt;0 为真，继续执行第二个 fork（B），得到 P 和 C2。P 中 B&gt;0，<code>A &amp;&amp; B</code> 为真，<code>||</code> 短路，不再 fork。C2 中 B=0，<code>A &amp;&amp; B</code> 为假，执行第三个 fork，再产生 C3。</li>
+    <li>C1 中 A=0，<code>&amp;&amp;</code> 短路为假，执行第三个 fork，产生 C4。</li>
+  </ul>
+  <p>合计 P、C1、C2、C3、C4 共 <strong>5</strong> 个进程。</p></details>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li><strong>fork</strong>：返回两次；地址空间写时复制；fd 表复制但共享文件偏移；只复制调用线程。</li>
+    <li><strong>exec</strong>：替换映像，保留 PID 和未设 CLOEXEC 的 fd；信号处理函数重置为默认；成功不返回。</li>
+    <li><strong>wait</strong>：获取退出状态并释放残留的 task_struct。</li>
+    <li><strong>僵尸</strong>：子先死父未收，占 PID，用 wait / SIGCHLD / SIG_IGN / 两次 fork 解决；<strong>孤儿</strong>：父先死，被 init 或 subreaper 收养，无害。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH9 ======================= -->
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>Windows 的进程创建模型</h1>
+    <p class="lead">没有 fork。CreateProcess 一步到位：建一个全新的进程，直接运行指定的程序。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>理解 CreateProcess 的参数和内部步骤</li>
+    <li>理解 Windows 的进程生命周期：内核对象、句柄与引用计数</li>
+    <li>对比 Windows 与 Linux 在父子关系、句柄继承、进程树管理上的差异</li>
+  </ul></div>
+
+  <h2>9.1 CreateProcess</h2>
+<!--code:cpp:d3_isolation.cpp 中的 RunChild（简化）-->
+std::string cmd = "\"" + self + "\" child";       // CreateProcessW 要求命令行缓冲区可写
+STARTUPINFOA si{ sizeof(si) };                    // 输入：窗口、标准输入输出句柄等
+PROCESS_INFORMATION pi{};                         // 输出：两个句柄 + 两个 ID
+CreateProcessA(nullptr, cmd.data(),
+               nullptr, nullptr,                  // 进程 / 线程对象的安全属性
+               FALSE,                             // bInheritHandles：是否继承可继承句柄
+               0,                                 // 创建标志：CREATE_SUSPENDED、CREATE_NEW_CONSOLE……
+               nullptr, nullptr,                  // 环境变量、当前目录（nullptr = 继承父进程）
+               &si, &pi);
+WaitForSingleObject(pi.hProcess, INFINITE);       // 等待进程对象变为有信号（≈ waitpid）
+GetExitCodeProcess(pi.hProcess, &code);           // 读退出码
+CloseHandle(pi.hThread);                          // 两个句柄都必须关闭
+CloseHandle(pi.hProcess);
+<!--/code-->
+  <h3>内部发生了什么</h3>
+  <p>根据 <em>Windows Internals</em> 的描述，CreateProcess 的主要阶段如下：</p>
+  <figure>
+  <svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg">
+    <g>
+      <rect x="10" y="40" width="130" height="80" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="75" y="64" text-anchor="middle" class="sm b">① 校验参数</text><text x="75" y="84" text-anchor="middle" class="xs">解析命令行</text><text x="75" y="102" text-anchor="middle" class="xs">确定优先级类</text>
+      <rect x="150" y="40" width="130" height="80" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="215" y="64" text-anchor="middle" class="sm b">② 打开映像</text><text x="215" y="84" text-anchor="middle" class="xs">打开 .exe</text><text x="215" y="102" text-anchor="middle" class="xs">创建 Section 对象</text>
+      <rect x="290" y="40" width="130" height="80" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="355" y="64" text-anchor="middle" class="sm b">③ 进程对象</text><text x="355" y="84" text-anchor="middle" class="xs">EPROCESS、地址空间</text><text x="355" y="102" text-anchor="middle" class="xs">句柄表、PEB</text>
+      <rect x="430" y="40" width="130" height="80" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="495" y="64" text-anchor="middle" class="sm b">④ 初始线程</text><text x="495" y="84" text-anchor="middle" class="xs">ETHREAD、TEB</text><text x="495" y="102" text-anchor="middle" class="xs">用户栈、初始上下文</text>
+      <rect x="570" y="40" width="130" height="80" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="635" y="64" text-anchor="middle" class="sm b">⑤ 通知子系统</text><text x="635" y="84" text-anchor="middle" class="xs">告知 CSRSS</text><text x="635" y="102" text-anchor="middle" class="xs">返回句柄给父进程</text>
+      <rect x="710" y="40" width="140" height="80" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="780" y="64" text-anchor="middle" class="sm b">⑥ 新进程中</text><text x="780" y="84" text-anchor="middle" class="xs">ntdll 加载器载入 DLL</text><text x="780" y="102" text-anchor="middle" class="xs">CRT 初始化 → main</text>
+    </g>
+    <g stroke="#4B5563" stroke-width="1.3"><line x1="140" y1="80" x2="149" y2="80"/><line x1="280" y1="80" x2="289" y2="80"/><line x1="420" y1="80" x2="429" y2="80"/><line x1="560" y1="80" x2="569" y2="80"/><line x1="700" y1="80" x2="709" y2="80"/></g>
+    <text x="430" y="150" text-anchor="middle" class="xs">③④ 主要在内核中通过 NtCreateUserProcess 一次完成；若指定 CREATE_SUSPENDED，初始线程创建后挂起，直到调用 ResumeThread</text>
+    <text x="430" y="172" text-anchor="middle" class="xs">新进程的地址空间是从零建立的，不复制父进程的任何内存</text>
+  </svg>
+  <figcaption><b>图 9-1</b> CreateProcess 的主要阶段</figcaption>
+  </figure>
+  <div class="co tip"><span class="h">✅ 实践建议：CREATE_SUSPENDED 的用途</span><p>先挂起创建，在子进程运行任何代码之前做一些设置：把它放进 Job 对象、调整优先级、注入调试或性能分析用的 DLL，然后再 <code>ResumeThread</code>。这在功能上相当于 Linux 中 fork 和 exec 之间的那段"空隙"。</p></div>
+
+  <h2>9.2 进程是内核对象：句柄与引用计数</h2>
+  <p>在 Windows 中，进程和线程都是<strong>内核对象</strong>，用户态通过<strong>句柄</strong>引用它们。内核对象有引用计数，只有当<strong>所有句柄都关闭、且进程已经终止</strong>时，<code>EPROCESS</code> 才会被真正释放。</p>
+  <ul>
+    <li>进程终止（最后一个线程退出，或调用 <code>ExitProcess</code>/<code>TerminateProcess</code>）后，它的地址空间、句柄表等资源立刻被清理，进程对象变为<strong>有信号</strong>状态，等待它的 <code>WaitForSingleObject</code> 返回。</li>
+    <li>但只要还有人持有它的句柄，进程对象本身就保留着，里面记录着<strong>退出码</strong>，可以用 <code>GetExitCodeProcess</code> 读取。</li>
+  </ul>
+  <div class="co warn"><span class="h">⚠️ 易错点：Windows 上的"僵尸"</span><p>这和 Linux 的僵尸进程本质相同：<strong>进程已经结束，但为了让别人读取退出状态，内核对象被保留了下来</strong>。区别是 Linux 依赖"父进程 wait"，Windows 依赖"所有句柄被关闭"。如果程序反复 <code>CreateProcess</code> 却忘了 <code>CloseHandle(pi.hProcess)</code> 和 <code>CloseHandle(pi.hThread)</code>，就会泄漏内核对象，在任务管理器里看到句柄数持续增长。这是 Windows 服务程序中很常见的泄漏。</p></div>
+
+  <h2>9.3 父子关系很"松"</h2>
+  <ul>
+    <li><strong>没有强制的进程树</strong>：Windows 只在子进程中记录了创建者的 PID（<code>InheritedFromUniqueProcessId</code>），仅作参考。父进程退出不影响子进程，也不存在"过继给 init"的机制。<strong>记录的父 PID 可能已经被别的进程复用</strong>，所以不能依赖它。</li>
+    <li><strong>不需要父进程来回收</strong>：任何持有进程句柄的进程都可以等待它、读取它的退出码。</li>
+    <li><strong>想要"父进程退出时子进程一起退出"</strong>：要用 <strong>Job 对象</strong>。把子进程放进一个设置了 <code>JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE</code> 的 Job，当 Job 的最后一个句柄关闭（例如父进程崩溃）时，Job 中的所有进程都会被终止。Chrome、VS 的构建系统、各种游戏启动器都用这个机制管理子进程。</li>
+  </ul>
+
+  <h2>9.4 句柄继承</h2>
+  <p>Linux 子进程默认继承所有 fd（除非设置 CLOEXEC）；Windows 正好相反，<strong>默认什么都不继承</strong>，必须同时满足两个条件：句柄在创建时被标记为可继承（<code>SECURITY_ATTRIBUTES.bInheritHandle = TRUE</code> 或 <code>SetHandleInformation</code>），并且 <code>CreateProcess</code> 的 <code>bInheritHandles</code> 参数为 <code>TRUE</code>。继承来的句柄在子进程中<strong>数值相同</strong>，所以通常通过命令行参数或 <code>STARTUPINFO</code> 中的标准输入输出字段把句柄值告诉子进程。为了避免把无关的可继承句柄也带过去，可以用 <code>STARTUPINFOEX</code> + <code>PROC_THREAD_ATTRIBUTE_HANDLE_LIST</code> 精确指定要继承的句柄列表。</p>
+
+  <h2>9.5 线程的创建</h2>
+  <div class="tbl"><table>
+    <tr><th>API</th><th>层次</th><th>说明</th></tr>
+    <tr><td><code>CreateThread</code></td><td>Win32</td><td>最底层的用户态 API。早期 CRT 中，用它创建的线程调用某些 CRT 函数可能导致 CRT 的每线程数据泄漏，所以过去推荐用 <code>_beginthreadex</code>；现代 UCRT 已经基本解决这个问题</td></tr>
+    <tr><td><code>_beginthreadex</code></td><td>C 运行时</td><td>在 CreateThread 之上初始化 CRT 的每线程数据</td></tr>
+    <tr><td><code>std::thread</code> / <code>std::jthread</code></td><td>C++ 标准库</td><td>MSVC 中最终调用 <code>_beginthreadex</code>；跨平台；<code>jthread</code> 析构自动 join 并支持停止令牌</td></tr>
+  </table></div>
+  <p>默认栈大小：由 exe 的 PE 头决定（MSVC 链接器默认保留 1MB，可用 <code>/STACK</code> 修改），<code>CreateThread</code> 也可以单独指定。d1 实测每个线程栈 1024KB 正是这个默认值。</p>
+
+  <h2>9.6 为什么 Windows 没有 fork</h2>
+  <p>Windows NT 的设计受 VMS 影响，一开始就采用"创建进程时指定程序"的模型。fork 的语义（复制整个进程状态）与 Windows 的很多机制不容易兼容：大量内核对象句柄、GUI 资源、多线程（fork 只复制调用线程的问题）、DLL 的初始化状态。NT 内核其实<strong>支持</strong>类似 fork 的能力（早期 POSIX 子系统和 WSL1 都依赖它实现了 fork，通过内部的克隆进程接口），但 Win32 API 从未公开。</p>
+  <div class="co deep"><span class="h">🔬 深入：学术界对 fork 的反思</span>
+  <p>2019 年 HotOS 会议上，微软研究院和波士顿大学的研究者发表论文 <em>A fork() in the road</em>，认为 fork 已经不适合现代操作系统：它与多线程不兼容；默认继承所有资源，带来安全隐患；写时复制需要过量提交内存；为了一个 exec 先复制整个地址空间的页表，在大内存进程上很慢。论文建议用 <code>posix_spawn</code> 这类"一步创建"的接口替代 fork + exec。这和 Windows CreateProcess 的设计理念一致。不过 fork 在"复制当前进程状态"的场景中仍然很有价值（如 Redis 快照、Android Zygote 预加载后 fork 出应用进程）。</p></div>
+
+  <h2>9.7 Linux vs Windows 对照</h2>
+  <div class="tbl"><table>
+    <tr><th>维度</th><th>Linux</th><th>Windows</th></tr>
+    <tr><td>创建进程</td><td>fork（复制）+ exec（替换），两步</td><td>CreateProcess，一步</td></tr>
+    <tr><td>子进程初始内存</td><td>父进程副本（COW）</td><td>全新地址空间，加载指定 exe</td></tr>
+    <tr><td>资源继承</td><td>默认继承所有 fd，需 CLOEXEC 排除</td><td>默认不继承，需显式标记 + bInheritHandles</td></tr>
+    <tr><td>父子关系</td><td>严格的进程树，孤儿被 init 收养</td><td>只记录创建者 PID，无强制树</td></tr>
+    <tr><td>回收</td><td>父进程 wait，否则成为僵尸</td><td>关闭所有句柄后内核对象释放</td></tr>
+    <tr><td>等待结束</td><td><code>waitpid</code></td><td><code>WaitForSingleObject(hProcess)</code></td></tr>
+    <tr><td>进程组管理</td><td>进程组 / 会话 / cgroup</td><td>Job 对象</td></tr>
+    <tr><td>线程在内核中</td><td>与进程同为 task_struct</td><td>独立的 ETHREAD，进程只是容器</td></tr>
+    <tr><td>崩溃</td><td>SIGSEGV 终止整个进程</td><td>未处理异常终止整个进程（d3 实测 0xC0000005）</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>CreateProcess 一步建立全新进程并运行指定程序；需要在子进程运行前做设置时用 <code>CREATE_SUSPENDED</code>。</li>
+    <li>进程是内核对象，靠句柄引用计数管理生命周期；忘记 CloseHandle 会泄漏，效果类似僵尸。</li>
+    <li>父子关系松散，没有过继机制；要管理进程树，用 Job 对象。</li>
+    <li>句柄默认不继承，与 Linux 默认继承 fd 相反。</li>
+  </ul></div>
+</section>

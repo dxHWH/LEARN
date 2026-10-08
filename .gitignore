@@ -1,0 +1,25 @@
+# C/C++ 编译产物
+*.exe
+*.obj
+*.o
+*.out
+*.pdb
+*.ilk
+*.idb
+*.log
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# IDE 会话数据
+.workbuddy/
+.codebuddy/
+
+# Python
+__pycache__/
+*.pyc
+.venv/

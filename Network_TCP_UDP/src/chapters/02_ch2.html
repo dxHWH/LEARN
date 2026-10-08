@@ -1,0 +1,226 @@
+<div class="part-head" data-toc="第二部分 · TCP 与 UDP">
+  <div class="no">PART TWO</div>
+  <h1>第二部分　TCP 与 UDP：两种截然不同的答案</h1>
+  <p>面对一个尽力而为的 IP 层，UDP 的答案是"我什么也不加，交给你"，TCP 的答案是"我全包了"。先看薄的，再看厚的，最后放在一起比较。</p>
+</div>
+
+<!-- ======================= CH2 ======================= -->
+<section class="chapter" id="ch2">
+  <div class="ch-head">
+    <div class="no">CHAPTER 02</div>
+    <h1>UDP：薄到极致的传输层</h1>
+    <p class="lead">UDP = IP + 端口 + 校验和。它的价值恰恰在于"不做什么"。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>背出 UDP 头部 4 个字段及含义，会算最大负载，知道伪首部为什么存在</li>
+    <li>理解"无连接""保留消息边界""尽力交付"三个特性的具体含义，并能用实测输出佐证</li>
+    <li>掌握 UDP 与 TCP 的 socket 编程调用序列差异</li>
+    <li>说出 UDP 的优缺点与典型应用场景，以及使用 UDP 时必须由应用补上的东西</li>
+  </ul></div>
+
+  <h2>2.1 一句话定义</h2>
+  <p><strong>UDP（User Datagram Protocol，用户数据报协议，RFC 768）</strong>是一种<strong>无连接、不可靠、面向数据报</strong>的传输层协议。它在 IP 之上只额外提供了两样东西：<strong>端口</strong>（让数据能交给正确的进程）和<strong>校验和</strong>（检测数据是否损坏）。RFC 768 全文只有 3 页，这在 IETF 的协议里极其罕见。</p>
+  <div class="co ana"><span class="h">📮 一个类比：寄明信片</span>
+  <p>UDP 像寄明信片：写上地址（IP）和收件人（端口）就丢进邮筒，不需要事先打电话确认对方在家；每张明信片独立投递，可能丢、可能晚到、两张寄出的顺序和收到的顺序可能相反；但<strong>每张明信片都是完整的一张</strong>，不会出现半张。TCP 则像打电话：先拨号接通（握手），然后连续说话，对方听不清会让你重说，最后说再见挂断（挥手）。</p></div>
+
+  <h2>2.2 报文结构：只有 8 字节</h2>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <g class="xs">
+      <text x="110" y="24">0</text><text x="262" y="24">8</text><text x="418" y="24">16</text><text x="574" y="24">24</text><text x="736" y="24">31</text>
+    </g>
+    <line x1="110" y1="30" x2="750" y2="30" stroke="#D1D5DB"/>
+    <rect x="110" y="36" width="320" height="44" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="270" y="56" text-anchor="middle" class="b">源端口 Source Port</text><text x="270" y="72" text-anchor="middle" class="xs">16 位，可为 0（不需要回复时）</text>
+    <rect x="430" y="36" width="320" height="44" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="590" y="56" text-anchor="middle" class="b">目的端口 Destination Port</text><text x="590" y="72" text-anchor="middle" class="xs">16 位</text>
+    <rect x="110" y="80" width="320" height="44" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="270" y="100" text-anchor="middle" class="b">长度 Length</text><text x="270" y="116" text-anchor="middle" class="xs">头部 + 数据的总字节数，≥ 8</text>
+    <rect x="430" y="80" width="320" height="44" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="590" y="100" text-anchor="middle" class="b">校验和 Checksum</text><text x="590" y="116" text-anchor="middle" class="xs">覆盖伪首部 + 头部 + 数据</text>
+    <rect x="110" y="124" width="640" height="50" fill="#fff" stroke="#9CA3AF" stroke-dasharray="5 3"/>
+    <text x="430" y="154" text-anchor="middle" class="b">数据 Data（可变长，IPv4 下最多 65507 字节）</text>
+    <text x="70" y="62" text-anchor="end" class="sm">第 0~3 字节</text>
+    <text x="70" y="106" text-anchor="end" class="sm">第 4~7 字节</text>
+    <text x="430" y="204" text-anchor="middle" class="xs">对比：TCP 头部最少 20 字节、最多 60 字节，还要维护连接状态</text>
+  </svg>
+  <figcaption><b>图 2-1</b> UDP 头部：两个 32 位字，共 8 字节</figcaption>
+  </figure>
+
+  <div class="tbl"><table>
+    <tr><th>字段</th><th>位数</th><th>含义与细节</th></tr>
+    <tr><td>源端口</td><td>16</td><td>发送方端口。客户端一般由系统分配临时端口；如果不需要对方回复，可以填 0。</td></tr>
+    <tr><td>目的端口</td><td>16</td><td>接收方端口，内核据此找到目标 socket。找不到时回复 ICMP "端口不可达"。</td></tr>
+    <tr><td>长度</td><td>16</td><td>UDP 头部加数据的总长度，最小 8。最大 65535，所以 IPv4 下数据最多 65535 − 8 − 20（IP 头）= <strong>65507</strong> 字节。</td></tr>
+    <tr><td>校验和</td><td>16</td><td>把<strong>伪首部 + UDP 头部 + 数据</strong>按 16 位反码求和再取反。IPv4 下可以填 0 表示"未计算"；<strong>IPv6 下必须计算</strong>（因为 IPv6 去掉了 IP 头部校验和）。</td></tr>
+  </table></div>
+
+  <h3>伪首部：为什么校验和要把 IP 地址也算进去</h3>
+  <p>计算校验和时，会在 UDP 报文前面临时拼一个 12 字节的<strong>伪首部（pseudo header）</strong>：源 IP、目的 IP、一个全 0 字节、协议号 17、UDP 长度。伪首部<strong>不会被发送</strong>，只参与计算。</p>
+  <p>目的是<strong>检测"送错了地方"</strong>：如果 IP 头部在传输中出错，导致一个本该发给 A 的数据报被交给了 B，单看 UDP 头部和数据是发现不了的；把 IP 地址纳入校验后，B 计算出的校验和就对不上，会丢弃这个数据报。TCP 的校验和用的是同样的方法（协议号为 6）。</p>
+<!--code:cpp:16 位反码求和（UDP / TCP / IP 校验和通用算法）-->
+uint16_t InternetChecksum(const uint8_t* data, size_t len, uint32_t sum = 0) {
+    for (size_t i = 0; i + 1 < len; i += 2)
+        sum += (uint32_t(data[i]) << 8) | data[i + 1];   // 按 16 位大端累加
+    if (len & 1) sum += uint32_t(data[len - 1]) << 8;    // 奇数长度：末尾补 0
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16); // 进位回卷（反码加法）
+    return uint16_t(~sum);                                // 取反
+}
+// 计算 UDP 校验和：先把伪首部（源IP、目的IP、0、17、UDP长度）累加进 sum，再累加 UDP 头部和数据
+// 接收方对"伪首部 + 整个 UDP 报文（含校验和字段）"再算一遍，结果为 0 说明无错
+<!--/code-->
+  <div class="co warn"><span class="h">⚠️ 易错点：校验和能保证数据正确吗？</span><p>不能完全保证。16 位反码和很弱：两个 16 位字互换位置、或两处错误恰好抵消，它都发现不了。链路层的 CRC32 能挡住绝大部分随机错误，但对恶意篡改毫无办法。<strong>需要防篡改就必须用密码学手段</strong>（TLS、DTLS、QUIC 的 AEAD 加密认证）。</p></div>
+
+  <h2>2.3 无连接：想发就发，发完不管</h2>
+  <p>"无连接"的意思是：通信前不需要握手，内核里<strong>不为"对方"保存任何状态</strong>。一个 UDP socket 可以给任意多个地址发数据，也可以收任意多个地址发来的数据。这带来三个直接后果：</p>
+  <ol>
+    <li><strong>发送没有前置延迟</strong>：第一个包就能携带业务数据，省掉握手的 1 个 RTT。</li>
+    <li><strong>服务器没有连接状态</strong>：一个 socket 就能服务海量客户端，内存占用极低，也不存在 TIME_WAIT 之类的连接管理问题。</li>
+    <li><strong>发送方不知道对方是否存在</strong>：<code>sendto</code> 返回成功，只说明数据已经交给了本机内核，<strong>不代表对方收到了，甚至不代表对方存在</strong>。</li>
+  </ol>
+
+  <div class="co net"><span class="h">🧪 实测证据（d1 · E2）：发给一个没人监听的端口</span>
+  <div class="term"><div class="bar">d1_tcp_udp_behaviors.exe · E2</div><pre>== E2 UDP 无连接：发给没人监听的端口 ==
+  sendto 返回 <span class="hl">4</span>（发送"成功"——UDP 不知道对方在不在）
+  随后 recvfrom 返回 -1，WSAGetLastError=<span class="hl">10054</span>（10054=WSAECONNRESET：内核收到 ICMP 端口不可达）
+  关闭 SIO_UDP_CONNRESET 后：recvfrom 返回 -1，WSAGetLastError=10060（10060=超时，错误被静默丢弃）</pre></div>
+  <p>sendto 照样返回发出的 4 字节。对方主机的内核发现 40012 端口没人监听，回了一个 <strong>ICMP 端口不可达</strong>。Windows 会把这个 ICMP 错误"记"在 socket 上，让下一次 <code>recvfrom</code> 报 <code>WSAECONNRESET</code>——对一个"无连接"协议来说这个错误名相当有迷惑性。</p></div>
+
+  <div class="co ver"><span class="h">🎮 游戏开发视角：Windows 上 UDP 服务器的经典坑</span><p>游戏服务器用一个 UDP socket 服务所有玩家。某个玩家断线后，服务器继续往他的地址发包，对端回 ICMP 端口不可达，于是服务器的<strong>下一次 recvfrom 报 WSAECONNRESET</strong>。如果代码把这个错误当成"socket 坏了"去关闭重建，所有玩家都会掉线。解决办法就是实测中的 <code>WSAIoctl(SIO_UDP_CONNRESET, FALSE)</code>，或者把这个错误码当作可忽略的提示。Linux 上，只有对 UDP socket 调用过 <code>connect()</code> 时才会把 ICMP 错误报给应用（<code>ECONNREFUSED</code>），未 connect 的 socket 默认不报。</p></div>
+
+  <h3>UDP 上的 connect() 是什么意思</h3>
+  <p>UDP socket 也可以调用 <code>connect()</code>，但<strong>不会发送任何报文</strong>，只是在内核里记下一个默认对端：之后可以用 <code>send/recv</code> 代替 <code>sendto/recvfrom</code>，内核只接收来自这个对端的数据报，并且能把 ICMP 错误报告给应用。它是"本地过滤器"，不是"连接"。QUIC 客户端和很多游戏客户端都会对 UDP socket 调用 <code>connect()</code>，顺便还能让内核少做一次路由查找。</p>
+
+  <h2>2.4 面向数据报：保留消息边界</h2>
+  <p>UDP 的每一次 <code>sendto</code> 都对应一个独立的数据报，接收方每次 <code>recvfrom</code> 恰好取出一个完整的数据报，<strong>既不会把两个合并，也不会只给你半个</strong>。这叫"保留消息边界"。TCP 则是<strong>字节流</strong>，没有消息边界的概念。</p>
+
+  <div class="co net"><span class="h">🧪 实测证据（d1 · E1）：三次发送，两种结果</span>
+  <div class="term"><div class="bar">d1_tcp_udp_behaviors.exe · E1</div><pre>== E1 消息边界：UDP 保留边界，TCP 是字节流 ==
+  UDP recvfrom #1 ->  <span class="ok">5 字节: "hello"</span>
+  UDP recvfrom #2 -> <span class="ok">12 字节: "tcp-udp-book"</span>
+  UDP recvfrom #3 -> <span class="ok">27 字节: "reliable-transport-over-udp"</span>
+  TCP 发送方 send() 3 次（5+12+27=44 字节），接收方 recv() 1 次 -> <span class="bad">44 字节: "hellotcp-udp-bookreliable-transport-over-udp"</span></pre></div>
+  <p>同样是发送三条消息、接收方稍晚一点再读：UDP 原样收到三条；TCP 一次 <code>recv</code> 就把 44 个字节全拿走了，三条消息"粘"在一起，接收方无从知道原来的边界在哪——这就是第 3 章要讲的<strong>粘包</strong>。</p></div>
+
+  <div class="co warn"><span class="h">⚠️ 易错点：接收缓冲区比数据报小会怎样？</span><p>数据报<strong>多出来的部分会被直接丢弃</strong>，不会留到下一次 recvfrom。Linux 会在 <code>msg_flags</code> 里置 <code>MSG_TRUNC</code>，Windows 的 recvfrom 返回错误 <code>WSAEMSGSIZE</code>（缓冲区里仍是截断后的数据）。所以 UDP 接收缓冲区要按协议的最大包长来开（例如 1500 或 64 KB）。</p></div>
+
+  <h2>2.5 尽力交付：UDP 不做的事</h2>
+  <div class="tbl"><table>
+    <tr><th>不做的事</th><th>具体表现</th><th>如果你需要，应该怎么补</th></tr>
+    <tr><td>不确认、不重传</td><td>丢了就是丢了，发送方完全不知道</td><td>应用层序号 + ACK + 重传（第 8 章）</td></tr>
+    <tr><td>不排序</td><td>按到达顺序交给应用</td><td>应用层序号 + 接收缓冲重排，或只取"最新"的</td></tr>
+    <tr><td>不去重</td><td>网络重复的包会被交付两次</td><td>序号 + 已收集合（滑动位图）</td></tr>
+    <tr><td>不做流量控制</td><td>接收方 socket 缓冲区满了，新来的数据报被内核<strong>静默丢弃</strong></td><td>增大 <code>SO_RCVBUF</code>；应用层窗口通告</td></tr>
+    <tr><td>不做拥塞控制</td><td>应用以多快的速度 sendto，内核就以多快的速度往外发</td><td>应用层限速（令牌桶）、拥塞控制算法</td></tr>
+    <tr><td>不分片</td><td>超过 MTU 的数据报交给 IP 分片</td><td>应用层控制包长 ≤ 1200～1400，大消息自己切</td></tr>
+  </table></div>
+  <p>看到这里可能会疑惑：UDP 什么都不做，凭什么被大量使用？答案是：<strong>"不做"本身就是一种能力</strong>——它把这些决定权留给了最了解业务需求的应用。语音通话里一个 20 ms 的语音帧丢了，最好的处理是让解码器插值补上，而不是等 200 ms 重传过来时这句话早已说完。这个思路是第四部分的出发点。</p>
+
+  <h2>2.6 编程模型：UDP 与 TCP 的调用序列</h2>
+  <figure>
+  <svg viewBox="0 0 860 360" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="22" text-anchor="middle" class="b" style="fill:#15803D">TCP</text>
+    <text x="645" y="22" text-anchor="middle" class="b" style="fill:#6D28D9">UDP</text>
+    <line x1="430" y1="10" x2="430" y2="350" stroke="#E5E7EB"/>
+    <g class="sm">
+      <!-- TCP server -->
+      <text x="110" y="46" text-anchor="middle" class="b">服务端</text>
+      <rect x="55" y="56" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="110" y="73" text-anchor="middle">socket()</text>
+      <rect x="55" y="88" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="110" y="105" text-anchor="middle">bind(:443)</text>
+      <rect x="55" y="120" width="110" height="24" rx="5" fill="#EAF7EF" stroke="#15803D"/><text x="110" y="137" text-anchor="middle">listen(backlog)</text>
+      <rect x="55" y="152" width="110" height="24" rx="5" fill="#EAF7EF" stroke="#15803D"/><text x="110" y="169" text-anchor="middle">accept() 阻塞</text>
+      <rect x="55" y="208" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="110" y="225" text-anchor="middle">recv() / send()</text>
+      <rect x="55" y="290" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="110" y="307" text-anchor="middle">close()</text>
+      <!-- TCP client -->
+      <text x="320" y="46" text-anchor="middle" class="b">客户端</text>
+      <rect x="265" y="56" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="320" y="73" text-anchor="middle">socket()</text>
+      <rect x="265" y="152" width="110" height="24" rx="5" fill="#EAF7EF" stroke="#15803D"/><text x="320" y="169" text-anchor="middle">connect()</text>
+      <rect x="265" y="208" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="320" y="225" text-anchor="middle">send() / recv()</text>
+      <rect x="265" y="290" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="320" y="307" text-anchor="middle">close()</text>
+    </g>
+    <line x1="265" y1="164" x2="167" y2="164" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="215" y="192" text-anchor="middle" class="xs" style="fill:#C2410C">三次握手（内核完成）</text><text x="215" y="206" text-anchor="middle" class="xs" style="fill:#C2410C">accept 返回新的连接 socket</text>
+    <line x1="265" y1="220" x2="167" y2="220" stroke="#2F5BD3" stroke-width="1.4" marker-start="url(#ab)" marker-end="url(#ab)"/>
+    <text x="215" y="252" text-anchor="middle" class="xs" style="fill:#2F5BD3">字节流（无边界）</text>
+    <line x1="265" y1="302" x2="167" y2="302" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="215" y="334" text-anchor="middle" class="xs" style="fill:#C2410C">四次挥手</text>
+    <line x1="110" y1="80" x2="110" y2="88" stroke="#4B5563"/><line x1="110" y1="112" x2="110" y2="120" stroke="#4B5563"/><line x1="110" y1="144" x2="110" y2="152" stroke="#4B5563"/><line x1="110" y1="176" x2="110" y2="208" stroke="#4B5563"/><line x1="110" y1="232" x2="110" y2="290" stroke="#4B5563"/>
+    <line x1="320" y1="80" x2="320" y2="152" stroke="#4B5563"/><line x1="320" y1="176" x2="320" y2="208" stroke="#4B5563"/><line x1="320" y1="232" x2="320" y2="290" stroke="#4B5563"/>
+    
+    <g class="sm">
+      <!-- UDP server -->
+      <text x="540" y="46" text-anchor="middle" class="b">服务端</text>
+      <rect x="485" y="56" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="540" y="73" text-anchor="middle">socket(DGRAM)</text>
+      <rect x="485" y="88" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="540" y="105" text-anchor="middle">bind(:7777)</text>
+      <rect x="470" y="196" width="140" height="40" rx="5" fill="#F3EEFE" stroke="#6D28D9"/><text x="540" y="213" text-anchor="middle">recvfrom(&amp;from)</text><text x="540" y="229" text-anchor="middle">sendto(from)</text>
+      <rect x="485" y="290" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="540" y="307" text-anchor="middle">close()</text>
+      <!-- UDP client -->
+      <text x="750" y="46" text-anchor="middle" class="b">客户端</text>
+      <rect x="695" y="56" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="750" y="73" text-anchor="middle">socket(DGRAM)</text>
+      <rect x="680" y="196" width="140" height="40" rx="5" fill="#F3EEFE" stroke="#6D28D9"/><text x="750" y="213" text-anchor="middle">sendto(server)</text><text x="750" y="229" text-anchor="middle">recvfrom()</text>
+      <rect x="695" y="290" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="750" y="307" text-anchor="middle">close()</text>
+    </g>
+    <line x1="540" y1="80" x2="540" y2="88" stroke="#4B5563"/><line x1="540" y1="112" x2="540" y2="196" stroke="#4B5563"/><line x1="540" y1="236" x2="540" y2="290" stroke="#4B5563"/>
+    <line x1="750" y1="80" x2="750" y2="196" stroke="#4B5563"/><line x1="750" y1="236" x2="750" y2="290" stroke="#4B5563"/>
+    <line x1="680" y1="216" x2="612" y2="216" stroke="#6D28D9" stroke-width="1.4" marker-start="url(#ap)" marker-end="url(#ap)"/>
+    <text x="645" y="256" text-anchor="middle" class="xs" style="fill:#6D28D9">一个个独立数据报</text>
+    <text x="645" y="334" text-anchor="middle" class="xs">没有 listen / accept / connect，close 也不发任何报文</text>
+  </svg>
+  <figcaption><b>图 2-2</b> 调用序列对比：TCP 有"监听 → 接受 → 连接 socket"的三段式，UDP 只有一个 socket 收发所有人</figcaption>
+  </figure>
+
+<!--code:cpp:最小 UDP 回显服务器（Winsock，省略错误处理）-->
+SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons(7777); addr.sin_addr.s_addr = INADDR_ANY;
+bind(s, (sockaddr*)&addr, sizeof addr);
+char buf[1500];
+for (;;) {
+    sockaddr_in from{}; int fromLen = sizeof from;
+    int n = recvfrom(s, buf, sizeof buf, 0, (sockaddr*)&from, &fromLen);  // 一次取一个完整数据报
+    if (n > 0) sendto(s, buf, n, 0, (sockaddr*)&from, fromLen);          // 原样发回给来源地址
+}
+<!--/code-->
+
+  <h2>2.7 UDP 独有的能力：广播与多播</h2>
+  <p>TCP 是严格的一对一连接，而 UDP 因为无连接，可以把一个数据报发往<strong>广播地址</strong>（如 <code>255.255.255.255</code> 或子网广播 <code>192.168.1.255</code>）或<strong>多播组</strong>（<code>224.0.0.0/4</code>），一次发送、多个接收者同时收到。</p>
+  <ul>
+    <li><strong>DHCP</strong>：新设备还没有 IP 地址，只能用广播（客户端 68 → 服务器 67）寻找 DHCP 服务器。</li>
+    <li><strong>局域网游戏发现</strong>：客户端广播"有房间吗"，局域网内的主机回复房间信息。</li>
+    <li><strong>mDNS / SSDP</strong>：打印机、投屏设备的自动发现。</li>
+    <li><strong>IPTV / 行情分发</strong>：机房内用多播把同一份数据推给大量订阅者。</li>
+  </ul>
+
+  <h2>2.8 优缺点与典型应用</h2>
+  <div class="cards">
+    <div class="card"><div class="t" style="color:#15803D">优点</div><p>① <strong>低延迟</strong>：无握手，第一个包就能带数据；无重传等待，不会被前面丢失的包卡住。<br>② <strong>开销小</strong>：头部 8 字节，内核无连接状态。<br>③ <strong>保留消息边界</strong>：天然适合"一个包一条消息"的协议。<br>④ <strong>灵活</strong>：支持广播 / 多播；可靠性、拥塞控制都能按需在应用层定制。</p></div>
+    <div class="card"><div class="t" style="color:#B91C1C">缺点</div><p>① <strong>不可靠</strong>：丢、乱、重全要应用自己处理。<br>② <strong>无拥塞控制</strong>：滥发会挤占网络，也会被运营商 QoS 限速。<br>③ <strong>NAT 不友好</strong>：NAT 映射超时短（常见 30 s～数分钟），必须定期发心跳保活。<br>④ <strong>易被滥用</strong>：源地址可伪造，可被用于反射放大攻击（DNS、NTP、Memcached）。</p></div>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>场景</th><th>为什么用 UDP</th><th>可靠性怎么补</th></tr>
+    <tr><td>DNS 查询</td><td>小报文一问一答，省掉握手 RTT</td><td>超时重问；大应答回退 TCP</td></tr>
+    <tr><td>DHCP</td><td>没有 IP 时只能广播</td><td>超时重发</td></tr>
+    <tr><td>语音 / 视频通话（RTP、WebRTC）</td><td>实时性第一，迟到的数据没用</td><td>FEC、NACK 选择性重传、丢帧插值、抖动缓冲</td></tr>
+    <tr><td>低延迟直播</td><td>减少重传卡顿</td><td>FEC + 有限重传（SRT 等协议）</td></tr>
+    <tr><td>在线游戏</td><td>位置、输入只关心最新值；每毫秒都很宝贵</td><td>按消息分级：状态不可靠、指令可靠（第 8、11 章）</td></tr>
+    <tr><td>HTTP/3</td><td>绕开内核 TCP，实现多路复用与 0-RTT</td><td>QUIC 在用户态完整实现可靠传输（第 10 章）</td></tr>
+    <tr><td>VPN / 隧道（WireGuard、VXLAN）</td><td>避免"TCP 套 TCP"的双重重传</td><td>交给隧道内部的 TCP 处理</td></tr>
+  </table></div>
+
+  <div class="co tip"><span class="h">✅ 面试答法：说说你对 UDP 的理解</span>
+  <p>UDP 是无连接、不可靠、面向数据报的传输层协议，头部只有 8 字节：源端口、目的端口、长度、校验和。它在 IP 之上只加了端口复用和差错检测，不建立连接、不确认、不重传、不排序、不做流量和拥塞控制，但保留消息边界、支持广播多播。优点是延迟低、开销小、灵活，缺点是可靠性和拥塞控制都要应用自己负责。典型场景是 DNS、DHCP、音视频实时通信、在线游戏，以及 HTTP/3 底层的 QUIC。<em>（加分项）</em>如果在 UDP 上需要可靠性，可以在应用层实现序号、确认、重传和窗口，比如 KCP 或 QUIC。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>UDP 头部 8 字节：<strong>源端口、目的端口、长度、校验和</strong>；IPv4 最大负载 65507 字节。</li>
+    <li>校验和覆盖<strong>伪首部</strong>（IP 地址、协议号、长度），用来发现"送错地方"；IPv4 可选、IPv6 必选；弱校验，防不了篡改。</li>
+    <li><strong>无连接</strong>：sendto 成功 ≠ 对方收到；Windows 上 ICMP 端口不可达会让下一次 recvfrom 报 WSAECONNRESET（实测）。</li>
+    <li><strong>保留消息边界</strong>：一次 sendto 对应一次 recvfrom（实测）；缓冲区不够时多余部分被丢弃。</li>
+    <li>不重传、不排序、不去重、不限速，这些"缺点"正是它灵活、低延迟的来源。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：UDP 包长度字段已经有了，为什么还需要 IP 头部的总长度字段？反过来呢？</summary>
+  <p>严格来说 UDP 长度字段是冗余的：UDP 长度 = IP 总长度 − IP 头部长度。保留它的原因是让 UDP 的校验和计算、报文解析可以不依赖下层（分层独立），而且伪首部中也用到这个长度。IP 头部的总长度则是网络层自己需要的（转发、分片），不能依赖上层协议。</p></details>
+  <details class="quiz"><summary>思考题 2：UDP 服务器的接收缓冲区满了会怎样？TCP 呢？</summary>
+  <p>UDP：内核直接丢弃新到的数据报，发送方毫不知情（可以通过 <code>netstat -su</code> 的 "receive buffer errors" 观察）。TCP：接收方通过窗口字段告诉发送方"我还能收多少"，缓冲区满时通告窗口为 0，发送方暂停发送并周期性发零窗口探测，数据不会丢——这就是流量控制。</p></details>
+  <details class="quiz"><summary>思考题 3：既然 UDP 不可靠，为什么说"UDP 更适合游戏"？这句话完全对吗？</summary>
+  <p>不完全对，应该说"UDP 让游戏<strong>有机会</strong>做得更好"。游戏里大量数据（位置、朝向）是"状态"，只关心最新值，丢了等下一帧即可，用 TCP 反而会因为重传和队头阻塞让后面的新状态被卡住。但游戏里也有必须可靠的数据（技能释放、购买道具、聊天），所以实际是"UDP + 应用层按需可靠"。另外，很多回合制、卡牌、MMO 的非战斗部分直接用 TCP 也完全够用，实时性要求高的 FPS、MOBA、格斗才更依赖 UDP。</p></details>
+</section>

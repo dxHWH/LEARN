@@ -1,0 +1,102 @@
+<header class="cover">
+  <div class="kicker">OPERATING SYSTEMS · PROCESS &amp; THREAD</div>
+  <h1>进程与线程<br><em>共享与独立的边界</em></h1>
+  <p class="sub">一本面向秋招的操作系统深度复习书。从"一个 exe 是怎么跑起来的"讲起，一路走到地址空间、TCB、上下文切换、用户级线程、协程、fork/exec/wait 与 Windows 的 CreateProcess。每一个关键结论都配有在本机实测的 C++ 程序输出作为证据。</p>
+  <div class="meta">
+    <span class="pill b">6 部分 · 11 章 · 1 篇速记附录</span>
+    <span class="pill o">6 个 Windows 实测案例 + 2 个 Linux 案例</span>
+    <span class="pill g">18 张原理插图</span>
+    <span class="pill p">2 个交互实验</span>
+    <span class="pill">Linux / Windows 双平台对照</span>
+  </div>
+</header>
+
+<section class="chapter" id="ch0">
+  <div class="ch-head">
+    <div class="no">CHAPTER 00</div>
+    <h1>阅读指南</h1>
+    <p class="lead">这本书怎么读、主线是什么、每种标记代表什么。</p>
+  </div>
+
+  <h2>一条主线：共享与独立</h2>
+  <p>进程与线程这一章的知识点看起来很散：概念、状态、PCB、fork、协程……但它们其实都在回答同一个问题：<strong>哪些东西是大家共用的，哪些东西是各自独有的，边界划在哪里，划在那里有什么代价。</strong></p>
+  <ul>
+    <li><strong>进程</strong>是资源的边界：地址空间、打开的文件、权限凭据都以进程为单位分配和隔离。</li>
+    <li><strong>线程</strong>是执行的边界：每个线程有自己的寄存器、栈和调度状态，CPU 调度的对象是线程。</li>
+    <li><strong>协程 / 任务</strong>把执行边界继续往下切，切到了操作系统看不见的用户态。</li>
+  </ul>
+  <p>后面所有内容，包括"选多进程还是多线程""为什么线程崩溃会带走整个进程""fork 之后文件偏移为什么是共享的"，都可以用这条主线推出来。读的时候遇到新知识点，可以先问自己一句：<em>它属于共享的那一侧，还是独立的那一侧？</em></p>
+
+  <h2>全书路线图</h2>
+  <figure>
+  <svg viewBox="0 0 860 290" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="22" text-anchor="middle" class="sm">由浅入深：概念 → 边界 → 管理 → 实现 → 平台 → 实战</text>
+    <rect x="10" y="40" width="135" height="200" rx="12" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="77" y="66" text-anchor="middle" class="b" style="fill:#2F5BD3">一 · 基本概念</text>
+    <text x="77" y="96" text-anchor="middle" class="sm">1 程序/进程/线程</text>
+    <text x="77" y="120" text-anchor="middle" class="sm">2 并发与并行</text>
+    <text x="77" y="222" text-anchor="middle" class="xs">先把词说准</text>
+
+    <rect x="152" y="40" width="135" height="200" rx="12" fill="#FFF4EC" stroke="#C2410C" stroke-width="2"/>
+    <text x="219" y="66" text-anchor="middle" class="b" style="fill:#C2410C">二 · 资源归属</text>
+    <text x="219" y="96" text-anchor="middle" class="sm">3 共享与独立</text>
+    <text x="219" y="120" text-anchor="middle" class="sm">（全书核心）</text>
+    <text x="219" y="150" text-anchor="middle" class="xs">地址空间 / 栈 / TLS</text>
+    <text x="219" y="168" text-anchor="middle" class="xs">句柄 / 崩溃半径</text>
+    <text x="219" y="222" text-anchor="middle" class="xs">重点掌握</text>
+
+    <rect x="294" y="40" width="135" height="200" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="361" y="66" text-anchor="middle" class="b" style="fill:#15803D">三 · 生命周期</text>
+    <text x="361" y="96" text-anchor="middle" class="sm">4 状态与切换</text>
+    <text x="361" y="120" text-anchor="middle" class="sm">5 PCB 与 TCB</text>
+    <text x="361" y="222" text-anchor="middle" class="xs">OS 怎么管它们</text>
+
+    <rect x="436" y="40" width="135" height="200" rx="12" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="503" y="66" text-anchor="middle" class="b" style="fill:#6D28D9">四 · 实现与抽象</text>
+    <text x="503" y="96" text-anchor="middle" class="sm">6 用户级/内核级</text>
+    <text x="503" y="120" text-anchor="middle" class="sm">7 线程/协程/任务</text>
+    <text x="503" y="222" text-anchor="middle" class="xs">往下切执行单元</text>
+
+    <rect x="578" y="40" width="135" height="200" rx="12" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="645" y="66" text-anchor="middle" class="b" style="fill:#B45309">五 · 平台补充</text>
+    <text x="645" y="96" text-anchor="middle" class="sm">8 Linux fork/exec</text>
+    <text x="645" y="120" text-anchor="middle" class="sm">9 Windows 创建</text>
+    <text x="645" y="150" text-anchor="middle" class="xs">僵尸 / 孤儿 / 句柄</text>
+    <text x="645" y="222" text-anchor="middle" class="xs">【P1】面试高频</text>
+
+    <rect x="720" y="40" width="130" height="200" rx="12" fill="#F3F4F6" stroke="#4B5563"/>
+    <text x="785" y="66" text-anchor="middle" class="b">六 · 实战</text>
+    <text x="785" y="96" text-anchor="middle" class="sm">10 选型与案例</text>
+    <text x="785" y="120" text-anchor="middle" class="sm">11 自测题库</text>
+    <text x="785" y="144" text-anchor="middle" class="sm">附录 速记卡</text>
+    <text x="785" y="222" text-anchor="middle" class="xs">能答、能用</text>
+    <g stroke="#4B5563" stroke-width="1.4">
+      <line x1="145" y1="140" x2="151" y2="140"/><line x1="287" y1="140" x2="293" y2="140"/><line x1="429" y1="140" x2="435" y2="140"/><line x1="571" y1="140" x2="577" y2="140"/><line x1="713" y1="140" x2="719" y2="140"/>
+    </g>
+    <text x="430" y="272" text-anchor="middle" class="xs">赶时间的最短路径：1 → 3 → 4 → 8 → 10 → 11（约 2 小时）</text>
+  </svg>
+  <figcaption><b>图 0-1</b> 全书结构。第二部分（资源归属）是全书核心，其余各章都会回到它</figcaption>
+  </figure>
+
+  <h2>书中的标记</h2>
+  <div class="co tip"><span class="h">✅ 面试答法</span>可以直接组织成口头回答的要点。</div>
+  <div class="co warn"><span class="h">⚠️ 易错点</span>常见的错误理解，或者面试官爱挖的坑。</div>
+  <div class="co deep"><span class="h">🔬 深入内核</span>Linux / Windows 内核里具体是怎么实现的。第一遍可以跳过，二面、三面前务必读。</div>
+  <div class="co net"><span class="h">🧪 实测证据</span>本书配套程序在本机运行得到的真实输出，用来证明正文结论。</div>
+  <div class="co ver"><span class="h">🎮 游戏开发视角</span>这个知识点在游戏引擎 / 游戏服务器中的应用。</div>
+
+  <h2>关于实测案例</h2>
+  <p>配套源码在本书同目录的 <code>demos/</code> 下，共 6 个 Windows 程序（<code>d1</code>～<code>d6</code>）和 2 个 Linux 程序（<code>demos/linux/</code>）。Windows 程序全部用 <strong>MSVC 14.44（VS2022）、<code>/std:c++20 /O2</code></strong> 编译，在 Windows 11 x64 上实际运行，书中的输出均为原样粘贴。双击 <code>demos/build_and_run.bat</code> 就能在你自己的机器上复现。</p>
+  <div class="tbl"><table>
+    <tr><th>程序</th><th>证明什么</th><th>所在章节</th></tr>
+    <tr><td><code>d1_share</code></td><td>全局变量、堆同一地址；栈、TLS 每线程一份</td><td>第 3 章</td></tr>
+    <tr><td><code>d2_stack_ptr</code></td><td>线程 B 能通过指针改写线程 A 栈上的数组</td><td>第 3 章 / 第 11 章</td></tr>
+    <tr><td><code>d3_isolation</code></td><td>父子进程同一虚拟地址、不同内容；子进程崩溃不影响父进程；线程崩溃带走整个进程</td><td>第 3 章 / 第 9 章</td></tr>
+    <tr><td><code>d4_cost</code></td><td>线程 vs 进程的创建开销与切换开销</td><td>第 4 章 / 第 10 章</td></tr>
+    <tr><td><code>d5_race</code></td><td>共享内存的代价：数据竞争丢失更新</td><td>第 3 章</td></tr>
+    <tr><td><code>d6_fiber_coro</code></td><td>用户级线程（Fiber）一阻塞全阻塞；C++20 协程单线程并发</td><td>第 2 / 6 / 7 章</td></tr>
+    <tr><td><code>linux/fork_exec_wait.c</code></td><td>fork 返回两次、写时复制、exec 替换映像、waitpid 回收</td><td>第 8 章</td></tr>
+    <tr><td><code>linux/zombie_orphan.c</code></td><td>制造僵尸与孤儿；SIGCHLD 正确回收</td><td>第 8 章</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 关于 Linux 案例</span><p>本机无法运行 Linux 环境，第 8 章中 Linux 程序的输出是<strong>按 Linux 语义给出的典型输出</strong>（PID 等数值会不同），未经本机实测。建议你在 WSL 或云服务器上亲手跑一遍，这本身就是很好的复习。</p></div>
+</section>

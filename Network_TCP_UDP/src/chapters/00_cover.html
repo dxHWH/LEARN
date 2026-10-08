@@ -1,0 +1,120 @@
+<header class="cover">
+  <div class="kicker">COMPUTER NETWORKING · TRANSPORT LAYER</div>
+  <h1>TCP / UDP 与可靠传输<br><em>在不可靠的网络上造可靠的路</em></h1>
+  <p class="sub">一本面向秋招的传输层深度学习书。从"浏览器打开一个网页时网卡上到底发生了什么"讲起，依次讲清 UDP 与 TCP 的报文结构和工作原理、三次握手与四次挥手的每一个状态、SYN Flood 攻防与各种异常，最后在 UDP 之上亲手搭出一套可靠传输协议，并拆解 KCP 和 QUIC 的设计取舍。关键结论都配有本机实测的 C++ 程序输出或可复现的仿真数据。</p>
+  <div class="meta">
+    <span class="pill b">5 部分 · 12 章 · 1 篇速记附录</span>
+    <span class="pill o">2 个实测 / 仿真程序</span>
+    <span class="pill g">30+ 张原理插图</span>
+    <span class="pill p">2 个交互实验</span>
+    <span class="pill">网页 · 视频 · 在线游戏 场景贯穿</span>
+  </div>
+</header>
+
+<section class="chapter" id="ch0">
+  <div class="ch-head">
+    <div class="no">CHAPTER 00</div>
+    <h1>阅读指南：一条主线串起传输层</h1>
+    <p class="lead">先说清楚这本书在讲什么、按什么顺序讲、遇到哪种标记该怎么读。</p>
+  </div>
+
+  <h2>一条主线：可靠性是一组机制，而不是一个开关</h2>
+  <p>传输层的知识点乍看很散：端口、校验和、序号、三次握手、滑动窗口、拥塞控制、TIME_WAIT、KCP、QUIC……面试时也常被拆成一道道独立的题来问。但它们其实都在回答同一个问题：</p>
+  <div class="co ana"><span class="h">🧭 全书主线</span>
+  <p><strong>IP 网络只承诺"尽力而为"：包会丢、会乱序、会重复、会出错、会因为拥塞而变慢。要想在它上面提供"可靠"的服务，就要拿出一组机制去对付这些问题，而每个机制都有代价（延迟、带宽、内存、复杂度）。</strong></p>
+  <p>UDP 几乎什么机制都不加，把选择权交给应用；TCP 把一整套机制固化在操作系统内核里，给所有应用同一种"可靠有序字节流"；可靠 UDP（KCP、QUIC、游戏引擎的网络层）则在用户态<em>按需挑选、重新调参</em>这些机制。</p></div>
+  <p>读的时候遇到新知识点，可以先问自己两句：<em>它是在对付哪一种网络问题？它付出了什么代价？</em>能答上这两句，这个知识点就不再是孤立的一道题，而是知识网里的一个节点。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="22" text-anchor="middle" class="sm">问题 → 机制 → 组合方式：全书知识体系</text>
+    <!-- problems -->
+    <rect x="10" y="40" width="200" height="330" rx="12" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="110" y="64" text-anchor="middle" class="b" style="fill:#B91C1C">IP 网络的"病"</text>
+    <g class="sm">
+      <text x="30" y="96">① 丢包（拥塞、无线干扰）</text>
+      <text x="30" y="126">② 乱序（多路径、重路由）</text>
+      <text x="30" y="156">③ 重复（重传、链路层重发）</text>
+      <text x="30" y="186">④ 比特错误</text>
+      <text x="30" y="216">⑤ 时延与抖动</text>
+      <text x="30" y="246">⑥ 发得太快，对方收不过来</text>
+      <text x="30" y="276">⑦ 发得太快，网络被挤爆</text>
+      <text x="30" y="306">⑧ 不知道对方是否存在</text>
+    </g>
+    <text x="110" y="352" text-anchor="middle" class="xs">第 1 章</text>
+
+    <!-- mechanisms -->
+    <rect x="250" y="40" width="300" height="330" rx="12" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="2"/>
+    <text x="400" y="64" text-anchor="middle" class="b" style="fill:#2F5BD3">机制工具箱（每样都有代价）</text>
+    <g class="sm">
+      <rect x="268" y="80" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="97">校验和 ………………………… 对付 ④</text>
+      <rect x="268" y="110" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="127">序列号 + 接收缓冲 ………… 对付 ② ③</text>
+      <rect x="268" y="140" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="157">确认 ACK + 超时/快速重传 … 对付 ①</text>
+      <rect x="268" y="170" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="187">RTT 估计 / RTO 计算 ……… 对付 ⑤</text>
+      <rect x="268" y="200" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="217">滑动窗口 + 流量控制 ……… 对付 ⑥</text>
+      <rect x="268" y="230" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="247">拥塞控制 ………………………… 对付 ⑦</text>
+      <rect x="268" y="260" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="277">握手 / 挥手 / 心跳 ………… 对付 ⑧</text>
+      <rect x="268" y="290" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="307">FEC / 冗余发送 …………… 用带宽换 ①</text>
+    </g>
+    <text x="400" y="352" text-anchor="middle" class="xs">第 3、5、6、8 章</text>
+
+    <!-- combos -->
+    <rect x="590" y="40" width="260" height="96" rx="12" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="720" y="64" text-anchor="middle" class="b">UDP：几乎不组合</text>
+    <text x="720" y="88" text-anchor="middle" class="xs">只有端口 + 可选校验和</text>
+    <text x="720" y="108" text-anchor="middle" class="xs">把选择权全部交给应用（第 2 章）</text>
+    <rect x="590" y="152" width="260" height="96" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="720" y="176" text-anchor="middle" class="b" style="fill:#15803D">TCP：全部固化在内核</text>
+    <text x="720" y="200" text-anchor="middle" class="xs">可靠 · 有序 · 字节流 · 公平</text>
+    <text x="720" y="220" text-anchor="middle" class="xs">所有应用同一种语义（第 3~6 章）</text>
+    <rect x="590" y="264" width="260" height="106" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="720" y="288" text-anchor="middle" class="b" style="fill:#C2410C">可靠 UDP：用户态按需组合</text>
+    <text x="720" y="312" text-anchor="middle" class="xs">自研 RUDP（第 7~8 章）</text>
+    <text x="720" y="330" text-anchor="middle" class="xs">KCP：延迟优先（第 9 章）</text>
+    <text x="720" y="348" text-anchor="middle" class="xs">QUIC：多路复用+加密（第 10 章）</text>
+
+    <line x1="212" y1="200" x2="246" y2="200" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <line x1="552" y1="88" x2="586" y2="88" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <line x1="552" y1="200" x2="586" y2="200" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <line x1="552" y1="316" x2="586" y2="316" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="430" y="392" text-anchor="middle" class="xs">第 11 章把三种组合放到网页、视频、游戏三个场景里做选型；第 12 章是面试题库</text>
+  </svg>
+  <figcaption><b>图 0-1</b> 全书知识体系：左边是网络的"病"，中间是治病的"药"，右边是三种不同的"药方"</figcaption>
+  </figure>
+
+  <h2>全书路线图</h2>
+  <div class="tbl"><table>
+    <tr><th>部分</th><th>章节</th><th>核心问题</th><th>面试权重</th></tr>
+    <tr><td>一 · 网络基础</td><td>1 从一次网页请求说起</td><td>分层、封装、端口、IP 尽力而为、MTU/MSS</td><td class="mid">铺垫</td></tr>
+    <tr><td rowspan="3">二 · TCP 与 UDP</td><td>2 UDP：薄到极致的传输层</td><td>8 字节头部、无连接、消息边界、校验和</td><td class="yes">高</td></tr>
+    <tr><td>3 TCP：可靠字节流的全套机制</td><td>头部字段、序号确认、重传、滑动窗口、拥塞控制、粘包</td><td class="yes">极高</td></tr>
+    <tr><td>4 TCP vs UDP 对比与选型</td><td>对比表、场景选型、常见追问</td><td class="yes">极高</td></tr>
+    <tr><td rowspan="2">三 · 连接管理</td><td>5 三次握手</td><td>状态与序号、为什么三次、半/全连接队列、SYN Flood、异常</td><td class="yes">极高</td></tr>
+    <tr><td>6 四次挥手</td><td>半关闭、TIME_WAIT、CLOSE_WAIT、RST、异常</td><td class="yes">极高</td></tr>
+    <tr><td rowspan="4">四 · 可靠 UDP</td><td>7 为什么要在 UDP 上造轮子</td><td>队头阻塞、握手时延、内核僵化、可靠性光谱</td><td class="yes">高（游戏岗必问）</td></tr>
+    <tr><td>8 亲手实现可靠 UDP</td><td>序号/ACK、RTO、ARQ、窗口、乱序去重、拥塞、FEC</td><td class="yes">高</td></tr>
+    <tr><td>9 KCP：以带宽换延迟</td><td>RTO×1.5、快速重传、四个队列、参数调优</td><td class="yes">高（游戏岗）</td></tr>
+    <tr><td>10 QUIC：下一代传输协议</td><td>连接 ID、0-RTT、流、包号、帧重传</td><td class="mid">中高</td></tr>
+    <tr><td rowspan="2">五 · 实战与面试</td><td>11 场景选型与游戏网络</td><td>网页 / 视频 / 游戏三场景方案</td><td class="mid">中</td></tr>
+    <tr><td>12 面试题库 + 附录速记卡</td><td>40 道高频题、口述模板</td><td class="yes">冲刺必看</td></tr>
+  </table></div>
+  <p>赶时间的最短路径：<strong>第 3 章 → 第 5 章 → 第 6 章 → 第 4 章 → 第 12 章</strong>（约 2.5 小时）。面游戏客户端 / 服务器岗位，再加上 <strong>第 7、8、9 章</strong>。</p>
+
+  <h2>书中的标记</h2>
+  <div class="co tip"><span class="h">✅ 面试答法</span>可以直接组织成口头回答的要点。</div>
+  <div class="co warn"><span class="h">⚠️ 易错点</span>常见的错误理解，或者面试官爱挖的坑。</div>
+  <div class="co deep"><span class="h">🔬 深入内核</span>Linux 内核或 RFC 里的具体实现细节。第一遍可以跳过，二面、三面前务必读。</div>
+  <div class="co net"><span class="h">🧪 实测证据</span>本书配套程序在本机运行得到的真实输出，用来证明正文结论。</div>
+  <div class="co ver"><span class="h">🎮 游戏开发视角</span>这个知识点在游戏客户端 / 服务器中的应用。</div>
+  <div class="co ana"><span class="h">📦 场景案例</span>用网页请求、视频传输、在线游戏等具体场景佐证讲解。</div>
+  <p>每章开头有<strong>本章目标</strong>，结尾有黑底的<strong>本章小结</strong>和可以展开答案的<strong>思考题</strong>。</p>
+
+  <h2>关于配套程序</h2>
+  <p>配套源码在本书同目录的 <code>demos/</code> 下，全部用 <strong>MSVC 14.44（VS2022）、<code>/std:c++20 /O2</code></strong> 编译，在 Windows 11 x64 上实际运行，书中的输出均为原样粘贴。双击 <code>demos/build_and_run.bat</code> 就能在你自己的机器上复现。</p>
+  <div class="tbl"><table>
+    <tr><th>程序</th><th>证明什么</th><th>所在章节</th></tr>
+    <tr><td><code>d1_tcp_udp_behaviors</code></td><td>真实 socket 实测：UDP 保留消息边界 / TCP 粘包；UDP 发往空端口"成功"但收到 ICMP；TCP 连空端口被 RST 拒绝（Windows 耗时约 2 s）；四次挥手中 <code>CLOSE_WAIT</code> / <code>FIN_WAIT_2</code> / <code>TIME_WAIT</code> 的出现时机；半关闭；<code>SO_LINGER</code> 发 RST</td><td>第 2、3、5、6 章</td></tr>
+    <tr><td><code>d2_rudp_sim</code></td><td>虚拟时钟仿真（RTT 60 ms、可调丢包）：停等 / GBN / SR / 快速重传 / 类 TCP / 类 KCP / 冗余发送 在批量传输与 100 Hz 实时流两种场景下的完成时间、重传占比和时延分布</td><td>第 8、9、11 章</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 关于仿真数据</span><p><code>d2</code> 是<strong>协议逻辑真实、网络是模型</strong>的仿真：本机回环几乎不丢包也没有延迟，用真实 socket 看不出协议差异。仿真里的"类 TCP"是教学用简化版（没有 TLP、RACK、PRR、BBR 等现代 Linux 优化），绝对数值偏悲观，<strong>请看趋势和相对大小，不要把绝对值当作真实 TCP 的性能</strong>。书中引用时会再次说明。</p></div>
+</section>

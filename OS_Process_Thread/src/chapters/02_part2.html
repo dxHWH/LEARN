@@ -1,0 +1,319 @@
+<div class="part-head" data-toc="第二部分 · 资源归属（核心）">
+  <div class="no">PART TWO</div>
+  <h1>第二部分　资源归属：共享与独立的边界</h1>
+  <p>本书最重要的一章。弄清进程拥有什么、线程共享什么、线程各自维护什么，后面的状态切换、选型、fork 语义都能推导出来。</p>
+</div>
+
+<!-- ======================= CH3 ======================= -->
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>进程拥有什么，线程共享什么，线程独占什么</h1>
+    <p class="lead">共享的是资源，独立的是执行状态。但"独立"在很多时候只是约定，而不是硬件保护。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>完整列出进程级资源和线程级状态，并说明每一项为什么放在那一侧</li>
+    <li>用实测输出证明：全局变量和堆是共享的，栈和 TLS 是每线程一份</li>
+    <li>理解"栈私有"不等于"别人访问不到"，以及由此带来的风险</li>
+    <li>理解崩溃半径：为什么一个线程崩溃会让整个进程退出</li>
+  </ul></div>
+
+  <h2>3.1 一张图看清边界</h2>
+  <figure>
+  <svg viewBox="0 0 860 470" xmlns="http://www.w3.org/2000/svg">
+    <rect x="10" y="10" width="840" height="450" rx="16" fill="#FBFAF7" stroke="#2F5BD3" stroke-width="1.6"/>
+    <text x="430" y="36" text-anchor="middle" class="b" style="fill:#2F5BD3">进程（资源容器）—— 以下所有线程共享</text>
+
+    <rect x="30" y="52" width="400" height="190" rx="12" fill="#EAF0FD" stroke="#93A9E8"/>
+    <text x="230" y="74" text-anchor="middle" class="b sm">① 虚拟地址空间（同一套页表）</text>
+    <g class="xs">
+      <rect x="48" y="86" width="175" height="30" rx="5" fill="#fff" stroke="#C9D7FA"/><text x="135" y="106" text-anchor="middle" class="xs">代码段 .text</text>
+      <rect x="236" y="86" width="175" height="30" rx="5" fill="#fff" stroke="#C9D7FA"/><text x="323" y="106" text-anchor="middle" class="xs">全局 / 静态变量 .data .bss</text>
+      <rect x="48" y="124" width="175" height="30" rx="5" fill="#fff" stroke="#C9D7FA"/><text x="135" y="144" text-anchor="middle" class="xs">堆 heap（new / malloc）</text>
+      <rect x="236" y="124" width="175" height="30" rx="5" fill="#fff" stroke="#C9D7FA"/><text x="323" y="144" text-anchor="middle" class="xs">共享库 / 内存映射文件</text>
+      <rect x="48" y="162" width="363" height="30" rx="5" fill="#FFF4EC" stroke="#E8A27A" stroke-dasharray="4 3"/><text x="230" y="182" text-anchor="middle" class="xs" style="fill:#C2410C">各线程的栈也在这里面！（地址可达，只是约定各用各的）</text>
+    </g>
+    <text x="230" y="222" text-anchor="middle" class="xs">任意线程拿到任意地址，都能直接读写</text>
+
+    <rect x="445" y="52" width="385" height="190" rx="12" fill="#EAF0FD" stroke="#93A9E8"/>
+    <text x="637" y="74" text-anchor="middle" class="b sm">② 系统资源与属性</text>
+    <text x="462" y="100" class="xs">· 句柄表（Windows）/ 文件描述符表（Linux）</text>
+    <text x="462" y="120" class="xs">  文件、socket、管道、互斥量、事件……</text>
+    <text x="462" y="140" class="xs">· 安全上下文：访问令牌 / uid、gid</text>
+    <text x="462" y="160" class="xs">· 当前工作目录、环境变量、umask</text>
+    <text x="462" y="180" class="xs">· 信号处置方式（Linux：每个信号的 handler）</text>
+    <text x="462" y="200" class="xs">· PID、父进程、资源限额、进程优先级类</text>
+    <text x="462" y="220" class="xs">· 进程级 CPU 时间、内存统计</text>
+
+    <text x="430" y="270" text-anchor="middle" class="b" style="fill:#C2410C">每个线程独立维护（执行状态）</text>
+    <g>
+      <rect x="30" y="284" width="260" height="160" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+      <text x="160" y="306" text-anchor="middle" class="b sm" style="fill:#C2410C">线程 T1</text>
+      <text x="46" y="330" class="xs">· 线程 ID（TID）</text>
+      <text x="46" y="350" class="xs">· 寄存器上下文：PC、SP、通用寄存器</text>
+      <text x="46" y="370" class="xs">· 用户栈 + 内核栈</text>
+      <text x="46" y="390" class="xs">· 线程局部存储 TLS（errno、GetLastError）</text>
+      <text x="46" y="410" class="xs">· 调度状态、优先级、CPU 亲和性</text>
+      <text x="46" y="430" class="xs">· 信号屏蔽字 / 异常处理链（SEH）</text>
+      <rect x="300" y="284" width="260" height="160" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+      <text x="430" y="306" text-anchor="middle" class="b sm" style="fill:#C2410C">线程 T2</text>
+      <text x="316" y="330" class="xs">· 线程 ID（TID）</text>
+      <text x="316" y="350" class="xs">· 寄存器上下文</text>
+      <text x="316" y="370" class="xs">· 用户栈 + 内核栈</text>
+      <text x="316" y="390" class="xs">· TLS</text>
+      <text x="316" y="410" class="xs">· 调度状态、优先级</text>
+      <text x="316" y="430" class="xs">· 信号屏蔽字 / SEH</text>
+      <rect x="570" y="284" width="260" height="160" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+      <text x="700" y="306" text-anchor="middle" class="b sm" style="fill:#C2410C">线程 T3</text>
+      <text x="586" y="330" class="xs">· ……同上</text>
+      <text x="586" y="370" class="xs">规律：凡是"执行到哪了、</text>
+      <text x="586" y="390" class="xs">正在算什么"的东西，</text>
+      <text x="586" y="410" class="xs">都必须每线程一份</text>
+    </g>
+  </svg>
+  <figcaption><b>图 3-1</b> 进程与线程的资源边界。注意虚线框：各线程的栈也位于共享地址空间内</figcaption>
+  </figure>
+
+  <h3>判断规则：为什么这么划分</h3>
+  <p>不需要死记表格，用一条规则推导即可：</p>
+  <div class="co tip"><span class="h">✅ 推导规则</span><p><strong>如果两条执行流同时使用某样东西而不冲突，它就可以共享；如果它记录的是"这条执行流自己执行到哪里了"，它就必须独立。</strong></p>
+  <ul>
+    <li><strong>PC 和寄存器</strong>：两个线程执行到不同的指令，算着不同的中间值，只能各有一份。</li>
+    <li><strong>栈</strong>：栈保存函数调用链（返回地址、局部变量）。T1 在 <code>main → load → parse</code>，T2 在 <code>main → render</code>，两条调用链不同，用同一个栈会互相覆盖。</li>
+    <li><strong>errno</strong>：T1 的 <code>open</code> 失败设置了 errno，T2 的 <code>read</code> 成功不能把它清零。所以现代 C 库把 errno 实现为线程局部变量（glibc 中是宏 <code>(*__errno_location())</code>）。Windows 的 <code>GetLastError()</code> 值存放在 TEB 中，同样是每线程一份。</li>
+    <li><strong>文件表</strong>：T1 打开的文件交给 T2 读取，是很常见的需求。共享是合理的。</li>
+  </ul></div>
+
+  <h3>Microsoft Learn 的官方表述</h3>
+  <p>Windows 文档<em>About Processes and Threads</em> 对这个边界有一段很精确的描述，这里转述其要点：</p>
+  <ul>
+    <li>进程提供执行程序所需的资源：<strong>虚拟地址空间、可执行代码、指向系统对象的打开句柄、安全上下文、唯一的进程标识符、环境变量、优先级类、最小和最大工作集大小</strong>，以及至少一个执行线程。</li>
+    <li>线程是进程中可以被调度执行的实体。<strong>一个进程的所有线程共享其虚拟地址空间和系统资源。</strong>此外，每个线程维护<strong>异常处理程序、调度优先级、线程局部存储、唯一的线程标识符</strong>，以及系统用来保存线程上下文的一组结构，直到线程被调度。</li>
+    <li>线程上下文包括线程的<strong>机器寄存器集合、内核栈、线程环境块（TEB），以及位于所属进程地址空间中的用户栈</strong>。</li>
+  </ul>
+  <p>最后一句值得仔细读：<strong>用户栈"位于所属进程的地址空间中"</strong>。这正是 3.4 节要讨论的问题的答案。另外请注意，每个线程实际上有<strong>两个栈</strong>：用户态执行时用用户栈，陷入内核（系统调用、中断）后用内核栈。内核栈位于内核地址空间，用户代码无法访问。</p>
+
+  <h2>3.2 完整对照表</h2>
+  <div class="tbl"><table>
+    <tr><th>项目</th><th>归属</th><th>说明</th></tr>
+    <tr><td>代码段</td><td class="yes">进程共享</td><td>只读，所有线程执行同一份代码</td></tr>
+    <tr><td>全局 / 静态变量</td><td class="yes">进程共享</td><td>多线程同时写需要同步。函数内 <code>static</code> 局部变量同样是共享的</td></tr>
+    <tr><td>堆</td><td class="yes">进程共享</td><td>一个线程 <code>new</code> 的对象可以交给另一个线程 <code>delete</code>。分配器内部通常有每线程缓存（如 tcmalloc、jemalloc）来减少锁竞争，但这是性能优化，语义上堆仍是共享的</td></tr>
+    <tr><td>文件描述符 / 句柄</td><td class="yes">进程共享</td><td>T1 <code>close(fd)</code> 后，T2 再用这个 fd 会出错；更糟的是 fd 号可能被马上复用，T2 写进了别的文件</td></tr>
+    <tr><td>当前工作目录</td><td class="yes">进程共享</td><td>一个线程 <code>chdir</code> 会影响所有线程的相对路径，所以多线程程序应该避免 <code>chdir</code></td></tr>
+    <tr><td>信号处理函数（Linux）</td><td class="yes">进程共享</td><td><code>sigaction</code> 设置的 handler 对整个进程生效</td></tr>
+    <tr><td>信号屏蔽字（Linux）</td><td class="no">线程独立</td><td>用 <code>pthread_sigmask</code> 设置。常见做法：所有线程屏蔽信号，由一个专门的线程 <code>sigwait</code> 统一处理</td></tr>
+    <tr><td>PC、SP、通用寄存器</td><td class="no">线程独立</td><td>切换时保存到 TCB / 内核栈</td></tr>
+    <tr><td>用户栈</td><td class="mid">独立但可达</td><td>每线程一块独立区域，但位于共享地址空间中，拿到指针就能访问</td></tr>
+    <tr><td>内核栈</td><td class="no">线程独立</td><td>位于内核空间，用户态不可见（Linux x86-64 上一般为 16KB）</td></tr>
+    <tr><td>TLS（<code>thread_local</code>）</td><td class="mid">独立但可达</td><td>每线程一份副本。取它的地址交给别的线程，仍然可以访问</td></tr>
+    <tr><td>errno / GetLastError</td><td class="no">线程独立</td><td>通过 TLS / TEB 实现</td></tr>
+    <tr><td>调度优先级、状态、亲和性</td><td class="no">线程独立</td><td>调度器以线程为单位调度</td></tr>
+  </table></div>
+
+  <h2>3.3 实测：谁共享，谁独立</h2>
+  <p><code>d1_share.cpp</code> 中，主线程 <code>new</code> 了一个 int，把指针交给 3 个工作线程。每个线程打印：全局变量地址、堆指针、自己栈上局部变量的地址、<code>thread_local</code> 变量的地址，以及用 <code>GetCurrentThreadStackLimits</code> 查到的本线程栈范围。</p>
+<!--code:cpp:d1_share.cpp（核心部分）-->
+int g_global = 100;                 // 数据段：全进程共享
+thread_local int t_tls = 0;         // 线程局部存储：每个线程一份
+
+void worker(int id, int* heapPtr)
+{
+    int local = id * 10;            // 栈：每个线程自己的栈
+    t_tls = id;                     // 只改到“自己那一份”
+    ULONG_PTR lo = 0, hi = 0;
+    GetCurrentThreadStackLimits(&lo, &hi);   // 本线程栈的地址范围
+    printf("[T%d tid=%5lu] &g_global=%p heap=%p &local=%p &t_tls=%p(t_tls=%d)\n" ...);
+}
+<!--/code-->
+  <div class="term"><div class="bar">d1_share.exe —— 实测输出（Windows 11 x64，MSVC 14.44 /O2）</div><pre>pid=69704  main tid=23692
+[T3 tid=67952] &amp;g_global=<span class="ok">00007FF643858000</span>  heap=<span class="ok">0000018132781990</span>  &amp;local=<span class="hl">0000000420DFFC20</span>  &amp;t_tls=<span class="hl">00000181327B0394</span>(t_tls=3)
+              stack=[0000000420D00000, 0000000420E00000)  size=1024 KB
+[T2 tid=76768] &amp;g_global=<span class="ok">00007FF643858000</span>  heap=<span class="ok">0000018132781990</span>  &amp;local=<span class="hl">0000000420CFF8E0</span>  &amp;t_tls=<span class="hl">00000181327C82F4</span>(t_tls=2)
+              stack=[0000000420C00000, 0000000420D00000)  size=1024 KB
+[T1 tid= 6292] &amp;g_global=<span class="ok">00007FF643858000</span>  heap=<span class="ok">0000018132781990</span>  &amp;local=<span class="hl">0000000420BFFB40</span>  &amp;t_tls=<span class="hl">00000181327926F4</span>(t_tls=1)
+              stack=[0000000420B00000, 0000000420C00000)  size=1024 KB
+main: t_tls=0 (主线程自己的 TLS 未被子线程改动)</pre></div>
+  <p>逐项解读：</p>
+  <ol>
+    <li><strong>全局变量和堆：三个线程地址完全相同</strong>（绿色）。它们访问的是同一块内存。</li>
+    <li><strong>局部变量：三个线程地址各不相同</strong>，并且分别落在各自的栈范围内。T1 的栈是 <code>[...420B00000, ...420C00000)</code>，T2 紧挨着是 <code>[...420C00000, ...420D00000)</code>，T3 是 <code>[...420D00000, ...420E00000)</code>。三块栈<strong>在同一个地址空间里首尾相连</strong>，每块正好 1024 KB。</li>
+    <li><strong>thread_local：每线程一个不同的地址，值也各不相同</strong>。主线程最后打印 <code>t_tls=0</code>，说明子线程写的是它们自己的副本。</li>
+    <li>线程是<strong>乱序</strong>完成的（T3 先打印）。线程的执行顺序由调度器决定，不能依赖创建顺序。</li>
+  </ol>
+  <div class="co deep"><span class="h">🔬 深入：栈多大？TLS 在哪？</span>
+  <ul>
+    <li><strong>Windows</strong>：线程栈默认<strong>保留 1MB</strong> 虚拟地址（由链接选项 <code>/STACK</code> 或 <code>CreateThread</code> 参数决定），但只<strong>提交</strong>很少的几页，栈顶下方有一个<strong>保护页（guard page）</strong>，访问到它时触发异常，系统再提交下一页并把保护页下移。用完 1MB 就会抛出 <code>STATUS_STACK_OVERFLOW</code>。上面输出的 <code>size=1024 KB</code> 就是保留大小。</li>
+    <li><strong>Linux</strong>：主线程栈大小由 <code>ulimit -s</code> 决定（通常 8MB），可动态向下增长；glibc 创建的线程栈默认也取这个值（8MB），用 <code>mmap</code> 分配，并在底部放一个不可访问的<strong>保护区</strong>。可用 <code>pthread_attr_setstacksize</code> 调整。</li>
+    <li><strong>TLS 的实现</strong>：x86-64 上，Linux 用 <strong>FS 段寄存器</strong>指向当前线程的 TCB（其中有 TLS 块），Windows 用 <strong>GS 段寄存器</strong>指向当前线程的 TEB。线程切换时内核会切换这个寄存器的基址，所以同一条指令 <code>mov eax, fs:[offset]</code> 在不同线程里读到不同的变量。上面输出中 TLS 的地址落在堆附近的区域（<code>0x0000018...</code>），因为 MSVC 的 <code>thread_local</code> 块是为每个线程动态分配的。</li>
+  </ul></div>
+
+  <h2>3.4 栈私有 ≠ 别人访问不到</h2>
+  <p>这是本章的重点问题。线程有自己的栈，指的是<strong>每个线程有一块专门给自己用的内存区域来保存调用链</strong>。但这块区域在进程的地址空间里，而同一进程的所有线程用的是<strong>同一套页表</strong>。MMU 只检查"这一页在当前页表里是否映射、是否可写"，它不知道也不关心当前是哪个线程在访问。</p>
+  <p>所以只要线程 B 拿到了指向线程 A 栈上数据的指针，它就可以读写那块数据。<code>d2_stack_ptr.cpp</code> 验证了这一点：</p>
+<!--code:cpp:d2_stack_ptr.cpp（核心部分）-->
+std::thread A([&] {
+    int buf[4] = {1, 2, 3, 4};         // 位于 A 线程的栈上
+    shared = buf;                      // 把栈地址交给别的线程
+    ready.count_down();
+    modified.wait();                   // 等 B 改完（A 的栈帧此时仍然存活）
+    printf("[A] 被 B 改写后的 buf = {%d, %d, %d, %d}\n", buf[0], buf[1], buf[2], buf[3]);
+});
+std::thread B([&] {
+    ready.wait();
+    for (int i = 0; i < 4; ++i) shared[i] *= 100;   // 跨线程直接写别人的栈
+});
+<!--/code-->
+  <div class="term"><div class="bar">d2_stack_ptr.exe —— 实测输出</div><pre>[A] buf=<span class="hl">00000021219FF7F0</span>  A的栈范围=[0000002121900000, 0000002121A00000)
+[B] 我的栈范围=[0000002121A00000, 0000002121B00000)，但我拿着指针 <span class="hl">00000021219FF7F0</span>
+[B] 写入成功：同一进程 = 同一地址空间，硬件不拦截
+[A] 被 B 改写后的 buf = {<span class="ok">100, 200, 300, 400</span>}
+结论：栈“私有”只是约定（每个线程各用各的区域），不是硬件隔离。</pre></div>
+  <p>B 的栈范围是 <code>[...2121A00000, ...2121B00000)</code>，它手里的指针 <code>...21219FF7F0</code> 明显落在 A 的栈范围内，写入照样成功。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="24" text-anchor="middle" class="b">同一进程：一套页表</text>
+    <rect x="30" y="40" width="370" height="230" rx="12" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <rect x="60" y="60" width="140" height="80" rx="8" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="130" y="84" text-anchor="middle" class="sm b">A 的栈</text><text x="130" y="106" text-anchor="middle" class="mono">buf[4]</text><text x="130" y="126" text-anchor="middle" class="xs">0x...21219FF7F0</text>
+    <rect x="230" y="60" width="140" height="80" rx="8" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="300" y="84" text-anchor="middle" class="sm b">B 的栈</text><text x="300" y="106" text-anchor="middle" class="mono">int* shared</text>
+    <path d="M300 140 C 300 180, 140 180, 130 142" fill="none" stroke="#15803D" stroke-width="2" marker-end="url(#ag)"/>
+    <text x="215" y="196" text-anchor="middle" class="sm" style="fill:#15803D">B 解引用指针：页表里有映射 → 成功</text>
+    <text x="215" y="250" text-anchor="middle" class="xs">MMU 只问"这页映射了吗、可写吗"，不问"你是哪个线程"</text>
+
+    <text x="645" y="24" text-anchor="middle" class="b">不同进程：各自的页表</text>
+    <rect x="450" y="40" width="170" height="150" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="535" y="62" text-anchor="middle" class="sm b">进程 P 的页表</text>
+    <rect x="462" y="80" width="146" height="50" rx="6" fill="#fff" stroke="#9AD3AE"/><text x="535" y="100" text-anchor="middle" class="xs">0x7FF6...8000</text><text x="535" y="118" text-anchor="middle" class="xs">→ 物理页 X</text>
+    <rect x="670" y="40" width="170" height="150" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="755" y="62" text-anchor="middle" class="sm b">进程 Q 的页表</text>
+    <rect x="682" y="80" width="146" height="50" rx="6" fill="#fff" stroke="#9AD3AE"/><text x="755" y="100" text-anchor="middle" class="xs">0x7FF6...8000</text><text x="755" y="118" text-anchor="middle" class="xs">→ 物理页 Y</text>
+    <line x1="624" y1="160" x2="666" y2="160" stroke="#B91C1C" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="645" y="150" text-anchor="middle" class="b" style="fill:#B91C1C">✕</text>
+    <text x="645" y="222" text-anchor="middle" class="sm" style="fill:#B91C1C">同一个地址值，在另一个进程里指向别的物理页</text>
+    <text x="645" y="250" text-anchor="middle" class="xs">见 d3 实测：父子进程 &amp;g_value 相同，值不同</text>
+  </svg>
+  <figcaption><b>图 3-2</b> 线程之间只有"约定的边界"，进程之间才有"硬件强制的边界"</figcaption>
+  </figure>
+
+  <h3>那为什么还说栈是私有的？三层含义</h3>
+  <ol>
+    <li><strong>空间上私有</strong>：每个线程分到一段专属的地址区间，编译器生成的 <code>push</code>/<code>call</code>/局部变量访问只会使用自己的 SP 指向的区域，正常情况下不会碰到别人的栈。</li>
+    <li><strong>生命周期私有</strong>：栈上对象的生命周期由<strong>拥有它的线程</strong>的函数调用决定。函数返回，栈帧就失效；线程退出，整块栈都会被释放。其他线程<strong>无权也无法</strong>延长它的寿命。</li>
+    <li><strong>默认不共享</strong>：如果没有人主动把栈地址交出去，别的线程就没有办法找到它（没有名字，地址也不固定）。</li>
+  </ol>
+  <p>所以，<strong>跨线程访问栈上数据在语法和硬件上都是允许的，难点在生命周期</strong>：</p>
+
+  <div class="co warn"><span class="h">⚠️ 易错点：悬垂的栈指针（最常见的真实 Bug）</span>
+<!--code:cpp:错误示范：把局部变量的地址交给异步任务-->
+void StartLoad(ThreadPool& pool)
+{
+    char path[260] = "data/level1.pak";
+    pool.Submit([&path] {              // 按引用捕获了栈上的数组
+        LoadFile(path);                // 工作线程执行时，StartLoad 很可能已经返回
+    });
+}   // ← path 所在栈帧在这里失效，之后这块内存会被下一次函数调用覆盖
+<!--/code-->
+  <p>这种 Bug 很难复现：工作线程启动得快时程序正常，慢一点就读到垃圾数据，Debug 和 Release 表现还不一样。<strong>修复方法是让数据的生命周期覆盖所有使用者</strong>：按值捕获（<code>[path = std::string(path)]</code>），或者放到堆上用 <code>std::shared_ptr</code> 管理，或者保证在栈帧返回前 <code>join</code>/等待任务完成（d2 就是用 <code>latch</code> 保证了 A 的栈帧在 B 写完之前一直存活）。</p></div>
+
+  <div class="co tip"><span class="h">✅ 合法而常见的跨线程访问栈的用法</span>
+  <ul>
+    <li><strong><code>std::thread</code> + 引用传参 + 在同一作用域 <code>join</code></strong>：主线程栈上的数组交给工作线程处理，处理完 <code>join</code>，生命周期是安全的。<code>std::jthread</code> 在析构时自动 <code>join</code>，更不容易出错。</li>
+    <li><strong>同步调用</strong>：线程 A 把栈上的请求结构体地址放入队列，然后阻塞等待工作线程处理完成，再继续执行。很多 RPC 框架和 Windows 的 <code>SendMessage</code> 都采用这种模式。</li>
+    <li><strong>OpenMP / parallel_for</strong>：并行循环访问外层函数的局部数组，因为外层函数会等所有迭代结束才返回。</li>
+  </ul></div>
+
+  <div class="co deep"><span class="h">🔬 深入：栈溢出会写坏别人的栈吗</span>
+  <p>d1 的输出显示，各线程的栈在地址上首尾相连。理论上，T2 的栈向下溢出就会进入 T1 栈的高地址部分。实际上中间隔着<strong>保护页</strong>：Windows 的 guard page 和 Linux 的 guard area 都不可访问，溢出时会先触发异常（Windows <code>STATUS_STACK_OVERFLOW</code>，Linux <code>SIGSEGV</code>），程序直接崩溃。但如果在栈上开了一个比保护页还大的局部数组（例如 <code>char buf[64*1024]</code>）并且从远端开始写，就可能<strong>跳过保护页</strong>直接写到相邻区域。因此编译器会在大栈帧函数中插入<strong>栈探测</strong>（MSVC 的 <code>__chkstk</code>，GCC 的 <code>-fstack-clash-protection</code>），按页依次触碰，确保一定会碰到保护页。</p></div>
+
+  <h2>3.5 共享的代价：数据竞争</h2>
+  <p>共享地址空间让线程间通信几乎零成本，代价是：<strong>多个线程同时读写同一块内存，且至少有一个是写，又没有同步，就构成数据竞争</strong>。在 C++ 标准中，数据竞争是<strong>未定义行为</strong>。</p>
+  <p>最经典的例子是 <code>counter++</code>。它看起来是一条语句，实际是三步：从内存读到寄存器 → 寄存器加 1 → 写回内存。两个线程交错执行就会丢失更新：</p>
+  <figure>
+  <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="26" class="b">时间 →</text>
+    <text x="20" y="66" class="sm b" style="fill:#2F5BD3">线程 1</text>
+    <text x="20" y="136" class="sm b" style="fill:#C2410C">线程 2</text>
+    <g>
+      <rect x="90" y="46" width="130" height="30" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="155" y="66" text-anchor="middle" class="xs">读 counter=5 → R1</text>
+      <rect x="230" y="116" width="130" height="30" rx="6" fill="#FFF4EC" stroke="#C2410C"/><text x="295" y="136" text-anchor="middle" class="xs">读 counter=5 → R2</text>
+      <rect x="370" y="46" width="110" height="30" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="425" y="66" text-anchor="middle" class="xs">R1 = 6</text>
+      <rect x="490" y="116" width="110" height="30" rx="6" fill="#FFF4EC" stroke="#C2410C"/><text x="545" y="136" text-anchor="middle" class="xs">R2 = 6</text>
+      <rect x="610" y="46" width="110" height="30" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="665" y="66" text-anchor="middle" class="xs">写回 6</text>
+      <rect x="730" y="116" width="110" height="30" rx="6" fill="#FFF4EC" stroke="#C2410C"/><text x="785" y="136" text-anchor="middle" class="xs">写回 6</text>
+    </g>
+    <text x="430" y="188" text-anchor="middle" class="sm" style="fill:#B91C1C">两次自增，counter 只从 5 变成 6：一次更新丢失了</text>
+  </svg>
+  <figcaption><b>图 3-3</b> 读-改-写被打断导致的丢失更新</figcaption>
+  </figure>
+  <div class="term"><div class="bar">d5_race.exe —— 4 线程各自增 100 万次，实测输出</div><pre>普通变量 ++ (round) 结果=  <span class="bad">1180103</span>  期望=4000000  耗时=   9.2 ms
+普通变量 ++ (round) 结果=  <span class="bad">3390547</span>  期望=4000000  耗时=   2.8 ms
+普通变量 ++ (round) 结果=  <span class="bad">1737623</span>  期望=4000000  耗时=   1.7 ms
+std::atomic fetch_add  结果=  <span class="ok">4000000</span>  期望=4000000  耗时=  21.5 ms
+std::mutex 加锁      结果=  <span class="ok">4000000</span>  期望=4000000  耗时=  78.1 ms</pre></div>
+  <p>三点观察：</p>
+  <ol>
+    <li>普通变量每次结果都不一样，最少的一次只有期望值的 30%。<strong>结果不确定</strong>正是数据竞争的特征。</li>
+    <li>代码中的 <code>volatile</code> 只是阻止编译器把循环优化成一条加法，<strong>它不提供原子性</strong>。这是 C++ 面试的常见陷阱（Java 的 volatile 语义不同，有可见性和有序性保证，但同样不保证复合操作的原子性）。</li>
+    <li>正确的版本更慢：<code>atomic</code> 慢约 2～10 倍，<code>mutex</code> 更慢。原因是多个核争抢同一条<strong>缓存行</strong>，每次写都要通过缓存一致性协议使其他核的副本失效。<strong>共享可写数据本身就有成本</strong>，所以高性能设计会尽量让每个线程写自己的数据（例如每线程一个局部计数器，最后汇总）。</li>
+  </ol>
+
+  <h2>3.6 进程之间：硬件强制的隔离</h2>
+  <p><code>d3_isolation.cpp</code> 用 <code>CreateProcess</code> 启动自身的另一个实例作为子进程，比较两边的全局变量：</p>
+  <div class="term"><div class="bar">d3_isolation.exe —— 实测输出（第一部分）</div><pre>[parent pid=66436] &amp;g_value=<span class="hl">00007FF79F558000</span>  g_value=1
+  [child pid=75908] &amp;g_value=<span class="hl">00007FF79F558000</span>  改成 999
+[parent] 子进程退出码=7，父进程 g_value 仍然=<span class="ok">1</span></pre></div>
+  <p>两个进程中 <code>g_value</code> 的<strong>虚拟地址完全相同</strong>，子进程改成 999，父进程仍然是 1。同一个虚拟地址，在两套页表中映射到不同的物理页。这就是图 3-2 右半部分。</p>
+  <p>进程之间要交换数据，必须借助内核提供的 <strong>IPC（进程间通信）</strong>机制：</p>
+  <div class="tbl"><table>
+    <tr><th>机制</th><th>Linux</th><th>Windows</th><th>特点</th></tr>
+    <tr><td>管道</td><td><code>pipe</code>、FIFO</td><td>匿名管道、命名管道</td><td>字节流，简单，适合父子进程</td></tr>
+    <tr><td>共享内存</td><td><code>shm_open</code>+<code>mmap</code>、System V shm</td><td><code>CreateFileMapping</code>+<code>MapViewOfFile</code></td><td><strong>最快</strong>（零拷贝），但需要自己同步，相当于把一部分页"故意"映射到多个进程</td></tr>
+    <tr><td>消息队列</td><td>POSIX mq、System V msg</td><td>窗口消息、邮槽、ALPC（内部）</td><td>有消息边界</td></tr>
+    <tr><td>套接字</td><td>Unix domain socket、TCP</td><td>TCP、AF_UNIX（Win10+）</td><td>通用，可跨机器</td></tr>
+    <tr><td>信号 / 事件</td><td>signal、eventfd</td><td>命名 Event、Semaphore</td><td>只传递通知，不传数据</td></tr>
+  </table></div>
+
+  <h2>3.7 崩溃半径：线程崩溃，整个进程陪葬</h2>
+  <p>共享地址空间的另一面是<strong>故障也共享</strong>。<code>d3_isolation</code> 的后两个实验：</p>
+  <div class="term"><div class="bar">d3_isolation.exe —— 实测输出（第二、三部分）</div><pre>[parent] 子进程空指针崩溃，退出码=<span class="bad">0xC0000005</span> (STATUS_ACCESS_VIOLATION)，父进程安然无恙
+
+  [threadcrash] 主线程仍在工作 0
+  [threadcrash] 主线程仍在工作 1
+  [threadcrash] 主线程仍在工作 2
+[parent] 子进程的“某个工作线程”崩溃 → 整个子进程被终止，退出码=<span class="bad">0xC0000005</span></pre></div>
+  <ul>
+    <li><strong>子进程崩溃，父进程不受影响</strong>：进程边界把故障挡在了外面。</li>
+    <li>在 <code>threadcrash</code> 模式下，子进程的主线程一直在正常打印，100ms 后一个<strong>工作线程</strong>解引用空指针，<strong>整个子进程（包括正常工作的主线程）立刻被终止</strong>。</li>
+  </ul>
+  <h3>为什么不能只杀掉出错的那个线程？</h3>
+  <p>因为<strong>没有办法知道它破坏了什么</strong>。出错的线程可能已经写坏了堆上的数据结构，也可能正持有一把锁（如果只杀掉它，这把锁永远不会被释放，其他线程等这把锁时会死锁），还可能正在修改一个被所有线程共享的全局状态，修改到一半。由于地址空间是共享的，这些破坏对所有线程都可见，继续运行的结果不可预测。所以操作系统的默认策略是终止整个进程：</p>
+  <ul>
+    <li><strong>Linux</strong>：<code>SIGSEGV</code> 是发给<strong>线程组（整个进程）</strong>的致命信号，默认动作是终止整个进程并生成 core dump。</li>
+    <li><strong>Windows</strong>：未处理的结构化异常最终交给系统的未处理异常过滤器，默认调用 WER（错误报告）并终止进程。</li>
+  </ul>
+  <div class="co ver"><span class="h">🎮 游戏开发视角</span>
+  <p>这就是为什么游戏客户端里一个线程（比如音频线程、资源加载线程）的空指针，会让整个游戏闪退，并在崩溃报告里看到崩溃线程不是 GameThread。也是为什么 Chrome、VS Code、Unreal Editor 的部分功能（Shader 编译、插件宿主、渲染进程）被拆到<strong>独立进程</strong>：它们崩溃时，主进程可以显示"页面崩溃，点击重新加载"或重启子进程，而不是整体退出。UE 的 <code>ShaderCompileWorker.exe</code> 就是一个例子。</p></div>
+
+  <div class="lab" id="lab-owner">
+    <div class="t">🧪 交互实验 1 · 归属判断训练</div>
+    <p style="margin:6px 0;font-size:14px;color:var(--ink2)">下面每一项是"同一进程内所有线程共享"，还是"每个线程独立维护"？点击按钮作答，会给出解释。</p>
+    <div class="row"><b id="ow-item" style="font-size:17px"></b></div>
+    <div class="row">
+      <button class="st-btn" id="ow-share">进程共享</button>
+      <button class="st-btn" id="ow-own">线程独立</button>
+      <button class="st-btn" id="ow-next">下一题 →</button>
+      <span id="ow-score" style="font-size:13px;color:var(--ink3)"></span>
+    </div>
+    <div class="out" id="ow-out">点击"进程共享"或"线程独立"开始。</div>
+  </div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li><strong>进程共享</strong>：地址空间（代码、全局变量、堆、映射、<em>以及所有线程的栈所在的区域</em>）、句柄 / fd 表、凭据、工作目录、信号处置方式。</li>
+    <li><strong>线程独立</strong>：TID、寄存器上下文（PC/SP）、用户栈与内核栈、TLS（errno）、调度状态与优先级、信号屏蔽字 / 异常处理链。</li>
+    <li>线程之间的"独立"是<strong>约定</strong>：栈和 TLS 只要拿到地址就能被别的线程访问，难点在生命周期。进程之间的隔离由 <strong>MMU + 独立页表</strong>强制执行。</li>
+    <li>共享带来零成本通信，也带来数据竞争和"一个线程崩溃，整个进程退出"。</li>
+  </ul></div>
+</section>

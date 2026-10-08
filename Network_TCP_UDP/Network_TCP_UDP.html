@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCP / UDP 与可靠传输 —— 秋招深度学习电子书</title>
+<style>
+:root{
+  --bg:#FBFAF7; --paper:#FFFFFF; --ink:#1F2937; --ink2:#4B5563; --ink3:#6B7280; --line:#E5E7EB;
+  --brand:#2F5BD3; --brand-soft:#EAF0FD; --accent:#C2410C; --accent-soft:#FFF4EC;
+  --green:#15803D; --green-soft:#EAF7EF; --purple:#6D28D9; --purple-soft:#F3EEFE;
+  --red:#B91C1C; --red-soft:#FDEEEE; --amber:#B45309; --amber-soft:#FEF6E4;
+  --code-bg:#F7F8FA; --code-line:#E8EAEE;
+  --side-w:300px;
+  --font: "PingFang SC","Microsoft YaHei","Noto Sans SC","Hiragino Sans GB",system-ui,sans-serif;
+  --mono: "JetBrains Mono","Cascadia Code",Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:16px;line-height:1.85;-webkit-font-smoothing:antialiased}
+a{color:var(--brand);text-decoration:none}
+a:hover{text-decoration:underline}
+#progress{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--brand),var(--accent));width:0;z-index:100}
+
+/* ---------- sidebar ---------- */
+#side{position:fixed;top:0;left:0;bottom:0;width:var(--side-w);background:#F4F2EC;border-right:1px solid var(--line);overflow-y:auto;padding:22px 14px 40px;z-index:50}
+#side .brand{font-weight:800;font-size:17px;line-height:1.4;padding:0 8px 4px;color:var(--ink)}
+#side .brand small{display:block;font-weight:500;font-size:12px;color:var(--ink3);margin-top:4px}
+#side input{width:100%;margin:14px 0 10px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;font-size:13px}
+#toc{list-style:none;margin:0;padding:0;font-size:13.5px}
+#toc .part{margin:16px 8px 4px;font-size:11.5px;font-weight:700;letter-spacing:.08em;color:var(--accent);text-transform:uppercase}
+#toc a{display:block;padding:4px 8px;border-radius:6px;color:var(--ink2);line-height:1.5}
+#toc a:hover{background:#ECE9E1;text-decoration:none}
+#toc a.ch{font-weight:600;color:var(--ink)}
+#toc a.sec{padding-left:22px;font-size:12.8px;display:none}
+#toc li.open a.sec{display:block}
+#toc a.active{background:var(--brand-soft);color:var(--brand)}
+#menuBtn{display:none;position:fixed;top:12px;left:12px;z-index:60;border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 10px;font-size:14px}
+
+/* ---------- main ---------- */
+main{margin-left:var(--side-w);padding:0 48px 120px}
+.wrap{max-width:900px;margin:0 auto}
+.cover{min-height:92vh;display:flex;flex-direction:column;justify-content:center;padding:60px 0;border-bottom:1px solid var(--line)}
+.cover .kicker{font-size:13px;letter-spacing:.2em;color:var(--accent);font-weight:700}
+.cover h1{font-size:46px;line-height:1.25;margin:18px 0 12px;letter-spacing:-.01em}
+.cover h1 em{font-style:normal;color:var(--brand)}
+.cover .sub{font-size:18px;color:var(--ink2);max-width:680px}
+.cover .meta{margin-top:28px;display:flex;gap:10px;flex-wrap:wrap}
+.pill{display:inline-block;font-size:12.5px;padding:3px 10px;border-radius:999px;background:#fff;border:1px solid var(--line);color:var(--ink2)}
+.pill.b{background:var(--brand-soft);border-color:#C9D7FA;color:var(--brand)}
+.pill.o{background:var(--accent-soft);border-color:#F8D3BC;color:var(--accent)}
+.pill.g{background:var(--green-soft);border-color:#BFE6CC;color:var(--green)}
+.pill.p{background:var(--purple-soft);border-color:#DCCDFB;color:var(--purple)}
+
+.part-head{margin:90px 0 10px;padding:34px 36px;border-radius:16px;background:linear-gradient(135deg,#1E3A8A 0%,#2F5BD3 60%,#4F7BEA 100%);color:#fff}
+.part-head .no{font-size:13px;letter-spacing:.25em;opacity:.85;font-weight:700}
+.part-head h1{margin:6px 0 6px;font-size:32px}
+.part-head p{margin:0;opacity:.92}
+
+section.chapter{padding-top:40px}
+.ch-head{margin:40px 0 24px;padding-bottom:16px;border-bottom:2px solid var(--ink)}
+.ch-head .no{font-family:var(--mono);color:var(--accent);font-weight:700;font-size:14px;letter-spacing:.1em}
+.ch-head h1{font-size:32px;line-height:1.35;margin:4px 0 6px}
+.ch-head .lead{color:var(--ink2);font-size:15.5px;margin:0}
+h2{font-size:23px;margin:46px 0 12px;padding-left:12px;border-left:4px solid var(--brand);line-height:1.45}
+h3{font-size:18.5px;margin:30px 0 8px;color:#111827}
+h4{font-size:16px;margin:22px 0 6px;color:var(--ink2)}
+p{margin:10px 0}
+strong{color:#111827}
+ul,ol{padding-left:24px;margin:8px 0}
+li{margin:3px 0}
+code{font-family:var(--mono);font-size:.88em;background:#F1F2F5;border:1px solid #E6E8EC;padding:1px 5px;border-radius:5px;color:#9A3412;word-break:break-word}
+hr{border:none;border-top:1px dashed var(--line);margin:30px 0}
+
+/* goals box */
+.goals{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 20px;margin:18px 0}
+.goals .t{font-weight:700;font-size:14px;color:var(--ink3);letter-spacing:.06em}
+.goals ul{margin:6px 0 0}
+
+/* callouts */
+.co{border-radius:10px;padding:12px 16px 12px 18px;margin:18px 0;border:1px solid;position:relative;font-size:15px}
+.co .h{font-weight:700;display:block;margin-bottom:2px;font-size:14.5px}
+.co p:first-of-type{margin-top:2px}
+.co.tip{background:var(--green-soft);border-color:#BFE6CC}.co.tip .h{color:var(--green)}
+.co.warn{background:var(--red-soft);border-color:#F5C7C7}.co.warn .h{color:var(--red)}
+.co.deep{background:var(--purple-soft);border-color:#DCCDFB}.co.deep .h{color:var(--purple)}
+.co.net{background:var(--brand-soft);border-color:#C9D7FA}.co.net .h{color:var(--brand)}
+.co.ver{background:var(--amber-soft);border-color:#F3DDA8}.co.ver .h{color:var(--amber)}
+.co.ana{background:#fff;border-color:var(--line);border-left:4px solid var(--accent)}.co.ana .h{color:var(--accent)}
+
+/* figures */
+figure{margin:26px 0;background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 18px 10px}
+figure svg{width:100%;height:auto;display:block}
+figure svg text{font-family:var(--font);fill:#1F2937;font-size:13px}
+figure svg .sm{font-size:11.5px;fill:#4B5563}
+figure svg .xs{font-size:10.5px;fill:#6B7280}
+figure svg .b{font-weight:700}
+figure svg .mono{font-family:var(--mono);font-size:11.5px}
+figure svg .wt{fill:#FFFFFF}
+figure svg g.sm text{font-size:11.5px}
+figure svg g.xs text{font-size:10.5px}
+figure svg g.mono text{font-family:var(--mono);font-size:11px}
+figcaption{font-size:13.5px;color:var(--ink3);text-align:center;margin-top:8px}
+figcaption b{color:var(--ink2)}
+
+/* tables */
+.tbl{overflow-x:auto;margin:16px 0}
+table{border-collapse:collapse;width:100%;font-size:14.5px;background:#fff;border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:#F3F4F6;font-weight:700;color:#111827;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+td code{font-size:.84em}
+.yes{color:var(--green);font-weight:700}.no{color:var(--red);font-weight:700}.mid{color:var(--amber);font-weight:700}
+
+/* code */
+.code{margin:16px 0;border:1px solid var(--code-line);border-radius:10px;background:var(--code-bg);overflow:hidden}
+.code .bar{display:flex;justify-content:space-between;align-items:center;padding:5px 12px;background:#EEF0F4;border-bottom:1px solid var(--code-line);font-size:12.5px;color:var(--ink3);font-family:var(--mono)}
+.code .bar button{border:1px solid #D9DCE2;background:#fff;border-radius:6px;font-size:11.5px;padding:1px 8px;cursor:pointer;color:var(--ink2)}
+.code pre{margin:0;padding:12px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.2px;line-height:1.62;color:#24292F;tab-size:4}
+.k{color:#CF222E}.ty{color:#8250DF}.s{color:#0A3069}.c{color:#6E7781;font-style:italic}.n{color:#0550AE}.m{color:#953800}.f{color:#6639BA}
+
+/* steps & cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:16px 0}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 16px}
+.card .t{font-weight:700;margin-bottom:2px}
+.card p{margin:4px 0;font-size:14.5px;color:var(--ink2)}
+.recap{background:#111827;color:#E5E7EB;border-radius:14px;padding:18px 24px;margin:34px 0 10px}
+.recap .t{font-weight:800;color:#FCD34D;letter-spacing:.05em;font-size:14px}
+.recap ul{margin:6px 0 0}
+.recap code{background:#1F2937;border-color:#374151;color:#FCA5A5}
+.recap strong{color:#fff}
+details.quiz{background:#fff;border:1px dashed #CBD5E1;border-radius:12px;padding:10px 16px;margin:12px 0}
+details.quiz summary{cursor:pointer;font-weight:700;color:var(--ink2)}
+details.quiz[open] summary{margin-bottom:6px}
+
+/* interactive */
+.lab{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px 20px;margin:22px 0}
+.lab .t{font-weight:800;color:var(--accent);font-size:14px;letter-spacing:.06em}
+.lab label{font-size:13.5px;color:var(--ink2)}
+.lab input[type=number]{width:80px;padding:3px 6px;border:1px solid var(--line);border-radius:6px;font:inherit;font-size:13.5px}
+.lab input[type=range]{width:220px;vertical-align:middle}
+.lab .row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin:8px 0}
+.lab .out{font-family:var(--mono);font-size:13.5px;background:var(--code-bg);border:1px solid var(--code-line);border-radius:8px;padding:10px 12px;white-space:pre-wrap}
+
+.term{margin:16px 0;border-radius:10px;background:#0F172A;color:#E2E8F0;overflow:hidden;border:1px solid #1E293B}
+.term .bar{padding:5px 12px;background:#1E293B;font-size:12.5px;color:#94A3B8;font-family:var(--mono)}
+.term pre{margin:0;padding:12px 16px;font-family:var(--mono);font-size:12.6px;line-height:1.6;white-space:pre-wrap;word-break:break-all}
+.term .hl{color:#FCD34D;font-weight:700}.term .ok{color:#86EFAC}.term .bad{color:#FCA5A5}
+.ans{background:#fff;border:1px solid var(--line);border-radius:12px;padding:6px 20px 12px;margin:16px 0}
+.ans .q{font-weight:800;font-size:17px;margin:12px 0 4px;color:var(--brand)}
+.st-btn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 10px;margin:3px;font:inherit;font-size:13px;cursor:pointer}
+.st-btn:hover{background:var(--brand-soft)}
+.st-btn:disabled{opacity:.35;cursor:not-allowed}
+@media print{.term{background:#F8FAFC;color:#111;border-color:#CBD5E1}.term .bar{background:#E2E8F0;color:#334155}.term .hl{color:#B45309}.term .ok{color:#15803D}.term .bad{color:#B91C1C}}
+.foot{margin-top:80px;padding-top:20px;border-top:1px solid var(--line);color:var(--ink3);font-size:13px;text-align:center}
+
+@media (max-width:1000px){
+  #side{transform:translateX(-100%);transition:.25s}
+  #side.show{transform:none;box-shadow:0 0 40px rgba(0,0,0,.15)}
+  #menuBtn{display:block}
+  main{margin-left:0;padding:0 18px 80px}
+  .cover h1{font-size:34px}
+}
+@media print{
+  #side,#menuBtn,#progress,.code .bar button{display:none!important}
+  main{margin:0;padding:0}
+  body{background:#fff;font-size:12pt}
+  .part-head,section.chapter{break-before:page}
+  figure,.code,table,.co{break-inside:avoid}
+  .recap{background:#fff;color:#111;border:1px solid #999}
+  .recap strong{color:#000}
+}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<button id="menuBtn" onclick="document.getElementById('side').classList.toggle('show')">☰ 目录</button>
+<nav id="side">
+  <div class="brand">TCP / UDP 与可靠传输<small>计算机网络 · 可靠性的代价 · 秋招版</small></div>
+  <input id="q" placeholder="筛选目录（如：握手、TIME_WAIT、KCP）">
+  <ul id="toc"></ul>
+</nav>
+
+<!-- 全局 SVG 定义：箭头等，供所有内联插图复用 -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4B5563"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2F5BD3"/></marker>
+    <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C2410C"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#15803D"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#B91C1C"/></marker>
+    <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6D28D9"/></marker>
+  </defs>
+</svg>
+
+<main><div class="wrap">
+<header class="cover">
+  <div class="kicker">COMPUTER NETWORKING · TRANSPORT LAYER</div>
+  <h1>TCP / UDP 与可靠传输<br><em>在不可靠的网络上造可靠的路</em></h1>
+  <p class="sub">一本面向秋招的传输层深度学习书。从"浏览器打开一个网页时网卡上到底发生了什么"讲起，依次讲清 UDP 与 TCP 的报文结构和工作原理、三次握手与四次挥手的每一个状态、SYN Flood 攻防与各种异常，最后在 UDP 之上亲手搭出一套可靠传输协议，并拆解 KCP 和 QUIC 的设计取舍。关键结论都配有本机实测的 C++ 程序输出或可复现的仿真数据。</p>
+  <div class="meta">
+    <span class="pill b">5 部分 · 12 章 · 1 篇速记附录</span>
+    <span class="pill o">2 个实测 / 仿真程序</span>
+    <span class="pill g">30+ 张原理插图</span>
+    <span class="pill p">2 个交互实验</span>
+    <span class="pill">网页 · 视频 · 在线游戏 场景贯穿</span>
+  </div>
+</header>
+
+<section class="chapter" id="ch0">
+  <div class="ch-head">
+    <div class="no">CHAPTER 00</div>
+    <h1>阅读指南：一条主线串起传输层</h1>
+    <p class="lead">先说清楚这本书在讲什么、按什么顺序讲、遇到哪种标记该怎么读。</p>
+  </div>
+
+  <h2>一条主线：可靠性是一组机制，而不是一个开关</h2>
+  <p>传输层的知识点乍看很散：端口、校验和、序号、三次握手、滑动窗口、拥塞控制、TIME_WAIT、KCP、QUIC……面试时也常被拆成一道道独立的题来问。但它们其实都在回答同一个问题：</p>
+  <div class="co ana"><span class="h">🧭 全书主线</span>
+  <p><strong>IP 网络只承诺"尽力而为"：包会丢、会乱序、会重复、会出错、会因为拥塞而变慢。要想在它上面提供"可靠"的服务，就要拿出一组机制去对付这些问题，而每个机制都有代价（延迟、带宽、内存、复杂度）。</strong></p>
+  <p>UDP 几乎什么机制都不加，把选择权交给应用；TCP 把一整套机制固化在操作系统内核里，给所有应用同一种"可靠有序字节流"；可靠 UDP（KCP、QUIC、游戏引擎的网络层）则在用户态<em>按需挑选、重新调参</em>这些机制。</p></div>
+  <p>读的时候遇到新知识点，可以先问自己两句：<em>它是在对付哪一种网络问题？它付出了什么代价？</em>能答上这两句，这个知识点就不再是孤立的一道题，而是知识网里的一个节点。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="22" text-anchor="middle" class="sm">问题 → 机制 → 组合方式：全书知识体系</text>
+    <!-- problems -->
+    <rect x="10" y="40" width="200" height="330" rx="12" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="110" y="64" text-anchor="middle" class="b" style="fill:#B91C1C">IP 网络的"病"</text>
+    <g class="sm">
+      <text x="30" y="96">① 丢包（拥塞、无线干扰）</text>
+      <text x="30" y="126">② 乱序（多路径、重路由）</text>
+      <text x="30" y="156">③ 重复（重传、链路层重发）</text>
+      <text x="30" y="186">④ 比特错误</text>
+      <text x="30" y="216">⑤ 时延与抖动</text>
+      <text x="30" y="246">⑥ 发得太快，对方收不过来</text>
+      <text x="30" y="276">⑦ 发得太快，网络被挤爆</text>
+      <text x="30" y="306">⑧ 不知道对方是否存在</text>
+    </g>
+    <text x="110" y="352" text-anchor="middle" class="xs">第 1 章</text>
+
+    <!-- mechanisms -->
+    <rect x="250" y="40" width="300" height="330" rx="12" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="2"/>
+    <text x="400" y="64" text-anchor="middle" class="b" style="fill:#2F5BD3">机制工具箱（每样都有代价）</text>
+    <g class="sm">
+      <rect x="268" y="80" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="97">校验和 ………………………… 对付 ④</text>
+      <rect x="268" y="110" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="127">序列号 + 接收缓冲 ………… 对付 ② ③</text>
+      <rect x="268" y="140" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="157">确认 ACK + 超时/快速重传 … 对付 ①</text>
+      <rect x="268" y="170" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="187">RTT 估计 / RTO 计算 ……… 对付 ⑤</text>
+      <rect x="268" y="200" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="217">滑动窗口 + 流量控制 ……… 对付 ⑥</text>
+      <rect x="268" y="230" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="247">拥塞控制 ………………………… 对付 ⑦</text>
+      <rect x="268" y="260" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="277">握手 / 挥手 / 心跳 ………… 对付 ⑧</text>
+      <rect x="268" y="290" width="264" height="24" rx="5" fill="#fff" stroke="#93A9E8"/><text x="280" y="307">FEC / 冗余发送 …………… 用带宽换 ①</text>
+    </g>
+    <text x="400" y="352" text-anchor="middle" class="xs">第 3、5、6、8 章</text>
+
+    <!-- combos -->
+    <rect x="590" y="40" width="260" height="96" rx="12" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="720" y="64" text-anchor="middle" class="b">UDP：几乎不组合</text>
+    <text x="720" y="88" text-anchor="middle" class="xs">只有端口 + 可选校验和</text>
+    <text x="720" y="108" text-anchor="middle" class="xs">把选择权全部交给应用（第 2 章）</text>
+    <rect x="590" y="152" width="260" height="96" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="720" y="176" text-anchor="middle" class="b" style="fill:#15803D">TCP：全部固化在内核</text>
+    <text x="720" y="200" text-anchor="middle" class="xs">可靠 · 有序 · 字节流 · 公平</text>
+    <text x="720" y="220" text-anchor="middle" class="xs">所有应用同一种语义（第 3~6 章）</text>
+    <rect x="590" y="264" width="260" height="106" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="720" y="288" text-anchor="middle" class="b" style="fill:#C2410C">可靠 UDP：用户态按需组合</text>
+    <text x="720" y="312" text-anchor="middle" class="xs">自研 RUDP（第 7~8 章）</text>
+    <text x="720" y="330" text-anchor="middle" class="xs">KCP：延迟优先（第 9 章）</text>
+    <text x="720" y="348" text-anchor="middle" class="xs">QUIC：多路复用+加密（第 10 章）</text>
+
+    <line x1="212" y1="200" x2="246" y2="200" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <line x1="552" y1="88" x2="586" y2="88" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <line x1="552" y1="200" x2="586" y2="200" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <line x1="552" y1="316" x2="586" y2="316" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="430" y="392" text-anchor="middle" class="xs">第 11 章把三种组合放到网页、视频、游戏三个场景里做选型；第 12 章是面试题库</text>
+  </svg>
+  <figcaption><b>图 0-1</b> 全书知识体系：左边是网络的"病"，中间是治病的"药"，右边是三种不同的"药方"</figcaption>
+  </figure>
+
+  <h2>全书路线图</h2>
+  <div class="tbl"><table>
+    <tr><th>部分</th><th>章节</th><th>核心问题</th><th>面试权重</th></tr>
+    <tr><td>一 · 网络基础</td><td>1 从一次网页请求说起</td><td>分层、封装、端口、IP 尽力而为、MTU/MSS</td><td class="mid">铺垫</td></tr>
+    <tr><td rowspan="3">二 · TCP 与 UDP</td><td>2 UDP：薄到极致的传输层</td><td>8 字节头部、无连接、消息边界、校验和</td><td class="yes">高</td></tr>
+    <tr><td>3 TCP：可靠字节流的全套机制</td><td>头部字段、序号确认、重传、滑动窗口、拥塞控制、粘包</td><td class="yes">极高</td></tr>
+    <tr><td>4 TCP vs UDP 对比与选型</td><td>对比表、场景选型、常见追问</td><td class="yes">极高</td></tr>
+    <tr><td rowspan="2">三 · 连接管理</td><td>5 三次握手</td><td>状态与序号、为什么三次、半/全连接队列、SYN Flood、异常</td><td class="yes">极高</td></tr>
+    <tr><td>6 四次挥手</td><td>半关闭、TIME_WAIT、CLOSE_WAIT、RST、异常</td><td class="yes">极高</td></tr>
+    <tr><td rowspan="4">四 · 可靠 UDP</td><td>7 为什么要在 UDP 上造轮子</td><td>队头阻塞、握手时延、内核僵化、可靠性光谱</td><td class="yes">高（游戏岗必问）</td></tr>
+    <tr><td>8 亲手实现可靠 UDP</td><td>序号/ACK、RTO、ARQ、窗口、乱序去重、拥塞、FEC</td><td class="yes">高</td></tr>
+    <tr><td>9 KCP：以带宽换延迟</td><td>RTO×1.5、快速重传、四个队列、参数调优</td><td class="yes">高（游戏岗）</td></tr>
+    <tr><td>10 QUIC：下一代传输协议</td><td>连接 ID、0-RTT、流、包号、帧重传</td><td class="mid">中高</td></tr>
+    <tr><td rowspan="2">五 · 实战与面试</td><td>11 场景选型与游戏网络</td><td>网页 / 视频 / 游戏三场景方案</td><td class="mid">中</td></tr>
+    <tr><td>12 面试题库 + 附录速记卡</td><td>40 道高频题、口述模板</td><td class="yes">冲刺必看</td></tr>
+  </table></div>
+  <p>赶时间的最短路径：<strong>第 3 章 → 第 5 章 → 第 6 章 → 第 4 章 → 第 12 章</strong>（约 2.5 小时）。面游戏客户端 / 服务器岗位，再加上 <strong>第 7、8、9 章</strong>。</p>
+
+  <h2>书中的标记</h2>
+  <div class="co tip"><span class="h">✅ 面试答法</span>可以直接组织成口头回答的要点。</div>
+  <div class="co warn"><span class="h">⚠️ 易错点</span>常见的错误理解，或者面试官爱挖的坑。</div>
+  <div class="co deep"><span class="h">🔬 深入内核</span>Linux 内核或 RFC 里的具体实现细节。第一遍可以跳过，二面、三面前务必读。</div>
+  <div class="co net"><span class="h">🧪 实测证据</span>本书配套程序在本机运行得到的真实输出，用来证明正文结论。</div>
+  <div class="co ver"><span class="h">🎮 游戏开发视角</span>这个知识点在游戏客户端 / 服务器中的应用。</div>
+  <div class="co ana"><span class="h">📦 场景案例</span>用网页请求、视频传输、在线游戏等具体场景佐证讲解。</div>
+  <p>每章开头有<strong>本章目标</strong>，结尾有黑底的<strong>本章小结</strong>和可以展开答案的<strong>思考题</strong>。</p>
+
+  <h2>关于配套程序</h2>
+  <p>配套源码在本书同目录的 <code>demos/</code> 下，全部用 <strong>MSVC 14.44（VS2022）、<code>/std:c++20 /O2</code></strong> 编译，在 Windows 11 x64 上实际运行，书中的输出均为原样粘贴。双击 <code>demos/build_and_run.bat</code> 就能在你自己的机器上复现。</p>
+  <div class="tbl"><table>
+    <tr><th>程序</th><th>证明什么</th><th>所在章节</th></tr>
+    <tr><td><code>d1_tcp_udp_behaviors</code></td><td>真实 socket 实测：UDP 保留消息边界 / TCP 粘包；UDP 发往空端口"成功"但收到 ICMP；TCP 连空端口被 RST 拒绝（Windows 耗时约 2 s）；四次挥手中 <code>CLOSE_WAIT</code> / <code>FIN_WAIT_2</code> / <code>TIME_WAIT</code> 的出现时机；半关闭；<code>SO_LINGER</code> 发 RST</td><td>第 2、3、5、6 章</td></tr>
+    <tr><td><code>d2_rudp_sim</code></td><td>虚拟时钟仿真（RTT 60 ms、可调丢包）：停等 / GBN / SR / 快速重传 / 类 TCP / 类 KCP / 冗余发送 在批量传输与 100 Hz 实时流两种场景下的完成时间、重传占比和时延分布</td><td>第 8、9、11 章</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 关于仿真数据</span><p><code>d2</code> 是<strong>协议逻辑真实、网络是模型</strong>的仿真：本机回环几乎不丢包也没有延迟，用真实 socket 看不出协议差异。仿真里的"类 TCP"是教学用简化版（没有 TLP、RACK、PRR、BBR 等现代 Linux 优化），绝对数值偏悲观，<strong>请看趋势和相对大小，不要把绝对值当作真实 TCP 的性能</strong>。书中引用时会再次说明。</p></div>
+</section>
+
+<div class="part-head" data-toc="第一部分 · 网络基础">
+  <div class="no">PART ONE</div>
+  <h1>第一部分　网络基础：传输层站在哪里</h1>
+  <p>先搞清楚传输层上面是谁、下面是谁、下面的 IP 到底承诺了什么、没承诺什么。TCP 和 UDP 的一切设计，都是对"IP 只尽力而为"这件事的回应。</p>
+</div>
+
+<!-- ======================= CH1 ======================= -->
+<section class="chapter" id="ch1">
+  <div class="ch-head">
+    <div class="no">CHAPTER 01</div>
+    <h1>从一次网页请求说起</h1>
+    <p class="lead">在浏览器里敲下一个网址，到页面开始出现，网线上依次走过了 UDP、TCP、TLS、HTTP。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能画出一次 HTTPS 网页请求的完整时序，并说出每一段属于哪一层、花了几个 RTT</li>
+    <li>说清 TCP/IP 分层模型、封装与解封装，以及各层 PDU 的名字</li>
+    <li>理解 IP 的"尽力而为"和端到端原则，明白为什么可靠性要放在传输层做</li>
+    <li>掌握端口、套接字、五元组、MTU 与 MSS 这几个后面反复出现的基本概念</li>
+  </ul></div>
+
+  <h2>1.1 敲下回车之后：一张时序图看全流程</h2>
+  <p>假设你在浏览器里输入 <code>https://www.example.com</code> 并回车，且本机没有任何缓存。抛开浏览器内部的解析和渲染，单看网络，大致会发生四件事：</p>
+  <ol>
+    <li><strong>DNS 解析</strong>：把域名翻译成 IP 地址。浏览器（通过操作系统）向 DNS 服务器发一个查询，<strong>通常用 UDP 的 53 端口</strong>，一问一答。</li>
+    <li><strong>TCP 三次握手</strong>：和 Web 服务器的 443 端口建立一条 TCP 连接。</li>
+    <li><strong>TLS 握手</strong>：在 TCP 连接之上协商加密参数、验证服务器证书。TLS 1.3 需要 1 个 RTT。</li>
+    <li><strong>HTTP 请求与响应</strong>：发送 <code>GET /</code>，收到 HTML。</li>
+  </ol>
+
+  <figure>
+  <svg viewBox="0 0 860 440" xmlns="http://www.w3.org/2000/svg">
+    <text x="120" y="24" text-anchor="middle" class="b">浏览器（客户端）</text>
+    <text x="430" y="24" text-anchor="middle" class="b">DNS 递归解析器</text>
+    <text x="700" y="24" text-anchor="middle" class="b">Web 服务器 :443</text>
+    <line x1="120" y1="34" x2="120" y2="420" stroke="#9CA3AF" stroke-dasharray="4 3"/>
+    <line x1="430" y1="34" x2="430" y2="140" stroke="#9CA3AF" stroke-dasharray="4 3"/>
+    <line x1="700" y1="34" x2="700" y2="420" stroke="#9CA3AF" stroke-dasharray="4 3"/>
+    <!-- DNS -->
+    <rect x="10" y="46" width="840" height="86" rx="8" fill="#F3EEFE" opacity=".55"/>
+    <line x1="120" y1="62" x2="428" y2="84" stroke="#6D28D9" stroke-width="1.8" marker-end="url(#ap)"/>
+    <text x="270" y="64" text-anchor="middle" class="sm" style="fill:#6D28D9">UDP :53 查询 A www.example.com</text>
+    <line x1="430" y1="96" x2="122" y2="118" stroke="#6D28D9" stroke-width="1.8" marker-end="url(#ap)"/>
+    <text x="280" y="124" text-anchor="middle" class="sm" style="fill:#6D28D9">应答 93.184.x.x</text>
+    <text x="800" y="94" text-anchor="middle" class="b sm" style="fill:#6D28D9">DNS · 1 RTT</text>
+    <!-- TCP -->
+    <rect x="10" y="144" width="840" height="96" rx="8" fill="#EAF7EF" opacity=".7"/>
+    <line x1="120" y1="156" x2="698" y2="176" stroke="#15803D" stroke-width="1.8" marker-end="url(#ag)"/>
+    <text x="400" y="160" text-anchor="middle" class="sm" style="fill:#15803D">SYN</text>
+    <line x1="700" y1="184" x2="122" y2="204" stroke="#15803D" stroke-width="1.8" marker-end="url(#ag)"/>
+    <text x="400" y="188" text-anchor="middle" class="sm" style="fill:#15803D">SYN + ACK</text>
+    <line x1="120" y1="212" x2="698" y2="232" stroke="#15803D" stroke-width="1.8" marker-end="url(#ag)"/>
+    <text x="400" y="216" text-anchor="middle" class="sm" style="fill:#15803D">ACK</text>
+    <text x="800" y="196" text-anchor="middle" class="b sm" style="fill:#15803D">TCP · 1 RTT</text>
+    <!-- TLS -->
+    <rect x="10" y="244" width="840" height="96" rx="8" fill="#FEF6E4" opacity=".9"/>
+    <line x1="120" y1="256" x2="698" y2="276" stroke="#B45309" stroke-width="1.8" marker-end="url(#a)"/>
+    <text x="400" y="260" text-anchor="middle" class="sm" style="fill:#B45309">ClientHello（可与上面的 ACK 同时发出）</text>
+    <line x1="700" y1="284" x2="122" y2="304" stroke="#B45309" stroke-width="1.8" marker-end="url(#a)"/>
+    <text x="400" y="288" text-anchor="middle" class="sm" style="fill:#B45309">ServerHello · 证书 · Finished</text>
+    <text x="800" y="296" text-anchor="middle" class="b sm" style="fill:#B45309">TLS 1.3 · 1 RTT</text>
+    <!-- HTTP -->
+    <rect x="10" y="344" width="840" height="76" rx="8" fill="#EAF0FD" opacity=".8"/>
+    <line x1="120" y1="350" x2="698" y2="370" stroke="#2F5BD3" stroke-width="1.8" marker-end="url(#ab)"/>
+    <text x="400" y="354" text-anchor="middle" class="sm" style="fill:#2F5BD3">Finished + HTTP GET /（加密）</text>
+    <line x1="700" y1="378" x2="122" y2="398" stroke="#2F5BD3" stroke-width="1.8" marker-end="url(#ab)"/>
+    <text x="400" y="404" text-anchor="middle" class="sm" style="fill:#2F5BD3">HTTP 200 + HTML（可能被拆成很多个 TCP 段）</text>
+    <text x="800" y="384" text-anchor="middle" class="b sm" style="fill:#2F5BD3">HTTP · 1 RTT</text>
+    <text x="430" y="436" text-anchor="middle" class="xs">冷启动下，从回车到收到 HTML 第一个字节 ≈ 4 个 RTT；跨省 RTT 30 ms 时约 120 ms，跨洋 RTT 200 ms 时接近 1 秒</text>
+  </svg>
+  <figcaption><b>图 1-1</b> 一次冷启动的 HTTPS 网页请求：DNS 走 UDP，网页本身走 TCP + TLS；每一段都至少花 1 个 RTT</figcaption>
+  </figure>
+
+  <p>这张图里已经藏着本书的大部分主题：</p>
+  <ul>
+    <li><strong>DNS 为什么用 UDP？</strong>一问一答、报文小，用 TCP 光握手就要多花 1 个 RTT，丢了重问一次即可（第 2 章、第 4 章）。</li>
+    <li><strong>SYN、SYN+ACK、ACK 各自携带了什么、为什么是三次？</strong>（第 5 章）</li>
+    <li><strong>HTML 被拆成很多个 TCP 段，丢了一个怎么办？乱序了怎么办？发太快怎么办？</strong>（第 3 章）</li>
+    <li><strong>能不能把 TCP 握手和 TLS 握手合并，把 4 个 RTT 压缩下来？</strong>这正是 QUIC / HTTP/3 的动机之一（第 10 章）。</li>
+  </ul>
+
+  <div class="co ana"><span class="h">📦 场景案例：RTT 才是网页慢的主因</span>
+  <p>很多人以为网页慢是因为"带宽不够"。实际上，打开一个普通网页只需要几百 KB，100 Mbps 的带宽传完只要几十毫秒；真正拖慢首屏的是<strong>来回次数（RTT 的个数）</strong>。这就是为什么工程上大量优化都在"省 RTT"：DNS 预解析、TCP 连接复用（HTTP Keep-Alive）、TLS 会话恢复、TCP Fast Open、HTTP/3 的 0-RTT。记住这个视角，后面讨论握手次数时你会更有体感。</p></div>
+
+  <h2>1.2 分层模型：每层只做一件事</h2>
+  <p>网络通信被拆成若干层，每一层只依赖下一层提供的服务，并向上一层提供服务。教科书里有两套模型：</p>
+  <div class="tbl"><table>
+    <tr><th>OSI 七层</th><th>TCP/IP 四层（五层教学版）</th><th>负责什么</th><th>典型协议</th><th>PDU 名称</th></tr>
+    <tr><td>应用层 / 表示层 / 会话层</td><td>应用层</td><td>具体业务语义</td><td>HTTP、DNS、TLS*、SSH、游戏协议</td><td>报文（message）</td></tr>
+    <tr><td>传输层</td><td>传输层</td><td><strong>进程到进程</strong>：端口复用、可靠性、流量 / 拥塞控制</td><td><strong>TCP、UDP</strong>、SCTP、QUIC*</td><td>TCP 段（segment）/ UDP 数据报（datagram）</td></tr>
+    <tr><td>网络层</td><td>网际层</td><td><strong>主机到主机</strong>：寻址与路由，跨越多个网络</td><td>IPv4、IPv6、ICMP</td><td>分组 / 包（packet）</td></tr>
+    <tr><td>数据链路层</td><td rowspan="2">网络接口层（链路层 + 物理层）</td><td>同一链路上相邻节点之间传帧</td><td>以太网、Wi-Fi、PPP</td><td>帧（frame）</td></tr>
+    <tr><td>物理层</td><td>比特 ↔ 电 / 光 / 无线信号</td><td>双绞线、光纤</td><td>比特</td></tr>
+  </table></div>
+  <p class="xs" style="font-size:13px;color:#6B7280">* TLS 通常被视为位于传输层和应用层之间；QUIC 运行在 UDP 之上，但承担的是传输层职责，所以常被称为"用户态传输层"。</p>
+
+  <h3>封装与解封装</h3>
+  <p>发送时，数据从上往下走，每经过一层就在前面加上一层"信封"（头部）；接收时从下往上走，每一层拆掉属于自己的信封，再根据头部里的字段决定交给上面的谁。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm">
+      <text x="20" y="46" class="b">应用层</text>
+      <rect x="470" y="28" width="300" height="28" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="620" y="47" text-anchor="middle">HTTP 数据（例如 1400 字节）</text>
+
+      <text x="20" y="106" class="b">传输层</text>
+      <rect x="390" y="88" width="80" height="28" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="107" text-anchor="middle">TCP 头 20</text>
+      <rect x="470" y="88" width="300" height="28" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="620" y="107" text-anchor="middle">数据</text>
+      <text x="320" y="107" text-anchor="end" class="xs">TCP 段</text>
+
+      <text x="20" y="166" class="b">网络层</text>
+      <rect x="310" y="148" width="80" height="28" rx="4" fill="#FEF6E4" stroke="#B45309"/><text x="350" y="167" text-anchor="middle">IP 头 20</text>
+      <rect x="390" y="148" width="80" height="28" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="167" text-anchor="middle">TCP 头</text>
+      <rect x="470" y="148" width="300" height="28" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="620" y="167" text-anchor="middle">数据</text>
+      <text x="240" y="167" text-anchor="end" class="xs">IP 包（≤ MTU 1500）</text>
+
+      <text x="20" y="226" class="b">链路层</text>
+      <rect x="210" y="208" width="100" height="28" rx="4" fill="#F3F4F6" stroke="#6B7280"/><text x="260" y="227" text-anchor="middle">以太网头 14</text>
+      <rect x="310" y="208" width="80" height="28" rx="4" fill="#FEF6E4" stroke="#B45309"/><text x="350" y="227" text-anchor="middle">IP 头</text>
+      <rect x="390" y="208" width="80" height="28" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="227" text-anchor="middle">TCP 头</text>
+      <rect x="470" y="208" width="300" height="28" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="620" y="227" text-anchor="middle">数据</text>
+      <rect x="770" y="208" width="70" height="28" rx="4" fill="#F3F4F6" stroke="#6B7280"/><text x="805" y="227" text-anchor="middle">FCS 4</text>
+    </g>
+    <line x1="855" y1="40" x2="855" y2="226" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="848" y="270" text-anchor="end" class="xs" style="fill:#2F5BD3">发送：逐层加头（封装）↓　　接收：逐层拆头（解封装）↑</text>
+    <text x="210" y="270" class="xs">以太网帧的"数据部分"最大 1500 字节 = MTU；去掉 IP 头 20、TCP 头 20，TCP 每段最多放 1460 字节 = MSS</text>
+    <text x="210" y="290" class="xs">接收方靠 以太网"类型"字段 → IP"协议"字段（6=TCP，17=UDP）→ 传输层"端口" 一路找到目标进程</text>
+  </svg>
+  <figcaption><b>图 1-2</b> 封装：一个 1400 字节的 HTTP 数据在发出前被套上三层头部</figcaption>
+  </figure>
+
+  <div class="co tip"><span class="h">✅ 面试答法：为什么要分层？</span>
+  <p>① <strong>解耦</strong>：每层只关心自己的职责，换掉其中一层（如把有线换成 Wi-Fi、把 IPv4 换成 IPv6）不影响其他层；② <strong>复用</strong>：所有应用共享同一套 TCP/IP 实现；③ <strong>标准化</strong>：不同厂商只要遵守层间接口就能互通。代价是每层都有头部开销，层与层之间也可能出现信息不对称（例如 TCP 不知道底层是无线链路，把无线干扰导致的丢包误当成拥塞，第 3 章会讲）。</p></div>
+
+  <h2>1.3 IP 的承诺：尽力而为</h2>
+  <p>网络层的 IP 协议负责把一个包从源主机送到目标主机，中间可能经过几十个路由器。但 IP <strong>只承诺"尽力而为"（best effort）</strong>，具体来说：</p>
+  <div class="cards">
+    <div class="card"><div class="t">❌ 不保证送达</div><p>路由器队列满了就直接丢包；TTL 减到 0 也丢。丢了不会通知任何人（最多偶尔回一个 ICMP）。</p></div>
+    <div class="card"><div class="t">❌ 不保证顺序</div><p>先发的包可能走了更长的路径，后发先至。</p></div>
+    <div class="card"><div class="t">❌ 不保证不重复</div><p>链路层重发、路由抖动都可能让同一个包到达两次。</p></div>
+    <div class="card"><div class="t">❌ 不保证数据正确</div><p>IPv4 头部校验和只校验<strong>头部</strong>，不管数据；IPv6 连头部校验和都去掉了。</p></div>
+    <div class="card"><div class="t">❌ 不控制速率</div><p>你发多快它就转多快，直到某个路由器扛不住开始丢包。</p></div>
+    <div class="card"><div class="t">✅ 只保证一件事</div><p>按目标 IP 地址尽量把包往正确的方向转发。</p></div>
+  </div>
+
+  <h3>为什么不让 IP 层直接做可靠？——端到端原则</h3>
+  <p>如果让每个路由器都保证可靠（逐跳确认、逐跳重传），路由器就得为每条流保存状态、缓存数据，成本极高；而且即使每一跳都可靠，数据仍可能在终端主机的内存里出错，<strong>最终还是要由两端再确认一次</strong>。这就是著名的<strong>端到端原则（End-to-End Argument）</strong>：</p>
+  <div class="co ana"><span class="h">📐 端到端原则</span><p>某个功能只有在通信的端点才能被完整、正确地实现时，就应该放在端点实现；网络中间只做简单、通用、高效的事情。<br>→ 所以 IP 保持"笨而快"，<strong>可靠性交给两端主机的传输层</strong>（TCP），或者干脆交给应用自己（UDP + 应用层可靠）。</p></div>
+  <p>这条原则也解释了本书最后一部分的存在：既然可靠性本来就是端点的事，那它放在<strong>内核里的 TCP</strong> 还是<strong>用户态的 KCP / QUIC</strong>，只是工程取舍，没有原则上的对错。</p>
+
+  <h2>1.4 端口、套接字与五元组：找到具体的进程</h2>
+  <p>IP 地址只能定位到<strong>主机</strong>，而一台主机上同时跑着浏览器、微信、游戏客户端。传输层的第一个职责就是<strong>复用与分用</strong>（multiplexing / demultiplexing）：发送时把多个进程的数据汇入同一个 IP 层，接收时再按端口号分发给正确的进程。</p>
+  <ul>
+    <li><strong>端口（port）</strong>：16 位无符号整数，0～65535。0～1023 是知名端口（HTTP 80、HTTPS 443、DNS 53、SSH 22），1024～49151 是注册端口，49152～65535 是动态（临时）端口。Linux 默认的临时端口范围是 <code>32768～60999</code>（<code>net.ipv4.ip_local_port_range</code>）。</li>
+    <li><strong>套接字（socket）</strong>：操作系统提供给应用的通信端点抽象。应用读写 socket，内核负责把数据交给 TCP/UDP 协议栈。</li>
+    <li><strong>五元组</strong>：<code>{协议, 源 IP, 源端口, 目的 IP, 目的端口}</code>，唯一标识一条通信。</li>
+  </ul>
+
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="820" height="290" rx="14" fill="#FBFAF7" stroke="#9CA3AF"/>
+    <text x="40" y="44" class="b">服务器 10.0.0.2 的内核</text>
+    <rect x="330" y="260" width="200" height="34" rx="8" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="430" y="282" text-anchor="middle" class="b sm" style="fill:#B45309">IP 层：看"协议"字段</text>
+    <line x1="400" y1="258" x2="230" y2="200" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="285" y="240" class="xs" style="fill:#15803D">协议=6</text>
+    <line x1="460" y1="258" x2="630" y2="200" stroke="#6D28D9" stroke-width="1.6" marker-end="url(#ap)"/>
+    <text x="560" y="240" class="xs" style="fill:#6D28D9">协议=17</text>
+    <!-- TCP -->
+    <rect x="40" y="60" width="380" height="140" rx="10" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="230" y="80" text-anchor="middle" class="b" style="fill:#15803D">TCP：按"四元组"查找连接</text>
+    <rect x="56" y="92" width="348" height="24" rx="5" fill="#fff" stroke="#9AD3AE"/><text x="66" y="109" class="mono">*:443  监听 socket（LISTEN）—— 只收新的 SYN</text>
+    <rect x="56" y="122" width="348" height="24" rx="5" fill="#fff" stroke="#9AD3AE"/><text x="66" y="139" class="mono">10.0.0.2:443 ⇄ 1.1.1.1:50001  连接 socket A</text>
+    <rect x="56" y="152" width="348" height="24" rx="5" fill="#fff" stroke="#9AD3AE"/><text x="66" y="169" class="mono">10.0.0.2:443 ⇄ 2.2.2.2:50001  连接 socket B</text>
+    <text x="230" y="194" text-anchor="middle" class="xs">同一个本地端口 443 可以有成千上万条连接，靠对端地址区分</text>
+    <!-- UDP -->
+    <rect x="440" y="60" width="380" height="140" rx="10" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="630" y="80" text-anchor="middle" class="b" style="fill:#6D28D9">UDP：只按"目的 IP + 目的端口"查找</text>
+    <rect x="456" y="92" width="348" height="24" rx="5" fill="#fff" stroke="#C4B5FD"/><text x="466" y="109" class="mono">*:53     DNS 服务 socket</text>
+    <rect x="456" y="122" width="348" height="24" rx="5" fill="#fff" stroke="#C4B5FD"/><text x="466" y="139" class="mono">*:7777   游戏服务器 socket</text>
+    <text x="630" y="166" text-anchor="middle" class="xs">所有客户端的包都进同一个 socket，</text>
+    <text x="630" y="184" text-anchor="middle" class="xs">由应用自己通过 recvfrom 拿到的源地址区分是谁</text>
+  </svg>
+  <figcaption><b>图 1-3</b> 分用：TCP 每条连接一个 socket（按四元组区分）；UDP 一个端口一个 socket，"连接"的概念需要应用自己维护</figcaption>
+  </figure>
+
+  <div class="co warn"><span class="h">⚠️ 易错点：一台服务器最多只能有 65535 个 TCP 连接？</span>
+  <p>错。端口号的 65535 限制针对的是<strong>同一个四元组中的一个端口字段</strong>。服务器只监听一个端口（443），每条连接由<code>{客户端 IP, 客户端端口}</code>区分，理论上限是"客户端 IP 数 × 客户端端口数"，远超 65535。实际限制来自<strong>文件描述符上限和内存</strong>（每条连接的内核结构加收发缓冲区要占几 KB 到几十 KB）。<br>反过来，<strong>客户端</strong>连同一个服务器的同一个端口时，确实最多只能用掉约 2.8 万个（Linux 默认临时端口范围）本地端口——这就是第 6 章 TIME_WAIT 过多会导致"端口耗尽"的根源。</p></div>
+
+  <h2>1.5 MTU、MSS 与分片</h2>
+  <p>链路层一次能承载的最大数据长度叫 <strong>MTU（Maximum Transmission Unit）</strong>，以太网是 1500 字节。比 MTU 大的 IP 包要么被<strong>分片</strong>（IPv4 允许路由器分片），要么被丢弃并回一个 ICMP "需要分片"（设置了 DF 位或 IPv6）。</p>
+  <ul>
+    <li><strong>分片的坏处</strong>：任何一个分片丢了，整个 IP 包都要作废；分片重组消耗接收方资源；很多防火墙和 NAT 会直接丢弃分片。所以<strong>无论 TCP 还是 UDP，都应该尽量避免 IP 分片</strong>。</li>
+    <li><strong>TCP 怎么避免</strong>：三次握手时双方在 SYN 里通过 <strong>MSS 选项</strong>告诉对方"我能收的最大段长"，一般是 MTU − 40 = 1460；之后 TCP 自己把字节流切成不超过 MSS 的段。再配合<strong>路径 MTU 发现（PMTUD）</strong>适应中间更小的 MTU（如 PPPoE 的 1492）。</li>
+    <li><strong>UDP 怎么避免</strong>：UDP 不切分，应用交给它多大，它就发多大的数据报。所以应用必须<strong>自己控制每个数据报的大小</strong>：以太网下 UDP 负载不超过 1500 − 20 − 8 = <strong>1472</strong> 字节；考虑到隧道、VPN、移动网络，实践中常取 <strong>1200～1400</strong>（QUIC 规定 IPv4/IPv6 下至少支持 1200 字节，KCP 默认 MTU 为 1400）。</li>
+  </ul>
+
+  <div class="co ver"><span class="h">🎮 游戏开发视角</span><p>游戏的同步包通常只有几十到几百字节，天然不会触发分片；但"进入场景时下发全量状态""发送一张大地图快照"这类大消息就必须在应用层<strong>手动分片、编号、重组</strong>，这正是第 8 章可靠 UDP 里"消息分片"机制要解决的问题。UE 的网络层把一个大的 Bunch 拆成多个 Partial Bunch 也是同一个道理。</p></div>
+
+  <h2>1.6 传输层的任务清单</h2>
+  <p>现在可以给传输层列一份任务清单了。所有传输层协议都必须做第 1 项；剩下几项做不做、做到什么程度，就是 TCP、UDP 和各种可靠 UDP 的根本区别：</p>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>任务</th><th>UDP</th><th>TCP</th><th>可靠 UDP（KCP / QUIC 等）</th></tr>
+    <tr><td>1</td><td>进程间复用 / 分用（端口）</td><td class="yes">✔</td><td class="yes">✔</td><td class="yes">✔（借用 UDP 端口，常再加会话 ID）</td></tr>
+    <tr><td>2</td><td>差错检测（校验和）</td><td class="mid">✔（IPv4 可选）</td><td class="yes">✔ 必选</td><td class="yes">✔（UDP 校验和，QUIC 还有 AEAD 认证）</td></tr>
+    <tr><td>3</td><td>可靠交付（不丢、不重）</td><td class="no">✘</td><td class="yes">✔</td><td class="mid">按需：可对每条消息选择</td></tr>
+    <tr><td>4</td><td>按序交付</td><td class="no">✘</td><td class="yes">✔（整条连接严格有序）</td><td class="mid">按需：可按流 / 通道有序</td></tr>
+    <tr><td>5</td><td>流量控制</td><td class="no">✘</td><td class="yes">✔</td><td class="yes">✔</td></tr>
+    <tr><td>6</td><td>拥塞控制</td><td class="no">✘</td><td class="yes">✔</td><td class="mid">可选 / 可替换算法</td></tr>
+    <tr><td>7</td><td>连接管理</td><td class="no">✘</td><td class="yes">✔（三次握手 / 四次挥手）</td><td class="mid">各自实现（QUIC 有，KCP 没有）</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>一次冷启动 HTTPS 请求 ≈ DNS(UDP) + TCP 握手 + TLS 握手 + HTTP，约 4 个 RTT；<strong>网页慢多半慢在 RTT 个数</strong>。</li>
+    <li>TCP/IP 四层：应用 → 传输（进程到进程）→ 网际（主机到主机）→ 网络接口；PDU 依次叫报文、段 / 数据报、分组、帧。</li>
+    <li>IP <strong>尽力而为</strong>：可能丢、乱、重、错、拥塞。按<strong>端到端原则</strong>，可靠性放在端点做。</li>
+    <li>端口 16 位；TCP 连接按四元组区分，UDP socket 按目的地址区分；服务器连接数不受 65535 限制。</li>
+    <li>MTU 1500 → TCP MSS 1460、UDP 安全负载 ≤ 1472（实践取 1200～1400）；尽量避免 IP 分片。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：为什么 DNS 一般用 UDP，什么情况下又会改用 TCP？</summary>
+  <p>一般用 UDP：查询和应答都很小，一问一答，没有必要先花 1 个 RTT 建连接；丢了由客户端超时重问即可，DNS 解析器也不需要为每个客户端维护连接状态，抗并发能力强。<br>改用 TCP 的情况：① 应答超过 512 字节（未使用 EDNS0 时）或超过 EDNS0 协商的大小，服务器会在 UDP 应答中设置 TC（截断）位，客户端改用 TCP 重新查询；② 主从 DNS 服务器之间的区域传送（AXFR/IXFR）数据量大，必须用 TCP；③ DNS over TLS（DoT，端口 853）基于 TCP。</p></details>
+  <details class="quiz"><summary>思考题 2：服务器只监听 443 一个端口，为什么能同时服务几十万个客户端？瓶颈在哪？</summary>
+  <p>TCP 连接由四元组标识，服务器侧的 IP 和端口相同，但客户端的 IP 和端口不同，所以每条连接都是唯一的，不受 65535 的限制。瓶颈在于：进程 / 系统级文件描述符上限（<code>ulimit -n</code>、<code>fs.file-max</code>）、每条连接的内核内存（sock 结构 + 收发缓冲区）、CPU（中断、协议栈处理、应用逻辑），以及 I/O 模型（需要 epoll / IOCP 之类的多路复用）。</p></details>
+  <details class="quiz"><summary>思考题 3：一个游戏要用 UDP 发送 10 KB 的场景快照，直接 sendto 一次行不行？</summary>
+  <p>技术上可以（UDP 最大负载约 64 KB），但会被 IP 层切成 7～8 个分片，<strong>任何一个分片丢失整个数据报就作废</strong>，丢包率被放大约 7 倍，还可能被中间设备直接丢弃。正确做法是在应用层把快照切成若干个 ≤ 1200 字节的片，每片带上"消息 ID + 片序号 + 总片数"，可靠发送并在对端重组；或者只发送和上一个已确认快照的差量（delta）。</p></details>
+</section>
+
+<div class="part-head" data-toc="第二部分 · TCP 与 UDP">
+  <div class="no">PART TWO</div>
+  <h1>第二部分　TCP 与 UDP：两种截然不同的答案</h1>
+  <p>面对一个尽力而为的 IP 层，UDP 的答案是"我什么也不加，交给你"，TCP 的答案是"我全包了"。先看薄的，再看厚的，最后放在一起比较。</p>
+</div>
+
+<!-- ======================= CH2 ======================= -->
+<section class="chapter" id="ch2">
+  <div class="ch-head">
+    <div class="no">CHAPTER 02</div>
+    <h1>UDP：薄到极致的传输层</h1>
+    <p class="lead">UDP = IP + 端口 + 校验和。它的价值恰恰在于"不做什么"。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>背出 UDP 头部 4 个字段及含义，会算最大负载，知道伪首部为什么存在</li>
+    <li>理解"无连接""保留消息边界""尽力交付"三个特性的具体含义，并能用实测输出佐证</li>
+    <li>掌握 UDP 与 TCP 的 socket 编程调用序列差异</li>
+    <li>说出 UDP 的优缺点与典型应用场景，以及使用 UDP 时必须由应用补上的东西</li>
+  </ul></div>
+
+  <h2>2.1 一句话定义</h2>
+  <p><strong>UDP（User Datagram Protocol，用户数据报协议，RFC 768）</strong>是一种<strong>无连接、不可靠、面向数据报</strong>的传输层协议。它在 IP 之上只额外提供了两样东西：<strong>端口</strong>（让数据能交给正确的进程）和<strong>校验和</strong>（检测数据是否损坏）。RFC 768 全文只有 3 页，这在 IETF 的协议里极其罕见。</p>
+  <div class="co ana"><span class="h">📮 一个类比：寄明信片</span>
+  <p>UDP 像寄明信片：写上地址（IP）和收件人（端口）就丢进邮筒，不需要事先打电话确认对方在家；每张明信片独立投递，可能丢、可能晚到、两张寄出的顺序和收到的顺序可能相反；但<strong>每张明信片都是完整的一张</strong>，不会出现半张。TCP 则像打电话：先拨号接通（握手），然后连续说话，对方听不清会让你重说，最后说再见挂断（挥手）。</p></div>
+
+  <h2>2.2 报文结构：只有 8 字节</h2>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <g class="xs">
+      <text x="110" y="24">0</text><text x="262" y="24">8</text><text x="418" y="24">16</text><text x="574" y="24">24</text><text x="736" y="24">31</text>
+    </g>
+    <line x1="110" y1="30" x2="750" y2="30" stroke="#D1D5DB"/>
+    <rect x="110" y="36" width="320" height="44" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="270" y="56" text-anchor="middle" class="b">源端口 Source Port</text><text x="270" y="72" text-anchor="middle" class="xs">16 位，可为 0（不需要回复时）</text>
+    <rect x="430" y="36" width="320" height="44" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="590" y="56" text-anchor="middle" class="b">目的端口 Destination Port</text><text x="590" y="72" text-anchor="middle" class="xs">16 位</text>
+    <rect x="110" y="80" width="320" height="44" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="270" y="100" text-anchor="middle" class="b">长度 Length</text><text x="270" y="116" text-anchor="middle" class="xs">头部 + 数据的总字节数，≥ 8</text>
+    <rect x="430" y="80" width="320" height="44" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="590" y="100" text-anchor="middle" class="b">校验和 Checksum</text><text x="590" y="116" text-anchor="middle" class="xs">覆盖伪首部 + 头部 + 数据</text>
+    <rect x="110" y="124" width="640" height="50" fill="#fff" stroke="#9CA3AF" stroke-dasharray="5 3"/>
+    <text x="430" y="154" text-anchor="middle" class="b">数据 Data（可变长，IPv4 下最多 65507 字节）</text>
+    <text x="70" y="62" text-anchor="end" class="sm">第 0~3 字节</text>
+    <text x="70" y="106" text-anchor="end" class="sm">第 4~7 字节</text>
+    <text x="430" y="204" text-anchor="middle" class="xs">对比：TCP 头部最少 20 字节、最多 60 字节，还要维护连接状态</text>
+  </svg>
+  <figcaption><b>图 2-1</b> UDP 头部：两个 32 位字，共 8 字节</figcaption>
+  </figure>
+
+  <div class="tbl"><table>
+    <tr><th>字段</th><th>位数</th><th>含义与细节</th></tr>
+    <tr><td>源端口</td><td>16</td><td>发送方端口。客户端一般由系统分配临时端口；如果不需要对方回复，可以填 0。</td></tr>
+    <tr><td>目的端口</td><td>16</td><td>接收方端口，内核据此找到目标 socket。找不到时回复 ICMP "端口不可达"。</td></tr>
+    <tr><td>长度</td><td>16</td><td>UDP 头部加数据的总长度，最小 8。最大 65535，所以 IPv4 下数据最多 65535 − 8 − 20（IP 头）= <strong>65507</strong> 字节。</td></tr>
+    <tr><td>校验和</td><td>16</td><td>把<strong>伪首部 + UDP 头部 + 数据</strong>按 16 位反码求和再取反。IPv4 下可以填 0 表示"未计算"；<strong>IPv6 下必须计算</strong>（因为 IPv6 去掉了 IP 头部校验和）。</td></tr>
+  </table></div>
+
+  <h3>伪首部：为什么校验和要把 IP 地址也算进去</h3>
+  <p>计算校验和时，会在 UDP 报文前面临时拼一个 12 字节的<strong>伪首部（pseudo header）</strong>：源 IP、目的 IP、一个全 0 字节、协议号 17、UDP 长度。伪首部<strong>不会被发送</strong>，只参与计算。</p>
+  <p>目的是<strong>检测"送错了地方"</strong>：如果 IP 头部在传输中出错，导致一个本该发给 A 的数据报被交给了 B，单看 UDP 头部和数据是发现不了的；把 IP 地址纳入校验后，B 计算出的校验和就对不上，会丢弃这个数据报。TCP 的校验和用的是同样的方法（协议号为 6）。</p>
+<div class="code"><div class="bar"><span>16 位反码求和（UDP / TCP / IP 校验和通用算法）</span><button>复制</button></div><pre data-lang="cpp">uint16_t InternetChecksum(const uint8_t* data, size_t len, uint32_t sum = 0) {
+    for (size_t i = 0; i + 1 &lt; len; i += 2)
+        sum += (uint32_t(data[i]) &lt;&lt; 8) | data[i + 1];   // 按 16 位大端累加
+    if (len &amp; 1) sum += uint32_t(data[len - 1]) &lt;&lt; 8;    // 奇数长度：末尾补 0
+    while (sum &gt;&gt; 16) sum = (sum &amp; 0xFFFF) + (sum &gt;&gt; 16); // 进位回卷（反码加法）
+    return uint16_t(~sum);                                // 取反
+}
+// 计算 UDP 校验和：先把伪首部（源IP、目的IP、0、17、UDP长度）累加进 sum，再累加 UDP 头部和数据
+// 接收方对&quot;伪首部 + 整个 UDP 报文（含校验和字段）&quot;再算一遍，结果为 0 说明无错</pre></div>
+  <div class="co warn"><span class="h">⚠️ 易错点：校验和能保证数据正确吗？</span><p>不能完全保证。16 位反码和很弱：两个 16 位字互换位置、或两处错误恰好抵消，它都发现不了。链路层的 CRC32 能挡住绝大部分随机错误，但对恶意篡改毫无办法。<strong>需要防篡改就必须用密码学手段</strong>（TLS、DTLS、QUIC 的 AEAD 加密认证）。</p></div>
+
+  <h2>2.3 无连接：想发就发，发完不管</h2>
+  <p>"无连接"的意思是：通信前不需要握手，内核里<strong>不为"对方"保存任何状态</strong>。一个 UDP socket 可以给任意多个地址发数据，也可以收任意多个地址发来的数据。这带来三个直接后果：</p>
+  <ol>
+    <li><strong>发送没有前置延迟</strong>：第一个包就能携带业务数据，省掉握手的 1 个 RTT。</li>
+    <li><strong>服务器没有连接状态</strong>：一个 socket 就能服务海量客户端，内存占用极低，也不存在 TIME_WAIT 之类的连接管理问题。</li>
+    <li><strong>发送方不知道对方是否存在</strong>：<code>sendto</code> 返回成功，只说明数据已经交给了本机内核，<strong>不代表对方收到了，甚至不代表对方存在</strong>。</li>
+  </ol>
+
+  <div class="co net"><span class="h">🧪 实测证据（d1 · E2）：发给一个没人监听的端口</span>
+  <div class="term"><div class="bar">d1_tcp_udp_behaviors.exe · E2</div><pre>== E2 UDP 无连接：发给没人监听的端口 ==
+  sendto 返回 <span class="hl">4</span>（发送"成功"——UDP 不知道对方在不在）
+  随后 recvfrom 返回 -1，WSAGetLastError=<span class="hl">10054</span>（10054=WSAECONNRESET：内核收到 ICMP 端口不可达）
+  关闭 SIO_UDP_CONNRESET 后：recvfrom 返回 -1，WSAGetLastError=10060（10060=超时，错误被静默丢弃）</pre></div>
+  <p>sendto 照样返回发出的 4 字节。对方主机的内核发现 40012 端口没人监听，回了一个 <strong>ICMP 端口不可达</strong>。Windows 会把这个 ICMP 错误"记"在 socket 上，让下一次 <code>recvfrom</code> 报 <code>WSAECONNRESET</code>——对一个"无连接"协议来说这个错误名相当有迷惑性。</p></div>
+
+  <div class="co ver"><span class="h">🎮 游戏开发视角：Windows 上 UDP 服务器的经典坑</span><p>游戏服务器用一个 UDP socket 服务所有玩家。某个玩家断线后，服务器继续往他的地址发包，对端回 ICMP 端口不可达，于是服务器的<strong>下一次 recvfrom 报 WSAECONNRESET</strong>。如果代码把这个错误当成"socket 坏了"去关闭重建，所有玩家都会掉线。解决办法就是实测中的 <code>WSAIoctl(SIO_UDP_CONNRESET, FALSE)</code>，或者把这个错误码当作可忽略的提示。Linux 上，只有对 UDP socket 调用过 <code>connect()</code> 时才会把 ICMP 错误报给应用（<code>ECONNREFUSED</code>），未 connect 的 socket 默认不报。</p></div>
+
+  <h3>UDP 上的 connect() 是什么意思</h3>
+  <p>UDP socket 也可以调用 <code>connect()</code>，但<strong>不会发送任何报文</strong>，只是在内核里记下一个默认对端：之后可以用 <code>send/recv</code> 代替 <code>sendto/recvfrom</code>，内核只接收来自这个对端的数据报，并且能把 ICMP 错误报告给应用。它是"本地过滤器"，不是"连接"。QUIC 客户端和很多游戏客户端都会对 UDP socket 调用 <code>connect()</code>，顺便还能让内核少做一次路由查找。</p>
+
+  <h2>2.4 面向数据报：保留消息边界</h2>
+  <p>UDP 的每一次 <code>sendto</code> 都对应一个独立的数据报，接收方每次 <code>recvfrom</code> 恰好取出一个完整的数据报，<strong>既不会把两个合并，也不会只给你半个</strong>。这叫"保留消息边界"。TCP 则是<strong>字节流</strong>，没有消息边界的概念。</p>
+
+  <div class="co net"><span class="h">🧪 实测证据（d1 · E1）：三次发送，两种结果</span>
+  <div class="term"><div class="bar">d1_tcp_udp_behaviors.exe · E1</div><pre>== E1 消息边界：UDP 保留边界，TCP 是字节流 ==
+  UDP recvfrom #1 ->  <span class="ok">5 字节: "hello"</span>
+  UDP recvfrom #2 -> <span class="ok">12 字节: "tcp-udp-book"</span>
+  UDP recvfrom #3 -> <span class="ok">27 字节: "reliable-transport-over-udp"</span>
+  TCP 发送方 send() 3 次（5+12+27=44 字节），接收方 recv() 1 次 -> <span class="bad">44 字节: "hellotcp-udp-bookreliable-transport-over-udp"</span></pre></div>
+  <p>同样是发送三条消息、接收方稍晚一点再读：UDP 原样收到三条；TCP 一次 <code>recv</code> 就把 44 个字节全拿走了，三条消息"粘"在一起，接收方无从知道原来的边界在哪——这就是第 3 章要讲的<strong>粘包</strong>。</p></div>
+
+  <div class="co warn"><span class="h">⚠️ 易错点：接收缓冲区比数据报小会怎样？</span><p>数据报<strong>多出来的部分会被直接丢弃</strong>，不会留到下一次 recvfrom。Linux 会在 <code>msg_flags</code> 里置 <code>MSG_TRUNC</code>，Windows 的 recvfrom 返回错误 <code>WSAEMSGSIZE</code>（缓冲区里仍是截断后的数据）。所以 UDP 接收缓冲区要按协议的最大包长来开（例如 1500 或 64 KB）。</p></div>
+
+  <h2>2.5 尽力交付：UDP 不做的事</h2>
+  <div class="tbl"><table>
+    <tr><th>不做的事</th><th>具体表现</th><th>如果你需要，应该怎么补</th></tr>
+    <tr><td>不确认、不重传</td><td>丢了就是丢了，发送方完全不知道</td><td>应用层序号 + ACK + 重传（第 8 章）</td></tr>
+    <tr><td>不排序</td><td>按到达顺序交给应用</td><td>应用层序号 + 接收缓冲重排，或只取"最新"的</td></tr>
+    <tr><td>不去重</td><td>网络重复的包会被交付两次</td><td>序号 + 已收集合（滑动位图）</td></tr>
+    <tr><td>不做流量控制</td><td>接收方 socket 缓冲区满了，新来的数据报被内核<strong>静默丢弃</strong></td><td>增大 <code>SO_RCVBUF</code>；应用层窗口通告</td></tr>
+    <tr><td>不做拥塞控制</td><td>应用以多快的速度 sendto，内核就以多快的速度往外发</td><td>应用层限速（令牌桶）、拥塞控制算法</td></tr>
+    <tr><td>不分片</td><td>超过 MTU 的数据报交给 IP 分片</td><td>应用层控制包长 ≤ 1200～1400，大消息自己切</td></tr>
+  </table></div>
+  <p>看到这里可能会疑惑：UDP 什么都不做，凭什么被大量使用？答案是：<strong>"不做"本身就是一种能力</strong>——它把这些决定权留给了最了解业务需求的应用。语音通话里一个 20 ms 的语音帧丢了，最好的处理是让解码器插值补上，而不是等 200 ms 重传过来时这句话早已说完。这个思路是第四部分的出发点。</p>
+
+  <h2>2.6 编程模型：UDP 与 TCP 的调用序列</h2>
+  <figure>
+  <svg viewBox="0 0 860 360" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="22" text-anchor="middle" class="b" style="fill:#15803D">TCP</text>
+    <text x="645" y="22" text-anchor="middle" class="b" style="fill:#6D28D9">UDP</text>
+    <line x1="430" y1="10" x2="430" y2="350" stroke="#E5E7EB"/>
+    <g class="sm">
+      <!-- TCP server -->
+      <text x="110" y="46" text-anchor="middle" class="b">服务端</text>
+      <rect x="55" y="56" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="110" y="73" text-anchor="middle">socket()</text>
+      <rect x="55" y="88" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="110" y="105" text-anchor="middle">bind(:443)</text>
+      <rect x="55" y="120" width="110" height="24" rx="5" fill="#EAF7EF" stroke="#15803D"/><text x="110" y="137" text-anchor="middle">listen(backlog)</text>
+      <rect x="55" y="152" width="110" height="24" rx="5" fill="#EAF7EF" stroke="#15803D"/><text x="110" y="169" text-anchor="middle">accept() 阻塞</text>
+      <rect x="55" y="208" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="110" y="225" text-anchor="middle">recv() / send()</text>
+      <rect x="55" y="290" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="110" y="307" text-anchor="middle">close()</text>
+      <!-- TCP client -->
+      <text x="320" y="46" text-anchor="middle" class="b">客户端</text>
+      <rect x="265" y="56" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="320" y="73" text-anchor="middle">socket()</text>
+      <rect x="265" y="152" width="110" height="24" rx="5" fill="#EAF7EF" stroke="#15803D"/><text x="320" y="169" text-anchor="middle">connect()</text>
+      <rect x="265" y="208" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="320" y="225" text-anchor="middle">send() / recv()</text>
+      <rect x="265" y="290" width="110" height="24" rx="5" fill="#fff" stroke="#15803D"/><text x="320" y="307" text-anchor="middle">close()</text>
+    </g>
+    <line x1="265" y1="164" x2="167" y2="164" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="215" y="192" text-anchor="middle" class="xs" style="fill:#C2410C">三次握手（内核完成）</text><text x="215" y="206" text-anchor="middle" class="xs" style="fill:#C2410C">accept 返回新的连接 socket</text>
+    <line x1="265" y1="220" x2="167" y2="220" stroke="#2F5BD3" stroke-width="1.4" marker-start="url(#ab)" marker-end="url(#ab)"/>
+    <text x="215" y="252" text-anchor="middle" class="xs" style="fill:#2F5BD3">字节流（无边界）</text>
+    <line x1="265" y1="302" x2="167" y2="302" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="215" y="334" text-anchor="middle" class="xs" style="fill:#C2410C">四次挥手</text>
+    <line x1="110" y1="80" x2="110" y2="88" stroke="#4B5563"/><line x1="110" y1="112" x2="110" y2="120" stroke="#4B5563"/><line x1="110" y1="144" x2="110" y2="152" stroke="#4B5563"/><line x1="110" y1="176" x2="110" y2="208" stroke="#4B5563"/><line x1="110" y1="232" x2="110" y2="290" stroke="#4B5563"/>
+    <line x1="320" y1="80" x2="320" y2="152" stroke="#4B5563"/><line x1="320" y1="176" x2="320" y2="208" stroke="#4B5563"/><line x1="320" y1="232" x2="320" y2="290" stroke="#4B5563"/>
+    
+    <g class="sm">
+      <!-- UDP server -->
+      <text x="540" y="46" text-anchor="middle" class="b">服务端</text>
+      <rect x="485" y="56" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="540" y="73" text-anchor="middle">socket(DGRAM)</text>
+      <rect x="485" y="88" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="540" y="105" text-anchor="middle">bind(:7777)</text>
+      <rect x="470" y="196" width="140" height="40" rx="5" fill="#F3EEFE" stroke="#6D28D9"/><text x="540" y="213" text-anchor="middle">recvfrom(&amp;from)</text><text x="540" y="229" text-anchor="middle">sendto(from)</text>
+      <rect x="485" y="290" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="540" y="307" text-anchor="middle">close()</text>
+      <!-- UDP client -->
+      <text x="750" y="46" text-anchor="middle" class="b">客户端</text>
+      <rect x="695" y="56" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="750" y="73" text-anchor="middle">socket(DGRAM)</text>
+      <rect x="680" y="196" width="140" height="40" rx="5" fill="#F3EEFE" stroke="#6D28D9"/><text x="750" y="213" text-anchor="middle">sendto(server)</text><text x="750" y="229" text-anchor="middle">recvfrom()</text>
+      <rect x="695" y="290" width="110" height="24" rx="5" fill="#fff" stroke="#6D28D9"/><text x="750" y="307" text-anchor="middle">close()</text>
+    </g>
+    <line x1="540" y1="80" x2="540" y2="88" stroke="#4B5563"/><line x1="540" y1="112" x2="540" y2="196" stroke="#4B5563"/><line x1="540" y1="236" x2="540" y2="290" stroke="#4B5563"/>
+    <line x1="750" y1="80" x2="750" y2="196" stroke="#4B5563"/><line x1="750" y1="236" x2="750" y2="290" stroke="#4B5563"/>
+    <line x1="680" y1="216" x2="612" y2="216" stroke="#6D28D9" stroke-width="1.4" marker-start="url(#ap)" marker-end="url(#ap)"/>
+    <text x="645" y="256" text-anchor="middle" class="xs" style="fill:#6D28D9">一个个独立数据报</text>
+    <text x="645" y="334" text-anchor="middle" class="xs">没有 listen / accept / connect，close 也不发任何报文</text>
+  </svg>
+  <figcaption><b>图 2-2</b> 调用序列对比：TCP 有"监听 → 接受 → 连接 socket"的三段式，UDP 只有一个 socket 收发所有人</figcaption>
+  </figure>
+
+<div class="code"><div class="bar"><span>最小 UDP 回显服务器（Winsock，省略错误处理）</span><button>复制</button></div><pre data-lang="cpp">SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons(7777); addr.sin_addr.s_addr = INADDR_ANY;
+bind(s, (sockaddr*)&amp;addr, sizeof addr);
+char buf[1500];
+for (;;) {
+    sockaddr_in from{}; int fromLen = sizeof from;
+    int n = recvfrom(s, buf, sizeof buf, 0, (sockaddr*)&amp;from, &amp;fromLen);  // 一次取一个完整数据报
+    if (n &gt; 0) sendto(s, buf, n, 0, (sockaddr*)&amp;from, fromLen);          // 原样发回给来源地址
+}</pre></div>
+
+  <h2>2.7 UDP 独有的能力：广播与多播</h2>
+  <p>TCP 是严格的一对一连接，而 UDP 因为无连接，可以把一个数据报发往<strong>广播地址</strong>（如 <code>255.255.255.255</code> 或子网广播 <code>192.168.1.255</code>）或<strong>多播组</strong>（<code>224.0.0.0/4</code>），一次发送、多个接收者同时收到。</p>
+  <ul>
+    <li><strong>DHCP</strong>：新设备还没有 IP 地址，只能用广播（客户端 68 → 服务器 67）寻找 DHCP 服务器。</li>
+    <li><strong>局域网游戏发现</strong>：客户端广播"有房间吗"，局域网内的主机回复房间信息。</li>
+    <li><strong>mDNS / SSDP</strong>：打印机、投屏设备的自动发现。</li>
+    <li><strong>IPTV / 行情分发</strong>：机房内用多播把同一份数据推给大量订阅者。</li>
+  </ul>
+
+  <h2>2.8 优缺点与典型应用</h2>
+  <div class="cards">
+    <div class="card"><div class="t" style="color:#15803D">优点</div><p>① <strong>低延迟</strong>：无握手，第一个包就能带数据；无重传等待，不会被前面丢失的包卡住。<br>② <strong>开销小</strong>：头部 8 字节，内核无连接状态。<br>③ <strong>保留消息边界</strong>：天然适合"一个包一条消息"的协议。<br>④ <strong>灵活</strong>：支持广播 / 多播；可靠性、拥塞控制都能按需在应用层定制。</p></div>
+    <div class="card"><div class="t" style="color:#B91C1C">缺点</div><p>① <strong>不可靠</strong>：丢、乱、重全要应用自己处理。<br>② <strong>无拥塞控制</strong>：滥发会挤占网络，也会被运营商 QoS 限速。<br>③ <strong>NAT 不友好</strong>：NAT 映射超时短（常见 30 s～数分钟），必须定期发心跳保活。<br>④ <strong>易被滥用</strong>：源地址可伪造，可被用于反射放大攻击（DNS、NTP、Memcached）。</p></div>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>场景</th><th>为什么用 UDP</th><th>可靠性怎么补</th></tr>
+    <tr><td>DNS 查询</td><td>小报文一问一答，省掉握手 RTT</td><td>超时重问；大应答回退 TCP</td></tr>
+    <tr><td>DHCP</td><td>没有 IP 时只能广播</td><td>超时重发</td></tr>
+    <tr><td>语音 / 视频通话（RTP、WebRTC）</td><td>实时性第一，迟到的数据没用</td><td>FEC、NACK 选择性重传、丢帧插值、抖动缓冲</td></tr>
+    <tr><td>低延迟直播</td><td>减少重传卡顿</td><td>FEC + 有限重传（SRT 等协议）</td></tr>
+    <tr><td>在线游戏</td><td>位置、输入只关心最新值；每毫秒都很宝贵</td><td>按消息分级：状态不可靠、指令可靠（第 8、11 章）</td></tr>
+    <tr><td>HTTP/3</td><td>绕开内核 TCP，实现多路复用与 0-RTT</td><td>QUIC 在用户态完整实现可靠传输（第 10 章）</td></tr>
+    <tr><td>VPN / 隧道（WireGuard、VXLAN）</td><td>避免"TCP 套 TCP"的双重重传</td><td>交给隧道内部的 TCP 处理</td></tr>
+  </table></div>
+
+  <div class="co tip"><span class="h">✅ 面试答法：说说你对 UDP 的理解</span>
+  <p>UDP 是无连接、不可靠、面向数据报的传输层协议，头部只有 8 字节：源端口、目的端口、长度、校验和。它在 IP 之上只加了端口复用和差错检测，不建立连接、不确认、不重传、不排序、不做流量和拥塞控制，但保留消息边界、支持广播多播。优点是延迟低、开销小、灵活，缺点是可靠性和拥塞控制都要应用自己负责。典型场景是 DNS、DHCP、音视频实时通信、在线游戏，以及 HTTP/3 底层的 QUIC。<em>（加分项）</em>如果在 UDP 上需要可靠性，可以在应用层实现序号、确认、重传和窗口，比如 KCP 或 QUIC。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>UDP 头部 8 字节：<strong>源端口、目的端口、长度、校验和</strong>；IPv4 最大负载 65507 字节。</li>
+    <li>校验和覆盖<strong>伪首部</strong>（IP 地址、协议号、长度），用来发现"送错地方"；IPv4 可选、IPv6 必选；弱校验，防不了篡改。</li>
+    <li><strong>无连接</strong>：sendto 成功 ≠ 对方收到；Windows 上 ICMP 端口不可达会让下一次 recvfrom 报 WSAECONNRESET（实测）。</li>
+    <li><strong>保留消息边界</strong>：一次 sendto 对应一次 recvfrom（实测）；缓冲区不够时多余部分被丢弃。</li>
+    <li>不重传、不排序、不去重、不限速，这些"缺点"正是它灵活、低延迟的来源。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：UDP 包长度字段已经有了，为什么还需要 IP 头部的总长度字段？反过来呢？</summary>
+  <p>严格来说 UDP 长度字段是冗余的：UDP 长度 = IP 总长度 − IP 头部长度。保留它的原因是让 UDP 的校验和计算、报文解析可以不依赖下层（分层独立），而且伪首部中也用到这个长度。IP 头部的总长度则是网络层自己需要的（转发、分片），不能依赖上层协议。</p></details>
+  <details class="quiz"><summary>思考题 2：UDP 服务器的接收缓冲区满了会怎样？TCP 呢？</summary>
+  <p>UDP：内核直接丢弃新到的数据报，发送方毫不知情（可以通过 <code>netstat -su</code> 的 "receive buffer errors" 观察）。TCP：接收方通过窗口字段告诉发送方"我还能收多少"，缓冲区满时通告窗口为 0，发送方暂停发送并周期性发零窗口探测，数据不会丢——这就是流量控制。</p></details>
+  <details class="quiz"><summary>思考题 3：既然 UDP 不可靠，为什么说"UDP 更适合游戏"？这句话完全对吗？</summary>
+  <p>不完全对，应该说"UDP 让游戏<strong>有机会</strong>做得更好"。游戏里大量数据（位置、朝向）是"状态"，只关心最新值，丢了等下一帧即可，用 TCP 反而会因为重传和队头阻塞让后面的新状态被卡住。但游戏里也有必须可靠的数据（技能释放、购买道具、聊天），所以实际是"UDP + 应用层按需可靠"。另外，很多回合制、卡牌、MMO 的非战斗部分直接用 TCP 也完全够用，实时性要求高的 FPS、MOBA、格斗才更依赖 UDP。</p></details>
+</section>
+
+<!-- ======================= CH3 ======================= -->
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>TCP：可靠字节流的全套机制</h1>
+    <p class="lead">序号、确认、重传、窗口、拥塞控制——把一个会丢会乱的网络，包装成一根"不丢不乱的管道"。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出 TCP 头部，说出每个字段和 6 个常用标志位的作用，知道常用选项（MSS、窗口扩大、SACK、时间戳）</li>
+    <li>理解"字节流"与序号 / 确认号的计算，能解释粘包、拆包并给出解决方案</li>
+    <li>讲清超时重传（RTO 计算、Karn 算法、指数退避）、快速重传与 SACK</li>
+    <li>讲清滑动窗口、流量控制、零窗口、Nagle 与延迟确认</li>
+    <li>讲清慢启动、拥塞避免、快速恢复，以及 CUBIC、BBR 的思想；区分流量控制与拥塞控制</li>
+  </ul></div>
+
+  <h2>3.1 一句话定义</h2>
+  <p><strong>TCP（Transmission Control Protocol，传输控制协议，现行标准 RFC 9293）</strong>是一种<strong>面向连接的、可靠的、基于字节流的、全双工</strong>传输层协议。拆开看：</p>
+  <div class="cards">
+    <div class="card"><div class="t">面向连接</div><p>通信前先三次握手，双方各自建立连接状态（序号、窗口、缓冲区）；结束后四次挥手释放。只能一对一，不支持广播多播。</p></div>
+    <div class="card"><div class="t">可靠</div><p>数据<strong>不丢、不重、不错、按序</strong>交付给应用。靠校验和 + 序号 + 确认 + 重传实现。</p></div>
+    <div class="card"><div class="t">字节流</div><p>TCP 眼里只有一串连续的字节，没有"消息"的概念。应用写入的边界不会被保留。</p></div>
+    <div class="card"><div class="t">全双工</div><p>双方可以同时收发，两个方向各有独立的序号空间和窗口，因此关闭时也要两个方向分别关闭。</p></div>
+  </div>
+
+  <h2>3.2 头部结构：20 字节固定 + 最多 40 字节选项</h2>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <g class="xs"><text x="110" y="20">0</text><text x="186" y="20">4</text><text x="262" y="20">8</text><text x="418" y="20">16</text><text x="736" y="20">31</text></g>
+    <line x1="110" y1="26" x2="750" y2="26" stroke="#D1D5DB"/>
+    <rect x="110" y="30" width="320" height="38" fill="#EAF7EF" stroke="#15803D"/><text x="270" y="54" text-anchor="middle" class="b">源端口（16）</text>
+    <rect x="430" y="30" width="320" height="38" fill="#EAF7EF" stroke="#15803D"/><text x="590" y="54" text-anchor="middle" class="b">目的端口（16）</text>
+    <rect x="110" y="68" width="640" height="38" fill="#EAF0FD" stroke="#2F5BD3"/><text x="430" y="92" text-anchor="middle" class="b">序列号 Sequence Number（32）：本段第一个字节的编号</text>
+    <rect x="110" y="106" width="640" height="38" fill="#EAF0FD" stroke="#2F5BD3"/><text x="430" y="130" text-anchor="middle" class="b">确认号 Acknowledgment Number（32）：期望收到的下一个字节编号</text>
+    <rect x="110" y="144" width="80" height="44" fill="#FEF6E4" stroke="#B45309"/><text x="150" y="163" text-anchor="middle" class="sm b">数据偏移</text><text x="150" y="179" text-anchor="middle" class="xs">4 位 ×4 字节</text>
+    <rect x="190" y="144" width="80" height="44" fill="#F3F4F6" stroke="#9CA3AF"/><text x="230" y="171" text-anchor="middle" class="sm">保留 4</text>
+    <rect x="270" y="144" width="160" height="44" fill="#FFF4EC" stroke="#C2410C"/>
+    <g class="mono" style="font-size:10.5px"><text x="280" y="162">C E U A P R S F</text></g>
+    <text x="350" y="180" text-anchor="middle" class="xs">8 个标志位</text>
+    <rect x="430" y="144" width="320" height="44" fill="#F3EEFE" stroke="#6D28D9"/><text x="590" y="163" text-anchor="middle" class="b">窗口大小（16）</text><text x="590" y="179" text-anchor="middle" class="xs">接收方还能收多少字节（可被窗口扩大选项放大）</text>
+    <rect x="110" y="188" width="320" height="38" fill="#F3F4F6" stroke="#6B7280"/><text x="270" y="212" text-anchor="middle" class="b">校验和（16）</text>
+    <rect x="430" y="188" width="320" height="38" fill="#F3F4F6" stroke="#6B7280"/><text x="590" y="212" text-anchor="middle" class="b">紧急指针（16）</text>
+    <rect x="110" y="226" width="640" height="44" fill="#fff" stroke="#9CA3AF" stroke-dasharray="5 3"/><text x="430" y="246" text-anchor="middle" class="b">选项 Options（0~40 字节，按 4 字节对齐）</text><text x="430" y="262" text-anchor="middle" class="xs">MSS · 窗口扩大 WS · SACK 许可 / SACK 块 · 时间戳 TS · NOP 填充</text>
+    <rect x="110" y="270" width="640" height="40" fill="#fff" stroke="#9CA3AF"/><text x="430" y="295" text-anchor="middle" class="b">数据 Data</text>
+    <text x="96" y="130" text-anchor="end" class="xs">固定 20 字节</text>
+    <line x1="100" y1="32" x2="100" y2="224" stroke="#9CA3AF"/>
+    <g class="xs">
+      <text x="110" y="336">C=CWR 拥塞窗口已减小　E=ECE ECN 回显（显式拥塞通知用）</text>
+      <text x="110" y="354">U=URG 紧急指针有效　A=ACK 确认号有效（除第一个 SYN 外几乎所有段都置位）　P=PSH 尽快交付应用</text>
+      <text x="110" y="372">R=RST 重置连接　S=SYN 同步序号（建立连接）　F=FIN 发送方数据已发完（关闭连接）</text>
+      <text x="110" y="390">头部长度 = 数据偏移 × 4，范围 20~60 字节；SYN 和 FIN 本身各占用 1 个序号</text>
+    </g>
+  </svg>
+  <figcaption><b>图 3-1</b> TCP 头部（RFC 9293 布局）：前 20 字节固定，后面最多 40 字节选项</figcaption>
+  </figure>
+
+  <div class="tbl"><table>
+    <tr><th>字段</th><th>位数</th><th>作用</th></tr>
+    <tr><td>源端口 / 目的端口</td><td>16 + 16</td><td>和 IP 地址一起组成四元组，标识一条连接。</td></tr>
+    <tr><td>序列号 seq</td><td>32</td><td>本段数据第一个字节在整个字节流中的编号。初始值 ISN 在握手时随机生成（第 5 章）。</td></tr>
+    <tr><td>确认号 ack</td><td>32</td><td>"我已经按序收到了 ack 之前的所有字节，下一个期望 ack"。只有 ACK 标志置位时有效。是<strong>累计确认</strong>。</td></tr>
+    <tr><td>数据偏移</td><td>4</td><td>头部长度，以 4 字节为单位，所以头部最大 15 × 4 = 60 字节。</td></tr>
+    <tr><td>标志位</td><td>8</td><td>见图下说明。面试最常问 SYN、ACK、FIN、RST、PSH、URG 六个。</td></tr>
+    <tr><td>窗口</td><td>16</td><td>接收窗口 rwnd，<strong>流量控制</strong>的核心。16 位最大 65535，需要窗口扩大选项才能表示更大的窗口。</td></tr>
+    <tr><td>校验和</td><td>16</td><td>和 UDP 一样覆盖伪首部 + 头部 + 数据，但 TCP 中<strong>必须</strong>计算。</td></tr>
+    <tr><td>紧急指针</td><td>16</td><td>URG 置位时有效，指出紧急数据的末尾。实际几乎不用（Telnet 的 Ctrl+C 是经典用例）。</td></tr>
+  </table></div>
+
+  <h3>常用选项</h3>
+  <div class="tbl"><table>
+    <tr><th>选项</th><th>出现时机</th><th>解决什么问题</th></tr>
+    <tr><td><strong>MSS</strong>（kind 2）</td><td>仅 SYN / SYN+ACK</td><td>告诉对方"我能接收的最大段长"，避免 IP 分片。以太网下一般是 1460。</td></tr>
+    <tr><td><strong>窗口扩大 WS</strong>（kind 3）</td><td>仅 SYN / SYN+ACK，双方都带才生效</td><td>窗口值左移 shift 位（最多 14），窗口上限扩到约 1 GB。高带宽、高时延的链路必需。</td></tr>
+    <tr><td><strong>SACK 许可 / SACK</strong>（kind 4 / 5）</td><td>许可在 SYN 中协商；SACK 块在 ACK 中</td><td>告诉发送方"除了累计确认之外，我还收到了哪些不连续的块"，实现选择性重传。</td></tr>
+    <tr><td><strong>时间戳 TS</strong>（kind 8）</td><td>SYN 协商后每个段都带</td><td>① 精确测量 RTT（包括重传段）；② <strong>PAWS</strong> 防止序号回绕时旧段被误收；③ 支撑 <code>tcp_tw_reuse</code>（第 6 章）。</td></tr>
+  </table></div>
+
+  <div class="co ana"><span class="h">📦 场景案例：为什么 16 位窗口不够用</span>
+  <p>发送方在收到确认之前最多能发"一个窗口"的数据，所以吞吐上限 ≈ 窗口 / RTT。窗口最大 64 KB、RTT 100 ms（北京到美西）时，吞吐上限只有 64 KB / 0.1 s ≈ <strong>5 Mbps</strong>——哪怕你的带宽是 1 Gbps。要跑满带宽，窗口至少要达到<strong>带宽时延积（BDP）</strong>：1 Gbps × 100 ms = 12.5 MB，所以必须用窗口扩大选项。下载海外大文件时速度上不去，常见原因之一就是某一端的接收窗口太小。</p></div>
+
+  <h2>3.3 字节流、序号与"粘包"</h2>
+  <h3>序号按字节编号</h3>
+  <p>TCP 给字节流中的<strong>每一个字节</strong>都编号，而不是给每个段编号。段的序号是它第一个字节的编号，确认号是"期望的下一个字节"。例如 ISN = 1000，SYN 占用 1 个序号，于是第一个数据字节的编号是 1001：</p>
+  <div class="tbl"><table>
+    <tr><th>报文</th><th>seq</th><th>数据长度</th><th>接收方回复的 ack</th></tr>
+    <tr><td>段 1</td><td>1001</td><td>100</td><td>1101</td></tr>
+    <tr><td>段 2</td><td>1101</td><td>200</td><td>1301</td></tr>
+    <tr><td>段 3（丢失）</td><td>1301</td><td>100</td><td>—</td></tr>
+    <tr><td>段 4</td><td>1401</td><td>100</td><td><strong>仍然是 1301</strong>（累计确认：1301 还没到，后面到了也不能确认）</td></tr>
+  </table></div>
+  <p>最后一行引出两个问题：发送方怎么知道段 3 丢了（3.4 节的重传），以及段 4 已经到了却不能确认是不是太浪费（3.4 节的 SACK）。</p>
+
+  <h3>粘包与拆包</h3>
+  <p>因为 TCP 没有消息边界，应用写入的"消息"和接收方读出来的"块"之间没有任何对应关系：</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="34" class="b sm">发送方 send() 三次</text>
+    <rect x="180" y="18" width="90" height="26" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="225" y="36" text-anchor="middle" class="mono">消息A 3B</text>
+    <rect x="290" y="18" width="70" height="26" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="325" y="36" text-anchor="middle" class="mono">B 2B</text>
+    <rect x="380" y="18" width="130" height="26" rx="4" fill="#FFF4EC" stroke="#C2410C"/><text x="445" y="36" text-anchor="middle" class="mono">消息C 4B</text>
+
+    <text x="20" y="96" class="b sm">TCP 字节流</text>
+    <g class="mono">
+      <rect x="180" y="78" width="30" height="26" fill="#EAF0FD" stroke="#2F5BD3"/><text x="195" y="96" text-anchor="middle">A</text>
+      <rect x="210" y="78" width="30" height="26" fill="#EAF0FD" stroke="#2F5BD3"/><text x="225" y="96" text-anchor="middle">A</text>
+      <rect x="240" y="78" width="30" height="26" fill="#EAF0FD" stroke="#2F5BD3"/><text x="255" y="96" text-anchor="middle">A</text>
+      <rect x="270" y="78" width="30" height="26" fill="#EAF7EF" stroke="#15803D"/><text x="285" y="96" text-anchor="middle">B</text>
+      <rect x="300" y="78" width="30" height="26" fill="#EAF7EF" stroke="#15803D"/><text x="315" y="96" text-anchor="middle">B</text>
+      <rect x="330" y="78" width="30" height="26" fill="#FFF4EC" stroke="#C2410C"/><text x="345" y="96" text-anchor="middle">C</text>
+      <rect x="360" y="78" width="30" height="26" fill="#FFF4EC" stroke="#C2410C"/><text x="375" y="96" text-anchor="middle">C</text>
+      <rect x="390" y="78" width="30" height="26" fill="#FFF4EC" stroke="#C2410C"/><text x="405" y="96" text-anchor="middle">C</text>
+      <rect x="420" y="78" width="30" height="26" fill="#FFF4EC" stroke="#C2410C"/><text x="435" y="96" text-anchor="middle">C</text>
+    </g>
+    <text x="470" y="96" class="xs">连续字节，没有任何"分隔"信息</text>
+
+    <text x="20" y="156" class="b sm">接收方 recv() 可能读到</text>
+    <rect x="180" y="138" width="150" height="26" rx="4" fill="#F3F4F6" stroke="#6B7280"/><text x="255" y="156" text-anchor="middle" class="mono">AAABB</text>
+    <rect x="340" y="138" width="110" height="26" rx="4" fill="#F3F4F6" stroke="#6B7280"/><text x="395" y="156" text-anchor="middle" class="mono">CCCC</text>
+    <text x="470" y="150" class="xs">粘包：A 和 B 被一次读出</text>
+    <rect x="180" y="174" width="60" height="26" rx="4" fill="#F3F4F6" stroke="#6B7280"/><text x="210" y="192" text-anchor="middle" class="mono">AA</text>
+    <rect x="250" y="174" width="200" height="26" rx="4" fill="#F3F4F6" stroke="#6B7280"/><text x="350" y="192" text-anchor="middle" class="mono">ABBCCCC</text>
+    <text x="470" y="186" class="xs">拆包 + 粘包：A 被拆成两半</text>
+
+    <text x="20" y="252" class="b sm" style="fill:#15803D">解决：长度前缀</text>
+    <g class="mono">
+      <rect x="180" y="234" width="40" height="26" fill="#FEF6E4" stroke="#B45309"/><text x="200" y="252" text-anchor="middle">3</text>
+      <rect x="220" y="234" width="90" height="26" fill="#EAF0FD" stroke="#2F5BD3"/><text x="265" y="252" text-anchor="middle">AAA</text>
+      <rect x="310" y="234" width="40" height="26" fill="#FEF6E4" stroke="#B45309"/><text x="330" y="252" text-anchor="middle">2</text>
+      <rect x="350" y="234" width="60" height="26" fill="#EAF7EF" stroke="#15803D"/><text x="380" y="252" text-anchor="middle">BB</text>
+      <rect x="410" y="234" width="40" height="26" fill="#FEF6E4" stroke="#B45309"/><text x="430" y="252" text-anchor="middle">4</text>
+      <rect x="450" y="234" width="120" height="26" fill="#FFF4EC" stroke="#C2410C"/><text x="510" y="252" text-anchor="middle">CCCC</text>
+    </g>
+    <text x="590" y="252" class="xs">先读固定长度的头，再按长度读消息体</text>
+    <text x="430" y="290" text-anchor="middle" class="xs">"粘包"不是 TCP 的 bug，而是应用把字节流当成了消息流——TCP 从来没承诺过边界</text>
+  </svg>
+  <figcaption><b>图 3-2</b> 字节流没有边界：接收方读出的块和发送方写入的消息没有对应关系，必须由应用层自己定义"帧"</figcaption>
+  </figure>
+  <p>第 2 章的 d1 · E1 实测就是这种情况：三次 send 的 44 字节被一次 recv 全部读出。粘包可能发生在发送端（Nagle 算法把小块合并成一个段）、也可能发生在接收端（多个段到达后还没被读走，在接收缓冲区里连成一片）。常见的应用层分帧方案有三种：</p>
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>做法</th><th>优点</th><th>缺点</th><th>例子</th></tr>
+    <tr><td>定长消息</td><td>每条消息固定 N 字节</td><td>最简单</td><td>浪费空间，不灵活</td><td>一些硬件 / 金融行情协议</td></tr>
+    <tr><td>分隔符</td><td>消息以特殊字符结尾</td><td>可读性好</td><td>消息体中出现分隔符要转义；需要逐字节扫描</td><td>HTTP/1.x 头部的 <code>\r\n\r\n</code>、Redis RESP</td></tr>
+    <tr><td><strong>长度前缀（TLV）</strong></td><td>头部写明长度，再跟消息体</td><td>高效、二进制安全，<strong>最常用</strong></td><td>要防止恶意超大长度（需设上限）</td><td>HTTP/2 帧、游戏协议、Protobuf 分帧、Kafka</td></tr>
+  </table></div>
+<div class="code"><div class="bar"><span>长度前缀分帧：处理&quot;粘包 + 半包&quot;的标准写法</span><button>复制</button></div><pre data-lang="cpp">// 接收缓冲 buf 里累积了从 socket 读到的字节；每次 recv 后调用一次
+// 帧格式：[4 字节大端长度 len][len 字节消息体]
+void OnBytes(std::vector&lt;uint8_t&gt;&amp; buf, auto&amp;&amp; onMessage) {
+    size_t off = 0;
+    while (buf.size() - off &gt;= 4) {                                   // 1) 头部够不够
+        uint32_t len = (buf[off] &lt;&lt; 24) | (buf[off+1] &lt;&lt; 16) | (buf[off+2] &lt;&lt; 8) | buf[off+3];
+        if (len &gt; kMaxMessage) throw std::runtime_error(&quot;bad frame&quot;);  // 2) 防御恶意长度
+        if (buf.size() - off - 4 &lt; len) break;                         // 3) 半包：消息体还没收全，等下次
+        onMessage(&amp;buf[off + 4], len);                                 // 4) 一条完整消息
+        off += 4 + len;                                                // 5) 可能还有下一条（粘包）
+    }
+    buf.erase(buf.begin(), buf.begin() + off);                         // 保留不完整的尾巴
+}</pre></div>
+  <div class="co warn"><span class="h">⚠️ 易错点："UDP 会不会粘包？"</span><p>不会。UDP 每个数据报都是独立的，内核按数据报为单位排队，recvfrom 一次只取一个。但 UDP 会<strong>丢包、乱序</strong>，以及缓冲区太小时<strong>截断</strong>。所以"粘包"是字节流协议特有的问题，面试里如果被问"怎么解决 TCP 粘包"，一定要先说明"这是因为 TCP 是字节流、没有消息边界"。</p></div>
+
+  <h2>3.4 可靠传输之一：确认与重传</h2>
+  <p>可靠传输的核心逻辑一句话就能说完：<strong>发送方给数据编号并保留副本，接收方收到后回确认，发送方在一定时间内没有收到确认就重发。</strong>难点全在细节：多久算"没收到"？怎么更早发现丢包？只丢了一个时能不能只重发一个？</p>
+
+  <h3>超时重传：RTO 怎么定</h3>
+  <p>重传超时时间 RTO（Retransmission TimeOut）太短会导致大量不必要的重传，太长则丢包后要干等很久。TCP 根据测得的往返时间 RTT 动态计算（RFC 6298）：</p>
+<div class="code"><div class="bar"><span>RFC 6298：RTO 计算</span><button>复制</button></div><pre data-lang="text">首次测得 RTT 样本 R：   SRTT = R          RTTVAR = R / 2
+之后每个新样本 R&#x27;：     RTTVAR = (1 - 1/4) * RTTVAR + 1/4 * |SRTT - R&#x27;|
+                       SRTT   = (1 - 1/8) * SRTT   + 1/8 * R&#x27;
+                       RTO    = SRTT + max(G, 4 * RTTVAR)        // G 为时钟粒度
+约束：RTO 下限 1 s（RFC 建议；Linux 实际用 200 ms），上限 ≥ 60 s；首个样本之前 RTO = 1 s
+超时后：RTO = RTO × 2（指数退避），直到收到新的确认后重新计算</pre></div>
+  <ul>
+    <li><strong>为什么要加 4 × RTTVAR</strong>：只用平均值的话，RTT 一抖动就会误判超时。方差项让 RTO 在网络抖动大时自动变宽。</li>
+    <li><strong>Karn 算法</strong>：重传过的段收到 ACK 时，<strong>不能用来采样 RTT</strong>——因为分不清这个 ACK 是对原始段还是对重传段的确认（重传歧义）。时间戳选项可以解决这个歧义；QUIC 则用"包号永不重复"从根本上消除了它（第 10 章）。</li>
+    <li><strong>指数退避</strong>：连续超时说明网络可能严重拥塞，每次把 RTO 翻倍，避免雪上加霜。代价是：连续丢几次后，RTO 会变成几秒甚至几十秒——这是游戏场景最痛恨的地方，也是 KCP 要改的第一件事（第 9 章）。</li>
+  </ul>
+
+  <h3>快速重传：不等超时</h3>
+  <p>超时重传至少要等一个 RTO（Linux 至少 200 ms）。能不能更早发现丢包？可以利用累计确认的特性：当某个段丢失后，后续每个段到达时接收方都会回复同样的确认号（<strong>重复 ACK</strong>）。发送方<strong>收到 3 个重复 ACK</strong>，就认为该段丢了，立即重传，不等定时器。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 370" xmlns="http://www.w3.org/2000/svg">
+    <text x="190" y="20" text-anchor="middle" class="b">超时重传</text>
+    <text x="680" y="20" text-anchor="middle" class="b">快速重传（3 个重复 ACK）</text>
+    <line x1="400" y1="8" x2="400" y2="362" stroke="#E5E7EB"/>
+    <!-- left -->
+    <text x="80" y="42" text-anchor="middle" class="sm b">发送方</text><text x="300" y="42" text-anchor="middle" class="sm b">接收方</text>
+    <line x1="80" y1="50" x2="80" y2="350" stroke="#9CA3AF"/><line x1="300" y1="50" x2="300" y2="350" stroke="#9CA3AF"/>
+    <line x1="80" y1="66" x2="190" y2="86" stroke="#B91C1C" stroke-width="1.6"/>
+    <text x="190" y="92" class="b" style="fill:#B91C1C">✕</text>
+    <text x="96" y="62" class="xs">seq=1001（丢失）</text>
+    <rect x="80" y="70" width="16" height="186" fill="#FDEEEE"/>
+    <text x="106" y="160" class="sm" style="fill:#B91C1C">等待 RTO</text>
+    <text x="106" y="178" class="xs" style="fill:#B91C1C">（Linux 至少 200 ms，且每次超时翻倍）</text>
+    <line x1="80" y1="258" x2="298" y2="286" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="110" y="256" class="xs" style="fill:#2F5BD3">重传 seq=1001</text>
+    <line x1="300" y1="296" x2="82" y2="324" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="210" y="332" class="xs" style="fill:#15803D">ack=1101</text>
+    <!-- right -->
+    <text x="560" y="42" text-anchor="middle" class="sm b">发送方</text><text x="800" y="42" text-anchor="middle" class="sm b">接收方</text>
+    <line x1="560" y1="50" x2="560" y2="350" stroke="#9CA3AF"/><line x1="800" y1="50" x2="800" y2="350" stroke="#9CA3AF"/>
+    <line x1="560" y1="60" x2="798" y2="80" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <line x1="560" y1="84" x2="680" y2="94" stroke="#B91C1C" stroke-width="1.4"/><text x="682" y="99" class="b" style="fill:#B91C1C">✕</text>
+    <line x1="560" y1="108" x2="798" y2="128" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <line x1="560" y1="132" x2="798" y2="152" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <line x1="560" y1="156" x2="798" y2="176" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <text x="552" y="64" text-anchor="end" class="xs">① seq=1</text>
+    <text x="552" y="88" text-anchor="end" class="xs" style="fill:#B91C1C">② seq=101 丢失</text>
+    <text x="552" y="112" text-anchor="end" class="xs">③ seq=201</text>
+    <text x="552" y="136" text-anchor="end" class="xs">④ seq=301</text>
+    <text x="552" y="160" text-anchor="end" class="xs">⑤ seq=401</text>
+    <line x1="800" y1="84" x2="562" y2="170" stroke="#15803D" stroke-width="1.4" marker-end="url(#ag)"/>
+    <line x1="800" y1="132" x2="562" y2="206" stroke="#C2410C" stroke-width="1.4" marker-end="url(#ao)"/>
+    <line x1="800" y1="156" x2="562" y2="230" stroke="#C2410C" stroke-width="1.4" marker-end="url(#ao)"/>
+    <line x1="800" y1="180" x2="562" y2="254" stroke="#C2410C" stroke-width="1.4" marker-end="url(#ao)"/>
+    <text x="552" y="174" text-anchor="end" class="xs" style="fill:#15803D">ack=101</text>
+    <text x="552" y="210" text-anchor="end" class="xs" style="fill:#C2410C">ack=101 重复①</text>
+    <text x="552" y="234" text-anchor="end" class="xs" style="fill:#C2410C">ack=101 重复②</text>
+    <text x="552" y="258" text-anchor="end" class="xs" style="fill:#C2410C">ack=101 重复③</text>
+    <line x1="560" y1="268" x2="798" y2="290" stroke="#2F5BD3" stroke-width="1.8" marker-end="url(#ab)"/>
+    <text x="552" y="272" text-anchor="end" class="xs" style="fill:#2F5BD3">立即重传 seq=101</text>
+    <line x1="800" y1="298" x2="562" y2="326" stroke="#15803D" stroke-width="1.8" marker-end="url(#ag)"/>
+    <text x="552" y="330" text-anchor="end" class="xs" style="fill:#15803D">ack=501</text>
+    <text x="680" y="346" text-anchor="middle" class="xs">③④⑤ 早已在接收缓冲里，补上 ② 后一次确认到 501</text>
+    <text x="680" y="364" text-anchor="middle" class="xs">只需约 1 个 RTT 就能发现丢包，比 RTO 快得多</text>
+  </svg>
+  <figcaption><b>图 3-3</b> 超时重传要干等一个 RTO；快速重传利用 3 个重复 ACK 提前发现丢包</figcaption>
+  </figure>
+
+  <div class="co deep"><span class="h">🔬 为什么是 3 个重复 ACK，而不是 1 个？</span><p>因为网络存在轻微乱序：段 3 比段 2 先到，也会产生 1 个重复 ACK，但随后段 2 到达就恢复了。阈值设为 3，是在"尽早发现丢包"和"把乱序误判成丢包"之间的经验折中。现代 Linux 默认还启用了 <strong>RACK</strong>（基于时间而不是计数判断丢包，RFC 8985）和 <strong>TLP 尾部丢失探测</strong>（解决"最后几个段丢了，后面没有段来触发重复 ACK"的问题）。KCP 把这个阈值做成了可调参数 <code>resend</code>，游戏场景常设为 2（第 9 章）。</p></div>
+
+  <h3>SACK：只重传真正丢了的</h3>
+  <p>累计确认只能说"我连续收到哪里为止"。如果一个窗口里丢了多个不连续的段，发送方只靠重复 ACK 无法知道到底丢了哪几个，要么一个 RTT 只能修复一个洞，要么把后面全部重发（类似回退 N 步）。<strong>SACK（选择确认，RFC 2018）</strong>在 ACK 的选项中附带最多 3～4 个"已收到的不连续块"，例如 <code>ack=101, SACK=[201-501]</code>，发送方就能精确地只重传 101～200。Linux 默认开启 SACK（<code>net.ipv4.tcp_sack=1</code>）。</p>
+
+  <h2>3.5 可靠传输之二：滑动窗口与流量控制</h2>
+  <p>如果每发一个段都要等确认再发下一个（<strong>停等协议</strong>），信道利用率极低：RTT 100 ms、每次 1460 字节，吞吐只有 14.6 KB/s。解决办法是<strong>允许连续发送多个段而不等确认</strong>，这些"已发出未确认"加上"允许发出"的部分就构成了<strong>发送窗口</strong>。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 280" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="24" class="b">发送方的发送缓冲区（按字节编号）</text>
+    <rect x="40" y="40" width="190" height="40" fill="#E5E7EB" stroke="#9CA3AF"/><text x="135" y="58" text-anchor="middle" class="sm b">① 已发送已确认</text><text x="135" y="73" text-anchor="middle" class="xs">可以释放</text>
+    <rect x="230" y="40" width="220" height="40" fill="#FFF4EC" stroke="#C2410C"/><text x="340" y="58" text-anchor="middle" class="sm b" style="fill:#C2410C">② 已发送未确认</text><text x="340" y="73" text-anchor="middle" class="xs">在途，必须保留副本</text>
+    <rect x="450" y="40" width="190" height="40" fill="#EAF7EF" stroke="#15803D"/><text x="545" y="58" text-anchor="middle" class="sm b" style="fill:#15803D">③ 允许发送未发送</text><text x="545" y="73" text-anchor="middle" class="xs">可用窗口</text>
+    <rect x="640" y="40" width="180" height="40" fill="#fff" stroke="#9CA3AF"/><text x="730" y="58" text-anchor="middle" class="sm b">④ 不允许发送</text><text x="730" y="73" text-anchor="middle" class="xs">超出窗口</text>
+    <path d="M230 92 L230 100 L640 100 L640 92" fill="none" stroke="#2F5BD3" stroke-width="1.6"/>
+    <text x="435" y="118" text-anchor="middle" class="sm b" style="fill:#2F5BD3">发送窗口 = min(rwnd, cwnd)</text>
+    <g class="xs mono"><text x="230" y="140" text-anchor="middle">SND.UNA</text><text x="450" y="140" text-anchor="middle">SND.NXT</text><text x="640" y="140" text-anchor="middle">SND.UNA+SND.WND</text></g>
+    <line x1="230" y1="84" x2="230" y2="128" stroke="#6B7280" stroke-dasharray="3 2"/><line x1="450" y1="84" x2="450" y2="128" stroke="#6B7280" stroke-dasharray="3 2"/><line x1="640" y1="84" x2="640" y2="128" stroke="#6B7280" stroke-dasharray="3 2"/>
+    <text x="435" y="164" text-anchor="middle" class="xs">收到新 ACK → SND.UNA 右移，窗口整体"滑"向右边；收到更大的 rwnd → 右边沿右移</text>
+
+    <text x="20" y="200" class="b">接收方的接收缓冲区</text>
+    <rect x="40" y="214" width="250" height="40" fill="#E5E7EB" stroke="#9CA3AF"/><text x="165" y="232" text-anchor="middle" class="sm b">已按序收到</text><text x="165" y="247" text-anchor="middle" class="xs">等待 / 已被应用 read 走</text>
+    <rect x="290" y="214" width="320" height="40" fill="#F3EEFE" stroke="#6D28D9"/><text x="450" y="232" text-anchor="middle" class="sm b" style="fill:#6D28D9">接收窗口 rwnd（可以接收）</text><text x="450" y="247" text-anchor="middle" class="xs">乱序到达的段暂存于此</text>
+    <rect x="610" y="214" width="210" height="40" fill="#fff" stroke="#9CA3AF"/><text x="715" y="238" text-anchor="middle" class="sm">不能接收</text>
+    <g class="xs mono"><text x="290" y="272" text-anchor="middle">RCV.NXT（= 回给对方的 ack）</text><text x="610" y="272" text-anchor="middle">RCV.NXT+RCV.WND</text></g>
+  </svg>
+  <figcaption><b>图 3-4</b> 滑动窗口：发送缓冲区被两个指针分成四段，窗口随确认向右滑动</figcaption>
+  </figure>
+
+  <h3>流量控制：别把对方淹死</h3>
+  <p>接收方的应用可能读得很慢（比如游戏服务器卡在一次数据库查询上），接收缓冲区就会逐渐被填满。TCP 让接收方在每个 ACK 的<strong>窗口字段</strong>里告诉发送方"我还剩多少空间"（rwnd），发送方保证在途数据不超过 rwnd。这就是<strong>流量控制</strong>：<em>端到端、由接收方驱动</em>，保护的是接收方。</p>
+  <ul>
+    <li><strong>零窗口</strong>：rwnd = 0 时发送方停止发送，并启动<strong>坚持定时器（persist timer）</strong>，周期性发 1 字节的<strong>零窗口探测</strong>，防止"接收方窗口恢复的那个通告 ACK 丢了，双方永远互相等待"的死锁。</li>
+    <li><strong>糊涂窗口综合征（Silly Window Syndrome）</strong>：接收方每腾出几个字节就通告一次，发送方就发几个字节的小段，头部开销远大于数据。对策：接收方等腾出足够空间（一个 MSS 或缓冲区一半）再通告；发送方用 <strong>Nagle 算法</strong>。</li>
+  </ul>
+
+  <h3>Nagle 算法与延迟确认：一对"好心办坏事"的组合</h3>
+  <div class="cards">
+    <div class="card"><div class="t">Nagle 算法（发送方）</div><p>如果还有<strong>已发送未确认</strong>的数据，新产生的小数据（不足一个 MSS）先攒着，等收到 ACK 或攒满一个 MSS 再发。目的是减少网络上的小包数量。</p></div>
+    <div class="card"><div class="t">延迟确认（接收方）</div><p>收到数据后不立即回 ACK，而是等一会儿（Linux 最少约 40 ms，Windows 默认 200 ms），希望能把 ACK 捎带在应答数据里，或者攒两个段一起确认。</p></div>
+  </div>
+  <p>两者单独都合理，叠加起来却会出问题：客户端发了一个小请求的前半段，Nagle 要等 ACK 才发后半段；服务器收到前半段，延迟确认要等 40～200 ms 才回 ACK——于是每个请求都凭空多出几十到上百毫秒。</p>
+  <div class="co ver"><span class="h">🎮 游戏开发视角：TCP 游戏连接一定要开 TCP_NODELAY</span><p>游戏的操作消息都很小、要求立即发出。用 TCP 承载时，务必 <code>setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &amp;one, sizeof one)</code> 关闭 Nagle；Linux 上还可以用 <code>TCP_QUICKACK</code> 临时关闭延迟确认。Redis、gRPC、大多数 RPC 框架默认都会开启 TCP_NODELAY。</p></div>
+
+  <h2>3.6 拥塞控制：别把网络挤爆</h2>
+  <p>流量控制只关心接收方，但路径中间的路由器也有容量。如果所有发送方都只看 rwnd 全速发，路由器队列被打满，丢包、重传、更多丢包，网络吞吐会断崖式下跌——这在 1986 年真实发生过（"拥塞崩溃"，NSFNET 吞吐一度跌到原来的千分之一），之后才有了 Van Jacobson 的拥塞控制算法。</p>
+  <p>TCP 发送方维护一个<strong>拥塞窗口 cwnd</strong>，表示"我估计网络还能承受多少在途数据"，实际发送窗口取 <strong>min(rwnd, cwnd)</strong>。经典 Reno 算法有四个部分：</p>
+
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <line x1="60" y1="280" x2="830" y2="280" stroke="#4B5563"/><line x1="60" y1="280" x2="60" y2="20" stroke="#4B5563"/>
+    <text x="830" y="300" text-anchor="end" class="xs">传输轮次（RTT）</text>
+    <text x="54" y="26" text-anchor="end" class="xs">cwnd</text>
+    <g class="xs" text-anchor="end"><text x="54" y="284">0</text><text x="54" y="204">8</text><text x="54" y="124">16</text><text x="54" y="44">24</text></g>
+    <line x1="60" y1="120" x2="380" y2="120" stroke="#B45309" stroke-dasharray="4 3"/><text x="64" y="114" class="xs" style="fill:#B45309">ssthresh=16</text>
+    <line x1="380" y1="160" x2="640" y2="160" stroke="#B45309" stroke-dasharray="4 3"/><text x="500" y="174" class="xs" style="fill:#B45309">ssthresh=12</text>
+    <line x1="640" y1="180" x2="830" y2="180" stroke="#B45309" stroke-dasharray="4 3"/><text x="742" y="196" class="xs" style="fill:#B45309">ssthresh=10</text>
+    <!-- 1 2 4 8 16 | 17..24 | 12..17 | 1 2 4 8 9 10 -->
+    <polyline fill="none" stroke="#2F5BD3" stroke-width="2.4" points="60,270 90,260 120,240 150,200 180,120 210,110 240,100 270,90 300,80 330,70 360,60 380,40 380,160 410,150 440,140 470,130 500,120 530,110 560,100 590,90 620,80 640,80 640,270 670,260 700,240 730,200 760,180 790,170 820,160"/>
+    <g fill="#2F5BD3"><circle cx="380" cy="40" r="4"/><circle cx="640" cy="80" r="4" fill="#B91C1C"/></g>
+    <text x="200" y="220" class="sm b" style="fill:#2F5BD3">慢启动</text><text x="200" y="236" class="xs">每 RTT 翻倍：1→2→4→8→16</text>
+    <text x="240" y="70" class="sm b" style="fill:#2F5BD3">拥塞避免</text><text x="236" y="84" class="xs">每 RTT +1</text>
+    <text x="388" y="36" class="xs" style="fill:#C2410C">3 个重复 ACK：ssthresh = cwnd/2，cwnd = ssthresh（快速恢复）</text>
+    <text x="440" y="190" class="sm b" style="fill:#2F5BD3">快速恢复后直接拥塞避免</text>
+    <text x="648" y="96" class="xs" style="fill:#B91C1C">超时：ssthresh = 20/2 = 10</text><text x="648" y="110" class="xs" style="fill:#B91C1C">cwnd = 1，重新慢启动</text>
+    <text x="445" y="324" text-anchor="middle" class="xs">"加性增、乘性减"（AIMD）：探测时温和，遇到拥塞时果断让出带宽，多条流最终趋向公平</text>
+  </svg>
+  <figcaption><b>图 3-5</b> Reno 拥塞窗口变化示意（单位：MSS）：慢启动 → 拥塞避免 → 快速恢复 → 超时</figcaption>
+  </figure>
+
+  <div class="tbl"><table>
+    <tr><th>阶段</th><th>触发条件</th><th>cwnd 怎么变</th><th>直觉</th></tr>
+    <tr><td><strong>慢启动</strong></td><td>连接开始 / 超时之后，cwnd &lt; ssthresh</td><td>每收到一个 ACK，cwnd += 1 → <strong>每 RTT 翻倍</strong>。初始窗口现在通常为 10 个 MSS（RFC 6928）</td><td>"慢"是指起点低，增长其实是指数级的</td></tr>
+    <tr><td><strong>拥塞避免</strong></td><td>cwnd ≥ ssthresh</td><td>每 RTT cwnd += 1（线性增长）</td><td>接近上次出事的位置了，小心试探</td></tr>
+    <tr><td><strong>快速重传 + 快速恢复</strong></td><td>3 个重复 ACK</td><td>ssthresh = cwnd / 2；cwnd = ssthresh（+3）；然后进入拥塞避免</td><td>还能收到重复 ACK 说明网络还通，只是轻度拥塞</td></tr>
+    <tr><td><strong>超时</strong></td><td>RTO 到期</td><td>ssthresh = cwnd / 2；<strong>cwnd = 1</strong>；重新慢启动</td><td>连 ACK 都收不到了，说明拥塞严重</td></tr>
+  </table></div>
+
+  <h3>现代算法：CUBIC 与 BBR</h3>
+  <div class="cards">
+    <div class="card"><div class="t">CUBIC（Linux 默认，RFC 9438）</div><p>仍然以<strong>丢包</strong>为拥塞信号，但 cwnd 的增长按"距离上次丢包的时间"的三次函数变化：远离上次丢包点时增长快，接近时放缓并在附近长时间停留，丢包后再快速探测。增长和 RTT 无关，对长肥管道更公平、更高效。</p></div>
+    <div class="card"><div class="t">BBR（Google，2016）</div><p>不再把丢包当拥塞信号，而是持续测量<strong>瓶颈带宽 BtlBw</strong>和<strong>最小往返时延 RTprop</strong>，按 BtlBw × RTprop 控制在途数据量、按 BtlBw 控制发送速率（pacing）。在有随机丢包的链路（无线、跨国）上吞吐远好于 CUBIC，也不会把路由器缓冲区塞满。</p></div>
+  </div>
+  <div class="co warn"><span class="h">⚠️ 易错点：流量控制 vs 拥塞控制</span>
+  <div class="tbl"><table>
+    <tr><th></th><th>流量控制</th><th>拥塞控制</th></tr>
+    <tr><td>保护谁</td><td>接收方（别把它的缓冲区淹了）</td><td>网络（别把路由器挤爆）</td></tr>
+    <tr><td>信息来源</td><td>接收方在 ACK 中<strong>显式通告</strong> rwnd</td><td>发送方根据丢包、RTT 等<strong>自己推测</strong> cwnd</td></tr>
+    <tr><td>作用范围</td><td>点对点</td><td>全局（所有共享瓶颈的流）</td></tr>
+    <tr><td>发送窗口</td><td colspan="2" style="text-align:center">两者同时生效：发送窗口 = min(rwnd, cwnd)</td></tr>
+  </table></div></div>
+  <div class="co ver"><span class="h">🎮 游戏开发视角：基于丢包的拥塞控制在弱网下的副作用</span><p>移动网络、Wi-Fi 上的丢包很多是<strong>随机干扰</strong>而不是拥塞，但 Reno / CUBIC 一律把它当成拥塞信号去减窗。对下载大文件来说只是速度慢一点；对每秒几十个小包的游戏来说，窗口被压到比实际需要还小，消息就会在发送缓冲里排队，延迟越积越高。第 8 章的仿真会量化这件事，第 9 章的 KCP 提供了关闭拥塞控制的开关 <code>nc=1</code>。</p></div>
+
+  <h2>3.7 TCP 状态机总览</h2>
+  <p>一条 TCP 连接在生命周期里会经历 11 种状态。第 5、6 章会逐一拆解，这里先给出全景图，后面两章随时可以翻回来对照。</p>
+  <figure>
+  <svg viewBox="0 0 860 580" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm b" text-anchor="middle">
+      <rect x="365" y="20" width="130" height="34" rx="17" fill="#F3F4F6" stroke="#4B5563"/><text x="430" y="42">CLOSED</text>
+      <rect x="90" y="100" width="130" height="34" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="155" y="122" style="fill:#2F5BD3">LISTEN</text>
+      <rect x="640" y="100" width="130" height="34" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="705" y="122" style="fill:#15803D">SYN_SENT</text>
+      <rect x="90" y="190" width="130" height="34" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="155" y="212" style="fill:#2F5BD3">SYN_RCVD</text>
+      <rect x="355" y="256" width="150" height="40" rx="10" fill="#FEF6E4" stroke="#B45309" stroke-width="2"/><text x="430" y="281" style="fill:#B45309">ESTABLISHED</text>
+      <rect x="90" y="350" width="130" height="34" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="155" y="372" style="fill:#15803D">FIN_WAIT_1</text>
+      <rect x="640" y="350" width="130" height="34" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="705" y="372" style="fill:#2F5BD3">CLOSE_WAIT</text>
+      <rect x="365" y="400" width="130" height="34" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="430" y="422" style="fill:#6D28D9">CLOSING</text>
+      <rect x="90" y="450" width="130" height="34" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="155" y="472" style="fill:#15803D">FIN_WAIT_2</text>
+      <rect x="640" y="450" width="130" height="34" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="705" y="472" style="fill:#2F5BD3">LAST_ACK</text>
+      <rect x="365" y="500" width="130" height="34" rx="8" fill="#FDEEEE" stroke="#B91C1C"/><text x="430" y="522" style="fill:#B91C1C">TIME_WAIT</text>
+      <rect x="640" y="530" width="130" height="34" rx="17" fill="#F3F4F6" stroke="#4B5563"/><text x="705" y="552">CLOSED</text>
+    </g>
+    <g stroke-width="1.6" fill="none">
+      <line x1="365" y1="44" x2="222" y2="106" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="495" y1="44" x2="638" y2="106" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="155" y1="134" x2="155" y2="188" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="705" y1="134" x2="507" y2="262" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="222" y1="214" x2="353" y2="268" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="640" y1="128" x2="222" y2="200" stroke="#6D28D9" stroke-dasharray="5 3" marker-end="url(#ap)"/>
+      <line x1="355" y1="290" x2="222" y2="354" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="505" y1="290" x2="638" y2="354" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="155" y1="384" x2="155" y2="448" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="222" y1="374" x2="363" y2="410" stroke="#6D28D9" stroke-dasharray="5 3" marker-end="url(#ap)"/>
+      <line x1="705" y1="384" x2="705" y2="448" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="705" y1="484" x2="705" y2="528" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="222" y1="474" x2="363" y2="510" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="430" y1="434" x2="430" y2="498" stroke="#6D28D9" stroke-dasharray="5 3" marker-end="url(#ap)"/>
+      <line x1="497" y1="522" x2="638" y2="542" stroke="#B91C1C" marker-end="url(#ar)"/>
+    </g>
+    <g class="xs">
+      <text x="300" y="56" text-anchor="end" style="fill:#2F5BD3">listen()（被动打开）</text>
+      <text x="566" y="56" style="fill:#15803D">connect() / 发 SYN（主动打开）</text>
+      <text x="164" y="166" style="fill:#2F5BD3">收 SYN / 发 SYN+ACK</text>
+      <text x="610" y="200" style="fill:#15803D">收 SYN+ACK / 发 ACK</text>
+      <text x="236" y="252" style="fill:#2F5BD3">收 ACK</text>
+      <text x="300" y="216" style="fill:#6D28D9">同时打开：收 SYN / 发 SYN+ACK</text>
+      <text x="272" y="308" text-anchor="end" style="fill:#15803D">close() / 发 FIN（主动关闭）</text>
+      <text x="592" y="316" style="fill:#2F5BD3">收 FIN / 发 ACK（被动关闭）</text>
+      <text x="164" y="420" style="fill:#15803D">收 ACK</text>
+      <text x="240" y="430" style="fill:#6D28D9">收 FIN / 发 ACK</text>
+      <text x="714" y="420" style="fill:#2F5BD3">close() / 发 FIN</text>
+      <text x="714" y="512" style="fill:#2F5BD3">收 ACK</text>
+      <text x="232" y="522" style="fill:#15803D">收 FIN / 发 ACK</text>
+      <text x="438" y="470" style="fill:#6D28D9">收 ACK</text>
+      <text x="500" y="560" style="fill:#B91C1C">等待 2MSL 超时</text>
+    </g>
+    <g class="xs">
+      <line x1="20" y1="566" x2="44" y2="566" stroke="#15803D" stroke-width="2"/><text x="50" y="570">客户端 / 主动方常走路径</text>
+      <line x1="200" y1="566" x2="224" y2="566" stroke="#2F5BD3" stroke-width="2"/><text x="230" y="570">服务端 / 被动方常走路径</text>
+      <line x1="20" y1="548" x2="44" y2="548" stroke="#6D28D9" stroke-width="2" stroke-dasharray="5 3"/><text x="50" y="552">同时打开 / 同时关闭（少见）</text>
+    </g>
+  </svg>
+  <figcaption><b>图 3-6</b> TCP 状态机（省略 RST、超时等异常转移）：上半部分是握手（第 5 章），下半部分是挥手（第 6 章）</figcaption>
+  </figure>
+
+  <div class="co tip"><span class="h">✅ 面试答法：TCP 如何保证可靠传输？</span>
+  <p>按"问题 → 机制"答：① 数据出错：<strong>校验和</strong>，错了直接丢弃，当作丢包处理；② 丢包：<strong>序号 + 确认 + 重传</strong>，包括基于 RTT 动态计算 RTO 的超时重传，以及 3 个重复 ACK 触发的快速重传，配合 SACK 只重传缺失部分；③ 乱序和重复：接收方按<strong>序号</strong>在接收缓冲区里重排、丢弃重复段，只把连续数据交给应用；④ 接收方处理不过来：<strong>滑动窗口流量控制</strong>；⑤ 网络拥塞：<strong>拥塞控制</strong>（慢启动、拥塞避免、快速重传、快速恢复）；⑥ 双方状态同步：<strong>三次握手和四次挥手</strong>的连接管理。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>TCP：面向连接、可靠、字节流、全双工。头部 20～60 字节；关键字段 seq / ack / 窗口 / 标志位。</li>
+    <li>序号按<strong>字节</strong>编号，ack 是"期望的下一个字节"（累计确认）；SYN、FIN 各占 1 个序号。</li>
+    <li>字节流没有边界 → 粘包 / 拆包；用<strong>长度前缀</strong>等应用层分帧解决；UDP 不存在粘包。</li>
+    <li>RTO = SRTT + 4·RTTVAR，Karn 算法，超时指数退避；3 个重复 ACK 快速重传；SACK 精确重传。</li>
+    <li>发送窗口 = min(rwnd, cwnd)：rwnd 是<strong>流量控制</strong>（保护接收方），cwnd 是<strong>拥塞控制</strong>（保护网络）。</li>
+    <li>Reno：慢启动（翻倍）→ 拥塞避免（+1）→ 3 dup ACK 减半 / 超时归 1；CUBIC 是 Linux 默认，BBR 基于带宽和时延建模。</li>
+    <li>Nagle + 延迟确认会制造几十～几百毫秒延迟，交互式应用要开 <code>TCP_NODELAY</code>。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：ISN = 5000，客户端依次发送 300 字节、200 字节两个段，服务器全部收到，最后的 ack 是多少？</summary>
+  <p>SYN 占用一个序号，所以第一个数据字节编号 5001。第一个段 seq=5001、长度 300；第二个段 seq=5301、长度 200；服务器累计确认 ack = 5301 + 200 = <strong>5501</strong>。</p></details>
+  <details class="quiz"><summary>思考题 2：接收方通告窗口为 0 后，发送方怎么知道什么时候可以继续发？如果通告恢复的那个 ACK 丢了呢？</summary>
+  <p>接收方腾出空间后会主动发一个窗口更新 ACK。但纯 ACK 不会被重传，如果它丢了，发送方一直认为窗口为 0，接收方一直等数据，形成死锁。所以发送方在收到零窗口后启动坚持定时器，周期性发送零窗口探测报文（携带 1 字节数据或序号为 SND.UNA−1 的段），强迫接收方回复当前窗口。</p></div>
+  <details class="quiz"><summary>思考题 3：为什么说"TCP 的拥塞控制在无线网络上表现不好"？有哪些改进？</summary>
+  <p>Reno / CUBIC 把丢包视为拥塞信号，而无线链路上的丢包很多来自信号干扰、切换基站，并非拥塞。于是 TCP 频繁地无谓减窗，吞吐上不去。改进方向：① 基于时延 / 带宽建模的算法，如 BBR；② 链路层本地重传（Wi-Fi、4G 本身有 ARQ/HARQ），减少暴露给 TCP 的丢包；③ ECN 显式拥塞通知，让路由器直接标记"我拥塞了"，而不是靠丢包传达；④ 应用层自定义传输（QUIC 可插拔拥塞控制、KCP 关闭拥塞控制）。</p></details>
+  <details class="quiz"><summary>思考题 4：发送窗口是不是越大越好？</summary>
+  <p>不是。窗口达到带宽时延积（BDP）就足以跑满带宽，再大也不会更快，只会让更多数据堆在路由器队列里，增加排队时延（即 Bufferbloat），并在丢包时需要重传更多数据、占用更多内存。这正是 BBR 把在途数据控制在 BDP 附近的原因。</p></details>
+</section>
+
+<div class="foot">计算机网络 · TCP / UDP 与可靠传输 · 案例在 Windows 11 + MSVC 14.44 实测 · 可用浏览器「打印 → 另存为 PDF」导出纸质版</div>
+</div></main>
+
+<script>
+/* ---------- C++ / ini 轻量高亮 ---------- */
+(function(){
+  const KW = new Set(("alignas auto bool break case catch char class const constexpr continue default delete do double else enum explicit extern false float for friend if inline int int32 int16 uint8 uint16 uint32 int64 namespace new nullptr operator override private protected public return short signed sizeof static static_cast struct switch template this throw true try typedef typename union unsigned using virtual void volatile while final pid_t size_t ssize_t DWORD HANDLE LPVOID BOOL WINAPI CALLBACK VOID ULONG_PTR std uint64_t uint32_t uint16_t uint8_t int32_t int16_t SOCKET").split(" "));
+  const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const re = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])')|(\b\d+(?:\.\d+)?f?\b)|(#\s*\w+)|(\b[A-Za-z_]\w*\b)/g;
+  function hl(src, lang){
+    if(lang==="ini"){
+      return src.split("\n").map(l=>{
+        if(/^\s*;/.test(l)) return '<span class="c">'+esc(l)+'</span>';
+        if(/^\s*\[/.test(l)) return '<span class="ty">'+esc(l)+'</span>';
+        const m=l.match(/^([^=]+)=(.*)$/); if(m) return '<span class="n">'+esc(m[1])+'</span>=<span class="s">'+esc(m[2])+'</span>';
+        return esc(l);}).join("\n");
+    }
+    if(lang==="text") return esc(src);
+    if(lang==="bash") return src.split("\n").map(l=>/^\s*#/.test(l)?'<span class="c">'+esc(l)+'</span>':(/^\$ /.test(l)?'<span class="k">$</span> '+esc(l.slice(2)):esc(l))).join("\n");
+    let out="",last=0,m;
+    re.lastIndex=0;
+    while((m=re.exec(src))){
+      out+=esc(src.slice(last,m.index)); last=re.lastIndex;
+      const t=m[0];
+      if(m[1]) out+='<span class="c">'+esc(t)+'</span>';
+      else if(m[2]) out+='<span class="s">'+esc(t)+'</span>';
+      else if(m[3]) out+='<span class="n">'+t+'</span>';
+      else if(m[4]) out+='<span class="m">'+esc(t)+'</span>';
+      else {
+        const nx=src.slice(re.lastIndex).match(/^\s*\(/);
+        if(KW.has(t)) out+='<span class="k">'+t+'</span>';
+        else if(/^[A-Z][A-Z0-9_]{2,}$/.test(t)) out+='<span class="m">'+t+'</span>';
+        else if(/^(vector|string|deque|map|set|sockaddr_in|ikcpcb|IKCPSEG|Segment|Packet|Header|Sender|Receiver|optional|array|bitset)$/.test(t)) out+='<span class="ty">'+t+'</span>';
+        else if(nx) out+='<span class="f">'+t+'</span>';
+        else out+=t;
+      }
+    }
+    out+=esc(src.slice(last));
+    return out;
+  }
+  document.querySelectorAll(".code pre").forEach(pre=>{
+    pre.innerHTML=hl(pre.textContent, pre.dataset.lang||"cpp");
+  });
+  document.querySelectorAll(".code .bar button").forEach(b=>{
+    b.onclick=()=>{const t=b.closest(".code").querySelector("pre").innerText;navigator.clipboard&&navigator.clipboard.writeText(t);b.textContent="已复制";setTimeout(()=>b.textContent="复制",1200);};
+  });
+})();
+
+/* ---------- 目录生成 / 滚动定位 ---------- */
+(function(){
+  const toc=document.getElementById("toc");
+  const nodes=document.querySelectorAll(".part-head, section.chapter");
+  const links=[];
+  let secCounter=0;
+  nodes.forEach(n=>{
+    if(n.classList.contains("part-head")){
+      const li=document.createElement("li"); li.className="part"; li.textContent=n.dataset.toc||n.querySelector("h1").textContent; toc.appendChild(li); return;
+    }
+    const li=document.createElement("li");
+    const h=n.querySelector(".ch-head h1");
+    const no=n.querySelector(".ch-head .no");
+    const a=document.createElement("a"); a.className="ch"; a.href="#"+n.id;
+    a.textContent=(no?no.textContent.replace(/CHAPTER\s*/i,"").trim()+" · ":"")+h.textContent;
+    li.appendChild(a); links.push([n,a,li]);
+    n.querySelectorAll("h2").forEach(h2=>{
+      if(!h2.id) h2.id="s"+(++secCounter);
+      const s=document.createElement("a"); s.className="sec"; s.href="#"+h2.id; s.textContent=h2.textContent;
+      li.appendChild(s); links.push([h2,s,li]);
+    });
+    toc.appendChild(li);
+  });
+  const bar=document.getElementById("progress");
+  function onScroll(){
+    const st=window.scrollY, h=document.documentElement.scrollHeight-innerHeight;
+    bar.style.width=(st/h*100)+"%";
+    let cur=null;
+    for(const [el,a,li] of links){ if(el.getBoundingClientRect().top<120) cur=[el,a,li]; }
+    document.querySelectorAll("#toc a.active").forEach(x=>x.classList.remove("active"));
+    document.querySelectorAll("#toc li.open").forEach(x=>x.classList.remove("open"));
+    if(cur){cur[1].classList.add("active");cur[2].classList.add("open");
+      const chA=cur[2].querySelector("a.ch"); if(chA!==cur[1]) chA.classList.add("active");}
+  }
+  addEventListener("scroll",onScroll,{passive:true}); onScroll();
+  document.getElementById("q").addEventListener("input",e=>{
+    const q=e.target.value.trim().toLowerCase();
+    toc.querySelectorAll("li").forEach(li=>{
+      if(li.classList.contains("part")) {li.style.display=q?"none":"";return;}
+      const hit=!q||li.textContent.toLowerCase().includes(q);
+      li.style.display=hit?"":"none";
+      if(q&&hit) li.classList.add("open");
+    });
+  });
+  toc.addEventListener("click",e=>{if(e.target.tagName==="A") document.getElementById("side").classList.remove("show");});
+})();
+
+</script>
+</body>
+</html>

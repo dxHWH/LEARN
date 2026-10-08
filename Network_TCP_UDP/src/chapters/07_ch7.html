@@ -1,0 +1,166 @@
+<div class="part-head" data-toc="第四部分 · 可靠 UDP">
+  <div class="no">PART FOUR</div>
+  <h1>第四部分　可靠 UDP：在用户态重新组合可靠性</h1>
+  <p>TCP 已经把可靠传输做到了极致，为什么还有人要在 UDP 上重造一遍？因为 TCP 给出的是"一种"可靠性，而实时应用需要的是"可以挑选的"可靠性。</p>
+</div>
+
+<!-- ======================= CH7 ======================= -->
+<section class="chapter" id="ch7">
+  <div class="ch-head">
+    <div class="no">CHAPTER 07</div>
+    <h1>为什么要在 UDP 上造轮子</h1>
+    <p class="lead">先把 TCP 在实时场景下的痛点逐条列出来，再画出"可靠性光谱"，最后给出一个可靠 UDP 协议的整体架构。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说出 TCP 用于实时场景的六个痛点，并能和前几章的机制对应起来</li>
+    <li>理解"可靠性光谱"：可靠 / 不可靠 × 有序 / 无序 / 只取最新，并能给游戏数据分类</li>
+    <li>画出可靠 UDP 协议的分层架构，知道每一层要解决什么</li>
+    <li>认清自研可靠 UDP 的代价与风险</li>
+  </ul></div>
+
+  <h2>7.1 TCP 在实时场景下的六个痛点</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>痛点</th><th>来自哪个机制</th><th>实时场景下的后果</th><th>能在 TCP 内解决吗</th></tr>
+    <tr><td>1</td><td><strong>队头阻塞</strong></td><td>按序可靠交付（第 3、4 章）</td><td>一个包丢了，后面所有新数据都要等它</td><td class="no">不能，这是 TCP 语义本身</td></tr>
+    <tr><td>2</td><td><strong>重传慢</strong></td><td>RTO 下限 200 ms、指数退避；快速重传需要 3 个重复 ACK</td><td>小流量时凑不够 3 个重复 ACK，只能等 RTO；连续丢包时等待时间翻倍增长</td><td class="mid">部分（Linux 可按路由调 rto_min，有 TLP/RACK，但不能每个连接随意改）</td></tr>
+    <tr><td>3</td><td><strong>拥塞控制误判</strong></td><td>丢包即拥塞（Reno / CUBIC）</td><td>无线随机丢包导致窗口被压缩，数据在发送缓冲排队，延迟越积越大</td><td class="mid">部分（可换 BBR，但不能关掉）</td></tr>
+    <tr><td>4</td><td><strong>延迟确认 + Nagle</strong></td><td>减少小包的优化（第 3 章）</td><td>额外 40～200 ms</td><td class="yes">能（TCP_NODELAY、TCP_QUICKACK）</td></tr>
+    <tr><td>5</td><td><strong>握手与换网</strong></td><td>三次握手 + TLS；连接绑定四元组</td><td>首包 2～3 RTT；Wi-Fi 切 4G 时 IP 变化，连接直接断开，要重新握手</td><td class="no">基本不能（TFO 部署受限；MPTCP 不普及）</td></tr>
+    <tr><td>6</td><td><strong>一视同仁 + 难以迭代</strong></td><td>实现在内核；中间设备僵化</td><td>不能对不同消息选择不同的可靠性 / 优先级；新算法要等操作系统升级</td><td class="no">不能</td></tr>
+  </table></div>
+
+  <div class="co ana"><span class="h">📦 场景案例：一次 300 ms 的"卡顿"是怎么来的</span>
+  <p>手游玩家在地铁里，网络 RTT 80 ms、丢包率 5%。游戏每 66 ms 发一个操作包（15 Hz），用 TCP 承载。某个包丢了：<br>
+  ① 后面每 66 ms 才有一个新包，要凑够 3 个重复 ACK 需要约 200 ms，往往还没凑够 RTO 先到了；<br>
+  ② 于是等到 RTO（≥ 200 ms，弱网下 RTTVAR 大，RTO 常常 300 ms 以上）才重传；<br>
+  ③ 这期间到达的所有新操作都被队头阻塞挡在内核缓冲区里；<br>
+  ④ 重传成功后，积压的操作一起交付，角色表现为"卡住 → 瞬移"。如果重传的包又丢了，RTO 翻倍，卡顿就变成 600 ms 以上。<br>
+  而同样的网络，用 UDP + 应用层可靠，可以做到"后面的包不等前面"（痛点 1）、"被跳过 2 次就重传"（痛点 2）、"每个包都冗余携带最近 3 帧操作"（干脆不需要重传），把卡顿压到一个 RTT 甚至零。</p></div>
+
+  <h2>7.2 可靠性光谱：不是所有数据都需要 TCP 那样的可靠</h2>
+  <p>把"可靠性"拆开，至少有两个独立的维度：<strong>是否保证送达</strong>，以及<strong>是否保证顺序</strong>。顺序这一维还有一个很实用的中间态：<strong>只要最新</strong>（sequenced，旧的晚到就直接丢）。组合起来就是一张光谱：</p>
+  <figure>
+  <svg viewBox="0 0 860 380" xmlns="http://www.w3.org/2000/svg">
+    <line x1="140" y1="40" x2="140" y2="330" stroke="#4B5563"/><line x1="140" y1="330" x2="840" y2="330" stroke="#4B5563"/>
+    <text x="490" y="362" text-anchor="middle" class="b sm">顺序保证（从弱到强） →</text>
+    <text x="40" y="190" text-anchor="middle" class="b sm" transform="rotate(-90 40 190)">送达保证 →</text>
+    <g class="sm b" text-anchor="middle"><text x="260" y="350">无序</text><text x="490" y="350">只要最新（Sequenced）</text><text x="720" y="350">严格有序</text></g>
+    <g class="sm b" text-anchor="end"><text x="132" y="110">可靠</text><text x="132" y="260">不可靠</text></g>
+    <!-- cells -->
+    <rect x="150" y="50" width="220" height="125" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="260" y="74" text-anchor="middle" class="b" style="fill:#C2410C">可靠 · 无序</text>
+    <text x="260" y="96" text-anchor="middle" class="xs">每条都必须送达，但彼此独立</text>
+    <text x="260" y="122" text-anchor="middle" class="sm">🎮 购买道具、拾取物品</text>
+    <text x="260" y="142" text-anchor="middle" class="sm">🎮 独立的技能命中事件</text>
+    <text x="260" y="164" text-anchor="middle" class="xs" style="fill:#C2410C">不被别的丢包阻塞</text>
+    <rect x="380" y="50" width="220" height="125" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="490" y="74" text-anchor="middle" class="b" style="fill:#B45309">可靠 · 只要最新</text>
+    <text x="490" y="96" text-anchor="middle" class="xs">最新值一定送达，中间值可跳过</text>
+    <text x="490" y="122" text-anchor="middle" class="sm">🎮 UE 属性复制（血量、等级）</text>
+    <text x="490" y="142" text-anchor="middle" class="sm">📱 配置、状态的最终一致</text>
+    <text x="490" y="164" text-anchor="middle" class="xs" style="fill:#B45309">重传时发的是"当前值"而非旧包</text>
+    <rect x="610" y="50" width="220" height="125" rx="10" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+    <text x="720" y="74" text-anchor="middle" class="b" style="fill:#15803D">可靠 · 有序（= TCP 语义）</text>
+    <text x="720" y="96" text-anchor="middle" class="xs">全部送达且按发送顺序交付</text>
+    <text x="720" y="122" text-anchor="middle" class="sm">🎮 帧同步的输入流、聊天</text>
+    <text x="720" y="142" text-anchor="middle" class="sm">🌐 网页、文件、RPC</text>
+    <text x="720" y="164" text-anchor="middle" class="xs" style="fill:#15803D">代价：队头阻塞</text>
+
+    <rect x="150" y="195" width="220" height="125" rx="10" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="260" y="219" text-anchor="middle" class="b">不可靠 · 无序（= 裸 UDP）</text>
+    <text x="260" y="241" text-anchor="middle" class="xs">发了就不管</text>
+    <text x="260" y="267" text-anchor="middle" class="sm">🎮 特效、音效触发、表情</text>
+    <text x="260" y="287" text-anchor="middle" class="sm">📡 遥测、日志打点</text>
+    <text x="260" y="309" text-anchor="middle" class="xs">零额外开销</text>
+    <rect x="380" y="195" width="220" height="125" rx="10" fill="#F3EEFE" stroke="#6D28D9" stroke-width="2"/>
+    <text x="490" y="219" text-anchor="middle" class="b" style="fill:#6D28D9">不可靠 · 只要最新</text>
+    <text x="490" y="241" text-anchor="middle" class="xs">丢了不重传，迟到的旧包直接丢弃</text>
+    <text x="490" y="267" text-anchor="middle" class="sm">🎮 位置 / 朝向 / 动画状态同步</text>
+    <text x="490" y="287" text-anchor="middle" class="sm">🎙️ 语音帧（配合 FEC、插值）</text>
+    <text x="490" y="309" text-anchor="middle" class="xs" style="fill:#6D28D9">实时游戏中数据量最大的一类</text>
+    <rect x="610" y="195" width="220" height="125" rx="10" fill="#fff" stroke="#9CA3AF" stroke-dasharray="5 3"/>
+    <text x="720" y="219" text-anchor="middle" class="b" style="fill:#6B7280">不可靠 · 严格有序</text>
+    <text x="720" y="245" text-anchor="middle" class="xs">要等前面的包，却不保证前面的包会来</text>
+    <text x="720" y="265" text-anchor="middle" class="xs">→ 可能永远等下去</text>
+    <text x="720" y="291" text-anchor="middle" class="sm" style="fill:#6B7280">基本没有实际用途</text>
+  </svg>
+  <figcaption><b>图 7-1</b> 可靠性光谱：TCP 只提供右上角一格，实时应用的大部分数据其实落在其他格子里</figcaption>
+  </figure>
+  <p>这张图在业界有很直接的对应：老牌游戏网络库 <strong>RakNet</strong> 的 <code>PacketReliability</code> 枚举就是 <code>UNRELIABLE</code>、<code>UNRELIABLE_SEQUENCED</code>、<code>RELIABLE</code>、<code>RELIABLE_ORDERED</code>、<code>RELIABLE_SEQUENCED</code>；<strong>ENet</strong> 提供可靠 / 不可靠 / 不可靠有序（sequenced）三种包，并用多个通道（channel）隔离顺序；<strong>Unreal Engine</strong> 里 Reliable RPC 在同一 Actor 通道内有序可靠，Unreliable RPC 发了就不管，<strong>属性复制</strong>则是"不可靠发送 + 丢包后重新发送当前最新值"，正好是"可靠 · 只要最新"这一格。</p>
+
+  <div class="co tip"><span class="h">✅ 面试答法：为什么游戏要用可靠 UDP 而不是 TCP？</span>
+  <p>核心是"可靠性可选"。游戏数据分为不同类别：位置等状态只要最新值，丢了不需要重传；技能、交易等事件必须送达但不一定需要和其他消息保持顺序；帧同步的输入需要可靠有序。TCP 只能对所有数据提供可靠有序的字节流，一个丢包会通过队头阻塞拖累所有数据，加上 RTO 下限高、指数退避、拥塞控制把随机丢包当拥塞，弱网下延迟抖动很大。在 UDP 上自己实现，可以按消息类型分通道、选择不同可靠级别，并且激进地调整重传策略（如 KCP 的 RTO×1.5、快速重传阈值 2），用一些带宽换取更低更稳定的延迟。</p></div>
+
+  <h2>7.3 一个可靠 UDP 协议的整体架构</h2>
+  <figure>
+  <svg viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
+    <rect x="160" y="14" width="540" height="40" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="430" y="39" text-anchor="middle" class="b" style="fill:#2F5BD3">应用：Send(msg, 通道/可靠级别, 优先级)　·　OnMessage(msg)</text>
+    <rect x="160" y="64" width="540" height="44" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="430" y="83" text-anchor="middle" class="b" style="fill:#C2410C">① 通道与调度层</text>
+    <text x="430" y="99" text-anchor="middle" class="xs">按可靠级别分通道（互不阻塞）；按优先级与带宽预算决定本次发什么；合并小消息进一个包</text>
+    <rect x="160" y="118" width="540" height="44" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="430" y="137" text-anchor="middle" class="b" style="fill:#B45309">② 分片与重组</text>
+    <text x="430" y="153" text-anchor="middle" class="xs">大于 MTU 的消息切成片（消息 ID + 片序号 + 总片数），接收端收齐后重组</text>
+    <rect x="160" y="172" width="540" height="62" rx="10" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+    <text x="430" y="191" text-anchor="middle" class="b" style="fill:#15803D">③ 可靠传输层（第 8 章主体）</text>
+    <text x="430" y="207" text-anchor="middle" class="xs">序号 · 确认（UNA + 选择确认 / 位图）· RTT 估计与 RTO · 超时重传 · 快速重传</text>
+    <text x="430" y="223" text-anchor="middle" class="xs">发送窗口 / 接收窗口 · 乱序缓存 · 去重 · 按序交付</text>
+    <rect x="160" y="244" width="540" height="44" rx="10" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="430" y="263" text-anchor="middle" class="b" style="fill:#6D28D9">④ 拥塞控制 / 限速 + FEC（可选）</text>
+    <text x="430" y="279" text-anchor="middle" class="xs">令牌桶 / AIMD / BBR 类算法；Pacing 平滑发送；前向纠错用冗余换重传</text>
+    <rect x="160" y="298" width="540" height="44" rx="10" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="430" y="317" text-anchor="middle" class="b">⑤ 安全层</text>
+    <text x="430" y="333" text-anchor="middle" class="xs">AEAD 加密认证（DTLS / 自定义 AES-GCM、ChaCha20-Poly1305）；防重放；防篡改</text>
+    <rect x="160" y="352" width="540" height="40" rx="10" fill="#fff" stroke="#4B5563"/>
+    <text x="430" y="377" text-anchor="middle" class="b">UDP socket（sendto / recvfrom，批量收发 sendmmsg / recvmmsg）</text>
+
+    <rect x="720" y="64" width="130" height="328" rx="10" fill="#EAF0FD" stroke="#2F5BD3" stroke-dasharray="5 3"/>
+    <text x="785" y="88" text-anchor="middle" class="b sm" style="fill:#2F5BD3">⑥ 连接管理</text>
+    <g class="xs" text-anchor="middle">
+      <text x="785" y="116">握手（带 Cookie</text><text x="785" y="132">防伪造与放大）</text>
+      <text x="785" y="160">会话 ID（conv）</text><text x="785" y="176">而非四元组识别</text><text x="785" y="192">→ 支持 NAT 换端口</text>
+      <text x="785" y="220">心跳 / RTT 测量</text><text x="785" y="236">NAT 保活</text>
+      <text x="785" y="264">超时断线判定</text>
+      <text x="785" y="292">优雅关闭</text>
+      <text x="785" y="320">重连与会话恢复</text>
+    </g>
+    <rect x="10" y="64" width="130" height="328" rx="10" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="5 3"/>
+    <text x="75" y="56" text-anchor="middle" class="b sm" style="fill:#B91C1C">对应本书位置</text>
+    <g class="xs" text-anchor="middle">
+      <text x="75" y="90">① 7.2 节 / 第 11 章</text>
+      <text x="75" y="144">② 8.10 节</text>
+      <text x="75" y="198">③ 8.1～8.7 节</text>
+      <text x="75" y="214">KCP 见第 9 章</text>
+      <text x="75" y="266">④ 8.8～8.9 节</text>
+      <text x="75" y="320">⑤ 8.11 节 / QUIC</text>
+      <text x="75" y="374">⑥ 8.11 节</text>
+    </g>
+  </svg>
+  <figcaption><b>图 7-2</b> 可靠 UDP 的分层架构：KCP 只实现了第 ③ 层（加一点 ②），QUIC 则实现了全部六层</figcaption>
+  </figure>
+  <p>这张图同时回答了"KCP 和 QUIC 有什么区别"这个常见问题：<strong>KCP 是一个纯 ARQ 算法库</strong>，只负责第 ③ 层，连接、加密、FEC 都要使用者自己补；<strong>QUIC 是一个完整的传输协议</strong>，从流复用到加密到连接迁移全都标准化了，可以直接替代 TCP + TLS。</p>
+
+  <h2>7.4 代价与风险：不要为了"用 UDP"而用 UDP</h2>
+  <div class="cards">
+    <div class="card"><div class="t">复杂度与正确性</div><p>可靠传输的边界情况极多：序号回绕、重传歧义、窗口死锁、ACK 风暴、分片丢失、重连时的状态残留……TCP 用了四十年打磨，自研协议的 bug 往往在线上弱网环境才暴露。</p></div>
+    <div class="card"><div class="t">网络环境的敌意</div><p>部分运营商对 UDP 做 QoS 限速，部分企业 / 校园网直接封禁 UDP，一些公共 Wi-Fi 的 NAT 对 UDP 映射超时极短。<strong>必须准备 TCP 兜底通道</strong>并做自动降级。</p></div>
+    <div class="card"><div class="t">CPU 开销</div><p>用户态协议栈没有 TCP 的硬件卸载（TSO/GRO），每个包都要系统调用、加解密、定时器管理。服务器端单机承载量可能明显低于 TCP，需要批量收发、多线程分片等优化。</p></div>
+    <div class="card"><div class="t">网络公平性</div><p>"关掉拥塞控制"在一个玩家的手机上很好，在一个网吧几十台机器同时这么做时就会互相挤爆出口带宽。至少要有发送速率上限，以及在 RTT 明显上升时主动降级。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>TCP 的实时痛点：<strong>队头阻塞、重传慢（RTO 下限 + 退避）、拥塞误判、Nagle/延迟确认、握手与换网断连、一视同仁且难迭代</strong>。</li>
+    <li>可靠性光谱 = {可靠, 不可靠} × {无序, 只要最新, 有序}；游戏数据大多落在"不可靠 · 只要最新"和"可靠 · 无序"。</li>
+    <li>RakNet / ENet / UE 的可靠性分级与光谱一一对应；UE 属性复制属于"可靠 · 只要最新"。</li>
+    <li>可靠 UDP 六层：通道调度、分片、可靠传输、拥塞 / FEC、安全、连接管理。KCP 只做可靠传输层，QUIC 做全部。</li>
+    <li>代价：复杂度、UDP 被限速 / 封禁（需 TCP 兜底）、CPU 开销、公平性。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：为什么"不可靠 · 严格有序"基本没有用途？</summary>
+  <p>严格有序意味着第 n 个包没到时，第 n+1 个包必须等待；而不可靠意味着第 n 个包可能永远不会再来（没有重传）。两者组合的结果就是接收方可能无限期等待，或者只能设置一个超时后放弃第 n 个包继续往下交付——这时它实际上退化成了"只要最新 / 允许跳号"的语义。所以实际协议里提供的都是"sequenced（丢弃过期的）"而不是"ordered（等待缺失的）"。</p></details>
+  <details class="quiz"><summary>思考题 2：一个 MOBA 游戏中，以下数据分别应该放在可靠性光谱的哪一格？英雄位置、技能释放指令、击杀公告、小地图信号、商店购买、结算数据。</summary>
+  <p>英雄位置：不可靠 · 只要最新。技能释放指令：在状态同步架构下是可靠事件（可靠 · 无序或与同一英雄的其他指令有序）；在帧同步架构下属于输入流的一部分，可靠有序。击杀公告：可靠 · 无序（丢了玩家会错过信息，但不必和别的消息排序；也可以设计成不可靠，由状态推导）。小地图信号：不可靠或可靠无序均可，看产品要求。商店购买：可靠（并且要服务器确认结果）。结算数据：可靠，且通常走 TCP/HTTP 等更稳妥的通道。</p></details>
+  <details class="quiz"><summary>思考题 3：既然 QUIC 已经标准化了，为什么很多游戏还是用 KCP 或自研协议？</summary>
+  <p>① QUIC 的流仍然是"可靠有序"的语义（虽然流之间没有队头阻塞），对"不可靠 · 只要最新"的状态数据支持有限（需要 RFC 9221 的 DATAGRAM 扩展）；② QUIC 强制 TLS 1.3 加密和较复杂的握手，客户端和服务器的 CPU、包体开销较大；③ QUIC 的拥塞控制和重传策略遵循 RFC 9002，偏向公平和吞吐，而游戏更想要激进的低延迟策略；④ KCP 代码量小、可以嵌入任意引擎和平台、参数可调，且游戏已有成熟的连接和加密方案。当然，随着 QUIC 库的成熟（以及 DATAGRAM 扩展），也有游戏开始采用。</p></details>
+</section>

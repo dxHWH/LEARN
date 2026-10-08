@@ -1,0 +1,468 @@
+<div class="part-head" data-toc="第三部分 · 网络同步" style="background:linear-gradient(135deg,#3B0764 0%,#6D28D9 60%,#8B5CF6 100%)">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　网络同步：把联网讲透</h1>
+  <p>单机写得对的技能，联网后往往问题不断。这一部分先讲"谁会收到什么数据"，再讲"预测键如何让客户端先执行、后对账"，最后用十个专题覆盖实际项目中最常见的网络问题。</p>
+</div>
+
+<!-- ======================= CH11 ======================= -->
+<section class="chapter" id="ch11">
+  <div class="ch-head">
+    <div class="no">CHAPTER 11</div>
+    <h1>复制基础：谁会收到什么</h1>
+    <p class="lead">GAS 的每一类数据都有自己的复制方式和接收范围。很多"模拟端不对"的问题，原因只是那份数据根本没有发给模拟端。</p>
+  </div>
+
+  <h2>11.1 三种网络角色</h2>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <rect x="10" y="20" width="270" height="365" rx="14" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="145" y="46" text-anchor="middle" class="b" style="fill:#2F5BD3">服务器（Authority）</text>
+    <text x="145" y="64" text-anchor="middle" class="xs">权威：所有数据的来源</text>
+    <rect x="295" y="20" width="270" height="365" rx="14" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="430" y="46" text-anchor="middle" class="b" style="fill:#C2410C">拥有者客户端（Autonomous）</text>
+    <text x="430" y="64" text-anchor="middle" class="xs">操控这个角色的玩家</text>
+    <rect x="580" y="20" width="270" height="365" rx="14" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="715" y="46" text-anchor="middle" class="b">其他客户端（Simulated）</text>
+    <text x="715" y="64" text-anchor="middle" class="xs">看着这个角色的其他玩家</text>
+    <g class="sm">
+      <text x="30" y="96" class="sm">✅ 已授予技能 Spec 列表</text>
+      <text x="30" y="122" class="sm">✅ 技能实例（正在运行）</text>
+      <text x="30" y="148" class="sm">✅ 所有 ActiveGE（完整）</text>
+      <text x="30" y="174" class="sm">✅ 属性（Base + Current）</text>
+      <text x="30" y="200" class="sm">✅ 完整 Tag 计数</text>
+      <text x="30" y="226" class="sm">✅ Execution / 伤害计算</text>
+      <text x="30" y="252" class="sm">✅ Montage（权威）</text>
+      <text x="30" y="278" class="sm">✅ 预测键的确认与拒绝</text>
+
+      <text x="315" y="96" class="sm">✅ 技能 Spec 列表（仅拥有者）</text>
+      <text x="315" y="122" class="sm">✅ 技能实例（本地激活 / 预测）</text>
+      <text x="315" y="148" class="sm">✅ ActiveGE（Mixed / Full）</text>
+      <text x="315" y="174" class="sm">✅ 属性（复制 + 本地预测）</text>
+      <text x="315" y="200" class="sm">✅ Tag（由本地 GE 计算）</text>
+      <text x="315" y="226" class="sm">❌ Execution（不在客户端运行）</text>
+      <text x="315" y="252" class="sm">✅ Montage（本地预测播放）</text>
+      <text x="315" y="278" class="sm">✅ ReplicatedPredictionKeyMap</text>
+
+      <text x="600" y="96" class="sm">❌ 没有技能 Spec</text>
+      <text x="600" y="122" class="sm">❌ 没有技能实例</text>
+      <text x="600" y="148" class="sm">⚠️ ActiveGE：仅 Full 模式才有</text>
+      <text x="600" y="174" class="sm">✅ 属性（除 COND_OwnerOnly）</text>
+      <text x="600" y="200" class="sm">⚠️ MinimalReplicationTags（无计数）</text>
+      <text x="600" y="226" class="sm">⚠️ MinimalReplicationGameplayCues</text>
+      <text x="600" y="252" class="sm">✅ RepAnimMontageInfo</text>
+      <text x="600" y="278" class="sm">✅ Executed Cue 多播</text>
+    </g>
+    <line x1="30" y1="300" x2="830" y2="300" stroke="#CBD5E1" stroke-dasharray="4 4"/>
+    <text x="145" y="328" text-anchor="middle" class="xs">做决定</text>
+    <text x="430" y="328" text-anchor="middle" class="xs">先执行、后对账</text>
+    <text x="715" y="328" text-anchor="middle" class="xs">只负责"看起来对"</text>
+    <text x="430" y="362" text-anchor="middle" class="sm b">结论：模拟端上不要做任何依赖技能实例或 GE 细节的逻辑，只用 Tag、属性、Cue 和 Montage</text>
+  </svg>
+  <figcaption><b>图 11-1</b> 以 Mixed 模式为例，三种网络角色分别拥有哪些 GAS 数据</figcaption>
+  </figure>
+
+  <h2>11.2 复制模式矩阵</h2>
+  <div class="tbl"><table>
+    <tr><th>数据</th><th>复制机制</th><th>Full</th><th>Mixed</th><th>Minimal</th></tr>
+    <tr><td>ActiveGameplayEffects</td><td>FastArray 属性复制</td><td>所有人</td><td>仅拥有者</td><td class="no">不复制</td></tr>
+    <tr><td>MinimalReplicationTags</td><td>属性复制（只同步有无）</td><td>—</td><td>模拟端</td><td>所有人</td></tr>
+    <tr><td>MinimalReplicationGameplayCues</td><td>FastArray 属性复制</td><td>—</td><td>模拟端</td><td>所有人</td></tr>
+    <tr><td>Attributes</td><td>AttributeSet 子对象的属性复制</td><td colspan="3" style="text-align:center">与模式无关，由每个属性的 DOREPLIFETIME 条件决定</td></tr>
+    <tr><td>ActivatableAbilities（Spec 列表）</td><td>FastArray，条件为拥有者</td><td colspan="3" style="text-align:center">始终只发给拥有者</td></tr>
+    <tr><td>RepAnimMontageInfo</td><td>属性复制</td><td colspan="3" style="text-align:center">发给模拟端</td></tr>
+    <tr><td>技能激活 / 结束 / TargetData</td><td>Reliable RPC（Server ↔ 拥有者）</td><td colspan="3" style="text-align:center">与模式无关</td></tr>
+    <tr><td>Executed Cue</td><td>Unreliable 多播</td><td colspan="3" style="text-align:center">与模式无关</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">✅ 选择建议</span><ul>
+    <li><b>玩家：Mixed</b>（默认选择）。自己的 Buff 列表、剩余时间在 UI 上要显示完整信息，别人只需要知道状态和特效。</li>
+    <li><b>AI 小兵 / 野怪：Minimal</b>。没有任何客户端需要它们的 GE 细节。</li>
+    <li><b>Full</b>：只有在必须显示"其他玩家 Buff 的剩余时间"时才使用（例如 MOBA 中点击敌方英雄查看 Buff 倒计时），并且要做带宽分析。</li>
+  </ul></div>
+
+  <h2>11.3 FastArray：增量复制</h2>
+  <p>ActiveGE 列表和技能 Spec 列表都使用 <code>FFastArraySerializer</code>，只复制<strong>新增、修改、删除</strong>的元素，而不是每次复制整个数组。客户端通过元素上的回调感知变化：</p>
+  <div class="tbl"><table>
+    <tr><th>FastArray 回调</th><th>ActiveGE 在客户端上做的事</th></tr>
+    <tr><td><code>PostReplicatedAdd</code></td><td>把 Modifier 加入本地聚合器、添加 Granted Tag、触发 OnActive / WhileActive Cue（如果这个 GE 是自己预测过的，则跳过 OnActive）</td></tr>
+    <tr><td><code>PostReplicatedChange</code></td><td>层数、持续时间变化：重新计算、广播层数变化委托</td></tr>
+    <tr><td><code>PreReplicatedRemove</code></td><td>移除 Modifier 和 Tag、触发 Removed Cue</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">🔬 深入源码：客户端的 CurrentValue 是怎么算出来的</span><p>AttributeSet 复制下来的是整个 <code>FGameplayAttributeData</code>（Base 和 Current 都在里面）。<code>GAMEPLAYATTRIBUTE_REPNOTIFY</code> 宏会调用 <code>SetBaseAttributeValueFromReplication</code>：如果客户端上存在这个属性的聚合器（也就是本地知道有哪些 Modifier，包括预测中的），就<strong>用服务器的 Base 加上本地已知的 Modifier 重新计算 Current</strong>；否则直接使用复制下来的值。这就是拥有者客户端能"预测属性"的基础。</p></div>
+
+  <h2>11.4 时间：持续时间与冷却</h2>
+  <p>ActiveGE 复制时带有服务器上的开始时间。客户端计算剩余时间时，用的是 <strong>GameState 同步的服务器时间</strong>（<code>GetServerWorldTimeSeconds()</code>），因此不同客户端看到的倒计时大致一致。<code>GetActiveEffectsTimeRemainingAndDuration</code> 已经处理好了这一点，UI 直接使用即可，不要自己用本地时间去推算。</p>
+
+  <h2>11.5 RPC 的前提：NetOwner</h2>
+  <p>ASC 上所有的 Server RPC（<code>ServerTryActivateAbility</code>、<code>ServerSetReplicatedTargetData</code> 等）只有在客户端<strong>拥有</strong>这个 ASC 所在的 Actor 时才能发出。所以：</p>
+  <ul>
+    <li>玩家去攻击一个宝箱时，<strong>不能</strong>直接激活宝箱 ASC 上的技能（客户端不拥有宝箱）。应该在<strong>玩家自己的</strong> ASC 上激活"开宝箱"技能，由这个技能对宝箱施加效果。</li>
+    <li>AI 的 ASC 没有拥有者客户端，所有技能都由服务器激活。</li>
+  </ul>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>服务器有全部数据；拥有者有自己的技能和 GE；模拟端只有属性、最小化 Tag、Cue 和 Montage。</li>
+    <li>玩家用 Mixed，小兵用 Minimal，Full 要谨慎。</li>
+    <li>客户端的 Current = 服务器 Base + 本地已知的 Modifier（包括预测中的），这是属性预测的基础。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH12 ======================= -->
+<section class="chapter" id="ch12">
+  <div class="ch-head">
+    <div class="no">CHAPTER 12</div>
+    <h1>客户端预测：PredictionKey 全流程</h1>
+    <p class="lead">GAS 最有价值的部分。本章按时间顺序跟踪一次预测从生成、执行、确认到对账的过程，以及被拒绝时如何回滚。</p>
+  </div>
+
+  <h2>12.1 为什么需要预测</h2>
+  <p>没有预测时，玩家按下技能键，要等请求到达服务器、服务器执行完、结果回到客户端，才能看到反应，至少要经过一个 RTT（往返时间）。100ms 的延迟就足以让操作感觉"发黏"。预测的思路是：<strong>客户端先按自己的判断执行，同时告诉服务器；服务器执行后告诉客户端结果是否正确，客户端再按服务器结果对账。</strong></p>
+
+  <div class="lab">
+    <div class="t">🧪 交互实验：延迟对手感的影响</div>
+    <div class="row"><label>网络 RTT：<input type="range" id="lat_rtt" min="0" max="400" step="10" value="120"> <b id="lat_v">120</b> ms</label>
+      <label>服务器帧间隔：<input type="number" id="lat_tick" value="33" style="width:60px"> ms</label></div>
+    <div id="lat_svg"></div>
+  </div>
+  <script>
+  (function(){
+    const box=document.getElementById("lat_svg"), r=document.getElementById("lat_rtt"), t=document.getElementById("lat_tick"), v=document.getElementById("lat_v");
+    function bar(y,label,start,end,color,txt,scale){
+      return `<text x="10" y="${y+15}" style="font-size:12.5px;fill:#1F2937">${label}</text>`+
+        `<rect x="${200+start*scale}" y="${y}" width="${Math.max(3,(end-start)*scale)}" height="20" rx="4" fill="${color}" opacity=".9"/>`+
+        `<text x="${206+end*scale}" y="${y+15}" style="font-size:11.5px;fill:#4B5563">${txt}</text>`;
+    }
+    function draw(){
+      const rtt=+r.value, tick=+t.value||0; v.textContent=rtt;
+      const half=rtt/2, total=Math.max(rtt+tick+60,200), scale=520/total;
+      const noPred=rtt+tick, pred=16;
+      let s=`<svg viewBox="0 0 860 190" xmlns="http://www.w3.org/2000/svg" style="width:100%">`;
+      s+=`<line x1="200" y1="170" x2="${200+total*scale}" y2="170" stroke="#9CA3AF"/><text x="200" y="186" style="font-size:11px;fill:#6B7280">0 ms（按键）</text>`;
+      s+=bar(14,"无预测：看到技能反应",0,noPred,"#B91C1C",`${Math.round(noPred)} ms`,scale);
+      s+=bar(48,"预测：看到技能反应",0,pred,"#15803D",`≈ 1 帧（16 ms）`,scale);
+      s+=bar(82,"服务器开始执行",0,half+tick/2,"#2F5BD3",`≈ ${Math.round(half+tick/2)} ms`,scale);
+      s+=bar(116,"客户端收到确认",0,rtt+tick,"#6D28D9",`≈ ${Math.round(rtt+tick)} ms（这段时间内客户端处于"预测中"）`,scale);
+      s+=`</svg>`;
+      box.innerHTML=s;
+    }
+    r.addEventListener("input",draw); t.addEventListener("input",draw); draw();
+  })();
+  </script>
+
+  <h2>12.2 核心概念</h2>
+  <div class="cards">
+    <div class="card"><div class="t">FPredictionKey</div><p>一个由客户端生成的整数 ID。客户端在预测期间做的每一件事（施加 GE、加 Tag、播 Montage、触发 Cue）都会关联这个 Key。服务器执行同样的操作时使用<strong>同一个</strong> Key，客户端据此把"自己预测的"和"服务器发来的"对应起来。</p></div>
+    <div class="card"><div class="t">预测窗口（FScopedPredictionWindow）</div><p>一个 RAII 作用域。只有在窗口内，ASC 才有一个"当前有效的预测 Key"。技能激活时引擎会自动打开窗口；部分 Task 回调（WaitInputRelease、WaitTargetData 等）会打开新的窗口。</p></div>
+    <div class="card"><div class="t">确认（Confirm）与追平（CatchUp）</div><p>服务器处理完带 Key 的请求后，把 Key 写入 <code>ReplicatedPredictionKeyMap</code> 复制给客户端。客户端收到后触发 CaughtUp 委托：移除自己预测的副作用，以服务器复制下来的版本为准。</p></div>
+    <div class="card"><div class="t">拒绝（Reject）</div><p>服务器判断激活失败时，发送 <code>ClientActivateAbilityFailed</code>，客户端触发 Rejected 委托，撤销该 Key 关联的所有预测副作用。</p></div>
+  </div>
+  <div class="co net"><span class="h">🌐 Key 只对两端有意义</span><p><code>FPredictionKey</code> 的 NetSerialize 只会把真实的值发给<strong>生成它的那个客户端连接</strong>，发给其他客户端的是无效 Key。所以模拟端完全不知道预测的存在，它们只会看到服务器的最终结果。</p></div>
+
+  <h2>12.3 成功的预测：时序图</h2>
+  <figure>
+  <svg viewBox="0 0 860 540" xmlns="http://www.w3.org/2000/svg">
+    <rect x="80" y="10" width="240" height="36" rx="8" fill="#C2410C"/><text x="200" y="33" text-anchor="middle" class="b wt">拥有者客户端</text>
+    <rect x="540" y="10" width="240" height="36" rx="8" fill="#2F5BD3"/><text x="660" y="33" text-anchor="middle" class="b wt">服务器</text>
+    <line x1="200" y1="46" x2="200" y2="530" stroke="#E7B899" stroke-width="2" stroke-dasharray="6 4"/>
+    <line x1="660" y1="46" x2="660" y2="530" stroke="#A9BFF0" stroke-width="2" stroke-dasharray="6 4"/>
+
+    <rect x="50" y="62" width="300" height="30" rx="7" fill="#fff" stroke="#C2410C"/><text x="200" y="82" text-anchor="middle" class="sm">① 按下 Q → TryActivateAbility</text>
+    <rect x="50" y="100" width="300" height="30" rx="7" fill="#FFF4EC" stroke="#C2410C"/><text x="200" y="120" text-anchor="middle" class="sm">② 打开预测窗口，生成 <tspan class="b">Key = 7</tspan></text>
+    <rect x="50" y="176" width="300" height="30" rx="7" fill="#fff" stroke="#C2410C"/><text x="200" y="196" text-anchor="middle" class="sm">④ ActivateAbility（模式：Predicting）</text>
+    <rect x="50" y="214" width="300" height="44" rx="7" fill="#fff" stroke="#C2410C"/><text x="200" y="232" text-anchor="middle" class="sm">⑤ Commit：预测施加 Cost / CD GE</text><text x="200" y="250" text-anchor="middle" class="xs">均关联 Key 7 · 蓝量立即 100→70 · UI 进入冷却</text>
+    <rect x="50" y="266" width="300" height="30" rx="7" fill="#fff" stroke="#C2410C"/><text x="200" y="286" text-anchor="middle" class="sm">⑥ 播放 Montage · 预测触发 Cue</text>
+
+    <path d="M350 140 L540 232" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="362" y="170" width="156" height="32" rx="5" fill="#FFFFFF" stroke="#E5E7EB"/>
+    <text x="440" y="183" text-anchor="middle" class="xs b">③ ServerTryActivateAbility</text>
+    <text x="440" y="196" text-anchor="middle" class="xs">(Handle, Key 7) · Reliable</text>
+
+    <rect x="510" y="236" width="300" height="30" rx="7" fill="#EAF0FD" stroke="#2F5BD3"/><text x="660" y="256" text-anchor="middle" class="sm">⑦ 用<tspan class="b">客户端的 Key 7</tspan> 打开窗口</text>
+    <rect x="510" y="274" width="300" height="30" rx="7" fill="#fff" stroke="#2F5BD3"/><text x="660" y="294" text-anchor="middle" class="sm">⑧ CanActivate ✓ → ActivateAbility</text>
+    <rect x="510" y="312" width="300" height="44" rx="7" fill="#fff" stroke="#2F5BD3"/><text x="660" y="330" text-anchor="middle" class="sm">⑨ Commit：施加 Cost / CD GE</text><text x="660" y="348" text-anchor="middle" class="xs">ActiveGE 上记录 Key 7 · Base 100→70</text>
+    <rect x="510" y="364" width="300" height="30" rx="7" fill="#fff" stroke="#2F5BD3"/><text x="660" y="384" text-anchor="middle" class="sm">⑩ 窗口关闭：Key 7 写入 PredictionKeyMap</text>
+
+    <path d="M510 290 L350 372" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <rect x="362" y="316" width="156" height="30" rx="5" fill="#FFFFFF" stroke="#BFE6CC"/>
+    <text x="440" y="329" text-anchor="middle" class="xs" style="fill:#15803D">ClientActivateAbility</text>
+    <text x="440" y="341" text-anchor="middle" class="xs" style="fill:#15803D">Succeed(Key 7)</text>
+    <path d="M510 392 L350 452" stroke="#6D28D9" stroke-width="1.6" marker-end="url(#ap)"/>
+    <rect x="362" y="408" width="156" height="30" rx="5" fill="#FFFFFF" stroke="#DCCDFB"/>
+    <text x="440" y="421" text-anchor="middle" class="xs" style="fill:#6D28D9">属性复制 + ActiveGE(Key 7)</text>
+    <text x="440" y="433" text-anchor="middle" class="xs" style="fill:#6D28D9">+ PredictionKeyMap(7)</text>
+
+    <rect x="50" y="368" width="300" height="30" rx="7" fill="#EAF7EF" stroke="#15803D"/><text x="200" y="388" text-anchor="middle" class="sm">⑪ 技能标记为 Confirmed</text>
+    <rect x="50" y="446" width="300" height="70" rx="7" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="200" y="466" text-anchor="middle" class="sm b">⑫ Key 7 追平（CaughtUp）</text>
+    <text x="200" y="484" text-anchor="middle" class="xs">移除本地预测的 Cost / CD GE，改用服务器版本</text>
+    <text x="200" y="500" text-anchor="middle" class="xs">服务器的 ActiveGE 带 Key 7 → 不重复触发 OnActive Cue</text>
+
+    <path d="M30 62 L22 62 L22 296 L30 296" stroke="#15803D" stroke-width="1.5" fill="none"/>
+    <text x="16" y="180" text-anchor="middle" class="xs b" style="fill:#15803D" transform="rotate(-90 16 180)">玩家立即看到反馈</text>
+    <path d="M830 236 L838 236 L838 394 L830 394" stroke="#2F5BD3" stroke-width="1.5" fill="none"/>
+    <text x="848" y="315" text-anchor="middle" class="xs b" style="fill:#2F5BD3" transform="rotate(90 848 315)">权威执行</text>
+  </svg>
+  <figcaption><b>图 12-1</b> 一次成功的本地预测：客户端第 ②–⑥ 步不需要等待网络，第 ⑫ 步用服务器的结果替换预测结果</figcaption>
+  </figure>
+  <div class="co deep"><span class="h">🔬 深入源码：关键函数</span><p>客户端：<code>InternalTryActivateAbility</code> 中创建 <code>FScopedPredictionWindow(this, true)</code> 生成新 Key，先调用 <code>CallServerTryActivateAbility</code>，再调用 <code>CallActivateAbility</code>；服务器：<code>ServerTryActivateAbility_Implementation → InternalServerTryActivateAbility</code>，用收到的 Key 构造 <code>FScopedPredictionWindow(this, PredictionKey)</code>，窗口析构时把 Key 写入 <code>ReplicatedPredictionKeyMap</code>。<code>GameplayPrediction.h</code> 文件头部有 Epic 写的长篇设计说明，<strong>强烈建议通读一遍</strong>。</p></div>
+
+  <h2>12.4 对账：蓝量为什么不会扣两次</h2>
+  <p>这是理解预测最好的例子。Cost GE 是 Instant，会修改 Base；但客户端预测的修改必须是<strong>可以撤销的</strong>。GAS 的做法是：<strong>客户端预测的 Instant GE 会被当作 Infinite GE 处理</strong>，它不修改 Base，而是作为一个 Modifier 挂在聚合器上。</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <line x1="140" y1="260" x2="840" y2="260" stroke="#9CA3AF"/>
+    <g class="xs"><text x="160" y="278" text-anchor="middle" class="xs">按键 t=0</text><text x="420" y="278" text-anchor="middle" class="xs">服务器扣蓝（RTT/2）</text><text x="680" y="278" text-anchor="middle" class="xs">复制到达（RTT）</text></g>
+    <line x1="160" y1="30" x2="160" y2="260" stroke="#E5E7EB"/><line x1="420" y1="30" x2="420" y2="260" stroke="#E5E7EB"/><line x1="680" y1="30" x2="680" y2="260" stroke="#E5E7EB"/>
+    <!-- server -->
+    <text x="20" y="56" class="sm b" style="fill:#2F5BD3">服务器</text>
+    <path d="M160 50 L420 50 L420 80 L840 80" stroke="#2F5BD3" stroke-width="3" fill="none"/>
+    <text x="290" y="44" text-anchor="middle" class="xs">Base 100</text><text x="630" y="74" text-anchor="middle" class="xs">Base 70</text>
+    <!-- client predicted -->
+    <text x="20" y="126" class="sm b" style="fill:#15803D">客户端（GAS）</text>
+    <path d="M150 120 L160 120 L160 150 L840 150" stroke="#15803D" stroke-width="3" fill="none"/>
+    <text x="300" y="142" text-anchor="middle" class="xs">Current 70 = Base 100 + 预测 Mod(−30)</text>
+    <text x="760" y="142" text-anchor="middle" class="xs">Current 70 = Base 70</text>
+    <circle cx="680" cy="150" r="5" fill="#15803D"/>
+    <text x="680" y="172" text-anchor="middle" class="xs" style="fill:#15803D">Base←70，同时 Key 追平移除预测 Mod</text>
+    <!-- naive -->
+    <text x="20" y="206" class="sm b" style="fill:#B91C1C">错误做法</text>
+    <text x="20" y="222" class="xs">两端各自 Mana−=30</text>
+    <path d="M150 196 L160 196 L160 226 L680 226" stroke="#B91C1C" stroke-width="3" fill="none"/>
+    <path d="M680 226 L680 196 L840 196" stroke="#B91C1C" stroke-width="3" fill="none" stroke-dasharray="5 3"/>
+    <text x="420" y="246" text-anchor="middle" class="xs" style="fill:#B91C1C">本地已扣成 70，复制到达时又被覆盖或重复计算 → 闪烁、不同步</text>
+    <text x="40" y="20" class="xs">蓝量（纵向：值越低越靠下）</text>
+  </svg>
+  <figcaption><b>图 12-2</b> 预测蓝量：客户端的预测 Modifier 挂在 Base 之上，确认后由服务器的 Base 替换，整个过程数值始终是 70</figcaption>
+  </figure>
+  <div class="co warn"><span class="h">⚠️ 这就是 REPNOTIFY_Always 的原因</span><p>由于有预测，客户端本地的属性值<strong>可能已经等于</strong>服务器复制下来的值。默认的复制规则是"值没变就不触发 OnRep"，这样 <code>GAMEPLAYATTRIBUTE_REPNOTIFY</code> 就不会执行，聚合器中的 Base 得不到更新。之后预测的 Modifier 被移除时，Current 会按旧的 Base 计算，结果就错了。<code>REPNOTIFY_Always</code> 保证每次复制都会把服务器的 Base 写入聚合器。</p></div>
+
+  <h2>12.5 被拒绝的预测：回滚</h2>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <rect x="80" y="10" width="240" height="34" rx="8" fill="#C2410C"/><text x="200" y="32" text-anchor="middle" class="b wt">拥有者客户端</text>
+    <rect x="540" y="10" width="240" height="34" rx="8" fill="#2F5BD3"/><text x="660" y="32" text-anchor="middle" class="b wt">服务器</text>
+    <line x1="200" y1="44" x2="200" y2="320" stroke="#E7B899" stroke-width="2" stroke-dasharray="6 4"/>
+    <line x1="660" y1="44" x2="660" y2="320" stroke="#A9BFF0" stroke-width="2" stroke-dasharray="6 4"/>
+    <rect x="50" y="60" width="300" height="44" rx="7" fill="#FFF4EC" stroke="#C2410C"/><text x="200" y="78" text-anchor="middle" class="sm">预测激活（Key 8）：扣蓝、进冷却</text><text x="200" y="96" text-anchor="middle" class="xs">播放 Montage、开始循环 Cue</text>
+    <path d="M350 90 L540 150" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="370" y="104" width="150" height="20" rx="5" fill="#FFFFFF" stroke="#E5E7EB"/>
+    <text x="445" y="118" text-anchor="middle" class="xs">ServerTryActivateAbility(Key 8)</text>
+    <rect x="510" y="150" width="300" height="52" rx="7" fill="#FDEEEE" stroke="#B91C1C"/><text x="660" y="170" text-anchor="middle" class="sm b" style="fill:#B91C1C">CanActivate ✗</text><text x="660" y="190" text-anchor="middle" class="xs">服务器上角色已被眩晕（客户端还不知道）</text>
+    <path d="M510 196 L350 250" stroke="#B91C1C" stroke-width="1.6" marker-end="url(#ar)"/>
+    <rect x="372" y="208" width="140" height="30" rx="5" fill="#FFFFFF" stroke="#F5C7C7"/>
+    <text x="442" y="221" text-anchor="middle" class="xs" style="fill:#B91C1C">ClientActivateAbility</text>
+    <text x="442" y="233" text-anchor="middle" class="xs" style="fill:#B91C1C">Failed(Key 8)</text>
+    <rect x="30" y="242" width="320" height="80" rx="7" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="190" y="261" text-anchor="middle" class="sm b" style="fill:#B91C1C">Key 8 的 Rejected 委托触发</text>
+    <text x="190" y="279" text-anchor="middle" class="xs">移除预测的 GE → 蓝量回到 100，冷却消失</text>
+    <text x="190" y="295" text-anchor="middle" class="xs">停止预测的 Montage · 循环 Cue 触发 Removed</text>
+    <text x="190" y="311" text-anchor="middle" class="xs">本地技能 EndAbility</text>
+  </svg>
+  <figcaption><b>图 12-3</b> 预测被拒绝：与 Key 8 关联的副作用被整体撤销</figcaption>
+  </figure>
+  <div class="co tip"><span class="h">✅ 实践建议：让回滚不那么突兀</span><p>回滚在玩家看来是"技能放了一半就消失了"。减少回滚的办法是<strong>让客户端的判断尽量准确</strong>：控制效果的 Tag 要尽快同步（调高 NetUpdateFrequency），冷却 UI 留一点容差，激活条件尽量依赖拥有者本地就能得到的数据。完全消除回滚是不可能的，这是预测的固有代价。</p></div>
+
+  <h2>12.6 依赖 Key 与新的预测窗口</h2>
+  <p>一个技能在运行过程中，可能需要<strong>再次</strong>预测：例如"按住蓄力、松手发射"，松手时要预测发射。这时 <code>WaitInputRelease</code> 在客户端的回调中打开一个新的预测窗口，生成一个<strong>依赖于原始 Key 的新 Key</strong>（<code>FPredictionKey</code> 中的 Base 字段指向原始 Key），并通过 <code>ServerSetReplicatedEvent</code> 把松手事件和新 Key 一起发给服务器。如果原始 Key 被拒绝，依赖它的 Key 也会一起被拒绝。</p>
+  <div class="co warn"><span class="h">⚠️ 坑点：在预测窗口之外施加 GE</span><p>在技能中通过 <code>SetTimer</code>、普通委托或者自己写的异步回调去施加 GE，这时已经<strong>不在任何预测窗口内</strong>。客户端调用 <code>ApplyGameplayEffectSpecToSelf</code> 时会因为没有有效 Key 而<strong>被直接忽略</strong>（<code>HasNetworkAuthorityToApplyGameplayEffect</code> 返回 false）；服务器正常施加。结果是"客户端没有预测，要等复制"。需要预测的操作，请放在 <code>ActivateAbility</code> 的同步代码中，或者放在会打开预测窗口的 Task 回调中。</p></div>
+
+  <h2>12.7 能预测什么、不能预测什么</h2>
+  <div class="tbl"><table>
+    <tr><th>能预测 ✅</th><th>不能预测 ❌</th></tr>
+    <tr><td>
+      • 技能激活（包括由事件触发的激活）<br>
+      • GE 施加：属性修改、Tag 授予<br>
+      • Cost / Cooldown（在窗口内 Commit 时）<br>
+      • GameplayCue（随 GE 或单独触发）<br>
+      • Montage 播放<br>
+      • 移动（由 CharacterMovement 自身的预测系统负责，包括 RootMotion Task）
+    </td><td>
+      • <b>GE 的移除</b><br>
+      • <b>Periodic GE 的周期跳动</b>（DOT 每秒掉血）<br>
+      • <b>Execution 计算</b>（伤害公式只在服务器运行）<br>
+      • 在窗口外执行的任何操作<br>
+      • 对其他 Actor 的伤害结算（应以服务器为准）<br>
+      • 投射物的生成（需要额外实现"假弹道"等方案）
+    </td></tr>
+  </table></div>
+
+  <h2>12.8 在代码中区分执行端</h2>
+<!--code:cpp:技能中常用的执行端判断-->
+// 是否在服务器上（权威）
+if (HasAuthority(&CurrentActivationInfo)) { /* 生成投射物、施加伤害、随机数 */ }
+
+// 是否是"正在预测"的客户端（服务器确认前）
+if (IsPredictingClient()) { /* 只做本地表现 */ }
+
+// 是否本地控制（Listen Server 主机玩家也返回 true）
+if (IsLocallyControlled()) { /* 摄像机抖动、准星动画、本地 UI */ }
+
+// 当前激活模式：Authority / NonAuthority / Predicting / Confirmed / Rejected
+switch (GetCurrentActivationInfo().ActivationMode) { /* ... */ }
+<!--/code-->
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>客户端在预测窗口中生成 Key，所有副作用都关联到这个 Key；服务器用同一个 Key 执行。</li>
+    <li>成功时：确认 → Key 追平 → 用服务器复制的数据替换预测的数据。失败时：Rejected 委托撤销所有副作用。</li>
+    <li>预测的 Instant GE 在客户端被当作 Infinite 处理，所以可以撤销；这也是属性要使用 REPNOTIFY_Always 的原因。</li>
+    <li>GE 移除、Periodic tick、Execution 都不能预测；在预测窗口外施加的 GE 在客户端会被忽略。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH13 ======================= -->
+<section class="chapter" id="ch13">
+  <div class="ch-head">
+    <div class="no">CHAPTER 13</div>
+    <h1>网络专题：十个常见问题</h1>
+    <p class="lead">每个专题都对应实际项目中经常出现的一类网络问题，给出原因和解决方法。</p>
+  </div>
+
+  <h2>13.1 专题一：冷却预测与 UI 抖动</h2>
+  <p><b>现象</b>：冷却圈在技能释放约 0.1 秒后"跳"了一下；或者冷却刚转完就按键，技能放出来又被撤回。</p>
+  <p><b>原因</b>：客户端比服务器早 RTT/2 开始冷却。Key 追平时，预测的冷却 GE 被移除，改用服务器的版本，而服务器版本的开始时间更晚，剩余时间就会变长一点。同理，客户端的冷却也会比服务器早结束，玩家这时按键，服务器上冷却还没结束，于是拒绝了这次激活。</p>
+  <p><b>对策</b>：</p>
+  <ul>
+    <li>UI 统一用 <code>GetActiveEffectsTimeRemainingAndDuration</code> 读取剩余时间（它基于服务器时间），并对显示值做平滑处理，不要直接显示突变。</li>
+    <li>冷却结束前一小段时间内（例如 RTT/2）的按键先<strong>缓存</strong>，冷却结束后再激活，即"输入缓冲"。这也是动作游戏常用的手法。</li>
+    <li>对于时长很短、要求高频释放的技能（例如普攻），可以在服务器上留一点容差：服务器上冷却剩余时间小于某个阈值时，仍然允许激活。</li>
+  </ul>
+
+  <h2>13.2 专题二：Montage 是怎么同步的</h2>
+  <figure>
+  <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="30" width="240" height="80" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="140" y="54" text-anchor="middle" class="sm b">拥有者：PlayMontage</text><text x="140" y="74" text-anchor="middle" class="xs">本地立即播放（关联预测 Key）</text><text x="140" y="92" text-anchor="middle" class="xs">被拒绝时自动停止</text>
+    <rect x="310" y="30" width="240" height="80" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="430" y="54" text-anchor="middle" class="sm b">服务器：PlayMontage</text><text x="430" y="74" text-anchor="middle" class="xs">写入 RepAnimMontageInfo</text><text x="430" y="92" text-anchor="middle" class="xs">（Montage、播放位置、速率、Section 等）</text>
+    <rect x="600" y="30" width="240" height="80" rx="10" fill="#F3F4F6" stroke="#6B7280"/><text x="720" y="54" text-anchor="middle" class="sm b">模拟端：OnRep</text><text x="720" y="74" text-anchor="middle" class="xs">OnRep_ReplicatedAnimMontage</text><text x="720" y="92" text-anchor="middle" class="xs">播放 / 跳转 / 停止</text>
+    <path d="M550 70 L598 70" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/>
+    <path d="M260 70 L308 70" stroke="#4B5563" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#a)"/>
+    <text x="284" y="62" text-anchor="middle" class="xs">RPC</text>
+    <rect x="20" y="130" width="820" height="66" rx="10" fill="#FDEEEE" stroke="#F5C7C7"/>
+    <text x="36" y="154" class="sm b" style="fill:#B91C1C">⚠️ 专用服务器上 AnimNotify 不触发</text>
+    <text x="36" y="176" class="sm">专用服务器不渲染，骨骼网格默认可能不 Tick 动画，Montage 中的 AnimNotify（例如"出手帧"事件）就不会触发，WaitGameplayEvent 一直等不到。</text>
+    <text x="36" y="192" class="xs">解决：网格 VisibilityBasedAnimTickOption 设为 AlwaysTickPose（或 …AndRefreshBones），或让服务器改用定时器触发出手</text>
+  </svg>
+  <figcaption><b>图 13-1</b> Montage 的三端同步路径，以及一个只在专用服务器上出现的问题</figcaption>
+  </figure>
+  <div class="co tip"><span class="h">✅ 实践建议</span><p>在技能中播放动画，请始终使用 <code>PlayMontageAndWait</code>（底层是 <code>ASC::PlayMontage</code>），<strong>不要</strong>直接调用 <code>AnimInstance::Montage_Play</code>。后者既不会同步给模拟端，被拒绝时也不会回滚。</p></div>
+
+  <h2>13.3 专题三：位移技能与移动预测</h2>
+  <p><b>现象</b>：冲刺技能在高延迟下"拉回"，或者模拟端看到的冲刺轨迹不对。</p>
+  <p><b>原因</b>：GAS 的预测<strong>不包括</strong>移动。角色移动由 <code>CharacterMovementComponent</code>（CMC）自己的预测系统负责（SavedMoves + 服务器校正）。在技能中直接调用 <code>SetActorLocation</code> 或 <code>LaunchCharacter</code>，CMC 不知道这次位移，服务器校正时就会把角色拉回去。</p>
+  <div class="tbl"><table>
+    <tr><th>做法</th><th>是否可预测</th><th>说明</th></tr>
+    <tr><td><code>ApplyRootMotionConstantForce</code> / <code>MoveToForce</code> 等 Task</td><td class="yes">是</td><td>创建 RootMotionSource，交给 CMC 预测和同步，推荐</td></tr>
+    <tr><td>带 RootMotion 的 Montage</td><td class="yes">是</td><td>CMC 原生支持 Montage RootMotion 的预测</td></tr>
+    <tr><td>修改 MoveSpeed 属性（加速 Buff）</td><td class="mid">部分</td><td>CMC 的 <code>GetMaxSpeed</code> 读取属性时，属性变化不在 SavedMove 中，高延迟下会出现轻微校正。要求严格时，应该扩展 CMC 的 SavedMove 标志位</td></tr>
+    <tr><td><code>SetActorLocation</code> / <code>LaunchCharacter</code></td><td class="no">否</td><td>只在服务器调用时会表现为延迟和拉扯</td></tr>
+  </table></div>
+
+  <h2>13.4 专题四：TargetData 的同步与校验</h2>
+  <figure>
+  <svg viewBox="0 0 860 230" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="30" width="190" height="70" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="115" y="56" text-anchor="middle" class="sm b">客户端：本地射线检测</text><text x="115" y="76" text-anchor="middle" class="xs">打包成 TargetDataHandle</text><text x="115" y="92" text-anchor="middle" class="xs">本地先播命中特效（预测）</text>
+    <rect x="240" y="30" width="190" height="70" rx="10" fill="#fff" stroke="#C2410C"/><text x="335" y="56" text-anchor="middle" class="sm b">CallServerSetReplicated</text><text x="335" y="72" text-anchor="middle" class="sm b">TargetData</text><text x="335" y="92" text-anchor="middle" class="xs">Reliable RPC，带预测 Key</text>
+    <rect x="460" y="30" width="190" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="555" y="56" text-anchor="middle" class="sm b">服务器：缓存数据</text><text x="555" y="76" text-anchor="middle" class="xs">AbilityTargetDataSetDelegate</text><text x="555" y="92" text-anchor="middle" class="xs">(Handle, Key) 广播</text>
+    <rect x="680" y="30" width="160" height="70" rx="10" fill="#2F5BD3"/><text x="760" y="56" text-anchor="middle" class="sm b wt">校验 → 结算</text><text x="760" y="76" text-anchor="middle" class="xs" style="fill:#DCE6FF">距离 / 视线 / 频率</text><text x="760" y="92" text-anchor="middle" class="xs" style="fill:#DCE6FF">通过才施加伤害 GE</text>
+    <g stroke="#4B5563" stroke-width="1.5"><line x1="210" y1="65" x2="238" y2="65" marker-end="url(#a)"/><line x1="430" y1="65" x2="458" y2="65" marker-end="url(#a)"/><line x1="650" y1="65" x2="678" y2="65" marker-end="url(#a)"/></g>
+    <rect x="20" y="124" width="820" height="90" rx="10" fill="#F3EEFE" stroke="#DCCDFB"/>
+    <text x="36" y="148" class="sm b" style="fill:#6D28D9">数据先到还是技能先激活？两种顺序都要处理</text>
+    <text x="36" y="170" class="sm">• 服务器上先绑定委托，然后调用 <tspan class="mono">CallReplicatedTargetDataDelegatesIfSet(Handle, Key)</tspan>：如果数据已经到达，会立即触发回调。</text>
+    <text x="36" y="190" class="sm">• 还没到就调用 <tspan class="mono">SetWaitingOnRemotePlayerData()</tspan> 继续等待；处理完后调用 <tspan class="mono">ConsumeClientReplicatedTargetData</tspan> 清理缓存。</text>
+    <text x="36" y="206" class="xs">WaitTargetData 内部已经实现了以上逻辑；自己实现射击流程（Lyra 方式）时需要手动处理。</text>
+  </svg>
+  <figcaption><b>图 13-2</b> TargetData：客户端负责"瞄准"，服务器负责"校验和结算"</figcaption>
+  </figure>
+<!--code:cpp:服务器端接收客户端 TargetData（Lyra 风格简化版）-->
+void UGA_Fire::ActivateAbility(...)
+{
+    UAbilitySystemComponent* ASC = CurrentActorInfo->AbilitySystemComponent.Get();
+    if (HasAuthority(&CurrentActivationInfo) && !IsLocallyControlled())
+    {
+        // 服务器（且不是 Listen 主机自己）：等待客户端的 TargetData
+        OnTargetDataReadyHandle = ASC->AbilityTargetDataSetDelegate(CurrentSpecHandle, CurrentActivationInfo.GetActivationPredictionKey())
+                                     .AddUObject(this, &ThisClass::OnTargetDataReady);
+        ASC->CallReplicatedTargetDataDelegatesIfSet(CurrentSpecHandle, CurrentActivationInfo.GetActivationPredictionKey());
+    }
+    else if (IsLocallyControlled())
+    {
+        FGameplayAbilityTargetDataHandle Data = TraceAndBuildTargetData();   // 本地射线检测
+        FScopedPredictionWindow Window(ASC, IsPredictingClient());
+        if (IsPredictingClient())
+        {
+            ASC->CallServerSetReplicatedTargetData(CurrentSpecHandle, CurrentActivationInfo.GetActivationPredictionKey(),
+                                                   Data, FGameplayTag(), ASC->ScopedPredictionKey);
+        }
+        OnTargetDataReady(Data, FGameplayTag());   // 本地也执行一次：客户端只做表现，服务器（Listen 主机）做结算
+    }
+}
+
+void UGA_Fire::OnTargetDataReady(const FGameplayAbilityTargetDataHandle& Data, FGameplayTag Tag)
+{
+    UAbilitySystemComponent* ASC = CurrentActorInfo->AbilitySystemComponent.Get();
+    if (HasAuthority(&CurrentActivationInfo))
+    {
+        if (ValidateHits(Data))                    // ★ 反作弊：不要盲目相信客户端
+        {
+            ApplyGameplayEffectToTarget(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, Data, DamageGE, GetAbilityLevel());
+        }
+        ASC->ConsumeClientReplicatedTargetData(CurrentSpecHandle, CurrentActivationInfo.GetActivationPredictionKey());
+    }
+    PlayLocalHitEffects(Data);                     // 本地表现（非复制 Cue）
+}
+<!--/code-->
+
+  <h2>13.5 专题五：RPC 批处理</h2>
+  <p>一个"点一下就打完"的射击技能，正常要发三个 RPC：激活、TargetData、结束。连发武器每秒十几发时，开销很可观。GAS 提供了 <strong>RPC 批处理</strong>，把这些合并成一个 <code>ServerAbilityRPCBatch</code>：</p>
+<!--code:cpp:开启批处理-->
+// 1) 自定义 ASC 中开启
+virtual bool ShouldDoServerAbilityRPCBatch() const override { return true; }
+
+// 2) 在激活技能的地方开启批处理作用域
+{
+    FScopedServerAbilityRPCBatcher Batcher(ASC, AbilitySpecHandle);
+    ASC->TryActivateAbility(AbilitySpecHandle);   // 技能内部同步完成：发送 TargetData + EndAbility
+}   // 作用域结束时，三个 RPC 合并成一个发出
+<!--/code-->
+  <div class="co warn"><span class="h">⚠️ 适用前提</span><p>批处理只在技能<strong>在同一帧内同步完成</strong>（激活 → TargetData → 结束）时才有意义。需要等待动画或输入的技能，没法合并。</p></div>
+
+  <h2>13.6 专题六：GameplayEvent 不会自动同步</h2>
+  <p><b>现象</b>：客户端发送了 <code>SendGameplayEventToActor</code>，服务器上的 <code>WaitGameplayEvent</code> 一直收不到。</p>
+  <p><b>原因</b>：GameplayEvent 只是<strong>本地函数调用</strong>，本身不会走网络。唯一的例外是：事件<strong>触发了</strong>一个本地预测技能的激活，这时 Payload 会随 <code>ServerTryActivateAbilityWithEventData</code> 一起发给服务器。</p>
+  <p><b>对策</b>：需要两端都收到的事件，应该让两端<strong>各自产生</strong>（例如来自两端都会播放的 Montage 中的 AnimNotify，注意 13.2 中提到的专用服务器问题）；或者使用 <code>ServerSetReplicatedEvent</code> / 自定义的 Reliable RPC 传递。</p>
+
+  <h2>13.7 专题七：WaitNetSync</h2>
+  <p>有时需要保证两端执行到同一位置后再继续，例如"客户端决定了某个值，服务器必须先收到这个值再继续执行"。<code>WaitNetSync</code> 有三种模式：</p>
+  <div class="tbl"><table>
+    <tr><th>模式</th><th>行为</th></tr>
+    <tr><td>OnlyServerWait</td><td>客户端发出信号后立即继续（打开新的预测窗口）；服务器等待收到信号后再继续</td></tr>
+    <tr><td>OnlyClientWait</td><td>服务器发出信号后继续；客户端等待</td></tr>
+    <tr><td>BothWait</td><td>两端互相等待（会产生一个完整 RTT 的停顿）</td></tr>
+  </table></div>
+  <p>官方建议：GA 中不要使用 Replicated 属性传值（5.5 已废弃），因为属性复制和激活 RPC 之间没有顺序保证。同一 Actor 上的 <strong>Reliable RPC 之间是有序的</strong>，用 RPC + WaitNetSync 才能得到可靠的时序。</p>
+
+  <h2>13.8 专题八：命中特效的预测</h2>
+  <p>伤害结算在服务器，但射击游戏的命中火花必须<strong>立即</strong>出现。常见做法是：客户端根据本地射线检测的结果，用<strong>非复制的本地 Cue</strong> 播放命中效果；服务器结算后，模拟端通过服务器的 Cue 看到同样的效果，拥有者则跳过（避免重复）。伤害数字等依赖结算结果的表现，等服务器结果到达后再显示。</p>
+
+  <h2>13.9 专题九：安全与反作弊</h2>
+  <div class="cards">
+    <div class="card"><div class="t">服务器会重新检查</div><p>即使是 LocalPredicted 技能，服务器收到激活请求后也会重新执行 <code>CanActivateAbility</code>（冷却、消耗、Tag）。客户端改内存跳过冷却，服务器仍会拒绝。</p></div>
+    <div class="card"><div class="t">敏感技能由服务器激活</div><p>使用 <code>NetSecurityPolicy = ServerOnlyExecution</code>，或者 <code>NetExecutionPolicy = ServerOnly / ServerInitiated</code>，客户端无法请求激活。</p></div>
+    <div class="card"><div class="t">校验 TargetData</div><p>客户端发来的命中目标必须校验：距离、视线、射速、目标是否存活。数值计算全部放在服务器的 Execution 中。</p></div>
+    <div class="card"><div class="t">事件 Payload 不可信</div><p>由客户端事件激活的技能，Payload 来自客户端。不要直接把 Payload 中的数值（例如 EventMagnitude）当作伤害使用。</p></div>
+  </div>
+
+  <h2>13.10 专题十：带宽、相关性与测试</h2>
+  <ul>
+    <li><b>PlayerState 始终相关</b>：PlayerState 默认 <code>bAlwaysRelevant</code>，ASC 放在 PlayerState 上时，属性和 Cue 会同步给<strong>所有</strong>客户端，与距离无关。玩家很多的模式（例如大逃杀）需要评估这部分带宽：把只有自己需要的属性设为 <code>COND_OwnerOnly</code>，或者让部分逻辑走 Pawn 上的数据。</li>
+    <li><b>属性复制条件</b>：蓝量、能量、经验等只需要自己看到的属性使用 <code>COND_OwnerOnly</code>。</li>
+    <li><b>小兵使用 Minimal 模式</b>，并且尽量少挂常驻 GE；可以用 Tag 表示的状态就不要用 GE。</li>
+    <li><b>Iris</b>：UE5 新的复制系统 Iris 已经对 GAS 做了适配，新项目可以评估，但请以所用引擎版本的实际支持情况为准。</li>
+    <li><b>测试</b>：PIE 中选择 <em>Play As Client</em>，并开启 <em>Network Emulation</em>（Bad 预设），或者在控制台输入 <code>Net PktLag=150</code>、<code>Net PktLoss=5</code>。<code>p.NetShowCorrections 1</code> 可以显示移动校正。<strong>所有技能都应该在 150ms 延迟、5% 丢包的环境下测试一遍。</strong></li>
+  </ul>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>冷却：客户端比服务器早开始、早结束，用服务器时间显示，配合输入缓冲。</li>
+    <li>动画用 PlayMontageAndWait；位移用 RootMotion Task；专用服务器要确保动画 Tick。</li>
+    <li>TargetData：客户端瞄准，服务器校验后结算；GameplayEvent 本身不同步。</li>
+    <li>上线前，所有技能都要在高延迟、丢包的模拟环境下测试。</li>
+  </ul></div>
+</section>

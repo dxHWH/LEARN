@@ -1,0 +1,394 @@
+<!-- ======================= CH6 ======================= -->
+<section class="chapter" id="ch6">
+  <div class="ch-head">
+    <div class="no">CHAPTER 06</div>
+    <h1>GameplayEffect（上）：时长、修饰器与聚合公式</h1>
+    <p class="lead">GE 是 GAS 中"改变世界"的唯一正规途径。本章讲 GE 的结构，以及多个 Modifier 叠加时的计算方式。</p>
+  </div>
+
+  <h2>6.1 GE 的结构</h2>
+  <p>GE 是一个<strong>纯数据</strong>类：一般在蓝图中继承 <code>UGameplayEffect</code> 并配置字段，<strong>不写逻辑</strong>。需要逻辑的部分（复杂公式、条件判断）通过插件类挂进来，例如 MMC、Execution 和 GEComponent。</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <rect x="250" y="20" width="360" height="262" rx="14" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="430" y="46" text-anchor="middle" class="b" style="fill:#C2410C">UGameplayEffect（数据资产）</text>
+    <g>
+      <rect x="270" y="60" width="320" height="32" rx="7" fill="#fff" stroke="#E7B899"/><text x="285" y="81" class="sm"><tspan class="b">Duration</tspan>：Instant / HasDuration / Infinite + Period</text>
+      <rect x="270" y="98" width="320" height="32" rx="7" fill="#fff" stroke="#E7B899"/><text x="285" y="119" class="sm"><tspan class="b">Modifiers[]</tspan>：改哪个属性 · 怎么改 · 改多少</text>
+      <rect x="270" y="136" width="320" height="32" rx="7" fill="#fff" stroke="#E7B899"/><text x="285" y="157" class="sm"><tspan class="b">Executions[]</tspan>：自定义计算（伤害公式）</text>
+      <rect x="270" y="174" width="320" height="32" rx="7" fill="#fff" stroke="#E7B899"/><text x="285" y="195" class="sm"><tspan class="b">GEComponents[]</tspan>（5.3+）：Tag、免疫、授予技能…</text>
+      <rect x="270" y="212" width="320" height="32" rx="7" fill="#fff" stroke="#E7B899"/><text x="285" y="233" class="sm"><tspan class="b">Stacking</tspan>：叠层规则</text>
+      <rect x="270" y="250" width="320" height="24" rx="7" fill="#fff" stroke="#E7B899"/><text x="285" y="267" class="sm"><tspan class="b">GameplayCues[]</tspan>：触发哪些表现</text>
+    </g>
+    <g class="sm">
+      <rect x="20" y="96" width="190" height="40" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="115" y="114" text-anchor="middle" class="sm b">MMC</text><text x="115" y="129" text-anchor="middle" class="xs">单个 Modifier 的数值计算</text>
+      <rect x="20" y="146" width="190" height="40" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="115" y="164" text-anchor="middle" class="sm b">ExecutionCalculation</text><text x="115" y="179" text-anchor="middle" class="xs">多属性输入 / 多输出</text>
+      <line x1="210" y1="116" x2="268" y2="114" stroke="#6D28D9" stroke-width="1.3" marker-end="url(#ap)"/>
+      <line x1="210" y1="166" x2="268" y2="152" stroke="#6D28D9" stroke-width="1.3" marker-end="url(#ap)"/>
+      <rect x="650" y="96" width="190" height="40" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="745" y="114" text-anchor="middle" class="sm b">FGameplayEffectSpec</text><text x="745" y="129" text-anchor="middle" class="xs">运行时实例：等级 + 来源</text>
+      <rect x="650" y="146" width="190" height="40" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="745" y="164" text-anchor="middle" class="sm b">FActiveGameplayEffect</text><text x="745" y="179" text-anchor="middle" class="xs">持续型 GE 在目标上的存活体</text>
+      <line x1="610" y1="114" x2="648" y2="114" stroke="#2F5BD3" stroke-width="1.3" marker-end="url(#ab)"/>
+      <line x1="745" y1="136" x2="745" y2="144" stroke="#15803D" stroke-width="1.3" marker-end="url(#ag)"/>
+    </g>
+  </svg>
+  <figcaption><b>图 6-1</b> GE 的结构：左侧是可插入的计算类，右侧是它在运行时的两种形态</figcaption>
+  </figure>
+
+  <h2>6.2 三种时长策略</h2>
+  <figure>
+  <svg viewBox="0 0 860 270" xmlns="http://www.w3.org/2000/svg">
+    <line x1="140" y1="250" x2="840" y2="250" stroke="#9CA3AF"/><text x="840" y="266" text-anchor="end" class="xs">时间 →</text>
+    <line x1="200" y1="30" x2="200" y2="250" stroke="#CBD5E1" stroke-dasharray="4 4"/><text x="200" y="266" text-anchor="middle" class="xs">施加</text>
+    <text x="20" y="56" class="b">Instant</text><text x="20" y="72" class="xs">瞬时</text>
+    <circle cx="200" cy="58" r="8" fill="#C2410C"/><text x="220" y="62" class="sm">执行一次，修改 <tspan class="b">Base</tspan>，不留存活体（伤害、治疗、消耗）</text>
+    <text x="20" y="112" class="b">HasDuration</text><text x="20" y="128" class="xs">有限时长</text>
+    <rect x="200" y="100" width="380" height="20" rx="5" fill="#EAF0FD" stroke="#2F5BD3"/><text x="390" y="115" text-anchor="middle" class="xs" style="fill:#2F5BD3">Modifier 生效中（修改 Current）</text>
+    <text x="590" y="115" class="sm">到期自动移除 · 加速 Buff、冷却</text>
+    <text x="20" y="168" class="b">Infinite</text><text x="20" y="184" class="xs">永久</text>
+    <rect x="200" y="156" width="560" height="20" rx="5" fill="#EAF7EF" stroke="#15803D"/><text x="480" y="171" text-anchor="middle" class="xs" style="fill:#15803D">一直生效，直到被主动移除 · 装备、光环、被动</text>
+    <text x="20" y="220" class="b">+ Period</text><text x="20" y="236" class="xs">周期</text>
+    <rect x="200" y="212" width="400" height="20" rx="5" fill="#FDEEEE" stroke="#B91C1C"/>
+    <g fill="#B91C1C"><circle cx="200" cy="222" r="6"/><circle cx="300" cy="222" r="6"/><circle cx="400" cy="222" r="6"/><circle cx="500" cy="222" r="6"/><circle cx="600" cy="222" r="6"/></g>
+    <text x="620" y="220" class="sm">每次 tick 等同一次 Instant，改 Base</text>
+    <text x="620" y="236" class="xs">首跳由 bExecutePeriodicEffect…OnApplication 控制</text>
+  </svg>
+  <figcaption><b>图 6-2</b> 时长策略。带 Period 的持续型 GE 中，Modifier 不再常驻聚合器，而是在每次 tick 时作为 Instant 执行</figcaption>
+  </figure>
+  <div class="co warn"><span class="h">⚠️ 坑点：DOT 加速 Buff 的区别</span><p>一个 HasDuration GE <strong>没有 Period</strong> 时，Modifier 修改 Current，到期后自动撤销（例如加速）；<strong>有 Period</strong> 时，Modifier 在每次 tick 时永久修改 Base，到期后不会撤销（例如燃烧掉的血）。"中毒 5 秒、每秒 −10 血"必须配置 Period = 1。</p></div>
+  <div class="co deep"><span class="h">🔬 深入源码：Period 与 Ongoing Tag Requirements</span><p>持续型 GE 可以配置"持续期间需要满足的 Tag 条件"（5.3+ 使用 <code>TargetTagRequirementsGameplayEffectComponent</code> 的 Ongoing 部分）。条件不满足时 GE 会被<strong>抑制（Inhibited）</strong>：Modifier 暂时从聚合器中移除，GE 本身仍然存在。周期效果被抑制后重新激活时，按 <code>PeriodicInhibitionPolicy</code>（NeverReset / ResetPeriod / ExecuteAndResetPeriod）决定计时方式。</p></div>
+
+  <h2>6.3 Modifier 的四个要素</h2>
+  <div class="tbl"><table>
+    <tr><th>字段</th><th>含义</th></tr>
+    <tr><td><b>Attribute</b></td><td>要改的属性。属性下拉列表来自所有 AttributeSet；属性加 <code>meta=(HideFromModifiers)</code> 可以从列表中隐藏</td></tr>
+    <tr><td><b>Modifier Op</b></td><td>运算方式：AddBase / MultiplyAdditive / DivideAdditive / MultiplyCompound / AddFinal / Override</td></tr>
+    <tr><td><b>Magnitude</b></td><td>数值来源，有四种计算方式（见 6.4）</td></tr>
+    <tr><td><b>Source / Target Tags</b></td><td>Modifier 级别的条件。例如"仅当目标处于燃烧状态时 +30% 伤害"，条件不满足时该 Modifier 不参与聚合</td></tr>
+  </table></div>
+
+  <h2>6.4 数值（Magnitude）的四种计算方式</h2>
+  <div class="tbl"><table>
+    <tr><th>类型</th><th>原理</th><th>典型用途</th></tr>
+    <tr><td><b>Scalable Float</b></td><td>常数 × 曲线表[Spec 等级]</td><td>"1 级 50 伤害，5 级 150 伤害"</td></tr>
+    <tr><td><b>Attribute Based</b></td><td><code>Coefficient × (Attr + PreMultiplyAdditive) + PostMultiplyAdditive</code>，Attr 可以取 Source 或 Target 的属性，可选 Current / Base / Bonus（Current − Base）</td><td>"治疗量 = 施法者法强 × 0.6"、派生属性</td></tr>
+    <tr><td><b>Custom Calculation Class (MMC)</b></td><td>继承 <code>UGameplayModMagnitudeCalculation</code>，在 C++ / 蓝图中计算一个 float</td><td>依赖多个属性或 Tag 的单值计算，例如受冷却缩减影响的冷却时长</td></tr>
+    <tr><td><b>Set By Caller</b></td><td>施加前由代码用 Tag 作为键写入 Spec</td><td>由技能逻辑决定的数值：蓄力伤害、按距离衰减</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">🔬 深入源码：Snapshot（快照）是什么</span><p>捕获属性时可以选择是否快照。<b>Source 快照</b>在 Spec <em>创建</em>时记录施法者的属性值，之后施法者属性变化不影响已发出的效果（例如火球已经飞出去，再加攻击力也不影响这颗火球）。<b>不快照</b>时，持续型 GE 会实时跟随属性变化（例如光环随施法者属性变化）。Target 属性通常在 GE <em>施加</em>时才捕获。</p></div>
+
+  <h2>6.5 聚合公式：多个 Modifier 怎么叠加</h2>
+  <p>同一个属性上可能同时存在十几个 Modifier。GAS 先把<strong>同类运算</strong>汇总，再按固定顺序计算：</p>
+  <div class="co tip" style="font-family:var(--mono);font-size:15px;text-align:center"><b>Current = ((Base + ΣAddBase) × MulAdd ÷ DivAdd × ΠMulCompound) + ΣAddFinal</b><br><span style="font-size:13px">（存在生效的 Override 时，直接返回 Override 的值）</span></div>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <g>
+      <rect x="10" y="40" width="110" height="64" rx="9" fill="#EAF7EF" stroke="#15803D"/><text x="65" y="64" text-anchor="middle" class="b">Base</text><text x="65" y="86" text-anchor="middle" class="b" style="fill:#15803D">100</text>
+      <rect x="145" y="40" width="120" height="64" rx="9" fill="#fff" stroke="#C2410C"/><text x="205" y="62" text-anchor="middle" class="sm b">+ AddBase</text><text x="205" y="80" text-anchor="middle" class="xs">装备 +20</text><text x="205" y="96" text-anchor="middle" class="b">= 120</text>
+      <rect x="290" y="40" width="140" height="64" rx="9" fill="#fff" stroke="#C2410C"/><text x="360" y="62" text-anchor="middle" class="sm b">× MultiplyAdditive</text><text x="360" y="80" text-anchor="middle" class="xs">1 + 0.2 + 0.3 = 1.5</text><text x="360" y="96" text-anchor="middle" class="b">= 180</text>
+      <rect x="455" y="40" width="120" height="64" rx="9" fill="#fff" stroke="#C2410C"/><text x="515" y="62" text-anchor="middle" class="sm b">÷ DivideAdditive</text><text x="515" y="80" text-anchor="middle" class="xs">无 → 1</text><text x="515" y="96" text-anchor="middle" class="b">= 180</text>
+      <rect x="600" y="40" width="130" height="64" rx="9" fill="#fff" stroke="#C2410C"/><text x="665" y="62" text-anchor="middle" class="sm b">× MultiplyCompound</text><text x="665" y="80" text-anchor="middle" class="xs">狂暴 ×1.5</text><text x="665" y="96" text-anchor="middle" class="b">= 270</text>
+      <rect x="750" y="40" width="100" height="64" rx="9" fill="#2F5BD3"/><text x="800" y="62" text-anchor="middle" class="sm b wt">+ AddFinal</text><text x="800" y="80" text-anchor="middle" class="xs" style="fill:#DCE6FF">+10</text><text x="800" y="96" text-anchor="middle" class="b wt">= 280</text>
+    </g>
+    <g stroke="#4B5563" stroke-width="1.4">
+      <line x1="120" y1="72" x2="143" y2="72" marker-end="url(#a)"/><line x1="265" y1="72" x2="288" y2="72" marker-end="url(#a)"/>
+      <line x1="430" y1="72" x2="453" y2="72" marker-end="url(#a)"/><line x1="575" y1="72" x2="598" y2="72" marker-end="url(#a)"/>
+      <line x1="730" y1="72" x2="748" y2="72" marker-end="url(#a)"/>
+    </g>
+    <rect x="10" y="130" width="840" height="106" rx="10" fill="#F3EEFE" stroke="#DCCDFB"/>
+    <text x="28" y="154" class="sm b" style="fill:#6D28D9">两种"乘"的区别（最容易搞错的地方）</text>
+    <text x="28" y="178" class="sm">• <tspan class="b">MultiplyAdditive</tspan>（老版本叫 Multiplicitive）：先把 (Mi − 1) 相加再加 1。+20% 和 +30% 合起来是 ×1.5，<tspan class="b">不是</tspan> 1.2 × 1.3 = 1.56。</text>
+    <text x="28" y="200" class="sm">  适合"同类加成相加"的设计（大多数游戏中"增加 X% 攻击"都是这个语义）。DivideAdditive 同理：÷2 和 ÷2 合起来是 ÷3。</text>
+    <text x="28" y="222" class="sm">• <tspan class="b">MultiplyCompound</tspan>：逐个连乘，1.5 × 1.5 = 2.25。适合"独立乘区"，例如"最终伤害 ×1.5"。</text>
+  </svg>
+  <figcaption><b>图 6-3</b> 聚合流水线示例：攻击力 Base 100 在五类 Modifier 作用下变为 280</figcaption>
+  </figure>
+
+  <div class="lab" id="aggLab">
+    <div class="t">🧪 交互实验：聚合器计算器</div>
+    <p style="font-size:14px;color:var(--ink2);margin:4px 0">在每类中填入多个数值，用逗号分隔。MultiplyAdditive / Compound / Divide 填倍率（例如 1.2 表示 +20%）。</p>
+    <div class="row"><label>Base <input type="number" id="ag_base" value="100"></label>
+      <label>AddBase <input id="ag_add" value="20" style="width:120px"></label>
+      <label>MultiplyAdditive <input id="ag_mul" value="1.2,1.3" style="width:120px"></label></div>
+    <div class="row"><label>DivideAdditive <input id="ag_div" value="" style="width:120px"></label>
+      <label>MultiplyCompound <input id="ag_cmp" value="1.5" style="width:120px"></label>
+      <label>AddFinal <input id="ag_fin" value="10" style="width:80px"></label>
+      <label>Override <input id="ag_ovr" value="" placeholder="留空" style="width:80px"></label></div>
+    <div class="out" id="ag_out"></div>
+  </div>
+  <script>
+  (function(){
+    const $=id=>document.getElementById(id);
+    const parse=s=>s.trim()===""?[]:s.split(/[,，\s]+/).filter(Boolean).map(Number).filter(x=>!isNaN(x));
+    function run(){
+      const base=+$("ag_base").value||0, add=parse($("ag_add").value), mul=parse($("ag_mul").value), div=parse($("ag_div").value), cmp=parse($("ag_cmp").value), fin=parse($("ag_fin").value), ovr=$("ag_ovr").value.trim();
+      const f=x=>Math.round(x*1000)/1000;
+      if(ovr!==""&&!isNaN(+ovr)){$("ag_out").textContent="存在 Override → 直接返回 "+(+ovr)+"（忽略其他所有 Modifier）";return;}
+      const sAdd=add.reduce((a,b)=>a+b,0);
+      const mA=1+mul.reduce((a,b)=>a+(b-1),0);
+      const dA=1+div.reduce((a,b)=>a+(b-1),0);
+      const mC=cmp.reduce((a,b)=>a*b,1);
+      const sF=fin.reduce((a,b)=>a+b,0);
+      const s1=base+sAdd, s2=s1*mA, s3=dA===0?NaN:s2/dA, s4=s3*mC, s5=s4+sF;
+      $("ag_out").textContent=
+        "① Base + ΣAddBase        = "+base+" + "+f(sAdd)+" = "+f(s1)+"\n"+
+        "② × MultiplyAdditive      = 1 + Σ(Mi−1) = "+f(mA)+"   → "+f(s2)+"\n"+
+        "③ ÷ DivideAdditive        = 1 + Σ(Di−1) = "+f(dA)+"   → "+f(s3)+"\n"+
+        "④ × ΠMultiplyCompound     = "+f(mC)+"   → "+f(s4)+"\n"+
+        "⑤ + ΣAddFinal             = "+f(sF)+"   → CurrentValue = "+f(s5)+
+        (mul.length>1?"\n\n对比：若把 MultiplyAdditive 改成连乘，结果是 "+f((base+sAdd)*mul.reduce((a,b)=>a*b,1)/dA*mC+sF):"");
+    }
+    ["ag_base","ag_add","ag_mul","ag_div","ag_cmp","ag_fin","ag_ovr"].forEach(i=>$(i).addEventListener("input",run));
+    run();
+  })();
+  </script>
+  <div class="co ver"><span class="h">🕒 版本差异</span><p>老版本只有 <code>Additive / Multiplicitive / Division / Override</code> 四种，公式是 <code>((Base + Additive) × Multiplicitive) ÷ Division</code>。新版本把它们改名为 AddBase / MultiplyAdditive / DivideAdditive（枚举值不变，老资产无需迁移），并新增了 <code>MultiplyCompound</code> 和 <code>AddFinal</code>。在老版本中要实现"独立乘区"，需要借助 Evaluation Channel 或者 Execution。</p></div>
+  <div class="co warn"><span class="h">⚠️ 坑点：Override 和多个 Override</span><p>Override 会让其他 Modifier 全部失效，而且多个 Override 同时存在时，结果取决于聚合器中 Modifier 的顺序。除了"初始化属性"这种一次性的 Instant 用法，<strong>尽量不要在持续型 GE 上使用 Override</strong>。"定身（速度为 0）"应该用 MultiplyCompound ×0，或者授予一个让移动组件读取的 Tag。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>GE = Duration + Modifiers + Executions + Components + Stacking + Cues，是纯数据。</li>
+    <li>Instant 和 Period tick 修改 Base；不带 Period 的持续型 GE 只往聚合器中添加 Modifier。</li>
+    <li>聚合顺序：<b>AddBase → MultiplyAdditive → DivideAdditive → MultiplyCompound → AddFinal</b>，"Additive" 类乘法是先把增量相加。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH7 ======================= -->
+<section class="chapter" id="ch7">
+  <div class="ch-head">
+    <div class="no">CHAPTER 07</div>
+    <h1>GameplayEffect（下）：Spec、计算类、堆叠与组件</h1>
+    <p class="lead">把 GE 用到实际项目中：如何传入运行时数值、如何写伤害公式、如何处理叠层，以及 5.3 之后的组件化配置。</p>
+  </div>
+
+  <h2>7.1 Spec 与 Context：一次施加带的信息</h2>
+<!--code:cpp:在技能中构造并施加 GE-->
+// 1) 由施法者 ASC 生成 Spec（此时 Source 侧快照属性被捕获）
+FGameplayEffectContextHandle Ctx = SourceASC->MakeEffectContext();
+Ctx.AddSourceObject(this);              // 来源对象（技能 / 武器）
+Ctx.AddHitResult(Hit);                  // 命中信息，Cue 可以读到命中点
+FGameplayEffectSpecHandle Spec = SourceASC->MakeOutgoingSpec(GE_Damage, AbilityLevel, Ctx);
+
+// 2) 写入 SetByCaller 数值（Tag 作为键）
+Spec.Data->SetSetByCallerMagnitude(MyTags::SetByCaller_Damage, 120.f);
+// 也可以追加动态 AssetTag，让 Execution 识别伤害类型
+Spec.Data->AddDynamicAssetTag(MyTags::Damage_Type_Magic);
+
+// 3) 施加到目标（返回句柄：Instant GE 的句柄无效，持续型 GE 可用于之后移除）
+FActiveGameplayEffectHandle H = SourceASC->ApplyGameplayEffectSpecToTarget(*Spec.Data.Get(), TargetASC);
+<!--/code-->
+  <p>在 GameplayAbility 内部，使用封装好的 <code>MakeOutgoingGameplayEffectSpec()</code> 和 <code>ApplyGameplayEffectSpecToTarget()</code> 更方便，它们会自动填好技能等级，并<strong>带上当前的预测键</strong>（第 12 章会讲为什么这一点很重要）。</p>
+  <div class="co tip"><span class="h">✅ 实践建议：自定义 Context</span><p>需要在 GE 上携带更多信息（是否暴击、技能连段数、投射物 ID）时，继承 <code>FGameplayEffectContext</code>，重写 <code>GetScriptStruct</code>、<code>Duplicate</code> 和 <code>NetSerialize</code>，再在自定义的 <code>UAbilitySystemGlobals::AllocGameplayEffectContext()</code> 中返回它，并在 <code>DefaultGame.ini</code> 中配置 <code>AbilitySystemGlobalsClassName</code>。Context 中的对象指针<strong>不会阻止 GC</strong>，请使用弱引用。</p></div>
+
+  <h2>7.2 MMC：受冷却缩减影响的冷却时长</h2>
+<!--code:cpp:MMC_Cooldown.cpp-->
+UMMC_Cooldown::UMMC_Cooldown()
+{
+    CDRDef.AttributeToCapture = UMyAttributeSet::GetCooldownReductionAttribute();
+    CDRDef.AttributeSource    = EGameplayEffectAttributeCaptureSource::Source;
+    CDRDef.bSnapshot          = true;          // 进入冷却时的冷却缩减值为准
+    RelevantAttributesToCapture.Add(CDRDef);
+}
+
+float UMMC_Cooldown::CalculateBaseMagnitude_Implementation(const FGameplayEffectSpec& Spec) const
+{
+    FAggregatorEvaluateParameters Params;
+    Params.SourceTags = Spec.CapturedSourceTags.GetAggregatedTags();
+    Params.TargetTags = Spec.CapturedTargetTags.GetAggregatedTags();
+
+    float CDR = 0.f;
+    GetCapturedAttributeMagnitude(CDRDef, Spec, Params, CDR);
+    CDR = FMath::Clamp(CDR, 0.f, 0.4f);        // 冷却缩减上限 40%
+
+    // 基础冷却由技能通过 SetByCaller 传入，这样所有技能可以共用同一个冷却 GE
+    const float BaseCD = Spec.GetSetByCallerMagnitude(MyTags::SetByCaller_Cooldown, false, 1.f);
+    return BaseCD * (1.f - CDR);
+}
+<!--/code-->
+
+  <h2>7.3 ExecutionCalculation：伤害公式</h2>
+  <p>当一个计算需要<strong>读取多个属性（Source 和 Target 都有）</strong>，或者需要<strong>输出到多个属性</strong>时，就该使用 Execution。它是整个项目中伤害规则的唯一实现位置：</p>
+<!--code:cpp:ExecCalc_Damage.cpp-->
+struct FDamageStatics
+{
+    DECLARE_ATTRIBUTE_CAPTUREDEF(AttackPower);
+    DECLARE_ATTRIBUTE_CAPTUREDEF(ArmorPenetration);
+    DECLARE_ATTRIBUTE_CAPTUREDEF(CritChance);
+    DECLARE_ATTRIBUTE_CAPTUREDEF(Armor);
+    FDamageStatics()
+    {   //                       类               属性               来源     快照
+        DEFINE_ATTRIBUTE_CAPTUREDEF(UMyAttributeSet, AttackPower,      Source, true);
+        DEFINE_ATTRIBUTE_CAPTUREDEF(UMyAttributeSet, ArmorPenetration, Source, true);
+        DEFINE_ATTRIBUTE_CAPTUREDEF(UMyAttributeSet, CritChance,       Source, true);
+        DEFINE_ATTRIBUTE_CAPTUREDEF(UMyAttributeSet, Armor,            Target, false);
+    }
+};
+static const FDamageStatics& DamageStatics() { static FDamageStatics S; return S; }
+
+UExecCalc_Damage::UExecCalc_Damage()
+{
+    RelevantAttributesToCapture.Add(DamageStatics().AttackPowerDef);
+    RelevantAttributesToCapture.Add(DamageStatics().ArmorPenetrationDef);
+    RelevantAttributesToCapture.Add(DamageStatics().CritChanceDef);
+    RelevantAttributesToCapture.Add(DamageStatics().ArmorDef);
+}
+
+void UExecCalc_Damage::Execute_Implementation(const FGameplayEffectCustomExecutionParameters& ExecParams,
+                                              FGameplayEffectCustomExecutionOutput& Out) const
+{
+    const FGameplayEffectSpec& Spec = ExecParams.GetOwningSpec();
+    FAggregatorEvaluateParameters P;
+    P.SourceTags = Spec.CapturedSourceTags.GetAggregatedTags();
+    P.TargetTags = Spec.CapturedTargetTags.GetAggregatedTags();
+
+    float AP = 0, Pen = 0, Crit = 0, Armor = 0;
+    ExecParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().AttackPowerDef,      P, AP);
+    ExecParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().ArmorPenetrationDef, P, Pen);
+    ExecParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().CritChanceDef,       P, Crit);
+    ExecParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().ArmorDef,            P, Armor);
+
+    // 技能基础伤害 + 攻击力加成系数，都由技能通过 SetByCaller 传入
+    const float BaseDmg = Spec.GetSetByCallerMagnitude(MyTags::SetByCaller_Damage, false, 0.f);
+    const float Coef    = Spec.GetSetByCallerMagnitude(MyTags::SetByCaller_AttackCoef, false, 1.f);
+    float Damage = BaseDmg + AP * Coef;
+
+    // 护甲减伤：有效护甲 = 护甲 × (1 − 穿透)，减伤乘数 = 100 / (100 + 有效护甲)
+    const float EffArmor = FMath::Max(0.f, Armor * (1.f - FMath::Clamp(Pen, 0.f, 1.f)));
+    Damage *= 100.f / (100.f + EffArmor);
+
+    // 暴击（Execution 只在服务器运行，随机数是权威结果）
+    if (FMath::FRand() < Crit) { Damage *= 2.f; /* 可以写入自定义 Context，供 UI 显示暴击 */ }
+
+    if (Damage > 0.f)
+    {   // 输出到 Meta 属性，由 AttributeSet::PostGameplayEffectExecute 结算（新版本中 Additive 即 AddBase）
+        Out.AddOutputModifier(FGameplayModifierEvaluatedData(
+            UMyAttributeSet::GetIncomingDamageAttribute(), EGameplayModOp::Additive, Damage));
+    }
+}
+<!--/code-->
+  <div class="co net"><span class="h">🌐 网络视角：Execution 不参与预测</span><p>Execution 只能用于 Instant 和 Periodic GE，并且在<strong>服务器</strong>上计算（本地预测的技能也不会在客户端执行 Execution）。这对伤害结算正合适：随机数、护甲读取都以服务器为准，客户端无法作弊。代价是伤害数字需要等服务器结果，无法预测显示。</p></div>
+  <div class="tbl"><table>
+    <tr><th></th><th>Modifier + Magnitude</th><th>MMC</th><th>Execution</th></tr>
+    <tr><td>输入</td><td>常数 / 单个属性</td><td>多个属性 + Tag + SetByCaller</td><td>多个属性 + Tag + SetByCaller</td></tr>
+    <tr><td>输出</td><td>1 个属性</td><td>1 个数值</td><td><b>多个属性</b></td></tr>
+    <tr><td>可用于持续型 GE</td><td class="yes">是</td><td class="yes">是（可随属性实时变化）</td><td class="no">否（仅 Instant / Periodic）</td></tr>
+    <tr><td>可预测</td><td class="yes">是</td><td class="yes">是</td><td class="no">否</td></tr>
+    <tr><td>典型用途</td><td>Buff、消耗</td><td>冷却时长、按等级缩放</td><td>伤害、治疗、吸血</td></tr>
+  </table></div>
+
+  <h2>7.4 Stacking：叠层</h2>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="400" height="215" rx="12" fill="#fff" stroke="#E5E7EB"/>
+    <text x="220" y="46" text-anchor="middle" class="b">AggregateBySource（按来源分别计层）</text>
+    <circle cx="80" cy="100" r="22" fill="#2F5BD3"/><text x="80" y="105" text-anchor="middle" class="b wt">A</text>
+    <circle cx="80" cy="175" r="22" fill="#C2410C"/><text x="80" y="180" text-anchor="middle" class="b wt">B</text>
+    <rect x="260" y="70" width="140" height="130" rx="10" fill="#F3F4F6" stroke="#6B7280"/><text x="330" y="92" text-anchor="middle" class="sm b">目标</text>
+    <rect x="275" y="104" width="110" height="34" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="330" y="126" text-anchor="middle" class="sm">A 的燃烧 ×3</text>
+    <rect x="275" y="148" width="110" height="34" rx="6" fill="#FFF4EC" stroke="#C2410C"/><text x="330" y="170" text-anchor="middle" class="sm">B 的燃烧 ×2</text>
+    <line x1="102" y1="100" x2="273" y2="120" stroke="#2F5BD3" stroke-width="1.4" marker-end="url(#ab)"/>
+    <line x1="102" y1="175" x2="273" y2="165" stroke="#C2410C" stroke-width="1.4" marker-end="url(#ao)"/>
+    <text x="220" y="222" text-anchor="middle" class="xs">每个施法者独立受层数上限限制 · 适合"各自的 DOT"</text>
+
+    <rect x="440" y="20" width="400" height="215" rx="12" fill="#fff" stroke="#E5E7EB"/>
+    <text x="640" y="46" text-anchor="middle" class="b">AggregateByTarget（目标身上共享一组层数）</text>
+    <circle cx="500" cy="100" r="22" fill="#2F5BD3"/><text x="500" y="105" text-anchor="middle" class="b wt">A</text>
+    <circle cx="500" cy="175" r="22" fill="#C2410C"/><text x="500" y="180" text-anchor="middle" class="b wt">B</text>
+    <rect x="680" y="70" width="140" height="130" rx="10" fill="#F3F4F6" stroke="#6B7280"/><text x="750" y="92" text-anchor="middle" class="sm b">目标</text>
+    <rect x="695" y="118" width="110" height="44" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="750" y="137" text-anchor="middle" class="sm">破甲 ×5</text><text x="750" y="153" text-anchor="middle" class="xs">（上限 5）</text>
+    <line x1="522" y1="100" x2="693" y2="132" stroke="#2F5BD3" stroke-width="1.4" marker-end="url(#ab)"/>
+    <line x1="522" y1="175" x2="693" y2="150" stroke="#C2410C" stroke-width="1.4" marker-end="url(#ao)"/>
+    <text x="640" y="222" text-anchor="middle" class="xs">所有来源共用上限 · 适合"破甲""易伤"等目标状态</text>
+  </svg>
+  <figcaption><b>图 7-1</b> 两种堆叠类型。层数存在 <code>FActiveGameplayEffect</code> 的 StackCount 中，Modifier 的数值会乘以层数</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>设置</th><th>可选值</th><th>说明</th></tr>
+    <tr><td>Stacking Type</td><td>None / AggregateBySource / AggregateByTarget</td><td>None 表示每次施加都创建一个独立的 ActiveGE</td></tr>
+    <tr><td>Stack Limit Count</td><td>整数</td><td>层数上限。超过上限时可以触发 Overflow GE（例如"叠满 5 层引爆"）</td></tr>
+    <tr><td>Stack Duration Refresh Policy</td><td>RefreshOnSuccessfulApplication / NeverRefresh</td><td>新叠一层时是否重置持续时间</td></tr>
+    <tr><td>Stack Period Reset Policy</td><td>ResetOnSuccessfulApplication / NeverReset</td><td>新叠一层时是否重置周期计时（避免频繁命中导致 DOT 永远不跳）</td></tr>
+    <tr><td>Stack Expiration Policy</td><td>ClearEntireStack / RemoveSingleStackAndRefreshDuration / RefreshDuration</td><td>到期时全部清除 / 每次掉一层 / 永不过期（仅刷新）</td></tr>
+  </table></div>
+
+  <h2>7.5 GE 组件化（UE 5.3+）</h2>
+  <p>5.3 之前，GE 面板上有一大堆 Tag 相关字段，大部分 GE 根本用不上。5.3 把它们拆成了<strong>按需添加的组件</strong>：</p>
+  <div class="tbl"><table>
+    <tr><th>组件</th><th>作用</th><th>替代的老字段</th></tr>
+    <tr><td><code>UTargetTagsGameplayEffectComponent</code></td><td>GE 生效期间给目标授予 Tag</td><td>GrantedTags（InheritableOwnedTagsContainer）</td></tr>
+    <tr><td><code>UAssetTagsGameplayEffectComponent</code></td><td>GE 自身的 Tag，用于查询、驱散、免疫判定</td><td>GameplayEffectAssetTag</td></tr>
+    <tr><td><code>UBlockAbilityTagsGameplayEffectComponent</code></td><td>生效期间阻止带指定 Tag 的技能激活</td><td>GrantedBlockedAbilityTags</td></tr>
+    <tr><td><code>UTargetTagRequirementsGameplayEffectComponent</code></td><td>施加条件 / 持续条件 / 移除条件</td><td>Application / Ongoing / Removal TagRequirements</td></tr>
+    <tr><td><code>URemoveOtherGameplayEffectComponent</code></td><td>施加时移除其他符合条件的 GE（驱散）</td><td>RemoveGameplayEffectsWithTags</td></tr>
+    <tr><td><code>UImmunityGameplayEffectComponent</code></td><td>生效期间对符合查询条件的 GE 免疫</td><td>GrantedApplicationImmunityTags</td></tr>
+    <tr><td><code>UAbilitiesGameplayEffectComponent</code></td><td>生效期间授予技能，结束时收回</td><td>GrantedAbilities</td></tr>
+    <tr><td><code>UAdditionalEffectsGameplayEffectComponent</code></td><td>施加或结束时连带施加其他 GE</td><td>ConditionalGameplayEffects 等</td></tr>
+    <tr><td><code>UChanceToApplyGameplayEffectComponent</code></td><td>按概率施加</td><td>ChanceToApplyToTarget</td></tr>
+    <tr><td><code>UCustomCanApplyGameplayEffectComponent</code></td><td>自定义是否可以施加</td><td>ApplicationRequirements</td></tr>
+    <tr><td><code>UGameplayEffectUIData</code> 系列</td><td>UI 显示数据（图标、描述）</td><td>UIData</td></tr>
+  </table></div>
+<!--code:cpp:C++ 中给 GE 添加组件（构造函数中）-->
+UGE_Stun::UGE_Stun()
+{
+    DurationPolicy = EGameplayEffectDurationType::HasDuration;
+    DurationMagnitude = FScalableFloat(1.0f);
+
+    // 授予 State.Debuff.Stun
+    UTargetTagsGameplayEffectComponent* TagsComp = CreateDefaultSubobject<UTargetTagsGameplayEffectComponent>(TEXT("TargetTags"));
+    GEComponents.Add(TagsComp);
+    FInheritedTagContainer Granted = TagsComp->GetConfiguredTargetTagChanges();
+    Granted.AddTag(MyTags::State_Debuff_Stun);
+    TagsComp->SetAndApplyTargetTagChanges(Granted);
+}
+<!--/code-->
+  <div class="co tip"><span class="h">✅ 实践建议：自定义 GEComponent</span><p>项目特有的 GE 行为（例如"生效期间显示描边""施加时记录战斗日志"）可以继承 <code>UGameplayEffectComponent</code>，重写 <code>CanGameplayEffectApply</code>、<code>OnActiveGameplayEffectAdded</code>、<code>OnGameplayEffectApplied</code> 等钩子来实现，不需要修改引擎。这正是 5.3 组件化想要解决的扩展问题。</p></div>
+
+  <h2>7.6 一次施加的完整流水线</h2>
+  <figure>
+  <svg viewBox="0 0 860 340" xmlns="http://www.w3.org/2000/svg">
+    <rect x="10" y="20" width="160" height="56" rx="9" fill="#EAF0FD" stroke="#2F5BD3"/><text x="90" y="44" text-anchor="middle" class="sm b">MakeOutgoingSpec</text><text x="90" y="62" text-anchor="middle" class="xs">等级 · Context · 源快照</text>
+    <rect x="195" y="20" width="160" height="56" rx="9" fill="#EAF0FD" stroke="#2F5BD3"/><text x="275" y="44" text-anchor="middle" class="sm b">ApplySpecToTarget</text><text x="275" y="62" text-anchor="middle" class="xs">交给目标 ASC</text>
+    <rect x="380" y="14" width="190" height="68" rx="9" fill="#FEF6E4" stroke="#B45309"/><text x="475" y="36" text-anchor="middle" class="sm b">能否施加？</text><text x="475" y="54" text-anchor="middle" class="xs">免疫 · 施加 Tag 条件</text><text x="475" y="70" text-anchor="middle" class="xs">概率 · 自定义 CanApply</text>
+    <rect x="600" y="20" width="110" height="56" rx="9" fill="#FDEEEE" stroke="#B91C1C"/><text x="655" y="52" text-anchor="middle" class="sm b" style="fill:#B91C1C">✗ 失败返回</text>
+    <g stroke="#4B5563" stroke-width="1.4"><line x1="170" y1="48" x2="193" y2="48" marker-end="url(#a)"/><line x1="355" y1="48" x2="378" y2="48" marker-end="url(#a)"/><line x1="570" y1="48" x2="598" y2="48" marker-end="url(#ar)" stroke="#B91C1C"/></g>
+    <path d="M475 82 L475 112" stroke="#15803D" stroke-width="1.5" marker-end="url(#ag)"/>
+    <rect x="390" y="114" width="170" height="40" rx="9" fill="#fff" stroke="#4B5563"/><text x="475" y="139" text-anchor="middle" class="sm b">Duration 类型？</text>
+    <!-- instant branch -->
+    <path d="M390 134 L240 134 L240 170" stroke="#C2410C" stroke-width="1.5" fill="none" marker-end="url(#ao)"/><text x="300" y="127" class="xs" style="fill:#C2410C">Instant</text>
+    <rect x="130" y="172" width="220" height="56" rx="9" fill="#FFF4EC" stroke="#C2410C"/><text x="240" y="194" text-anchor="middle" class="sm b">ExecuteGameplayEffect</text><text x="240" y="212" text-anchor="middle" class="xs">Executions + Modifiers → 改 Base</text>
+    <rect x="130" y="246" width="220" height="44" rx="9" fill="#E6F7F7" stroke="#0F766E"/><text x="240" y="273" text-anchor="middle" class="sm">Cue: Executed（一次性）</text>
+    <line x1="240" y1="228" x2="240" y2="244" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <!-- duration branch -->
+    <path d="M560 134 L700 134 L700 170" stroke="#2F5BD3" stroke-width="1.5" fill="none" marker-end="url(#ab)"/><text x="610" y="127" class="xs" style="fill:#2F5BD3">HasDuration / Infinite</text>
+    <rect x="560" y="172" width="290" height="40" rx="9" fill="#EAF0FD" stroke="#2F5BD3"/><text x="705" y="197" text-anchor="middle" class="sm">已有同类可叠层的 GE？→ 层数 +1（刷新时间）</text>
+    <rect x="560" y="222" width="290" height="40" rx="9" fill="#EAF7EF" stroke="#15803D"/><text x="705" y="247" text-anchor="middle" class="sm">新建 FActiveGameplayEffect · Modifier 加入聚合器</text>
+    <rect x="560" y="272" width="290" height="40" rx="9" fill="#fff" stroke="#15803D"/><text x="705" y="297" text-anchor="middle" class="sm">授予 Tag / 技能 · Cue: OnActive + WhileActive</text>
+    <line x1="705" y1="212" x2="705" y2="220" stroke="#4B5563" stroke-width="1.2" marker-end="url(#a)"/>
+    <line x1="705" y1="262" x2="705" y2="270" stroke="#4B5563" stroke-width="1.2" marker-end="url(#a)"/>
+    <text x="840" y="332" text-anchor="end" class="xs">之后：Period tick（Execute）… 到期 / 被移除 → 撤销 Modifier 与 Tag → Cue: Removed</text>
+  </svg>
+  <figcaption><b>图 7-2</b> GE 从创建 Spec 到在目标身上生效的流水线</figcaption>
+  </figure>
+
+  <h2>7.7 查询、移除与监听</h2>
+<!--code:cpp:常用的查询与移除操作-->
+// 按 GE 自身的 AssetTag 驱散所有控制效果
+FGameplayEffectQuery Q = FGameplayEffectQuery::MakeQuery_MatchAnyEffectTags(FGameplayTagContainer(MyTags::Effect_Type_CC));
+ASC->RemoveActiveEffects(Q);
+
+// 查询某个冷却的剩余时间（UI 转圈）
+TArray<TPair<float, float>> Remain = ASC->GetActiveEffectsTimeRemainingAndDuration(
+    FGameplayEffectQuery::MakeQuery_MatchAnyOwningTags(FGameplayTagContainer(MyTags::Cooldown_Hero_Q)));
+
+// 监听：自己被施加了任何持续型 GE（服务器和拥有者客户端都会触发）
+ASC->OnActiveGameplayEffectAddedDelegateToSelf.AddUObject(this, &ThisClass::OnEffectAdded);
+// 监听某个 GE 的层数变化
+ASC->OnGameplayEffectStackChangeDelegate(Handle)->AddUObject(this, &ThisClass::OnStackChanged);
+<!--/code-->
+  <div class="co warn"><span class="h">⚠️ 坑点：在客户端移除 GE</span><p>GE 的移除<strong>只能由服务器发起</strong>，并且<strong>不能被预测</strong>。在客户端调用 <code>RemoveActiveGameplayEffect</code>，下一次复制时 GE 又会出现。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>Spec 携带等级、Context 和 SetByCaller；在技能内施加 GE 时使用技能自带的接口，会自动带上预测键。</li>
+    <li>单值计算用 MMC，多输入多输出（伤害）用 Execution。Execution 只在服务器运行，不参与预测。</li>
+    <li>Stacking 分为按来源计层和按目标计层，配合刷新策略和过期策略可以实现各种层数机制。</li>
+    <li>5.3+ 的 Tag、免疫、授予技能等功能都通过 <b>GEComponents</b> 配置，项目特有的行为可以自定义组件实现。</li>
+  </ul></div>
+</section>

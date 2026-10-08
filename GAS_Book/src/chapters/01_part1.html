@@ -1,0 +1,563 @@
+<div class="part-head" data-toc="第一部分 · 入门">
+  <div class="no">PART ONE</div>
+  <h1>第一部分　入门：建立正确的心智模型</h1>
+  <p>先回答三个问题：GAS 解决什么问题、由哪些零件组成、怎样在工程里跑起来。</p>
+</div>
+
+<!-- ======================= CH1 ======================= -->
+<section class="chapter" id="ch1">
+  <div class="ch-head">
+    <div class="no">CHAPTER 01</div>
+    <h1>为什么需要 GAS</h1>
+    <p class="lead">先看清楚问题，才能理解 GAS 那些乍看很"重"的设计是在解决什么。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清楚"不用 GAS 时，一个技能要写多少东西"</li>
+    <li>理解 GAS 的四条设计原则：数据驱动、组合优先、Tag 作为通用语言、网络内建</li>
+    <li>判断你的项目该不该用 GAS</li>
+  </ul></div>
+
+  <h2>1.1 一个火球术，要写多少代码？</h2>
+  <p>策划的需求很简单：<strong>"按 Q 放火球，耗 30 蓝，冷却 6 秒，命中造成 100 点火焰伤害，并附加 3 秒燃烧，每秒 10 点。"</strong>直接写的话，第一版大概是这样：</p>
+<!--code:cpp:第一版：直接写在角色里-->
+void AMyHero::CastFireball()
+{
+    if (Mana < 30.f) return;                         // 蓝量检查
+    if (GetWorld()->GetTimeSeconds() < FireballReadyTime) return; // 冷却检查
+    Mana -= 30.f;
+    FireballReadyTime = GetWorld()->GetTimeSeconds() + 6.f;
+    PlayAnimMontage(FireballMontage);
+    SpawnFireball();                                  // 命中后 Target->TakeDamage(100)
+}
+<!--/code-->
+  <p>看上去还行。但需求会一条条追加上来：</p>
+  <ol>
+    <li><strong>"被眩晕时不能放技能。"</strong>于是加 <code>bIsStunned</code>。之后又来了沉默、击飞、冰冻，每种控制对哪些技能生效还不一样。</li>
+    <li><strong>"装备 +20% 法强，Buff +30%，两者叠加。"</strong>需要一套修饰器系统，还要能正确撤销：Buff 结束时减掉的值必须和当初加上的一样。</li>
+    <li><strong>"燃烧最多叠 3 层，重复命中刷新持续时间。"</strong>要写 DOT 管理器，处理计时、层数和刷新规则。</li>
+    <li><strong>"冷却缩减 20%，冷却期间 UI 要显示转圈。"</strong>冷却时长得能动态计算，UI 需要能查询剩余时间。</li>
+    <li><strong>"联网对战，延迟 100ms 时按键也要立即有反馈。"</strong>这是最难的一条：客户端得先扣蓝、先播动画，服务器否决时还要回滚。</li>
+  </ol>
+  <p>一个月后，<code>AMyHero</code> 里塞满了 bool、计时器和 RPC，每个技能都在重复写同样的检查。新人加一个"免疫控制"的 Buff，要改十几处 <code>if</code>。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <text x="205" y="24" text-anchor="middle" class="b">传统写法：逻辑散落在角色类中</text>
+    <rect x="20" y="40" width="370" height="270" rx="14" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="205" y="64" text-anchor="middle" class="b" style="fill:#B91C1C">AMyHero（3000 行）</text>
+    <g class="sm">
+      <rect x="40" y="82" width="100" height="30" rx="6" fill="#fff" stroke="#E5A5A5"/><text x="90" y="102" text-anchor="middle" class="sm">bIsStunned</text>
+      <rect x="155" y="82" width="100" height="30" rx="6" fill="#fff" stroke="#E5A5A5"/><text x="205" y="102" text-anchor="middle" class="sm">bIsSilenced</text>
+      <rect x="270" y="82" width="100" height="30" rx="6" fill="#fff" stroke="#E5A5A5"/><text x="320" y="102" text-anchor="middle" class="sm">CooldownTimers</text>
+      <rect x="40" y="150" width="100" height="30" rx="6" fill="#fff" stroke="#E5A5A5"/><text x="90" y="170" text-anchor="middle" class="sm">BuffList[]</text>
+      <rect x="155" y="150" width="100" height="30" rx="6" fill="#fff" stroke="#E5A5A5"/><text x="205" y="170" text-anchor="middle" class="sm">DotManager</text>
+      <rect x="270" y="150" width="100" height="30" rx="6" fill="#fff" stroke="#E5A5A5"/><text x="320" y="170" text-anchor="middle" class="sm">Server_Cast RPC</text>
+      <rect x="40" y="220" width="100" height="30" rx="6" fill="#fff" stroke="#E5A5A5"/><text x="90" y="240" text-anchor="middle" class="sm">Multicast_FX</text>
+      <rect x="155" y="220" width="100" height="30" rx="6" fill="#fff" stroke="#E5A5A5"/><text x="205" y="240" text-anchor="middle" class="sm">Rollback?</text>
+      <rect x="270" y="220" width="100" height="30" rx="6" fill="#fff" stroke="#E5A5A5"/><text x="320" y="240" text-anchor="middle" class="sm">RecalcStats()</text>
+    </g>
+    <g stroke="#D46A6A" stroke-width="1.1" fill="none" opacity=".85">
+      <path d="M90 112 L320 220"/><path d="M205 112 L90 150"/><path d="M320 112 L90 220"/>
+      <path d="M90 180 L320 220"/><path d="M205 180 L320 112"/><path d="M320 180 L205 220"/>
+      <path d="M90 112 L205 150"/><path d="M205 112 L320 150"/><path d="M90 180 L205 220"/><path d="M320 180 L90 150"/>
+    </g>
+    <text x="205" y="285" text-anchor="middle" class="sm" style="fill:#B91C1C">每加一个规则，都要改 N 处 if；联网后还要逐个写 RPC 和回滚</text>
+
+    <text x="645" y="24" text-anchor="middle" class="b">GAS：以 ASC 为中枢的组合式结构</text>
+    <rect x="460" y="40" width="380" height="270" rx="14" fill="#EAF7EF" stroke="#15803D"/>
+    <circle cx="650" cy="170" r="52" fill="#15803D"/>
+    <text x="650" y="166" text-anchor="middle" class="b wt">ASC</text>
+    <text x="650" y="184" text-anchor="middle" class="xs wt" style="fill:#fff">能力系统组件</text>
+    <g>
+      <rect x="480" y="66" width="120" height="34" rx="8" fill="#fff" stroke="#15803D"/><text x="540" y="88" text-anchor="middle" class="sm">Tags：状态与规则</text>
+      <rect x="700" y="66" width="120" height="34" rx="8" fill="#fff" stroke="#15803D"/><text x="760" y="88" text-anchor="middle" class="sm">Attributes：数值</text>
+      <rect x="480" y="153" width="105" height="34" rx="8" fill="#fff" stroke="#15803D"/><text x="532" y="175" text-anchor="middle" class="sm">Abilities：行为</text>
+      <rect x="715" y="153" width="105" height="34" rx="8" fill="#fff" stroke="#15803D"/><text x="767" y="175" text-anchor="middle" class="sm">Effects：修改</text>
+      <rect x="480" y="240" width="120" height="34" rx="8" fill="#fff" stroke="#15803D"/><text x="540" y="262" text-anchor="middle" class="sm">Cues：表现</text>
+      <rect x="700" y="240" width="120" height="34" rx="8" fill="#fff" stroke="#15803D"/><text x="760" y="262" text-anchor="middle" class="sm">复制 + 预测（内建）</text>
+    </g>
+    <g stroke="#15803D" stroke-width="1.4">
+      <line x1="596" y1="100" x2="620" y2="128"/><line x1="704" y1="100" x2="680" y2="128"/>
+      <line x1="585" y1="170" x2="598" y2="170"/><line x1="715" y1="170" x2="702" y2="170"/>
+      <line x1="596" y1="240" x2="620" y2="212"/><line x1="704" y1="240" x2="680" y2="212"/>
+    </g>
+    <text x="650" y="296" text-anchor="middle" class="sm" style="fill:#15803D">新增规则通常 = 新增一个数据资产 + 几个 Tag，不改角色代码</text>
+  </svg>
+  <figcaption><b>图 1-1</b> 左：规则以 if/bool/RPC 的形式写在角色里，彼此耦合；右：GAS 把规则拆成五类可组合的数据对象</figcaption>
+  </figure>
+
+  <h2>1.2 GAS 的四条设计原则</h2>
+  <div class="cards">
+    <div class="card"><div class="t">① 数据驱动</div><p>冷却、消耗、伤害、Buff 都写成<strong>数据资产</strong>（GameplayEffect），策划可以在编辑器里配置，不必改代码。</p></div>
+    <div class="card"><div class="t">② 组合优于继承</div><p>"眩晕"不是一个类，而是"一个 GE 给目标加上 <code>State.Stunned</code> Tag"，加上"技能声明被这个 Tag 阻挡"。规则之间靠组合产生联系。</p></div>
+    <div class="card"><div class="t">③ Tag 是通用语言</div><p>Ability、Effect、Cue、免疫、打断全部用层级化的 GameplayTag 描述，系统之间只依赖 Tag，不需要互相引用类。</p></div>
+    <div class="card"><div class="t">④ 网络内建</div><p>属性复制、Effect 复制、技能激活 RPC、客户端预测与回滚都已经实现好。你只需要选择正确的策略。</p></div>
+  </div>
+  <p>用 GAS 重写火球术，<strong>只需要一段几乎不变的 Ability 逻辑和几份数据</strong>：</p>
+  <div class="tbl"><table>
+    <tr><th>需求</th><th>GAS 中的表达方式</th><th>需要写代码吗</th></tr>
+    <tr><td>耗 30 蓝</td><td>Cost GE：Instant，Mana AddBase −30</td><td class="yes">否</td></tr>
+    <tr><td>冷却 6 秒（受冷却缩减影响）</td><td>Cooldown GE：持续 6 秒，授予 <code>Cooldown.Skill.Fireball</code>；时长用 SetByCaller 或 MMC 计算</td><td class="mid">一次性</td></tr>
+    <tr><td>眩晕 / 沉默时不能放</td><td>Ability 的 <code>ActivationBlockedTags</code> 填 <code>State.Debuff.Stun</code>、<code>State.Debuff.Silence</code></td><td class="yes">否</td></tr>
+    <tr><td>+20% / +30% 法强叠加</td><td>装备与 Buff 各自是 Infinite / Duration GE 上的 Modifier，由聚合器自动计算，自动撤销</td><td class="yes">否</td></tr>
+    <tr><td>100 点火焰伤害（算抗性）</td><td>Damage GE + ExecutionCalculation（伤害公式写一次，全游戏复用）</td><td class="mid">一次性</td></tr>
+    <tr><td>燃烧 3 层、刷新时长</td><td>Burn GE：Duration 3s、Period 1s、Stacking 上限 3、刷新策略</td><td class="yes">否</td></tr>
+    <tr><td>命中特效、燃烧特效</td><td>GameplayCue：<code>GameplayCue.Fireball.Hit</code> / <code>GameplayCue.Burn</code></td><td class="mid">只做表现</td></tr>
+    <tr><td>联网 + 按键立即反馈</td><td>Ability 设为 <code>LocalPredicted</code></td><td class="yes">否</td></tr>
+  </table></div>
+
+  <h2>1.3 该不该用 GAS</h2>
+  <div class="cards">
+    <div class="card"><div class="t" style="color:var(--green)">适合</div><p>RPG、ARPG、MOBA、射击（Lyra、堡垒之夜都在用）、多人动作游戏。也就是技能、Buff 多，数值规则复杂，并且需要联网的项目。</p></div>
+    <div class="card"><div class="t" style="color:var(--red)">慎用</div><p>只有一两个技能的单机小游戏；帧同步 / 锁步架构的项目（GAS 基于 UE 的 C/S 状态同步）；团队完全没有 C++ 能力（初始化必须写 C++）。</p></div>
+  </div>
+  <div class="co net"><span class="h">🌐 网络视角：与帧同步项目的关系</span><p>GAS 构建在 UE 的 <strong>服务器权威 + 属性复制 + RPC</strong> 模型之上，预测机制也是为这个模型设计的。帧同步项目（所有客户端用相同输入跑相同逻辑）一般不会直接采用 GAS 的网络部分，但它的<strong>数据建模思想</strong>（Tag、Modifier 聚合、Effect 生命周期、Stacking）可以直接借鉴到自研技能系统中。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>直接写技能时，难点不在单个技能，而在<strong>规则之间的组合</strong>和<strong>联网后的同步与回滚</strong>。</li>
+    <li>GAS 把规则拆成 Tag / Attribute / Effect / Ability / Cue 五类可组合的数据，以 ASC 作为中枢。</li>
+    <li>大部分新需求只需要配数据；需要写代码的通常是一次性的框架部分（伤害公式、初始化、输入绑定）。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH2 ======================= -->
+<section class="chapter" id="ch2">
+  <div class="ch-head">
+    <div class="no">CHAPTER 02</div>
+    <h1>全景架构：七个核心对象</h1>
+    <p class="lead">先看整张地图，再逐个深入。这一章的图建议记住，后面每一章都是在放大其中一块。</p>
+  </div>
+
+  <h2>2.1 一张图看懂 GAS</h2>
+  <figure>
+  <svg viewBox="0 0 860 470" xmlns="http://www.w3.org/2000/svg">
+    <!-- owner actor frame -->
+    <rect x="200" y="20" width="460" height="300" rx="16" fill="#F8FAFF" stroke="#94A3B8" stroke-dasharray="6 4"/>
+    <text x="215" y="42" class="sm">OwnerActor（通常是 PlayerState / AI 的 Pawn）</text>
+    <!-- ASC -->
+    <rect x="320" y="120" width="220" height="110" rx="14" fill="#2F5BD3"/>
+    <text x="430" y="152" text-anchor="middle" class="b wt" style="font-size:15px">UAbilitySystemComponent</text>
+    <text x="430" y="174" text-anchor="middle" class="sm wt" style="fill:#DCE6FF">ASC · 能力系统组件</text>
+    <text x="430" y="196" text-anchor="middle" class="xs" style="fill:#DCE6FF">已授予技能 · 激活中的 Effect</text>
+    <text x="430" y="212" text-anchor="middle" class="xs" style="fill:#DCE6FF">Tag 计数 · 预测键 · 复制</text>
+    <!-- AttributeSet -->
+    <rect x="225" y="60" width="160" height="46" rx="10" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="305" y="80" text-anchor="middle" class="b" style="fill:#15803D">UAttributeSet</text>
+    <text x="305" y="97" text-anchor="middle" class="xs">Health / Mana / Attack…</text>
+    <!-- Tags -->
+    <rect x="475" y="60" width="160" height="46" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="555" y="80" text-anchor="middle" class="b" style="fill:#B45309">GameplayTags</text>
+    <text x="555" y="97" text-anchor="middle" class="xs">State.Debuff.Stun …</text>
+    <line x1="340" y1="106" x2="380" y2="120" stroke="#15803D" stroke-width="1.5"/>
+    <line x1="520" y1="106" x2="480" y2="120" stroke="#B45309" stroke-width="1.5"/>
+    <!-- GA -->
+    <rect x="225" y="250" width="180" height="54" rx="10" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="315" y="272" text-anchor="middle" class="b" style="fill:#6D28D9">UGameplayAbility</text>
+    <text x="315" y="290" text-anchor="middle" class="xs">技能：做什么（流程）</text>
+    <!-- AbilityTask -->
+    <rect x="20" y="250" width="160" height="54" rx="10" fill="#fff" stroke="#6D28D9" stroke-dasharray="4 3"/>
+    <text x="100" y="272" text-anchor="middle" class="b" style="fill:#6D28D9">UAbilityTask</text>
+    <text x="100" y="290" text-anchor="middle" class="xs">技能里的异步步骤</text>
+    <line x1="225" y1="277" x2="182" y2="277" stroke="#6D28D9" stroke-width="1.5" marker-end="url(#ap)"/>
+    <text x="203" y="268" text-anchor="middle" class="xs">启动</text>
+    <!-- GE -->
+    <rect x="455" y="250" width="180" height="54" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="545" y="272" text-anchor="middle" class="b" style="fill:#C2410C">UGameplayEffect</text>
+    <text x="545" y="290" text-anchor="middle" class="xs">效果：改什么（数据）</text>
+    <line x1="360" y1="230" x2="335" y2="250" stroke="#6D28D9" stroke-width="1.5"/>
+    <line x1="500" y1="230" x2="525" y2="250" stroke="#C2410C" stroke-width="1.5"/>
+    <!-- GA -> GE -->
+    <path d="M405 290 L453 290" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/>
+    <text x="429" y="282" text-anchor="middle" class="xs">施加</text>
+    <!-- Cue -->
+    <rect x="690" y="250" width="155" height="54" rx="10" fill="#E6F7F7" stroke="#0F766E"/>
+    <text x="767" y="272" text-anchor="middle" class="b" style="fill:#0F766E">GameplayCue</text>
+    <text x="767" y="290" text-anchor="middle" class="xs">表现：特效 / 音效 / 震屏</text>
+    <path d="M635 277 L688 277" stroke="#0F766E" stroke-width="1.5" marker-end="url(#a)"/>
+    <text x="661" y="268" text-anchor="middle" class="xs">触发</text>
+    <!-- Avatar -->
+    <rect x="690" y="120" width="155" height="70" rx="12" fill="#fff" stroke="#4B5563"/>
+    <text x="767" y="146" text-anchor="middle" class="b">AvatarActor</text>
+    <text x="767" y="165" text-anchor="middle" class="xs">世界中的身体（Pawn）</text>
+    <text x="767" y="180" text-anchor="middle" class="xs">动画 / 位置 / 碰撞</text>
+    <path d="M540 165 L688 155" stroke="#4B5563" stroke-width="1.3" stroke-dasharray="5 3" marker-end="url(#a)"/>
+    <text x="612" y="150" text-anchor="middle" class="xs">InitAbilityActorInfo</text>
+    <!-- Target ASC -->
+    <rect x="455" y="360" width="250" height="70" rx="12" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="580" y="388" text-anchor="middle" class="b">目标的 ASC</text>
+    <text x="580" y="408" text-anchor="middle" class="xs">GE 在这里生效，改它的 AttributeSet / Tags</text>
+    <path d="M545 304 L560 358" stroke="#C2410C" stroke-width="1.5" marker-end="url(#ao)"/>
+    <text x="600" y="336" class="xs">ApplyGameplayEffectSpecToTarget</text>
+    <!-- input -->
+    <rect x="20" y="360" width="160" height="50" rx="10" fill="#fff" stroke="#4B5563"/>
+    <text x="100" y="381" text-anchor="middle" class="b">输入 / 事件 / Tag</text>
+    <text x="100" y="398" text-anchor="middle" class="xs">激活技能的来源</text>
+    <path d="M180 385 Q 300 385 310 306" stroke="#6D28D9" stroke-width="1.5" fill="none" marker-end="url(#ap)"/>
+    <text x="250" y="378" class="xs">TryActivateAbility</text>
+    <text x="430" y="458" text-anchor="middle" class="sm">口诀：<tspan class="b">Ability 决定"做什么"，Effect 决定"改什么"，Tag 决定"能不能"，Cue 决定"看起来怎样"</tspan></text>
+  </svg>
+  <figcaption><b>图 2-1</b> GAS 全景：ASC 是中枢，挂在 OwnerActor 上，通过 AvatarActor 作用于世界</figcaption>
+  </figure>
+
+  <h2>2.2 七个对象各是什么</h2>
+  <div class="tbl"><table>
+    <tr><th>对象</th><th>一句话</th><th>类比</th><th>典型例子</th></tr>
+    <tr><td><b>AbilitySystemComponent</b></td><td>挂在 Actor 上的组件，管理该 Actor 所有的 GAS 状态</td><td>角色的"战斗中枢"</td><td>每个英雄、小兵、防御塔各一个</td></tr>
+    <tr><td><b>AttributeSet</b></td><td>一组 float 属性的容器，带数值变化回调</td><td>角色面板</td><td>Health、MaxHealth、Mana、Armor</td></tr>
+    <tr><td><b>GameplayEffect (GE)</b></td><td>描述"怎么改属性 / 加什么 Tag / 持续多久"的<strong>纯数据</strong>资产</td><td>一张规范化的修改单</td><td>伤害、治疗、Buff、冷却、消耗</td></tr>
+    <tr><td><b>GameplayAbility (GA)</b></td><td>一段可激活的游戏逻辑，有完整的生命周期</td><td>行为脚本</td><td>普攻、冲刺、火球、开宝箱</td></tr>
+    <tr><td><b>AbilityTask</b></td><td>Ability 中的异步步骤（等动画、等事件、等输入）</td><td>协程中的 await</td><td>PlayMontageAndWait、WaitTargetData</td></tr>
+    <tr><td><b>GameplayTag</b></td><td>层级化的名字，例如 <code>A.B.C</code></td><td>状态标签 / 系统间的通用语言</td><td><code>State.Debuff.Stun</code></td></tr>
+    <tr><td><b>GameplayCue (GC)</b></td><td>由 Tag 驱动的表现层回调，不影响逻辑</td><td>舞台灯光与音效</td><td>命中火花、燃烧粒子</td></tr>
+  </table></div>
+
+  <h2>2.3 定义、实例与句柄：贯穿全书的三层概念</h2>
+  <p>GAS 的 API 第一眼很乱，主要原因是同一个概念有三种形态。弄清楚这一点，API 就好读了：</p>
+  <figure>
+  <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+    <g>
+      <rect x="20" y="40" width="240" height="140" rx="12" fill="#F3F4F6" stroke="#6B7280"/>
+      <text x="140" y="66" text-anchor="middle" class="b">① 定义（Class / CDO）</text>
+      <text x="140" y="92" text-anchor="middle" class="mono">UGameplayAbility 子类</text>
+      <text x="140" y="112" text-anchor="middle" class="mono">UGameplayEffect 子类</text>
+      <text x="140" y="140" text-anchor="middle" class="xs">"火球术长什么样"</text>
+      <text x="140" y="158" text-anchor="middle" class="xs">编辑器里的资产，全局一份</text>
+    </g>
+    <g>
+      <rect x="310" y="40" width="240" height="140" rx="12" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="430" y="66" text-anchor="middle" class="b" style="fill:#2F5BD3">② 运行时实例（Spec）</text>
+      <text x="430" y="92" text-anchor="middle" class="mono">FGameplayAbilitySpec</text>
+      <text x="430" y="112" text-anchor="middle" class="mono">FGameplayEffectSpec</text>
+      <text x="430" y="140" text-anchor="middle" class="xs">"张三的 3 级火球术"</text>
+      <text x="430" y="158" text-anchor="middle" class="xs">带等级、来源、SetByCaller 数值</text>
+    </g>
+    <g>
+      <rect x="600" y="40" width="240" height="140" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="720" y="66" text-anchor="middle" class="b" style="fill:#15803D">③ 句柄（Handle）</text>
+      <text x="720" y="92" text-anchor="middle" class="mono">FGameplayAbilitySpecHandle</text>
+      <text x="720" y="112" text-anchor="middle" class="mono">FActiveGameplayEffectHandle</text>
+      <text x="720" y="140" text-anchor="middle" class="xs">轻量 ID，可以安全传递和保存</text>
+      <text x="720" y="158" text-anchor="middle" class="xs">用来激活、取消、查询、移除</text>
+    </g>
+    <line x1="260" y1="110" x2="308" y2="110" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <text x="284" y="100" text-anchor="middle" class="xs">Give / MakeSpec</text>
+    <line x1="550" y1="110" x2="598" y2="110" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <text x="574" y="100" text-anchor="middle" class="xs">返回</text>
+    <text x="430" y="22" text-anchor="middle" class="sm">记住：传递时用 Handle，配置时用 Class，运行时数据都在 Spec 里</text>
+  </svg>
+  <figcaption><b>图 2-2</b> 定义 → 实例 → 句柄。几乎所有 GAS API 都可以对应到这三层之一</figcaption>
+  </figure>
+  <div class="co deep"><span class="h">🔬 深入源码：Spec 存在哪里</span><p>已授予的技能存放在 <code>ASC::ActivatableAbilities</code>（类型 <code>FGameplayAbilitySpecContainer</code>）中，正在生效的持续型效果存放在 <code>ASC::ActiveGameplayEffects</code>（类型 <code>FActiveGameplayEffectsContainer</code>）中。两者都是 <code>FFastArraySerializer</code>，也就是增量复制的数组，这是第 11 章的重点。</p></div>
+
+  <h2>2.4 一次技能释放的完整旅程</h2>
+  <p>把七个对象串起来，看一次"火球术命中敌人"在系统里依次经过哪些环节：</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <g>
+      <rect x="10" y="30" width="120" height="56" rx="10" fill="#fff" stroke="#4B5563"/><text x="70" y="54" text-anchor="middle" class="b">① 按下 Q</text><text x="70" y="72" text-anchor="middle" class="xs">输入 → ASC</text>
+      <rect x="160" y="30" width="150" height="56" rx="10" fill="#FEF6E4" stroke="#B45309"/><text x="235" y="54" text-anchor="middle" class="b">② 能否激活？</text><text x="235" y="72" text-anchor="middle" class="xs">Tag / 消耗 / 冷却检查</text>
+      <rect x="340" y="30" width="150" height="56" rx="10" fill="#F3EEFE" stroke="#6D28D9"/><text x="415" y="54" text-anchor="middle" class="b">③ ActivateAbility</text><text x="415" y="72" text-anchor="middle" class="xs">Commit：扣蓝 + 进冷却</text>
+      <rect x="520" y="30" width="150" height="56" rx="10" fill="#fff" stroke="#6D28D9" stroke-dasharray="4 3"/><text x="595" y="54" text-anchor="middle" class="b">④ AbilityTask</text><text x="595" y="72" text-anchor="middle" class="xs">播动画，等出手事件</text>
+      <rect x="700" y="30" width="150" height="56" rx="10" fill="#F3EEFE" stroke="#6D28D9"/><text x="775" y="54" text-anchor="middle" class="b">⑤ 生成火球</text><text x="775" y="72" text-anchor="middle" class="xs">仅服务器 · 弹道复制</text>
+    </g>
+    <g stroke="#4B5563" stroke-width="1.5">
+      <line x1="130" y1="58" x2="158" y2="58" marker-end="url(#a)"/><line x1="310" y1="58" x2="338" y2="58" marker-end="url(#a)"/>
+      <line x1="490" y1="58" x2="518" y2="58" marker-end="url(#a)"/><line x1="670" y1="58" x2="698" y2="58" marker-end="url(#a)"/>
+      <path d="M775 86 L775 150" marker-end="url(#a)"/>
+    </g>
+    <g>
+      <rect x="700" y="152" width="150" height="56" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="775" y="176" text-anchor="middle" class="b">⑥ 命中：施加 GE</text><text x="775" y="194" text-anchor="middle" class="xs">Spec 带 等级 / 来源</text>
+      <rect x="520" y="152" width="150" height="56" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="595" y="176" text-anchor="middle" class="b">⑦ 伤害计算</text><text x="595" y="194" text-anchor="middle" class="xs">ExecutionCalculation</text>
+      <rect x="340" y="152" width="150" height="56" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="415" y="176" text-anchor="middle" class="b">⑧ 属性变化</text><text x="415" y="194" text-anchor="middle" class="xs">Health −87 · 回调</text>
+      <rect x="160" y="152" width="150" height="56" rx="10" fill="#E6F7F7" stroke="#0F766E"/><text x="235" y="176" text-anchor="middle" class="b">⑨ GameplayCue</text><text x="235" y="194" text-anchor="middle" class="xs">所有客户端播放命中特效</text>
+      <rect x="10" y="152" width="120" height="56" rx="10" fill="#fff" stroke="#4B5563"/><text x="70" y="176" text-anchor="middle" class="b">⑩ UI 刷新</text><text x="70" y="194" text-anchor="middle" class="xs">属性委托 → 血条</text>
+    </g>
+    <g stroke="#4B5563" stroke-width="1.5">
+      <line x1="700" y1="180" x2="672" y2="180" marker-end="url(#a)"/><line x1="520" y1="180" x2="492" y2="180" marker-end="url(#a)"/>
+      <line x1="340" y1="180" x2="312" y2="180" marker-end="url(#a)"/><line x1="160" y1="180" x2="132" y2="180" marker-end="url(#a)"/>
+    </g>
+    <rect x="10" y="236" width="840" height="50" rx="10" fill="#EAF0FD" stroke="#C9D7FA"/>
+    <text x="430" y="257" text-anchor="middle" class="sm" style="fill:#2F5BD3">🌐 联网时：①–④ 在本地客户端<tspan class="b">预测执行</tspan>（立即反馈），同时 RPC 通知服务器；⑤–⑧ 只在<tspan class="b">服务器</tspan>权威执行，</text>
+    <text x="430" y="276" text-anchor="middle" class="sm" style="fill:#2F5BD3">结果通过属性复制下发；⑨ 通过 Effect 复制或多播到达所有客户端。第三部分会逐步展开这里的每个细节。</text>
+  </svg>
+  <figcaption><b>图 2-3</b> 火球术从按键到血条变化的十个环节</figcaption>
+  </figure>
+
+  <h2>2.5 逻辑与表现分离</h2>
+  <p>GAS 有一条贯穿始终的界线：<strong>GE、Attribute、Tag 是逻辑层</strong>，由服务器权威决定；<strong>GameplayCue 是表现层</strong>，可以丢包、可以延迟、可以只在本地播放，丢了也不影响游戏结果。</p>
+  <div class="co warn"><span class="h">⚠️ 坑点：不要在 Cue 里写逻辑</span><p>Cue 走的是 Unreliable 多播，而且只在客户端执行（专用服务器默认不跑表现）。在 Cue 里扣血、加 Buff，结果一定会不同步。反过来，Ability 也只存在于服务器和"拥有者客户端"，<strong>在 Ability 里用 Multicast RPC 播特效是错误做法</strong>，应该交给 Cue 去做。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>ASC 是中枢；AttributeSet 存数值，GE 改数值，GA 写流程，Task 处理异步，Tag 管规则，Cue 管表现。</li>
+    <li>记住三层概念：<strong>Class（定义）→ Spec（运行时实例）→ Handle（句柄）</strong>。</li>
+    <li>逻辑在服务器权威执行，表现交给 Cue，二者不要混用。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH3 ======================= -->
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>最小可运行工程</h1>
+    <p class="lead">从零接入 GAS。这一章的每个决定（ASC 放哪、何时初始化）都直接影响后面的联网表现，不要跳过。</p>
+  </div>
+
+  <h2>3.1 启用插件与模块依赖</h2>
+  <p>在编辑器 <em>Edit → Plugins</em> 中启用 <strong>Gameplay Abilities</strong>，然后在模块的 <code>Build.cs</code> 中添加依赖：</p>
+<!--code:cpp:MyGame.Build.cs-->
+PublicDependencyModuleNames.AddRange(new string[] {
+    "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput",
+    "GameplayAbilities",   // ASC / GA / GE / AttributeSet
+    "GameplayTags",        // FGameplayTag
+    "GameplayTasks"        // AbilityTask 的基类 UGameplayTask
+});
+<!--/code-->
+  <div class="co ver"><span class="h">🕒 版本差异：InitGlobalData</span><p>老教程会要求在 <code>UAssetManager::StartInitialLoading()</code> 中手动调用 <code>UAbilitySystemGlobals::Get().InitGlobalData()</code>，否则 TargetData 等功能会报错。新版本的插件模块会自行完成全局初始化。如果你的项目是从 UE4 升级上来的，可以保留这行调用，它内部有防重复初始化的判断。</p></div>
+
+  <h2>3.2 第一个关键决定：ASC 放在哪里</h2>
+  <p>ASC 所在的 Actor 叫 <strong>OwnerActor</strong>，ASC 在世界中作用的"身体"叫 <strong>AvatarActor</strong>。两者可以是同一个 Actor，也可以分开：</p>
+  <figure>
+  <svg viewBox="0 0 860 280" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="30" width="180" height="60" rx="10" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="110" y="56" text-anchor="middle" class="b">PlayerController</text>
+    <text x="110" y="76" text-anchor="middle" class="xs">只在服务器 + 本机存在</text>
+    <rect x="270" y="20" width="250" height="110" rx="12" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="395" y="44" text-anchor="middle" class="b" style="fill:#2F5BD3">PlayerState（OwnerActor）</text>
+    <rect x="290" y="56" width="100" height="30" rx="6" fill="#2F5BD3"/><text x="340" y="76" text-anchor="middle" class="sm wt">ASC</text>
+    <rect x="400" y="56" width="100" height="30" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="450" y="76" text-anchor="middle" class="sm">AttributeSet</text>
+    <text x="395" y="110" text-anchor="middle" class="xs">所有客户端都有 · 角色死亡后依然存在</text>
+    <line x1="200" y1="60" x2="268" y2="60" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/>
+    <text x="234" y="52" text-anchor="middle" class="xs">Owner</text>
+
+    <rect x="600" y="20" width="240" height="70" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="720" y="48" text-anchor="middle" class="b" style="fill:#15803D">Pawn（AvatarActor）· 第 1 条命</text>
+    <text x="720" y="70" text-anchor="middle" class="xs">骨骼网格、动画、碰撞、移动</text>
+    <line x1="520" y1="60" x2="598" y2="55" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="560" y="48" text-anchor="middle" class="xs" style="fill:#2F5BD3">Avatar</text>
+
+    <rect x="600" y="160" width="240" height="70" rx="12" fill="#fff" stroke="#15803D" stroke-dasharray="5 3"/>
+    <text x="720" y="188" text-anchor="middle" class="b" style="fill:#15803D">新 Pawn · 重生后</text>
+    <text x="720" y="210" text-anchor="middle" class="xs">再次 InitAbilityActorInfo(PS, NewPawn)</text>
+    <path d="M720 90 L720 158" stroke="#B91C1C" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+    <text x="728" y="130" class="xs" style="fill:#B91C1C">死亡 → 销毁 → 重生</text>
+    <path d="M520 110 Q 570 190 598 195" stroke="#2F5BD3" stroke-width="1.4" fill="none" stroke-dasharray="5 3" marker-end="url(#ab)"/>
+    <rect x="20" y="160" width="520" height="100" rx="12" fill="#FEF6E4" stroke="#F3DDA8"/>
+    <text x="36" y="186" class="b" style="fill:#B45309">放在 PlayerState 的好处</text>
+    <text x="36" y="208" class="sm">• 角色死亡后，冷却、永久 Buff、属性、已学技能都保留，不需要迁移数据</text>
+    <text x="36" y="228" class="sm">• Pawn 可以随时更换（换坐骑、变身），只需重设 Avatar</text>
+    <text x="36" y="248" class="sm">• 代价：PlayerState 的同步频率默认很低，需要调高（见 3.3）</text>
+  </svg>
+  <figcaption><b>图 3-1</b> 玩家角色推荐的结构：ASC 和 AttributeSet 放在 PlayerState，Pawn 只作为 Avatar</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>场景</th><th>ASC 放置</th><th>复制模式</th><th>说明</th></tr>
+    <tr><td>玩家角色（要保留状态）</td><td>PlayerState</td><td>Mixed</td><td>Lyra 与 Epic 官方最佳实践的推荐方案</td></tr>
+    <tr><td>玩家角色（每条命完全重置）</td><td>Pawn</td><td>Mixed</td><td>实现简单，死亡即清空</td></tr>
+    <tr><td>大量 AI 小兵</td><td>Pawn（Owner = Avatar = 自己）</td><td>Minimal</td><td>节省带宽，小兵不需要把 GE 细节同步给任何客户端</td></tr>
+    <tr><td>需要和玩家统一处理的 AI（Bot）</td><td>PlayerState（AIController 设 <code>bWantsPlayerState = true</code>）</td><td>Mixed</td><td>Bot 与玩家共用同一套代码</td></tr>
+    <tr><td>可破坏物、宝箱</td><td>自身</td><td>Minimal</td><td>同样可以被 GE 打</td></tr>
+    <tr><td>联网游戏</td><td class="no">❌ 不要放 PlayerController</td><td>—</td><td>PC 不会复制到其他客户端</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 坑点：一个 Actor 只放一个 ASC</span><p>ASC 初始化时会自动收集 OwnerActor 上所有 AttributeSet 子对象。放两个 ASC 会导致属性集被重复注册，<code>IAbilitySystemInterface</code> 的返回值也变得不确定。</p></div>
+
+  <h2>3.3 PlayerState：创建 ASC 与 AttributeSet</h2>
+<!--code:cpp:MyPlayerState.h-->
+UCLASS()
+class AMyPlayerState : public APlayerState, public IAbilitySystemInterface
+{
+    GENERATED_BODY()
+public:
+    AMyPlayerState();
+    // IAbilitySystemInterface：让 GAS 以 O(1) 找到 ASC（未实现时会退化为遍历组件）
+    virtual UAbilitySystemComponent* GetAbilitySystemComponent() const override { return AbilitySystemComponent; }
+    UMyAttributeSet* GetAttributeSet() const { return AttributeSet; }
+
+protected:
+    UPROPERTY(VisibleAnywhere, Category = "GAS")
+    TObjectPtr<UMyAbilitySystemComponent> AbilitySystemComponent;
+
+    // 必须用 UPROPERTY 持有，否则会被 GC
+    UPROPERTY()
+    TObjectPtr<UMyAttributeSet> AttributeSet;
+};
+<!--/code-->
+<!--code:cpp:MyPlayerState.cpp-->
+AMyPlayerState::AMyPlayerState()
+{
+    AbilitySystemComponent = CreateDefaultSubobject<UMyAbilitySystemComponent>(TEXT("AbilitySystemComponent"));
+    AbilitySystemComponent->SetIsReplicated(true);
+    // Mixed：GE 细节只同步给自己，其他客户端只收到 Tag 和 Cue（第 11 章详解）
+    AbilitySystemComponent->SetReplicationMode(EGameplayEffectReplicationMode::Mixed);
+
+    // 在构造函数中作为子对象创建：客户端无需等待复制就能拿到属性集
+    AttributeSet = CreateDefaultSubobject<UMyAttributeSet>(TEXT("AttributeSet"));
+
+    // PlayerState 默认同步频率很低，会导致技能/属性响应迟缓
+    SetNetUpdateFrequency(100.f);   // UE5.5 之前写作 NetUpdateFrequency = 100.f;
+}
+<!--/code-->
+  <div class="co net"><span class="h">🌐 网络视角：为什么要调高 NetUpdateFrequency</span><p>属性、ActiveGE 等通过<strong>属性复制</strong>下发，而属性复制受所在 Actor 的 <code>NetUpdateFrequency</code> 限制。PlayerState 默认的更新频率很低，不调高的话，服务器扣血后客户端要等很久才看到。ASC 的 RPC（激活、Cue）不受这个频率限制，所以表现为"特效出来了，血条半天才动"。</p></div>
+
+  <h2>3.4 第二个关键决定：何时初始化 ActorInfo</h2>
+  <p><code>InitAbilityActorInfo(Owner, Avatar)</code> 会把 Owner、Avatar、PlayerController、动画实例、移动组件等缓存到 <code>FGameplayAbilityActorInfo</code> 中，技能运行时都从这里读取。<strong>服务器和客户端必须各自调用一次</strong>，而且要在双方都"准备好"之后调用：</p>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="40" class="b" style="fill:#2F5BD3">服务器</text>
+    <line x1="90" y1="35" x2="845" y2="35" stroke="#C9D7FA" stroke-width="2"/>
+    <g>
+      <rect x="95" y="50" width="130" height="44" rx="8" fill="#fff" stroke="#2F5BD3"/><text x="160" y="77" text-anchor="middle" class="sm">生成 PlayerState</text>
+      <rect x="240" y="50" width="120" height="44" rx="8" fill="#fff" stroke="#2F5BD3"/><text x="300" y="77" text-anchor="middle" class="sm">生成 Pawn</text>
+      <rect x="375" y="50" width="150" height="44" rx="8" fill="#fff" stroke="#2F5BD3"/><text x="450" y="70" text-anchor="middle" class="sm">Controller→Possess</text><text x="450" y="86" text-anchor="middle" class="xs">Pawn::PossessedBy</text>
+      <rect x="540" y="50" width="150" height="44" rx="8" fill="#2F5BD3"/><text x="615" y="77" text-anchor="middle" class="sm wt">InitAbilityActorInfo</text>
+      <rect x="705" y="50" width="140" height="44" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="775" y="70" text-anchor="middle" class="sm">授予技能</text><text x="775" y="86" text-anchor="middle" class="xs">施加初始化 GE</text>
+    </g>
+    <text x="20" y="160" class="b" style="fill:#C2410C">拥有者客户端</text>
+    <line x1="110" y1="155" x2="845" y2="155" stroke="#F8D3BC" stroke-width="2"/>
+    <g>
+      <rect x="120" y="170" width="140" height="44" rx="8" fill="#fff" stroke="#C2410C"/><text x="190" y="190" text-anchor="middle" class="sm">PS 复制到达</text><text x="190" y="206" text-anchor="middle" class="xs">ASC/AttrSet 已存在</text>
+      <rect x="280" y="170" width="120" height="44" rx="8" fill="#fff" stroke="#C2410C"/><text x="340" y="197" text-anchor="middle" class="sm">Pawn 复制到达</text>
+      <rect x="420" y="170" width="160" height="44" rx="8" fill="#fff" stroke="#C2410C"/><text x="500" y="190" text-anchor="middle" class="sm">Pawn::OnRep_PlayerState</text><text x="500" y="206" text-anchor="middle" class="xs">两者都到了才触发</text>
+      <rect x="600" y="170" width="150" height="44" rx="8" fill="#C2410C"/><text x="675" y="197" text-anchor="middle" class="sm wt">InitAbilityActorInfo</text>
+      <rect x="765" y="170" width="80" height="44" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="805" y="190" text-anchor="middle" class="xs">PC::OnRep</text><text x="805" y="205" text-anchor="middle" class="xs">Refresh</text>
+    </g>
+    <g stroke="#94A3B8" stroke-dasharray="4 3" stroke-width="1.2">
+      <line x1="160" y1="94" x2="185" y2="168" marker-end="url(#a)"/>
+      <line x1="300" y1="94" x2="335" y2="168" marker-end="url(#a)"/>
+    </g>
+    <text x="250" y="132" class="xs">复制（到达顺序无保证）</text>
+    <text x="430" y="248" text-anchor="middle" class="xs">客户端上 PC、PS、Pawn 的到达顺序不确定。PC 晚到时，需要在 PC 的 OnRep_PlayerState 中 RefreshAbilityActorInfo，否则本地预测技能无法激活</text>
+  </svg>
+  <figcaption><b>图 3-2</b> 两端初始化时机：服务器在 PossessedBy 中初始化，客户端在 OnRep_PlayerState 中初始化</figcaption>
+  </figure>
+<!--code:cpp:MyCharacter.cpp —— 两端初始化-->
+// 服务器：Controller 附身时
+void AMyCharacter::PossessedBy(AController* NewController)
+{
+    Super::PossessedBy(NewController);
+    InitAbilitySystem();
+    if (HasAuthority())
+    {
+        GrantStartupAbilitiesAndEffects();     // 技能只能在服务器授予
+    }
+}
+
+// 客户端：PlayerState 复制到达时（此时 Pawn 也一定已经存在）
+void AMyCharacter::OnRep_PlayerState()
+{
+    Super::OnRep_PlayerState();
+    InitAbilitySystem();
+}
+
+void AMyCharacter::InitAbilitySystem()
+{
+    AMyPlayerState* PS = GetPlayerState<AMyPlayerState>();
+    if (!PS) return;
+    AbilitySystemComponent = PS->GetAbilitySystemComponent();   // 角色缓存一个指针，便于访问
+    // Owner = PlayerState（持久），Avatar = 当前角色（身体）
+    AbilitySystemComponent->InitAbilityActorInfo(PS, this);
+}
+
+// 角色同样实现 IAbilitySystemInterface，返回 PS 上的 ASC
+UAbilitySystemComponent* AMyCharacter::GetAbilitySystemComponent() const { return AbilitySystemComponent; }
+<!--/code-->
+<!--code:cpp:MyPlayerController.cpp —— 兜底刷新 PC 缓存-->
+void AMyPlayerController::OnRep_PlayerState()
+{
+    Super::OnRep_PlayerState();
+    // PC 可能晚于 PS/Pawn 到达；这里保证 ActorInfo 中缓存到了 PlayerController
+    if (IsNetMode(NM_Client))
+    {
+        if (UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(PlayerState))
+        {
+            ASC->RefreshAbilityActorInfo();
+        }
+    }
+}
+<!--/code-->
+  <div class="co warn"><span class="h">⚠️ 坑点：本地预测技能"按了没反应"</span><p>症状是：Listen Server 上正常，纯客户端上 <code>LocalPredicted</code> 技能激活不了，或者全部走了服务器。原因通常是 <code>ActorInfo.PlayerController</code> 为空，ASC 认为自己"不是本地控制的"。按上面的写法补上 PC 端的 Refresh 即可。Lyra 在 5.6 中也修复了同样的问题。</p></div>
+  <div class="co net"><span class="h">🌐 网络视角：OwnerActor 的 Owner 链</span><p>客户端要能调用 ASC 上的 Server RPC，ASC 所在 Actor 的 <strong>NetOwner 必须是该客户端的连接</strong>。PlayerState 的 Owner 默认就是 PlayerController，天然满足；ASC 放在 Pawn 上时，Possess 会把 Pawn 的 Owner 设为 Controller，同样满足。<strong>Mixed 复制模式还额外要求 OwnerActor 的 Owner 是 Controller</strong>，否则 GE 无法正确同步给拥有者。</p></div>
+
+  <h2>3.5 AI / 小兵：Owner 与 Avatar 是同一个 Actor</h2>
+<!--code:cpp:MyMinion.cpp-->
+AMyMinion::AMyMinion()
+{
+    AbilitySystemComponent = CreateDefaultSubobject<UAbilitySystemComponent>(TEXT("ASC"));
+    AbilitySystemComponent->SetIsReplicated(true);
+    AbilitySystemComponent->SetReplicationMode(EGameplayEffectReplicationMode::Minimal); // 小兵用 Minimal
+    AttributeSet = CreateDefaultSubobject<UMyAttributeSet>(TEXT("AttributeSet"));
+}
+
+void AMyMinion::BeginPlay()
+{
+    Super::BeginPlay();
+    AbilitySystemComponent->InitAbilityActorInfo(this, this);   // 两端都在 BeginPlay 初始化即可
+    if (HasAuthority()) { GrantStartupAbilitiesAndEffects(); }
+}
+<!--/code-->
+
+  <h2>3.6 授予技能与初始化属性</h2>
+<!--code:cpp:授予初始技能 / 初始属性（只在服务器）-->
+void AMyCharacter::GrantStartupAbilitiesAndEffects()
+{
+    UAbilitySystemComponent* ASC = GetAbilitySystemComponent();
+    if (!ASC || bStartupGranted) return;      // 重生时 ASC 在 PS 上，避免重复授予
+
+    for (const TSubclassOf<UGameplayAbility>& AbilityClass : StartupAbilities)
+    {
+        // Spec(类, 等级, InputID, SourceObject)
+        ASC->GiveAbility(FGameplayAbilitySpec(AbilityClass, 1, INDEX_NONE, this));
+    }
+
+    // 用一个 Instant GE（Override 各项属性）初始化属性，而不是直接 Set
+    FGameplayEffectContextHandle Ctx = ASC->MakeEffectContext();
+    Ctx.AddSourceObject(this);
+    FGameplayEffectSpecHandle Spec = ASC->MakeOutgoingSpec(GE_InitAttributes, CharacterLevel, Ctx);
+    ASC->ApplyGameplayEffectSpecToSelf(*Spec.Data.Get());
+
+    bStartupGranted = true;
+}
+<!--/code-->
+  <div class="co tip"><span class="h">✅ 实践建议：属性初始化的三种方式</span><ul>
+    <li><b>Instant GE + Override</b>：最直观，可以按等级读曲线表，推荐入门使用。</li>
+    <li><b>DataTable</b>：<code>InitStats(AttributeSetClass, DataTable)</code>，简单但不支持等级。</li>
+    <li><b>FAttributeSetInitter + CurveTable</b>：堡垒之夜使用的方式，在项目设置 <code>GlobalAttributeSetDefaultsTables</code> 中配置曲线表，按"组名 + 等级"初始化，适合有大量单位的项目。</li>
+  </ul></div>
+
+  <h2>3.7 输入绑定：Enhanced Input + InputTag</h2>
+  <p>引擎内置的 <code>BindAbilityActivationToInputComponent</code> 依赖旧版输入系统和一个枚举，大项目一般不用。现在的主流做法（Lyra）是<strong>让技能在 DynamicTags 中声明自己响应哪个 InputTag</strong>，输入组件只负责把 InputTag 转发给 ASC：</p>
+<!--code:cpp:MyAbilitySystemComponent.cpp —— InputTag 驱动-->
+// 授予时：Spec.GetDynamicSpecSourceTags().AddTag(InputTag_Ability_Q);  (5.5 之前为 Spec.DynamicAbilityTags)
+
+void UMyAbilitySystemComponent::AbilityInputTagPressed(const FGameplayTag& InputTag)
+{
+    for (FGameplayAbilitySpec& Spec : GetActivatableAbilities())
+    {
+        if (!Spec.Ability || !Spec.GetDynamicSpecSourceTags().HasTagExact(InputTag)) continue;
+
+        AbilitySpecInputPressed(Spec);           // 让 WaitInputPress 等 Task 能收到
+        if (Spec.IsActive())
+        {
+            // 技能已经在运行：把"按下"事件同步给服务器上的同一个技能实例
+            InvokeReplicatedEvent(EAbilityGenericReplicatedEvent::InputPressed,
+                                  Spec.Handle, Spec.GetPrimaryInstance()->GetCurrentActivationInfo().GetActivationPredictionKey());
+        }
+        else
+        {
+            TryActivateAbility(Spec.Handle);     // 会根据 NetExecutionPolicy 自动走预测/RPC
+        }
+    }
+}
+<!--/code-->
+  <div class="co ver"><span class="h">🕒 版本差异</span><p><code>FGameplayAbilitySpec::DynamicAbilityTags</code> 在 5.5 中改为通过 <code>GetDynamicSpecSourceTags()</code> 访问；<code>GetPrimaryInstance()</code> 是 5.5 之后获取 InstancedPerActor 实例的推荐接口（之前一般用 <code>GetAbilityInstances()</code> 取最后一个）。旧接口仍可编译，但会给出废弃警告。</p></div>
+
+  <h2>3.8 验证：showdebug abilitysystem</h2>
+  <p>运行游戏，在控制台输入 <code>showdebug abilitysystem</code>，屏幕上会列出当前目标的属性、Owned Tags、已授予技能和激活中的 GE。用 <code>AbilitySystem.Debug.NextCategory</code> 切换显示类别，用 PageUp / PageDown 切换查看对象。看到属性值和技能列表，说明接入已经成功。</p>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>玩家的 ASC 推荐放在 <strong>PlayerState</strong>（Mixed 模式，调高 NetUpdateFrequency），AI 小兵放在自身（Minimal 模式）。</li>
+    <li><code>InitAbilityActorInfo</code> 两端都要调用：服务器在 <code>PossessedBy</code>，客户端在 <code>OnRep_PlayerState</code>，PC 端再做一次 Refresh 兜底。</li>
+    <li>技能<strong>只能在服务器授予</strong>；属性用 GE 初始化；输入用 InputTag 转发给 ASC。</li>
+  </ul></div>
+  <details class="quiz"><summary>思考题：ASC 放在 PlayerState 上，角色死亡时"正在燃烧"的 DOT 该怎么处理？</summary>
+  <p>ASC 不随 Pawn 销毁，所以 DOT 会一直保留。一般做法是：死亡时由服务器调用 <code>RemoveActiveEffectsWithGrantedTags</code>（或给 GE 打上 <code>Effect.RemoveOnDeath</code> 之类的 AssetTag，再按 Tag 查询移除），同时 <code>CancelAllAbilities()</code>。需要跨命保留的效果（例如永久天赋）不要打这个 Tag。这正是官方文档说的"移除部分效果，比在 ASC 之间迁移效果容易得多"。</p></details>
+</section>

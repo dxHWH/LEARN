@@ -1,0 +1,306 @@
+<div class="part-head" data-toc="第三部分 · 生命周期与管理">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　生命周期与管理结构</h1>
+  <p>操作系统怎么知道一个进程/线程处于什么状态？在什么事件下切换状态？靠什么数据结构记住它的一切？</p>
+</div>
+
+<!-- ======================= CH4 ======================= -->
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>生命周期与状态转换</h1>
+    <p class="lead">五个状态、六条合法的边，以及每条边背后由谁触发。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出五状态模型，说出每条转换的触发事件，以及哪些转换不存在、为什么不存在</li>
+    <li>把教科书模型对应到 Linux 的 <code>R/S/D/T/Z</code> 和 Windows 的线程状态</li>
+    <li>理解上下文切换做了什么，进程切换为什么比线程切换贵</li>
+  </ul></div>
+
+  <h2>4.1 五状态模型</h2>
+  <figure>
+  <svg viewBox="0 0 860 350" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="40" width="130" height="56" rx="28" fill="#F3F4F6" stroke="#4B5563" stroke-width="1.6"/>
+    <text x="85" y="65" text-anchor="middle" class="b">创建 New</text><text x="85" y="84" text-anchor="middle" class="xs">分配 PCB、资源</text>
+    <rect x="250" y="40" width="130" height="56" rx="28" fill="#EAF7EF" stroke="#15803D" stroke-width="1.6"/>
+    <text x="315" y="65" text-anchor="middle" class="b" style="fill:#15803D">就绪 Ready</text><text x="315" y="84" text-anchor="middle" class="xs">只差 CPU</text>
+    <rect x="520" y="40" width="130" height="56" rx="28" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="1.6"/>
+    <text x="585" y="65" text-anchor="middle" class="b" style="fill:#2F5BD3">运行 Running</text><text x="585" y="84" text-anchor="middle" class="xs">正在 CPU 上执行</text>
+    <rect x="720" y="40" width="130" height="56" rx="28" fill="#F3F4F6" stroke="#4B5563" stroke-width="1.6"/>
+    <text x="785" y="65" text-anchor="middle" class="b">终止 Exit</text><text x="785" y="84" text-anchor="middle" class="xs">等待回收</text>
+    <rect x="390" y="250" width="140" height="56" rx="28" fill="#FDEEEE" stroke="#B91C1C" stroke-width="1.6"/>
+    <text x="460" y="275" text-anchor="middle" class="b" style="fill:#B91C1C">阻塞 Blocked</text><text x="460" y="294" text-anchor="middle" class="xs">差事件，给 CPU 也没用</text>
+
+    <line x1="150" y1="68" x2="248" y2="68" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <text x="199" y="60" text-anchor="middle" class="xs">① 准入</text>
+    <line x1="380" y1="58" x2="518" y2="58" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="449" y="50" text-anchor="middle" class="xs" style="fill:#2F5BD3">② 调度器选中</text>
+    <line x1="520" y1="80" x2="382" y2="80" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="449" y="114" text-anchor="middle" class="xs" style="fill:#C2410C">③ 时间片用完 / 被抢占 / yield</text>
+    <line x1="650" y1="68" x2="718" y2="68" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <text x="685" y="60" text-anchor="middle" class="xs">⑥ 退出</text>
+    <text x="685" y="114" text-anchor="middle" class="xs">exit / 被杀 / 致命异常</text>
+
+    <path d="M600 96 C 625 180, 600 245, 534 272" stroke="#B91C1C" stroke-width="1.6" marker-end="url(#ar)" fill="none"/>
+    <text x="628" y="178" class="xs" style="fill:#B91C1C">④ 等待 I/O、锁、sleep、</text>
+    <text x="628" y="194" class="xs" style="fill:#B91C1C">   条件变量（自己发起）</text>
+    <path d="M390 272 C 330 250, 300 180, 312 100" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)" fill="none"/>
+    <text x="298" y="178" text-anchor="end" class="xs" style="fill:#15803D">⑤ 等待的事件发生</text>
+    <text x="298" y="194" text-anchor="end" class="xs" style="fill:#15803D">（中断处理 / 其他线程唤醒）</text>
+
+    <path d="M470 248 L560 100" stroke="#9CA3AF" stroke-width="1.2" stroke-dasharray="5 4" fill="none"/>
+    <text x="520" y="214" class="xs" style="fill:#9CA3AF">✕ 阻塞→运行</text>
+    <text x="430" y="334" text-anchor="middle" class="xs">实线：合法转换。灰色虚线：不存在的转换 —— 被唤醒后只能先回就绪队列排队；就绪的任务没在运行，也就不可能发起"等待"</text>
+  </svg>
+  <figcaption><b>图 4-1</b> 五状态模型。注意 ③ 和 ④ 的区别：③ 是被动让出 CPU 但随时可以再跑，④ 是自己发起等待，事件不来就不能跑</figcaption>
+  </figure>
+
+  <div class="tbl"><table>
+    <tr><th>转换</th><th>触发者</th><th>典型例子</th></tr>
+    <tr><td>① 创建 → 就绪</td><td>内核完成初始化</td><td><code>fork</code> / <code>CreateProcess</code> 返回前，新任务进入就绪队列</td></tr>
+    <tr><td>② 就绪 → 运行</td><td><strong>调度器</strong></td><td>当前任务让出 CPU，调度器从就绪队列选出下一个</td></tr>
+    <tr><td>③ 运行 → 就绪</td><td>时钟中断 / 调度器</td><td>时间片用完；更高优先级的任务被唤醒并抢占；调用 <code>sched_yield</code> / <code>SwitchToThread</code></td></tr>
+    <tr><td>④ 运行 → 阻塞</td><td><strong>任务自己</strong>（经系统调用）</td><td><code>read</code> 磁盘、<code>recv</code> 网络、<code>mutex.lock()</code> 没抢到、<code>sleep</code>、<code>cv.wait</code></td></tr>
+    <tr><td>⑤ 阻塞 → 就绪</td><td>中断处理程序 / 其他任务</td><td>磁盘 DMA 完成触发中断；持锁线程 <code>unlock</code> 唤醒等待者；定时器到期</td></tr>
+    <tr><td>⑥ 运行 → 终止</td><td>任务自己 / 内核</td><td><code>return</code> 出 <code>main</code>；<code>exit</code>；收到 <code>SIGKILL</code>；访问违例</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">✅ 面试答法：为什么没有"阻塞 → 运行"和"就绪 → 阻塞"？</span>
+  <p><strong>阻塞 → 运行</strong>：事件发生只说明它<em>可以</em>运行了，但 CPU 可能正被别人占用，必须先进入就绪队列，由调度器统一决定谁上 CPU。（有些内核会在唤醒时检查优先级，若被唤醒者更高就立即触发抢占，但逻辑上仍是"先就绪、再被调度"。）</p>
+  <p><strong>就绪 → 阻塞</strong>：阻塞是任务<em>自己</em>执行了一个"等待"操作（系统调用）的结果，而就绪的任务根本没有在执行，不可能发起等待。</p></div>
+
+  <div class="lab" id="lab-state">
+    <div class="t">🧪 交互实验 2 · 状态机模拟器</div>
+    <p style="margin:6px 0;font-size:14px;color:var(--ink2)">模拟一个进程从创建到终止的过程。只有在当前状态下合法的事件按钮才可点击，对照上图体会每条边。</p>
+    <div class="row"><span>当前状态：</span><b id="st-cur" style="font-size:18px"></b></div>
+    <div class="row" id="st-btns"></div>
+    <div class="out" id="st-log"></div>
+  </div>
+
+  <h2>4.2 一次 <code>read()</code> 经历的完整状态变化</h2>
+  <p>把抽象模型放到具体场景里：一个线程调用 <code>read(fd, buf, 4096)</code> 读一个不在页缓存里的文件。</p>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <line x1="40" y1="200" x2="830" y2="200" stroke="#4B5563" stroke-width="1.2" marker-end="url(#a)"/>
+    <text x="830" y="222" text-anchor="end" class="xs">时间</text>
+    <rect x="40" y="60" width="130" height="34" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="105" y="82" text-anchor="middle" class="xs">运行：用户态代码</text>
+    <rect x="170" y="60" width="110" height="34" rx="6" fill="#DCE6FB" stroke="#2F5BD3"/><text x="225" y="82" text-anchor="middle" class="xs">运行：陷入内核</text>
+    <rect x="280" y="120" width="300" height="34" rx="6" fill="#FDEEEE" stroke="#B91C1C"/><text x="430" y="142" text-anchor="middle" class="xs">阻塞：挂在该磁盘请求的等待队列上（CPU 去跑别人）</text>
+    <rect x="580" y="90" width="100" height="34" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="630" y="112" text-anchor="middle" class="xs">就绪：排队</text>
+    <rect x="680" y="60" width="150" height="34" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="755" y="82" text-anchor="middle" class="xs">运行：拷贝数据，返回</text>
+    <g class="xs">
+      <line x1="170" y1="40" x2="170" y2="200" stroke="#9CA3AF" stroke-dasharray="3 3"/><text x="170" y="34" text-anchor="middle" class="xs">syscall 指令</text>
+      <line x1="280" y1="40" x2="280" y2="200" stroke="#9CA3AF" stroke-dasharray="3 3"/><text x="280" y="34" text-anchor="middle" class="xs">提交 I/O，schedule()</text>
+      <line x1="580" y1="40" x2="580" y2="200" stroke="#9CA3AF" stroke-dasharray="3 3"/><text x="580" y="34" text-anchor="middle" class="xs">磁盘中断：唤醒</text>
+      <line x1="680" y1="40" x2="680" y2="200" stroke="#9CA3AF" stroke-dasharray="3 3"/><text x="680" y="34" text-anchor="middle" class="xs">再次被调度</text>
+    </g>
+    <text x="430" y="182" text-anchor="middle" class="xs" style="fill:#B91C1C">这几毫秒里 CPU 并没有闲着 —— 这就是并发提高利用率的来源</text>
+  </svg>
+  <figcaption><b>图 4-2</b> 一次阻塞式 read 的状态时间线。注意"陷入内核"本身不是状态变化，线程仍然是运行态，只是从用户态切到了内核态</figcaption>
+  </figure>
+  <div class="co warn"><span class="h">⚠️ 易错点：用户态/内核态 ≠ 运行/阻塞</span><p>"用户态、内核态"说的是 CPU 的<strong>特权级</strong>；"运行、就绪、阻塞"说的是<strong>调度状态</strong>。一个线程执行系统调用时进入内核态，但它仍然是"运行"状态；只有在内核里发现需要等待并调用调度函数让出 CPU 时，它才变为"阻塞"。</p></div>
+
+  <h2>4.3 扩展：挂起状态（七状态模型）</h2>
+  <p>当内存紧张时，操作系统可能把某些进程整个换出到磁盘，这时就多出两个状态：<strong>就绪挂起</strong>（在磁盘上，换入就能跑）和<strong>阻塞挂起</strong>（在磁盘上，还在等事件）。现代通用操作系统以<strong>页</strong>为单位换出内存，很少整进程换出，所以这个模型更多出现在教材和考研题中。了解即可：<strong>挂起关注的是"在不在内存里"，阻塞关注的是"在不在等事件"，两者正交。</strong></p>
+
+  <h2>4.4 真实系统里的状态</h2>
+  <h3>Linux：<code>ps</code> 的 STAT 列</h3>
+  <div class="tbl"><table>
+    <tr><th>STAT</th><th>内核状态</th><th>对应教科书</th><th>说明</th></tr>
+    <tr><td><code>R</code></td><td>TASK_RUNNING</td><td>就绪 + 运行</td><td><strong>Linux 不区分就绪和运行</strong>，都是 R，区别只在是否正在某个 CPU 上</td></tr>
+    <tr><td><code>S</code></td><td>TASK_INTERRUPTIBLE</td><td>阻塞</td><td>可中断睡眠：信号可以把它唤醒（例如 <code>sleep</code>、等待 socket）</td></tr>
+    <tr><td><code>D</code></td><td>TASK_UNINTERRUPTIBLE</td><td>阻塞</td><td>不可中断睡眠：通常在等磁盘 / NFS I/O。<strong><code>kill -9</code> 也杀不掉</strong>，大量 D 状态进程通常说明存储出了问题</td></tr>
+    <tr><td><code>T</code> / <code>t</code></td><td>TASK_STOPPED / TRACED</td><td>（挂起）</td><td>被 <code>SIGSTOP</code>/<code>Ctrl+Z</code> 暂停，或正被调试器跟踪</td></tr>
+    <tr><td><code>Z</code></td><td>EXIT_ZOMBIE</td><td>终止</td><td>已退出但父进程尚未 <code>wait</code>，第 8 章详述</td></tr>
+    <tr><td><code>X</code></td><td>EXIT_DEAD</td><td>终止</td><td>正在被彻底回收，几乎看不到</td></tr>
+  </table></div>
+  <p>Linux 的平均负载（load average）统计的是 <strong>R + D</strong> 状态的任务数。所以负载高不一定是 CPU 忙，也可能是大量任务卡在磁盘 I/O 上。</p>
+  <h3>Windows：线程状态</h3>
+  <p>Windows 调度的对象是线程，进程本身没有运行状态。线程状态（<code>KTHREAD_STATE</code>）比教科书更细：<strong>Initialized</strong>（创建中）→ <strong>Ready</strong>（就绪）→ <strong>Deferred Ready</strong>（已选定处理器，等待被分派）→ <strong>Standby</strong>（已被选为某处理器下一个要运行的线程）→ <strong>Running</strong> → <strong>Waiting</strong>（阻塞）→ <strong>Terminated</strong>。另外还有 <strong>Transition</strong>（就绪但内核栈被换出内存）。可以在 Process Explorer 中查看线程属性观察这些状态。</p>
+
+  <h2>4.5 上下文切换：状态转换的代价</h2>
+  <p>每次"运行 → 其他状态 → 运行"，CPU 都要从一个线程换到另一个线程，这叫<strong>上下文切换</strong>。它包括：</p>
+  <ol>
+    <li><strong>进入内核</strong>：通过时钟中断、系统调用或异常。</li>
+    <li><strong>保存当前线程的上下文</strong>：通用寄存器、PC、SP、标志寄存器，必要时还有浮点 / SIMD 寄存器（AVX-512 状态可达 2KB 以上），保存到它的内核栈和 TCB 中。</li>
+    <li><strong>调度器选择下一个线程</strong>。</li>
+    <li><strong>如果下一个线程属于另一个进程</strong>：切换页表（x86 上写 <code>CR3</code> 寄存器）。</li>
+    <li><strong>恢复下一个线程的上下文</strong>，切换内核栈、FS/GS 基址（TLS），返回用户态。</li>
+  </ol>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="30" width="400" height="170" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="220" y="54" text-anchor="middle" class="b" style="fill:#15803D">同进程线程切换</text>
+    <text x="40" y="82" class="sm">✔ 保存/恢复寄存器、切换栈和 TLS 基址</text>
+    <text x="40" y="106" class="sm">✘ 不换页表 → TLB 有效</text>
+    <text x="40" y="130" class="sm">✘ 代码和数据共享 → 缓存大概率仍然有效</text>
+    <text x="40" y="172" class="sm b" style="fill:#15803D">直接开销：约 1 微秒量级</text>
+    <rect x="440" y="30" width="400" height="170" rx="12" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="640" y="54" text-anchor="middle" class="b" style="fill:#B91C1C">跨进程切换</text>
+    <text x="460" y="82" class="sm">✔ 保存/恢复寄存器、切换栈和 TLS 基址</text>
+    <text x="460" y="106" class="sm">✔ 切换页表（写 CR3）</text>
+    <text x="460" y="130" class="sm">✔ TLB 失效（无 PCID 时全部刷新）</text>
+    <text x="460" y="154" class="sm">✔ 工作集不同 → 缓存被逐步替换</text>
+    <text x="460" y="182" class="sm b" style="fill:#B91C1C">直接开销更高，间接开销（缓存/TLB 冷启动）更大</text>
+  </svg>
+  <figcaption><b>图 4-3</b> 线程切换与进程切换的差别在于地址空间：要不要换页表，TLB 和缓存还能不能用</figcaption>
+  </figure>
+  <div class="co net"><span class="h">🧪 实测证据：d4_cost 的 ping-pong 测试</span>
+  <p>把进程绑定到同一个 CPU 核上，两个执行流用 Event 来回唤醒对方 10 万次，每一次交互必然发生一次上下文切换。测得的单次时间包含了 <code>SetEvent</code>/<code>WaitForSingleObject</code> 两次系统调用的开销。</p></div>
+  <div class="term"><div class="bar">d4_cost.exe —— 实测输出（同核 ping-pong）</div><pre>单次切换(含事件系统调用)  线程间: <span class="ok">0.68 us</span>   进程间: <span class="bad">1.50 us</span></pre></div>
+  <p>跨进程切换是线程切换的约 2.2 倍。需要注意，这个微基准中两个进程的工作集都极小，<strong>没有体现缓存和 TLB 被污染的间接开销</strong>。在真实程序中，切换后需要重新加载的缓存行和 TLB 项越多，差距越大。</p>
+  <div class="co deep"><span class="h">🔬 深入：PCID 与 KPTI</span>
+  <p>早期 x86 写 CR3 会刷新整个 TLB（全局页除外）。现代 CPU 支持 <strong>PCID</strong>（进程上下文标识符），TLB 项带上地址空间标签，切换后旧进程的 TLB 项可以保留，切回来时继续使用。2018 年 Meltdown 漏洞之后，内核引入了 <strong>KPTI</strong>（内核页表隔离）：用户态和内核态使用两套页表，于是<strong>每次系统调用</strong>也要切换 CR3，PCID 在这里同样能大幅降低开销。这也是为什么当年打 Meltdown 补丁后，系统调用密集型的程序（数据库、I/O 密集服务）性能下降明显。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>五状态：创建、就绪、运行、阻塞、终止；六条合法转换。<strong>就绪是"差 CPU"，阻塞是"差事件"</strong>。</li>
+    <li>阻塞由任务自己发起，唤醒由别人完成；唤醒后先回就绪队列，不能直接运行。</li>
+    <li>Linux 用 R 同时表示就绪和运行；D 状态不可被信号打断；Z 是僵尸。</li>
+    <li>上下文切换要保存/恢复寄存器；跨进程还要切换页表，导致 TLB 和缓存失效。实测同核切换：线程 0.68μs，进程 1.50μs。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH5 ======================= -->
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>进程控制块与线程控制块</h1>
+    <p class="lead">PCB 是进程在内核中的"档案"，TCB 是线程的"档案"。理解它们要记什么，就不用背字段。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>从"操作系统需要对进程做哪些事"推导出 PCB 必须记录的信息</li>
+    <li>说清楚 PCB 和 TCB 的分工，以及它们与第 3 章资源边界的对应关系</li>
+    <li>认识 Linux <code>task_struct</code> 与 Windows <code>EPROCESS/ETHREAD</code>、<code>PEB/TEB</code></li>
+  </ul></div>
+
+  <h2>5.1 从需求推导 PCB 的内容</h2>
+  <p>不要背字段。问自己：操作系统要管理一个进程，需要做哪些事？每件事需要记住什么？</p>
+  <div class="tbl"><table>
+    <tr><th>操作系统要做的事</th><th>因此必须记录</th><th>放在 PCB 还是 TCB</th></tr>
+    <tr><td>区分不同的进程 / 线程</td><td>PID、TID、父进程 ID、所属用户</td><td>两者都有各自的 ID</td></tr>
+    <tr><td>暂停一个执行流，以后从原处继续</td><td><strong>CPU 上下文</strong>：PC、SP、通用寄存器、标志寄存器、浮点状态</td><td class="mid">TCB</td></tr>
+    <tr><td>决定下一个让谁运行</td><td>调度状态、优先级、已用 CPU 时间、所在队列的链接指针</td><td class="mid">TCB（调度单位是线程）</td></tr>
+    <tr><td>把虚拟地址翻译成物理地址</td><td>页表基址、内存区域列表（代码 / 堆 / 栈 / 映射）</td><td class="yes">PCB</td></tr>
+    <tr><td>管理打开的文件和设备</td><td>文件描述符表 / 句柄表</td><td class="yes">PCB</td></tr>
+    <tr><td>检查权限</td><td>uid/gid、能力集、访问令牌</td><td class="yes">PCB（Windows 线程可临时模拟另一身份）</td></tr>
+    <tr><td>维护进程家族、回收退出码</td><td>父进程、子进程链表、退出状态</td><td class="yes">PCB</td></tr>
+    <tr><td>投递信号 / 异步通知</td><td>信号处置方式（进程）、待处理信号与屏蔽字（线程）</td><td>两者都有</td></tr>
+    <tr><td>统计和限制资源</td><td>CPU 时间、内存用量、资源上限</td><td>两者都有</td></tr>
+  </table></div>
+  <p>这张表的第三列和第 3 章的资源边界是<strong>一一对应</strong>的：进程共享的东西记在 PCB，线程独立的东西记在 TCB。PCB 可以概括为三类信息：<strong>标识信息、处理器状态信息（保存在 TCB 中）、控制信息（调度、内存、资源、家族、统计）</strong>。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="30" width="360" height="280" rx="14" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="200" y="56" text-anchor="middle" class="b" style="fill:#2F5BD3">PCB（每进程一个）</text>
+    <rect x="40" y="72" width="320" height="34" rx="6" fill="#fff" stroke="#C9D7FA"/><text x="56" y="94" class="sm">标识：PID / PPID / uid gid</text>
+    <rect x="40" y="114" width="320" height="34" rx="6" fill="#fff" stroke="#C9D7FA"/><text x="56" y="136" class="sm">内存：页表基址 → 内存区域列表</text>
+    <rect x="40" y="156" width="320" height="34" rx="6" fill="#fff" stroke="#C9D7FA"/><text x="56" y="178" class="sm">资源：文件描述符表 / 句柄表</text>
+    <rect x="40" y="198" width="320" height="34" rx="6" fill="#fff" stroke="#C9D7FA"/><text x="56" y="220" class="sm">家族：父进程、子进程链表、退出码</text>
+    <rect x="40" y="240" width="320" height="34" rx="6" fill="#fff" stroke="#C9D7FA"/><text x="56" y="262" class="sm">线程列表 ────────────────→</text>
+    <text x="200" y="298" text-anchor="middle" class="xs">共享资源的唯一一份记录</text>
+
+    <g>
+      <rect x="480" y="30" width="360" height="84" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+      <text x="660" y="52" text-anchor="middle" class="b sm" style="fill:#C2410C">TCB #1</text>
+      <text x="496" y="74" class="xs">TID · 状态 · 优先级 · 队列链接</text>
+      <text x="496" y="94" class="xs">寄存器上下文 · 内核栈指针 · 用户栈 · TLS 基址</text>
+      <rect x="480" y="128" width="360" height="84" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+      <text x="660" y="150" text-anchor="middle" class="b sm" style="fill:#C2410C">TCB #2</text>
+      <text x="496" y="172" class="xs">TID · 状态 · 优先级 · 队列链接</text>
+      <text x="496" y="192" class="xs">寄存器上下文 · 内核栈指针 · 用户栈 · TLS 基址</text>
+      <rect x="480" y="226" width="360" height="84" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+      <text x="660" y="248" text-anchor="middle" class="b sm" style="fill:#C2410C">TCB #3</text>
+      <text x="496" y="270" class="xs">每个都有指针指回所属的 PCB</text>
+    </g>
+    <path d="M360 257 L478 72" stroke="#4B5563" stroke-width="1.3" marker-end="url(#a)" fill="none"/>
+    <path d="M360 257 L478 170" stroke="#4B5563" stroke-width="1.3" marker-end="url(#a)" fill="none"/>
+    <path d="M360 257 L478 268" stroke="#4B5563" stroke-width="1.3" marker-end="url(#a)" fill="none"/>
+  </svg>
+  <figcaption><b>图 5-1</b> PCB 与 TCB 的一对多关系</figcaption>
+  </figure>
+
+  <h2>5.2 PCB 如何被组织起来</h2>
+  <p>单个 PCB 只是档案，操作系统还要能快速找到"所有就绪的线程""等待某个磁盘请求的线程"。方法是把 TCB 挂到不同的队列 / 数据结构上：</p>
+  <ul>
+    <li><strong>就绪队列</strong>：Linux CFS 调度器为每个 CPU 维护一棵按"虚拟运行时间"排序的<strong>红黑树</strong>，每次选最左边（运行得最少）的任务；Linux 6.6 起换成了 EEVDF 调度器，但仍然是每 CPU 一个运行队列。Windows 为每个处理器维护 32 个优先级的就绪队列，配合位图快速找到最高优先级的非空队列。</li>
+    <li><strong>等待队列</strong>：每个可等待的对象（一把锁、一个 socket、一个磁盘请求）都有自己的等待队列。线程阻塞时挂上去，事件发生时被摘下、放回就绪队列。</li>
+    <li><strong>全局索引</strong>：按 PID 查找（Linux 用 IDR/基数树），以及所有进程的链表。</li>
+  </ul>
+  <p>状态转换在实现上就是<strong>把 TCB 从一个队列移到另一个队列</strong>，再修改它的状态字段。</p>
+
+  <h2>5.3 Linux：<code>task_struct</code></h2>
+  <p>如第 1 章所说，Linux 中进程和线程都由 <code>task_struct</code> 表示（定义在 <code>include/linux/sched.h</code>，有几百个字段）。它的巧妙之处在于：<strong>共享的资源不直接放在 task_struct 里，而是放在独立的结构体中，用指针引用</strong>。同一进程的线程，指针指向同一个结构体；不同进程的指针指向不同的结构体。</p>
+<!--code:cpp:task_struct 极简示意（非真实定义，只保留与本章相关的字段）-->
+struct task_struct {
+    /* ---- 每个 task 自己的：相当于 TCB ---- */
+    unsigned int          __state;      // TASK_RUNNING / TASK_INTERRUPTIBLE / ...
+    pid_t                 pid;          // 内核视角的 ID，即用户态的 tid
+    pid_t                 tgid;         // 线程组 ID，即用户态 getpid() 的返回值
+    int                   prio;         // 动态优先级
+    struct sched_entity   se;           // CFS/EEVDF 调度实体：vruntime、红黑树节点……
+    void                 *stack;        // 内核栈
+    struct thread_struct  thread;       // 体系结构相关的 CPU 上下文（sp、fs 基址……）
+    sigset_t              blocked;      // 本线程的信号屏蔽字
+
+    /* ---- 指向共享资源的指针：相当于 PCB 的内容 ---- */
+    struct mm_struct      *mm;          // 地址空间：页表 pgd + 内存区域 VMA 列表
+    struct files_struct   *files;       // 文件描述符表
+    struct fs_struct      *fs;          // 根目录、当前工作目录
+    struct signal_struct  *signal;      // 线程组共享的信号状态
+    struct sighand_struct *sighand;     // 信号处理函数表
+    const struct cred     *cred;        // uid / gid / capabilities
+
+    /* ---- 家族关系 ---- */
+    struct task_struct    *real_parent;
+    struct list_head       children, sibling;
+    int                    exit_code;   // 退出码，僵尸状态时保留给父进程
+};
+<!--/code-->
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <text x="190" y="22" text-anchor="middle" class="b">同一进程的两个线程</text>
+    <rect x="30" y="40" width="140" height="80" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="100" y="64" text-anchor="middle" class="sm b">task_struct</text><text x="100" y="84" text-anchor="middle" class="xs">pid=101 tgid=100</text><text x="100" y="102" text-anchor="middle" class="xs">自己的栈、寄存器</text>
+    <rect x="210" y="40" width="140" height="80" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="280" y="64" text-anchor="middle" class="sm b">task_struct</text><text x="280" y="84" text-anchor="middle" class="xs">pid=102 tgid=100</text><text x="280" y="102" text-anchor="middle" class="xs">自己的栈、寄存器</text>
+    <rect x="60" y="170" width="80" height="40" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="100" y="195" text-anchor="middle" class="sm">mm</text>
+    <rect x="150" y="170" width="80" height="40" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="190" y="195" text-anchor="middle" class="sm">files</text>
+    <rect x="240" y="170" width="80" height="40" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="280" y="195" text-anchor="middle" class="sm">sighand</text>
+    <g stroke="#2F5BD3" stroke-width="1.2" fill="none">
+      <path d="M90 120 L100 168" marker-end="url(#ab)"/><path d="M110 120 L185 168" marker-end="url(#ab)"/><path d="M130 120 L270 168" marker-end="url(#ab)"/>
+      <path d="M260 120 L110 168" marker-end="url(#ab)"/><path d="M280 120 L195 168" marker-end="url(#ab)"/><path d="M300 120 L285 168" marker-end="url(#ab)"/>
+    </g>
+    <text x="190" y="238" text-anchor="middle" class="xs" style="fill:#2F5BD3">指向同一份 → 共享（pthread_create / CLONE_VM|CLONE_FILES|...）</text>
+
+    <text x="640" y="22" text-anchor="middle" class="b">fork 出的父子两个进程</text>
+    <rect x="480" y="40" width="140" height="80" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="550" y="64" text-anchor="middle" class="sm b">task_struct</text><text x="550" y="84" text-anchor="middle" class="xs">pid=200 tgid=200</text>
+    <rect x="680" y="40" width="140" height="80" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="750" y="64" text-anchor="middle" class="sm b">task_struct</text><text x="750" y="84" text-anchor="middle" class="xs">pid=201 tgid=201</text>
+    <rect x="470" y="170" width="70" height="40" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="505" y="195" text-anchor="middle" class="sm">mm</text>
+    <rect x="550" y="170" width="70" height="40" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="585" y="195" text-anchor="middle" class="sm">files</text>
+    <rect x="680" y="170" width="70" height="40" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="715" y="195" text-anchor="middle" class="sm">mm'</text>
+    <rect x="760" y="170" width="70" height="40" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="795" y="195" text-anchor="middle" class="sm">files'</text>
+    <g stroke="#15803D" stroke-width="1.2" fill="none">
+      <path d="M530 120 L507 168" marker-end="url(#ag)"/><path d="M570 120 L585 168" marker-end="url(#ag)"/>
+      <path d="M730 120 L715 168" marker-end="url(#ag)"/><path d="M770 120 L795 168" marker-end="url(#ag)"/>
+    </g>
+    <text x="650" y="238" text-anchor="middle" class="xs" style="fill:#15803D">各自一份（内容是复制来的，内存页写时复制）</text>
+  </svg>
+  <figcaption><b>图 5-2</b> Linux 用"指针是否指向同一个结构体"来表达共享与独立</figcaption>
+  </figure>
+  <div class="co deep"><span class="h">🔬 深入：内核线程的 mm 为什么是 NULL</span><p>内核线程（如 <code>kworker</code>、<code>ksoftirqd</code>）只在内核空间运行，不需要用户地址空间，所以它们的 <code>mm</code> 为 <code>NULL</code>。调度到内核线程时，内核会"借用"上一个用户进程的页表（记在 <code>active_mm</code> 中），因为所有进程页表中的内核部分都是相同的，这样就省掉了一次 CR3 切换。这是一个"不切换地址空间就能省开销"的实例，和第 4 章的分析一致。</p></div>
+
+  <h2>5.4 Windows：内核结构 + 用户态结构</h2>
+  <div class="tbl"><table>
+    <tr><th>结构</th><th>位于</th><th>作用</th></tr>
+    <tr><td><code>EPROCESS</code>（内含 <code>KPROCESS</code>）</td><td>内核空间</td><td>进程对象：PID、页表目录基址、句柄表、访问令牌、线程列表、Job 归属……<code>KPROCESS</code> 是其中调度相关的部分</td></tr>
+    <tr><td><code>ETHREAD</code>（内含 <code>KTHREAD</code>）</td><td>内核空间</td><td>线程对象：TID、状态、优先级、内核栈、等待块、上下文……</td></tr>
+    <tr><td><strong>PEB</strong>（进程环境块）</td><td><strong>用户空间</strong></td><td>已加载模块列表、进程堆、命令行、环境变量指针。<code>kernel32</code>/<code>ntdll</code> 在用户态直接读取它，省去系统调用</td></tr>
+    <tr><td><strong>TEB</strong>（线程环境块）</td><td><strong>用户空间</strong></td><td>栈基址与栈限制、TLS 槽、<code>LastErrorValue</code>、SEH 链表头、指向 PEB 的指针。x64 下由 <code>GS</code> 寄存器指向</td></tr>
+  </table></div>
+  <p>PEB / TEB 的设计说明了一点：<strong>"线程控制信息"不一定都在内核里</strong>。为了性能，那些用户态频繁读写、又不涉及安全的状态（如 <code>GetLastError</code> 的值、栈边界）被放在用户空间。d1 中调用的 <code>GetCurrentThreadStackLimits</code> 本质上就是从 TEB 中读取栈的上下界，不需要进入内核。</p>
+  <div class="co warn"><span class="h">⚠️ 易错点</span><p>面试问"PCB 包含什么"时，不要逐个背 Linux 字段名，而应该按<strong>"标识、处理器状态、调度信息、内存管理、资源清单、家族与统计"</strong>分类回答，再补一句"其中处理器状态和调度信息在多线程系统中下沉到了每个线程的 TCB"。这能体现你理解了 PCB 与 TCB 的分工。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>PCB 记录进程的"标识 + 资源 + 控制信息"，TCB 记录线程的"执行上下文 + 调度信息"。两者的划分与第 3 章的资源边界一致。</li>
+    <li>状态转换在实现上就是在就绪队列、等待队列之间移动 TCB。</li>
+    <li>Linux 的 <code>task_struct</code> 通过指针共享 <code>mm/files/sighand</code> 来区分进程和线程；Windows 有 <code>EPROCESS/ETHREAD</code> 以及用户态的 <code>PEB/TEB</code>。</li>
+  </ul></div>
+</section>

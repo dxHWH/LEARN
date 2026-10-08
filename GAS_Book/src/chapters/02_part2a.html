@@ -1,0 +1,377 @@
+<div class="part-head" data-toc="第二部分 · 核心机制" style="background:linear-gradient(135deg,#14532D 0%,#15803D 60%,#22A35A 100%)">
+  <div class="no">PART TWO</div>
+  <h1>第二部分　核心机制：逐个拆解</h1>
+  <p>从最基础的 Tag 和 Attribute 开始，逐层往上讲到 Effect、Ability、Task 和 Cue。每章都配有源码级别的细节和可直接使用的代码。</p>
+</div>
+
+<!-- ======================= CH4 ======================= -->
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>GameplayTags：系统之间的通用语言</h1>
+    <p class="lead">Tag 是 GAS 中最简单、也最重要的概念。Tag 体系设计得好，后面大部分规则可以只靠配置完成。</p>
+  </div>
+
+  <h2>4.1 Tag 是什么</h2>
+  <p><code>FGameplayTag</code> 本质上是一个注册过的 <code>FName</code>，用点号表示层级，例如 <code>State.Debuff.Stun</code>。它比 FName 和枚举更适合描述状态，原因有三点：</p>
+  <ul>
+    <li><b>层级匹配</b>：查询 <code>State.Debuff</code> 时，<code>State.Debuff.Stun</code> 也会命中。"驱散所有负面效果"只需要一行。</li>
+    <li><b>全局注册</b>：所有 Tag 都在 TagManager 中注册，编辑器里可以下拉选择，拼错名字会在加载时报错。</li>
+    <li><b>网络友好</b>：复制时传的是索引而不是字符串（开启 Fast Replication 后），带宽开销很小。</li>
+  </ul>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="120" width="90" height="34" rx="8" fill="#B45309"/><text x="65" y="142" text-anchor="middle" class="b wt">State</text>
+    <rect x="160" y="60" width="110" height="34" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="215" y="82" text-anchor="middle" class="sm">Debuff</text>
+    <rect x="160" y="180" width="110" height="34" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="215" y="202" text-anchor="middle" class="sm">Buff</text>
+    <rect x="320" y="20" width="110" height="30" rx="8" fill="#fff" stroke="#B45309"/><text x="375" y="40" text-anchor="middle" class="sm">Stun</text>
+    <rect x="320" y="62" width="110" height="30" rx="8" fill="#fff" stroke="#B45309"/><text x="375" y="82" text-anchor="middle" class="sm">Silence</text>
+    <rect x="320" y="104" width="110" height="30" rx="8" fill="#fff" stroke="#B45309"/><text x="375" y="124" text-anchor="middle" class="sm">Slow</text>
+    <rect x="320" y="180" width="110" height="30" rx="8" fill="#fff" stroke="#B45309"/><text x="375" y="200" text-anchor="middle" class="sm">Invulnerable</text>
+    <rect x="320" y="222" width="110" height="30" rx="8" fill="#fff" stroke="#B45309"/><text x="375" y="242" text-anchor="middle" class="sm">Unstoppable</text>
+    <g stroke="#B45309" stroke-width="1.3" fill="none">
+      <path d="M110 137 L160 77"/><path d="M110 137 L160 197"/>
+      <path d="M270 77 L320 35"/><path d="M270 77 L320 77"/><path d="M270 77 L320 119"/>
+      <path d="M270 197 L320 195"/><path d="M270 197 L320 237"/>
+    </g>
+    <rect x="480" y="20" width="360" height="250" rx="12" fill="#fff" stroke="#E5E7EB"/>
+    <text x="500" y="46" class="b">角色身上的 Tag：State.Debuff.Stun</text>
+    <text x="500" y="76" class="mono">HasTag(State.Debuff.Stun)</text><text x="820" y="76" text-anchor="end" class="b" style="fill:#15803D">✓</text>
+    <text x="500" y="102" class="mono">HasTag(State.Debuff)</text><text x="820" y="102" text-anchor="end" class="b" style="fill:#15803D">✓ 父级命中</text>
+    <text x="500" y="128" class="mono">HasTag(State)</text><text x="820" y="128" text-anchor="end" class="b" style="fill:#15803D">✓ 父级命中</text>
+    <text x="500" y="154" class="mono">HasTagExact(State.Debuff)</text><text x="820" y="154" text-anchor="end" class="b" style="fill:#B91C1C">✗ 精确匹配</text>
+    <text x="500" y="180" class="mono">HasTag(State.Debuff.Silence)</text><text x="820" y="180" text-anchor="end" class="b" style="fill:#B91C1C">✗</text>
+    <line x1="500" y1="196" x2="820" y2="196" stroke="#E5E7EB"/>
+    <text x="500" y="220" class="sm">方向很重要：持有<tspan class="b">子</tspan> Tag，查询<tspan class="b">父</tspan> Tag 会命中；</text>
+    <text x="500" y="242" class="sm">持有父 Tag，查询子 Tag <tspan class="b">不会</tspan>命中。</text>
+    <text x="215" y="290" text-anchor="middle" class="xs">在 Project Settings → GameplayTags 或 C++ 中定义</text>
+  </svg>
+  <figcaption><b>图 4-1</b> Tag 的层级结构与匹配规则：HasTag 会向上匹配父级，HasTagExact 只做精确匹配</figcaption>
+  </figure>
+
+  <h2>4.2 定义 Tag 的三种方式</h2>
+  <div class="tbl"><table>
+    <tr><th>方式</th><th>适合</th><th>备注</th></tr>
+    <tr><td>Project Settings → GameplayTags（写入 <code>Config/DefaultGameplayTags.ini</code>）</td><td>策划配置使用的 Tag</td><td>可以拆成多个 <code>Config/Tags/*.ini</code> 文件，减少多人修改同一文件时的冲突</td></tr>
+    <tr><td>DataTable（行结构 <code>GameplayTagTableRow</code>）</td><td>批量导入</td><td>在 GameplayTagTableList 中注册</td></tr>
+    <tr><td><b>Native Tag（C++）</b></td><td>代码中需要直接引用的 Tag</td><td>推荐。编译期可检查，不用担心字符串拼错</td></tr>
+  </table></div>
+<!--code:cpp:MyGameplayTags.h / .cpp —— Native Tag-->
+// .h
+#include "NativeGameplayTags.h"
+namespace MyTags
+{
+    UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Debuff_Stun);
+    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Type_Attack);
+    UE_DECLARE_GAMEPLAY_TAG_EXTERN(Event_Montage_Hit);
+    UE_DECLARE_GAMEPLAY_TAG_EXTERN(SetByCaller_Damage);
+}
+
+// .cpp
+namespace MyTags
+{
+    UE_DEFINE_GAMEPLAY_TAG_COMMENT(State_Debuff_Stun, "State.Debuff.Stun", "眩晕：无法移动与施法");
+    UE_DEFINE_GAMEPLAY_TAG(Ability_Type_Attack, "Ability.Type.Attack");
+    UE_DEFINE_GAMEPLAY_TAG(Event_Montage_Hit,   "Event.Montage.Hit");
+    UE_DEFINE_GAMEPLAY_TAG(SetByCaller_Damage,  "SetByCaller.Damage");
+}
+
+// 使用：
+if (ASC->HasMatchingGameplayTag(MyTags::State_Debuff_Stun)) { /* ... */ }
+<!--/code-->
+
+  <h2>4.3 容器与查询</h2>
+  <div class="tbl"><table>
+    <tr><th>API</th><th>含义</th></tr>
+    <tr><td><code>FGameplayTagContainer::HasTag(T)</code></td><td>容器中有 T 或 T 的子 Tag 就返回 true</td></tr>
+    <tr><td><code>HasTagExact(T)</code></td><td>只做精确匹配</td></tr>
+    <tr><td><code>HasAny(Other)</code> / <code>HasAll(Other)</code></td><td>与另一个容器做"任一 / 全部"匹配（层级匹配）</td></tr>
+    <tr><td><code>FGameplayTagQuery</code></td><td>可组合的布尔表达式，例如"包含 A 且不包含 B"，常用于 GE 查询</td></tr>
+    <tr><td><code>FGameplayTagRequirements</code></td><td>RequireTags + IgnoreTags（5.x 还有 TagQuery），GE 和 Modifier 的条件判断都使用它</td></tr>
+  </table></div>
+
+  <h2>4.4 ASC 上的 Tag：带计数</h2>
+  <p>ASC 内部通过 <code>FGameplayTagCountContainer</code> 记录每个 Tag 的<strong>引用计数</strong>。两个 GE 都授予了 <code>State.Debuff.Slow</code>，计数为 2；移除其中一个后计数为 1，Tag 依然存在。这样不同来源的同一状态就不会互相覆盖。</p>
+  <div class="tbl"><table>
+    <tr><th>Tag 来源</th><th>如何添加</th><th>如何移除</th><th>是否复制</th></tr>
+    <tr><td>GE 授予（GrantedTags）</td><td>GE 上加 <code>TargetTagsGameplayEffectComponent</code></td><td>GE 结束时自动移除</td><td class="yes">随 GE / Minimal Tags 复制</td></tr>
+    <tr><td>技能激活期间</td><td>GA 的 <code>ActivationOwnedTags</code></td><td>技能结束时自动移除</td><td class="mid">各端在本地激活时各自添加</td></tr>
+    <tr><td>Loose Tag</td><td><code>AddLooseGameplayTag</code></td><td>必须手动移除</td><td class="no">不复制</td></tr>
+    <tr><td>复制的 Loose Tag</td><td><code>AddReplicatedLooseGameplayTag</code>（较早版本为 <code>AddMinimalReplicationGameplayTag</code>）</td><td>对应的 Remove 函数</td><td class="yes">复制</td></tr>
+  </table></div>
+<!--code:cpp:监听 Tag 变化：眩晕时打断技能-->
+ASC->RegisterGameplayTagEvent(MyTags::State_Debuff_Stun, EGameplayTagEventType::NewOrRemoved)
+   .AddUObject(this, &AMyCharacter::OnStunTagChanged);
+
+void AMyCharacter::OnStunTagChanged(const FGameplayTag Tag, int32 NewCount)
+{
+    if (NewCount > 0 && HasAuthority())
+    {
+        // 打断除"被动"以外的所有技能
+        FGameplayTagContainer Ignore(MyTags::Ability_Type_Passive);
+        GetAbilitySystemComponent()->CancelAbilities(nullptr, &Ignore);
+    }
+}
+<!--/code-->
+  <div class="co net"><span class="h">🌐 网络视角：Tag 计数只在服务器可靠</span><p>Mixed / Minimal 模式下，其他客户端（Simulated Proxy）上的 Tag 来自 <code>MinimalReplicationTags</code>，<strong>只同步"有没有"，不同步"有几个"</strong>。所以不要把 Tag 计数当作玩法计数器（比如层数），层数应该用 GE 的 StackCount 或属性表示。</p></div>
+
+  <h2>4.5 推荐的 Tag 命名体系</h2>
+  <div class="tbl"><table>
+    <tr><th>根节点</th><th>用途</th><th>示例</th></tr>
+    <tr><td><code>Ability.*</code></td><td>技能身份 / 类型（技能的 AssetTags）</td><td><code>Ability.Hero.Q</code>、<code>Ability.Type.Attack</code>、<code>Ability.Type.Passive</code></td></tr>
+    <tr><td><code>State.*</code></td><td>角色状态（被检查的条件）</td><td><code>State.Dead</code>、<code>State.Debuff.Stun</code>、<code>State.Casting</code></td></tr>
+    <tr><td><code>Cooldown.*</code></td><td>冷却 GE 授予的 Tag</td><td><code>Cooldown.Hero.Q</code></td></tr>
+    <tr><td><code>Effect.*</code></td><td>GE 自身的分类（AssetTags），用于驱散、免疫、查询</td><td><code>Effect.Type.CC</code>、<code>Effect.RemoveOnDeath</code></td></tr>
+    <tr><td><code>Event.*</code></td><td>GameplayEvent</td><td><code>Event.Montage.Hit</code>、<code>Event.Hit.Received</code></td></tr>
+    <tr><td><code>Damage.Type.*</code></td><td>伤害类型</td><td><code>Damage.Type.Physical</code>、<code>Damage.Type.Magic</code></td></tr>
+    <tr><td><code>SetByCaller.*</code></td><td>运行时传入的数值键</td><td><code>SetByCaller.Damage</code>、<code>SetByCaller.Cooldown</code></td></tr>
+    <tr><td><code>GameplayCue.*</code></td><td>表现（<b>必须</b>以此开头）</td><td><code>GameplayCue.Hero.Q.Hit</code></td></tr>
+    <tr><td><code>InputTag.*</code></td><td>输入映射</td><td><code>InputTag.Ability.Q</code></td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">✅ 实践建议</span><p>Tag 改名时，在 <code>DefaultGameplayTags.ini</code> 中加 <code>+GameplayTagRedirects=(OldTagName="...",NewTagName="...")</code>，否则已经引用旧 Tag 的资产会失效。开启 <code>FastReplication</code> 后，客户端和服务器的 Tag 列表必须完全一致。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>Tag 是层级化、全局注册的名字；<code>HasTag</code> 会向上匹配父级，<code>HasTagExact</code> 只做精确匹配。</li>
+    <li>ASC 上的 Tag 带引用计数，可以来自 GE、技能激活或 Loose 添加；<strong>Loose Tag 默认不复制</strong>。</li>
+    <li>先规划好 Tag 树（Ability / State / Cooldown / Effect / Event / GameplayCue），后面大部分规则都能靠配置完成。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH5 ======================= -->
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>Attribute 与 AttributeSet：数值的家</h1>
+    <p class="lead">理解 Base 与 Current 的区别、回调的调用顺序，以及 Meta 属性的用法，是写好伤害和数值系统的前提。</p>
+  </div>
+
+  <h2>5.1 BaseValue 与 CurrentValue</h2>
+  <p>每个属性是一个 <code>FGameplayAttributeData</code>，里面<strong>同时保存两个 float</strong>：</p>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="30" class="b">以 AttackPower（攻击力）为例</text>
+    <rect x="20" y="50" width="250" height="70" rx="10" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="145" y="76" text-anchor="middle" class="b" style="fill:#15803D">BaseValue = 100</text>
+    <text x="145" y="98" text-anchor="middle" class="xs">永久值 · 只有 Instant / Periodic GE 能改</text>
+    <rect x="320" y="40" width="250" height="90" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="445" y="62" text-anchor="middle" class="b" style="fill:#C2410C">Aggregator（聚合器）</text>
+    <text x="445" y="84" text-anchor="middle" class="sm">+ 装备 +20（Infinite GE）</text>
+    <text x="445" y="104" text-anchor="middle" class="sm">× 狂暴 +50%（Duration GE，10 秒）</text>
+    <text x="445" y="122" text-anchor="middle" class="xs">挂着所有持续型 Modifier</text>
+    <rect x="620" y="50" width="220" height="70" rx="10" fill="#2F5BD3"/>
+    <text x="730" y="76" text-anchor="middle" class="b wt">CurrentValue = 180</text>
+    <text x="730" y="98" text-anchor="middle" class="xs" style="fill:#DCE6FF">(100 + 20) × 1.5，实际参与计算的值</text>
+    <line x1="270" y1="85" x2="318" y2="85" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <line x1="570" y1="85" x2="618" y2="85" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+
+    <rect x="20" y="160" width="400" height="80" rx="10" fill="#fff" stroke="#E5E7EB"/>
+    <text x="36" y="184" class="b">狂暴 10 秒后结束</text>
+    <text x="36" y="206" class="sm">Duration GE 移除 → 聚合器去掉 ×1.5 → Current 重算为 120</text>
+    <text x="36" y="226" class="sm">Base 始终没变，<tspan class="b">所以撤销是精确的</tspan>，不会出现数值漂移</text>
+    <rect x="440" y="160" width="400" height="80" rx="10" fill="#fff" stroke="#E5E7EB"/>
+    <text x="456" y="184" class="b">吃了"永久 +5 攻击"药水（Instant GE）</text>
+    <text x="456" y="206" class="sm">Base 100 → 105，聚合器重新计算</text>
+    <text x="456" y="226" class="sm">Current = (105 + 20) × 1.5 = 187.5</text>
+  </svg>
+  <figcaption><b>图 5-1</b> Base 是永久值，Current = Base 经过所有持续型 Modifier 聚合后的结果</figcaption>
+  </figure>
+  <div class="co warn"><span class="h">⚠️ 坑点：不要把"最大生命值"当作 Health 的 Base</span><p>新手常以为 Health 的 Base 就是满血值。正确的建模是：<code>Health</code> 和 <code>MaxHealth</code> 是<strong>两个独立属性</strong>，<code>Health</code> 被 Instant 伤害或治疗修改 Base，<code>MaxHealth</code> 由装备、Buff 等持续型 GE 修改 Current。</p></div>
+
+  <h2>5.2 编写 AttributeSet</h2>
+<!--code:cpp:MyAttributeSet.h-->
+#include "AttributeSet.h"
+#include "AbilitySystemComponent.h"
+
+// UE5.6 起引擎内置 ATTRIBUTE_ACCESSORS_BASIC；更早的版本自行定义下面这个宏
+#define ATTRIBUTE_ACCESSORS(ClassName, PropertyName) \
+    GAMEPLAYATTRIBUTE_PROPERTY_GETTER(ClassName, PropertyName) \
+    GAMEPLAYATTRIBUTE_VALUE_GETTER(PropertyName) \
+    GAMEPLAYATTRIBUTE_VALUE_SETTER(PropertyName) \
+    GAMEPLAYATTRIBUTE_VALUE_INITTER(PropertyName)
+
+UCLASS()
+class UMyAttributeSet : public UAttributeSet
+{
+    GENERATED_BODY()
+public:
+    UMyAttributeSet();
+
+    UPROPERTY(BlueprintReadOnly, Category = "Vital", ReplicatedUsing = OnRep_Health)
+    FGameplayAttributeData Health;
+    ATTRIBUTE_ACCESSORS(UMyAttributeSet, Health)       // 生成 GetHealthAttribute()/GetHealth()/SetHealth()/InitHealth()
+
+    UPROPERTY(BlueprintReadOnly, Category = "Vital", ReplicatedUsing = OnRep_MaxHealth)
+    FGameplayAttributeData MaxHealth;
+    ATTRIBUTE_ACCESSORS(UMyAttributeSet, MaxHealth)
+
+    UPROPERTY(BlueprintReadOnly, Category = "Vital", ReplicatedUsing = OnRep_Mana)
+    FGameplayAttributeData Mana;
+    ATTRIBUTE_ACCESSORS(UMyAttributeSet, Mana)
+
+    UPROPERTY(BlueprintReadOnly, Category = "Combat", ReplicatedUsing = OnRep_Armor)
+    FGameplayAttributeData Armor;
+    ATTRIBUTE_ACCESSORS(UMyAttributeSet, Armor)
+
+    // ---- Meta 属性：不复制，只在服务器上作为"中转站"使用 ----
+    UPROPERTY(BlueprintReadOnly, Category = "Meta", meta = (HideFromLevelInfos))
+    FGameplayAttributeData IncomingDamage;
+    ATTRIBUTE_ACCESSORS(UMyAttributeSet, IncomingDamage)
+
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+    virtual void PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue) override;
+    virtual void PostAttributeChange(const FGameplayAttribute& Attribute, float OldValue, float NewValue) override;
+    virtual bool PreGameplayEffectExecute(FGameplayEffectModCallbackData& Data) override;
+    virtual void PostGameplayEffectExecute(const FGameplayEffectModCallbackData& Data) override;
+
+protected:
+    UFUNCTION() void OnRep_Health(const FGameplayAttributeData& OldValue);
+    UFUNCTION() void OnRep_MaxHealth(const FGameplayAttributeData& OldValue);
+    UFUNCTION() void OnRep_Mana(const FGameplayAttributeData& OldValue);
+    UFUNCTION() void OnRep_Armor(const FGameplayAttributeData& OldValue);
+};
+<!--/code-->
+<!--code:cpp:MyAttributeSet.cpp —— 复制部分-->
+void UMyAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    // REPNOTIFY_Always：即使新值与客户端本地值相同也要触发 OnRep（预测需要，见 13.1）
+    DOREPLIFETIME_CONDITION_NOTIFY(UMyAttributeSet, Health,    COND_None,      REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UMyAttributeSet, MaxHealth, COND_None,      REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UMyAttributeSet, Mana,      COND_OwnerOnly, REPNOTIFY_Always); // 蓝量只给自己看，省带宽
+    DOREPLIFETIME_CONDITION_NOTIFY(UMyAttributeSet, Armor,     COND_None,      REPNOTIFY_Always);
+}
+
+void UMyAttributeSet::OnRep_Health(const FGameplayAttributeData& OldValue)
+{
+    // 通知 ASC：把服务器下发的值同步进聚合器，并广播属性变化委托
+    GAMEPLAYATTRIBUTE_REPNOTIFY(UMyAttributeSet, Health, OldValue);
+}
+// 其余 OnRep_* 写法相同
+<!--/code-->
+
+  <h2>5.3 回调的调用顺序</h2>
+  <p>AttributeSet 提供了一组虚函数，分别在数值变化的不同阶段被调用。<strong>弄清楚谁在什么时候被调用</strong>，是避免数值 Bug 的关键：</p>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="28" class="b" style="fill:#C2410C">Instant / Periodic GE（修改 Base）</text>
+    <g>
+      <rect x="20" y="42" width="150" height="58" rx="9" fill="#FFF4EC" stroke="#C2410C"/><text x="95" y="64" text-anchor="middle" class="sm b">PreGameplayEffect</text><text x="95" y="80" text-anchor="middle" class="sm b">Execute</text><text x="95" y="94" text-anchor="middle" class="xs">返回 false 可拒绝</text>
+      <rect x="190" y="42" width="150" height="58" rx="9" fill="#fff" stroke="#C2410C"/><text x="265" y="64" text-anchor="middle" class="sm b">PreAttribute</text><text x="265" y="80" text-anchor="middle" class="sm b">BaseChange</text><text x="265" y="94" text-anchor="middle" class="xs">可钳制 Base</text>
+      <rect x="360" y="42" width="120" height="58" rx="9" fill="#EAF7EF" stroke="#15803D"/><text x="420" y="64" text-anchor="middle" class="sm b">写入 Base</text><text x="420" y="80" text-anchor="middle" class="xs">PostAttribute</text><text x="420" y="94" text-anchor="middle" class="xs">BaseChange</text>
+      <rect x="500" y="42" width="160" height="58" rx="9" fill="#EAF0FD" stroke="#2F5BD3"/><text x="580" y="62" text-anchor="middle" class="sm b">聚合器重算 Current</text><text x="580" y="78" text-anchor="middle" class="xs">PreAttributeChange →</text><text x="580" y="92" text-anchor="middle" class="xs">写入 → PostAttributeChange</text>
+      <rect x="680" y="42" width="160" height="58" rx="9" fill="#FFF4EC" stroke="#C2410C"/><text x="760" y="64" text-anchor="middle" class="sm b">PostGameplayEffect</text><text x="760" y="80" text-anchor="middle" class="sm b">Execute</text><text x="760" y="94" text-anchor="middle" class="xs">★ 伤害结算的主战场</text>
+    </g>
+    <g stroke="#4B5563" stroke-width="1.5">
+      <line x1="170" y1="71" x2="188" y2="71" marker-end="url(#a)"/><line x1="340" y1="71" x2="358" y2="71" marker-end="url(#a)"/>
+      <line x1="480" y1="71" x2="498" y2="71" marker-end="url(#a)"/><line x1="660" y1="71" x2="678" y2="71" marker-end="url(#a)"/>
+    </g>
+    <text x="20" y="146" class="b" style="fill:#2F5BD3">Duration / Infinite GE（只影响 Current）</text>
+    <g>
+      <rect x="20" y="160" width="200" height="50" rx="9" fill="#fff" stroke="#2F5BD3"/><text x="120" y="182" text-anchor="middle" class="sm b">Modifier 加入 / 移出聚合器</text><text x="120" y="198" text-anchor="middle" class="xs">GE 施加、移除、层数变化</text>
+      <rect x="250" y="160" width="160" height="50" rx="9" fill="#EAF0FD" stroke="#2F5BD3"/><text x="330" y="190" text-anchor="middle" class="sm b">PreAttributeChange</text>
+      <rect x="440" y="160" width="140" height="50" rx="9" fill="#EAF7EF" stroke="#15803D"/><text x="510" y="190" text-anchor="middle" class="sm b">写入 Current</text>
+      <rect x="610" y="160" width="160" height="50" rx="9" fill="#EAF0FD" stroke="#2F5BD3"/><text x="690" y="190" text-anchor="middle" class="sm b">PostAttributeChange</text>
+    </g>
+    <g stroke="#4B5563" stroke-width="1.5">
+      <line x1="220" y1="185" x2="248" y2="185" marker-end="url(#a)"/><line x1="410" y1="185" x2="438" y2="185" marker-end="url(#a)"/><line x1="580" y1="185" x2="608" y2="185" marker-end="url(#a)"/>
+    </g>
+    <rect x="20" y="232" width="820" height="84" rx="10" fill="#F3EEFE" stroke="#DCCDFB"/>
+    <text x="36" y="256" class="sm b" style="fill:#6D28D9">要点</text>
+    <text x="36" y="278" class="sm">• Duration GE <tspan class="b">不会</tspan>触发 Pre/PostGameplayEffectExecute。在那里写"受到伤害"逻辑，对持续型 Modifier 无效。</text>
+    <text x="36" y="298" class="sm">• PreAttributeChange 只钳制本次得到的值，不改 Modifier；永久钳制 Base 请在 PreAttributeBaseChange 或 PostGEExecute 中处理。</text>
+  </svg>
+  <figcaption><b>图 5-2</b> AttributeSet 回调顺序。Instant 类 GE 走上面一条（多两个 Execute 回调），持续类 GE 走下面一条</figcaption>
+  </figure>
+
+  <h2>5.4 钳制与 Meta 属性：伤害的标准写法</h2>
+  <p>为什么不让伤害 GE 直接 <code>Health −= X</code>？因为扣血之前往往还有很多步骤：护盾吸收、伤害反弹、吸血、击杀判定、伤害数字显示。<strong>Meta 属性</strong>（例如 <code>IncomingDamage</code>）就是一个临时中转站：GE 只往它里面写数值，在 <code>PostGameplayEffectExecute</code> 中统一处理后清零。</p>
+<!--code:cpp:MyAttributeSet.cpp —— 钳制与伤害结算-->
+void UMyAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue)
+{
+    Super::PreAttributeChange(Attribute, NewValue);
+    if (Attribute == GetHealthAttribute())
+    {
+        NewValue = FMath::Clamp(NewValue, 0.f, GetMaxHealth());
+    }
+}
+
+void UMyAttributeSet::PostAttributeChange(const FGameplayAttribute& Attribute, float OldValue, float NewValue)
+{
+    Super::PostAttributeChange(Attribute, OldValue, NewValue);
+    // MaxHealth 变化时，按比例调整当前血量（例如 500/1000 → 加装备后 600/1200）
+    if (Attribute == GetMaxHealthAttribute() && OldValue > 0.f)
+    {
+        UAbilitySystemComponent* ASC = GetOwningAbilitySystemComponent();
+        if (!ASC || !ASC->IsOwnerActorAuthoritative()) return;   // 只在服务器修正，客户端等复制
+        const float NewHealth = GetHealth() * NewValue / OldValue;
+        ASC->ApplyModToAttribute(GetHealthAttribute(), EGameplayModOp::Override, NewHealth);
+    }
+}
+
+bool UMyAttributeSet::PreGameplayEffectExecute(FGameplayEffectModCallbackData& Data)
+{
+    // 无敌：直接拒绝本次伤害执行
+    if (Data.EvaluatedData.Attribute == GetIncomingDamageAttribute()
+        && Data.Target.HasMatchingGameplayTag(MyTags::State_Buff_Invulnerable))
+    {
+        return false;
+    }
+    return true;
+}
+
+void UMyAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCallbackData& Data)
+{
+    Super::PostGameplayEffectExecute(Data);
+
+    if (Data.EvaluatedData.Attribute == GetIncomingDamageAttribute())
+    {
+        const float Damage = GetIncomingDamage();
+        SetIncomingDamage(0.f);                         // Meta 属性用完立即清零
+        if (Damage <= 0.f) return;
+
+        const float NewHealth = FMath::Clamp(GetHealth() - Damage, 0.f, GetMaxHealth());
+        SetHealth(NewHealth);
+
+        // 来源信息都在 Context 里：谁打的、用什么打的、命中点
+        const FGameplayEffectContextHandle& Ctx = Data.EffectSpec.GetContext();
+        AActor* Instigator = Ctx.GetOriginalInstigator();
+
+        if (NewHealth <= 0.f && !Data.Target.HasMatchingGameplayTag(MyTags::State_Dead))
+        {
+            // 通知"死亡"：发 GameplayEvent，由死亡技能去处理（掉落、计分、复活计时）
+            FGameplayEventData Payload;
+            Payload.Instigator = Instigator;
+            Payload.EventMagnitude = Damage;
+            Data.Target.HandleGameplayEvent(MyTags::Event_Death, &Payload);
+        }
+    }
+}
+<!--/code-->
+  <div class="co deep"><span class="h">🔬 深入源码：SetHealth 做了什么</span><p>宏生成的 <code>SetHealth(v)</code> 内部调用的是 <code>ASC->SetNumericAttributeBase(Attr, v)</code>，也就是<strong>修改 Base 并让聚合器重新计算 Current</strong>，而不是直接改 float 字段。所以在 AttributeSet 外部，请始终使用这些 Setter 或 GE 来修改属性，不要直接给 <code>Health.SetCurrentValue()</code> 赋值，否则聚合器状态会被绕过。</p></div>
+
+  <h2>5.5 监听属性变化（UI）</h2>
+<!--code:cpp:血条控件监听 Health-->
+ASC->GetGameplayAttributeValueChangeDelegate(UMyAttributeSet::GetHealthAttribute())
+   .AddUObject(this, &UMyHealthBar::OnHealthChanged);
+
+void UMyHealthBar::OnHealthChanged(const FOnAttributeChangeData& Data)
+{
+    SetPercent(Data.NewValue / CachedMaxHealth);
+    // 注意：Data.GEModData 只在服务器上有效（客户端收到的是属性复制，没有 GE 上下文）
+}
+<!--/code-->
+  <p>蓝图中可以直接使用异步节点 <b>Wait for Attribute Changed</b>（<code>UAbilityAsync_WaitAttributeChanged</code>），不需要写 C++。</p>
+
+  <h2>5.6 派生属性</h2>
+  <p>"最大生命值 = 体质 × 10 + 200"这种派生关系，<strong>不要在代码里手动同步</strong>。做法是给角色挂一个 <b>Infinite GE</b>，其中 MaxHealth 的 Modifier 使用 <em>Attribute Based</em> 类型的数值，捕获自身的 Vitality，并且<strong>不勾选 Snapshot</strong>。之后 Vitality 发生变化时，聚合器会自动重新计算 MaxHealth。</p>
+
+  <h2>5.7 多个 AttributeSet</h2>
+  <p>一个 ASC 可以有多个 AttributeSet，例如 Lyra 把属性拆成 <code>HealthSet</code> 和 <code>CombatSet</code>。但<strong>同一个类的 AttributeSet 只能有一个</strong>，ASC 按类查找属性集，有重复时只会返回第一个。</p>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li><strong>Instant 改 Base，Duration / Infinite 改 Current</strong>。Base 不被持续型效果修改，因此撤销总是精确的。</li>
+    <li>回调顺序：PreGEExecute → PreBaseChange → Base → PreAttributeChange → Current → PostAttributeChange → PostGEExecute；后两个 Execute 回调只在 Instant / Periodic 时触发。</li>
+    <li>伤害走 <strong>Meta 属性</strong> IncomingDamage，在 PostGameplayEffectExecute 中统一结算后清零。</li>
+    <li>复制使用 <code>REPNOTIFY_Always</code> + <code>GAMEPLAYATTRIBUTE_REPNOTIFY</code>，原因在第 13 章解释。</li>
+  </ul></div>
+</section>

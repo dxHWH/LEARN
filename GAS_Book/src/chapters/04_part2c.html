@@ -1,0 +1,383 @@
+<!-- ======================= CH8 ======================= -->
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>GameplayAbility：技能的生命周期</h1>
+    <p class="lead">GE 是"改什么"，GA 是"做什么"。本章讲 GA 从授予到结束的完整生命周期、Tag 规则、消耗与冷却，以及决定联网行为的四个策略。</p>
+  </div>
+
+  <h2>8.1 生命周期全图</h2>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <rect x="10" y="20" width="150" height="54" rx="10" fill="#F3F4F6" stroke="#6B7280"/><text x="85" y="43" text-anchor="middle" class="sm b">GiveAbility</text><text x="85" y="61" text-anchor="middle" class="xs">仅服务器 → 复制给拥有者</text>
+    <rect x="190" y="20" width="150" height="54" rx="10" fill="#fff" stroke="#6B7280"/><text x="265" y="43" text-anchor="middle" class="sm b">已授予（空闲）</text><text x="265" y="61" text-anchor="middle" class="xs">OnGiveAbility · OnAvatarSet</text>
+    <rect x="370" y="20" width="150" height="54" rx="10" fill="#fff" stroke="#6D28D9"/><text x="445" y="43" text-anchor="middle" class="sm b">TryActivateAbility</text><text x="445" y="61" text-anchor="middle" class="xs">输入 / Tag / 事件 / 代码</text>
+    <rect x="550" y="14" width="190" height="66" rx="10" fill="#FEF6E4" stroke="#B45309"/><text x="645" y="36" text-anchor="middle" class="sm b">CanActivateAbility</text><text x="645" y="53" text-anchor="middle" class="xs">冷却？消耗？Tag 条件？</text><text x="645" y="68" text-anchor="middle" class="xs">是否被 Block？</text>
+    <rect x="770" y="20" width="80" height="54" rx="10" fill="#FDEEEE" stroke="#B91C1C"/><text x="810" y="43" text-anchor="middle" class="sm b" style="fill:#B91C1C">失败</text><text x="810" y="61" text-anchor="middle" class="xs">FailureTags</text>
+    <g stroke="#4B5563" stroke-width="1.4"><line x1="160" y1="47" x2="188" y2="47" marker-end="url(#a)"/><line x1="340" y1="47" x2="368" y2="47" marker-end="url(#a)"/><line x1="520" y1="47" x2="548" y2="47" marker-end="url(#a)"/><line x1="740" y1="47" x2="768" y2="47" stroke="#B91C1C" marker-end="url(#ar)"/></g>
+    <path d="M645 80 L645 112" stroke="#15803D" stroke-width="1.5" marker-end="url(#ag)"/>
+    <rect x="550" y="114" width="190" height="62" rx="10" fill="#F3EEFE" stroke="#6D28D9"/><text x="645" y="136" text-anchor="middle" class="sm b">PreActivate（引擎）</text><text x="645" y="153" text-anchor="middle" class="xs">加 ActivationOwnedTags</text><text x="645" y="168" text-anchor="middle" class="xs">Cancel / Block 其他技能</text>
+    <path d="M550 145 L522 145" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <rect x="330" y="114" width="190" height="62" rx="10" fill="#6D28D9"/><text x="425" y="140" text-anchor="middle" class="sm b wt">ActivateAbility</text><text x="425" y="160" text-anchor="middle" class="xs" style="fill:#EDE4FF">★ 你的逻辑从这里开始</text>
+    <path d="M330 145 L302 145" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <rect x="110" y="114" width="190" height="62" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="205" y="136" text-anchor="middle" class="sm b">CommitAbility</text><text x="205" y="153" text-anchor="middle" class="xs">再次检查并施加</text><text x="205" y="168" text-anchor="middle" class="xs">Cost GE + Cooldown GE</text>
+    <path d="M205 176 L205 212" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <rect x="60" y="214" width="290" height="62" rx="10" fill="#fff" stroke="#6D28D9" stroke-dasharray="5 3"/><text x="205" y="238" text-anchor="middle" class="sm b">运行中：AbilityTasks</text><text x="205" y="258" text-anchor="middle" class="xs">播动画 · 等事件 · 等输入 · 选目标 · 施加 GE</text>
+    <path d="M350 245 L418 245" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <rect x="420" y="214" width="200" height="62" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="520" y="238" text-anchor="middle" class="sm b">EndAbility</text><text x="520" y="256" text-anchor="middle" class="xs">正常结束 · bWasCancelled=false</text>
+    <rect x="640" y="214" width="200" height="62" rx="10" fill="#FDEEEE" stroke="#B91C1C"/><text x="740" y="238" text-anchor="middle" class="sm b">CancelAbility</text><text x="740" y="256" text-anchor="middle" class="xs">被打断 → 内部也调用 EndAbility</text>
+    <path d="M520 276 L520 306" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/><path d="M740 276 L620 316" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <rect x="340" y="308" width="360" height="58" rx="10" fill="#F3F4F6" stroke="#6B7280"/><text x="520" y="330" text-anchor="middle" class="sm b">清理</text><text x="520" y="350" text-anchor="middle" class="xs">结束所有 Task · 移除 ActivationOwnedTags · 解除 Block · 通知另一端</text>
+    <path d="M340 337 Q 250 337 250 300 Q 250 90 265 76" stroke="#94A3B8" stroke-width="1.3" fill="none" stroke-dasharray="5 3" marker-end="url(#a)"/>
+    <text x="110" y="330" class="xs">回到空闲，可以再次激活</text>
+    <text x="430" y="392" text-anchor="middle" class="xs">ClearAbility（服务器）→ OnRemoveAbility：技能被收回；如果技能正在运行，会在结束后再移除</text>
+  </svg>
+  <figcaption><b>图 8-1</b> GameplayAbility 的生命周期。紫色是技能执行部分，橙色是资源结算部分</figcaption>
+  </figure>
+  <div class="co warn"><span class="h">⚠️ 坑点：忘记 EndAbility</span><p>技能不会自动结束。如果某个分支（例如 Montage 被打断的回调）没有调用 <code>EndAbility</code>，技能会一直处于激活状态：<code>ActivationOwnedTags</code> 不会移除，InstancedPerActor 技能也无法再次激活，表现为"技能按了没反应"。<strong>每个 Task 的每个出口回调（Completed / Interrupted / Cancelled）都要检查是否需要结束技能。</strong></p></div>
+
+  <h2>8.2 Tag 规则：十个字段</h2>
+  <p>GA 上有十个 Tag 容器，组合起来可以描述几乎所有"技能之间能否并存"的规则：</p>
+  <div class="tbl"><table>
+    <tr><th>字段</th><th>作用对象</th><th>含义</th><th>例子（冲锋斩）</th></tr>
+    <tr><td><b>AssetTags</b>（老名 AbilityTags）</td><td>本技能</td><td>技能自己的身份标签</td><td><code>Ability.Hero.Q</code>、<code>Ability.Type.Dash</code></td></tr>
+    <tr><td><b>CancelAbilitiesWithTag</b></td><td>其他技能</td><td>激活时<strong>打断</strong>正在运行、带这些 Tag 的技能</td><td><code>Ability.Type.Channel</code>（打断自己的引导技能）</td></tr>
+    <tr><td><b>BlockAbilitiesWithTag</b></td><td>其他技能</td><td>运行期间<strong>阻止</strong>带这些 Tag 的技能激活</td><td><code>Ability.Type.Attack</code>（冲刺中不能普攻）</td></tr>
+    <tr><td><b>ActivationOwnedTags</b></td><td>拥有者</td><td>运行期间给自己加上这些 Tag</td><td><code>State.Dashing</code></td></tr>
+    <tr><td><b>ActivationRequiredTags</b></td><td>拥有者</td><td>拥有者<strong>必须有</strong>这些 Tag 才能激活</td><td>（变身后才能用的技能填 <code>State.Transformed</code>）</td></tr>
+    <tr><td><b>ActivationBlockedTags</b></td><td>拥有者</td><td>拥有者有这些 Tag 时<strong>不能</strong>激活</td><td><code>State.Debuff.Stun</code>、<code>State.Debuff.Root</code>、<code>State.Dead</code></td></tr>
+    <tr><td><b>Source/Target Required/Blocked</b></td><td>来源 / 目标</td><td>由事件或 TargetData 激活时，检查来源和目标的 Tag</td><td>（"只能对敌方英雄释放"）</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">✅ 实践建议：Block 与 ActivationBlockedTags 的区别</span><p><code>BlockAbilitiesWithTag</code> 是<strong>技能之间</strong>的互斥（通过 ASC 的 BlockedAbilityTags 计数实现）；<code>ActivationBlockedTags</code> 检查的是<strong>角色状态</strong>。"眩晕时所有技能都不能放"有两种做法：①所有技能的 ActivationBlockedTags 都填 Stun；②眩晕 GE 加一个 <code>BlockAbilityTagsGameplayEffectComponent</code>，阻止 <code>Ability</code> 根 Tag 下的所有技能。②只需改一处，更好维护。别忘了还要打断<strong>正在运行</strong>的技能（见 4.4 的 Tag 监听示例）。</p></div>
+
+  <h2>8.3 消耗与冷却</h2>
+  <p>在 GA 上配置 <code>CostGameplayEffectClass</code> 和 <code>CooldownGameplayEffectClass</code>：</p>
+  <ul>
+    <li><b>Cost GE</b>：Instant，Modifier 为 <code>Mana AddBase −30</code>。<code>CheckCost</code> 会模拟施加，判断属性是否会小于 0。</li>
+    <li><b>Cooldown GE</b>：HasDuration，<strong>必须</strong>通过 TargetTags 组件授予一个冷却 Tag（例如 <code>Cooldown.Hero.Q</code>）。<code>CheckCooldown</code> 只检查拥有者身上是否有这个 Tag。</li>
+    <li>在 <code>ActivateAbility</code> 中调用 <code>CommitAbility()</code>，<strong>并检查返回值</strong>：激活之后，资源可能已经被其他效果改变。</li>
+  </ul>
+  <p>默认做法要求每个技能各配一个冷却 GE，技能多了很难维护。常见的做法是<strong>所有技能共用一个冷却 GE</strong>，冷却时长和冷却 Tag 在运行时注入：</p>
+<!--code:cpp:MyGameplayAbility.cpp —— 通用冷却-->
+// 头文件中：
+// UPROPERTY(EditDefaultsOnly, Category="Cooldown") FScalableFloat CooldownDuration;   // 按技能等级取值
+// UPROPERTY(EditDefaultsOnly, Category="Cooldown") FGameplayTagContainer CooldownTags; // 例如 Cooldown.Hero.Q
+// UPROPERTY(Transient) FGameplayTagContainer TempCooldownTags;
+
+const FGameplayTagContainer* UMyGameplayAbility::GetCooldownTags() const
+{
+    // CheckCooldown 用它来判断是否处于冷却中
+    FGameplayTagContainer* Mutable = const_cast<FGameplayTagContainer*>(&TempCooldownTags);
+    Mutable->Reset();
+    if (const FGameplayTagContainer* Parent = Super::GetCooldownTags()) { Mutable->AppendTags(*Parent); }
+    Mutable->AppendTags(CooldownTags);
+    return Mutable;
+}
+
+void UMyGameplayAbility::ApplyCooldown(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
+                                       const FGameplayAbilityActivationInfo ActivationInfo) const
+{
+    if (UGameplayEffect* CooldownGE = GetCooldownGameplayEffect())   // 共用的 GE_Cooldown（时长使用 MMC_Cooldown）
+    {
+        FGameplayEffectSpecHandle Spec = MakeOutgoingGameplayEffectSpec(CooldownGE->GetClass(), GetAbilityLevel());
+        Spec.Data->DynamicGrantedTags.AppendTags(CooldownTags);       // 动态授予本技能的冷却 Tag
+        Spec.Data->SetSetByCallerMagnitude(MyTags::SetByCaller_Cooldown, CooldownDuration.GetValueAtLevel(GetAbilityLevel()));
+        ApplyGameplayEffectSpecToOwner(Handle, ActorInfo, ActivationInfo, Spec);   // 会带上预测键
+    }
+}
+<!--/code-->
+  <div class="co ver"><span class="h">🕒 版本差异</span><p><code>FGameplayEffectSpec::DynamicGrantedTags</code> 在 5.3 之后仍然可用，但引擎更推荐通过 <code>Spec.AddDynamicGrantedTag()</code> 之类的接口访问（不同小版本的接口名有差异，以头文件为准）。思路不变：<strong>同一个 GE，在运行时授予不同的 Tag</strong>。</p></div>
+
+  <h2>8.4 四个策略：决定技能在网络中的行为</h2>
+  <div class="tbl"><table>
+    <tr><th>策略</th><th>选项</th><th>建议</th></tr>
+    <tr><td><b>InstancingPolicy</b><br>实例化</td><td><code>InstancedPerActor</code>：每个 ASC 一个实例，可以保存状态<br><code>InstancedPerExecution</code>：每次激活新建实例<br><code>NonInstanced</code>：使用 CDO（<strong>5.5 废弃</strong>）</td><td>默认使用 <b>InstancedPerActor</b>。PerExecution 每次激活都要分配对象，开销较大，只在确实需要多个实例同时运行时使用</td></tr>
+    <tr><td><b>NetExecutionPolicy</b><br>在哪里执行</td><td><code>LocalPredicted</code>：客户端先执行，服务器确认<br><code>LocalOnly</code>：只在本地客户端执行<br><code>ServerInitiated</code>：服务器先执行，再通知客户端<br><code>ServerOnly</code>：只在服务器执行</td><td>玩家主动技能用 <b>LocalPredicted</b>；被动、AI 技能、死亡技能用 ServerInitiated / ServerOnly；纯本地 UI 行为（例如打开瞄准镜）用 LocalOnly</td></tr>
+    <tr><td><b>NetSecurityPolicy</b><br>谁能发起 / 终止</td><td><code>ClientOrServer</code><br><code>ServerOnlyExecution</code>：客户端不能请求激活<br><code>ServerOnlyTermination</code>：客户端不能取消<br><code>ServerOnly</code>：两者都由服务器决定</td><td>"复活""使用道具结算"这类敏感技能，用 ServerOnlyExecution 防止客户端伪造激活请求</td></tr>
+    <tr><td><b>ReplicationPolicy</b><br>实例本身是否复制</td><td><code>ReplicateNo</code> / <code>ReplicateYes</code></td><td>保持 <b>ReplicateNo</b>。激活与结束本来就通过 RPC 同步，与这个选项无关；5.5 起 GA 上的 Replicated 属性已废弃，跨端传值请使用 RPC</td></tr>
+  </table></div>
+  <div class="co net"><span class="h">🌐 网络视角：技能实例只存在于两个地方</span><p>即使设置了 ReplicateYes，GA 实例也只存在于<strong>服务器</strong>和<strong>拥有者客户端</strong>。其他客户端（模拟端）上没有技能实例，它们看到的动画来自 Montage 复制，特效来自 Cue，状态来自 Tag。这一点决定了第三部分的很多设计。</p></div>
+
+  <h2>8.5 激活方式</h2>
+  <div class="tbl"><table>
+    <tr><th>方式</th><th>API / 配置</th><th>适用场景</th></tr>
+    <tr><td>句柄</td><td><code>TryActivateAbility(SpecHandle)</code></td><td>输入绑定（推荐配合 InputTag）</td></tr>
+    <tr><td>Tag</td><td><code>TryActivateAbilitiesByTag(Container)</code>，匹配 AssetTags</td><td>"跳跃""闪避"这类通用动作</td></tr>
+    <tr><td>类</td><td><code>TryActivateAbilityByClass</code></td><td>不推荐，会和具体类耦合</td></tr>
+    <tr><td>GameplayEvent</td><td>GA 的 <code>AbilityTriggers</code> 配置 TriggerSource = GameplayEvent；<code>SendGameplayEventToActor</code> 触发</td><td>受击反应、死亡、连招衔接；事件 Payload 会传给 <code>ActivateAbilityFromEvent</code></td></tr>
+    <tr><td>Tag 增删</td><td>TriggerSource = OwnedTagAdded / OwnedTagPresent</td><td>"获得 State.Debuff.Stun 时自动播放眩晕技能"，Tag 消失时 Present 类型的技能会被取消</td></tr>
+    <tr><td>被动</td><td>在 <code>OnAvatarSet</code> 或 <code>OnGiveAbility</code> 中调用 <code>TryActivateAbility</code></td><td>常驻被动（Lyra 中的 ActivationPolicy = OnSpawn）</td></tr>
+  </table></div>
+
+  <h2>8.6 一个完整的 C++ 技能：火球术</h2>
+<!--code:cpp:GA_Fireball.cpp-->
+UGA_Fireball::UGA_Fireball()
+{
+    InstancingPolicy   = EGameplayAbilityInstancingPolicy::InstancedPerActor;
+    NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
+    // AssetTags / ActivationBlockedTags 等一般在蓝图子类中配置
+}
+
+void UGA_Fireball::ActivateAbility(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo,
+                                   const FGameplayAbilityActivationInfo ActivationInfo, const FGameplayEventData* TriggerEventData)
+{
+    // ① 提交：扣蓝 + 进冷却（在预测窗口内，客户端会预测执行）
+    if (!CommitAbility(Handle, ActorInfo, ActivationInfo))
+    {
+        EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+        return;
+    }
+
+    // ② 播放施法动画（本地立即播放；服务器播放后通过 Montage 复制给其他客户端）
+    UAbilityTask_PlayMontageAndWait* MontageTask =
+        UAbilityTask_PlayMontageAndWait::CreatePlayMontageAndWaitProxy(this, NAME_None, CastMontage);
+    MontageTask->OnCompleted.AddDynamic(this, &ThisClass::OnMontageFinished);
+    MontageTask->OnBlendOut.AddDynamic(this, &ThisClass::OnMontageFinished);
+    MontageTask->OnInterrupted.AddDynamic(this, &ThisClass::OnMontageCancelled);
+    MontageTask->OnCancelled.AddDynamic(this, &ThisClass::OnMontageCancelled);
+    MontageTask->ReadyForActivation();
+
+    // ③ 等动画中的出手帧通知（AnimNotify 中调用 SendGameplayEventToActor(Event.Montage.Fire)）
+    UAbilityTask_WaitGameplayEvent* FireTask =
+        UAbilityTask_WaitGameplayEvent::WaitGameplayEvent(this, MyTags::Event_Montage_Fire, nullptr, /*OnlyTriggerOnce*/ true);
+    FireTask->EventReceived.AddDynamic(this, &ThisClass::OnFireEvent);
+    FireTask->ReadyForActivation();
+}
+
+void UGA_Fireball::OnFireEvent(FGameplayEventData Payload)
+{
+    // ④ 只在服务器生成投射物（投射物是复制的 Actor）
+    if (!HasAuthority(&CurrentActivationInfo)) return;
+
+    const FTransform SpawnTM = GetMuzzleTransform();
+    AMyProjectile* P = GetWorld()->SpawnActorDeferred<AMyProjectile>(ProjectileClass, SpawnTM, GetOwningActorFromActorInfo(),
+                                                                     Cast<APawn>(GetAvatarActorFromActorInfo()));
+    // 把要施加的伤害 Spec 交给投射物，命中时直接 Apply
+    FGameplayEffectSpecHandle Spec = MakeOutgoingGameplayEffectSpec(DamageEffect, GetAbilityLevel());
+    Spec.Data->SetSetByCallerMagnitude(MyTags::SetByCaller_Damage, BaseDamage.GetValueAtLevel(GetAbilityLevel()));
+    P->DamageSpec = Spec;
+    P->FinishSpawning(SpawnTM);
+}
+
+void UGA_Fireball::OnMontageFinished()  { EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false); }
+void UGA_Fireball::OnMontageCancelled() { EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, true);  }
+<!--/code-->
+  <div class="co deep"><span class="h">🔬 深入源码：CommitAbility 做了什么</span><p><code>CommitAbility</code> = <code>CommitCheck</code>（再次检查冷却和消耗，因为激活之后状态可能已经变化）+ <code>CommitExecute</code>（调用 <code>ApplyCooldown</code> 和 <code>ApplyCost</code>）。你也可以分开调用 <code>CommitAbilityCost</code> 和 <code>CommitAbilityCooldown</code>，例如"引导技能开始时扣蓝，结束后才进入冷却"。<code>EndAbility</code> 和 <code>CancelAbility</code> 都<strong>不会</strong>自动提交。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>生命周期：Give → TryActivate → CanActivate → PreActivate → <b>ActivateAbility</b> → Commit → Tasks → <b>End / Cancel</b>。每个出口都必须调用 EndAbility。</li>
+    <li>十个 Tag 字段描述技能之间以及技能与角色状态之间的互斥关系，眩晕、沉默等控制效果都通过它们实现。</li>
+    <li>消耗和冷却都是 GE；冷却通过 Tag 判断，常见做法是所有技能共用一个冷却 GE，在运行时注入时长和 Tag。</li>
+    <li>默认使用 <b>InstancedPerActor + LocalPredicted + ReplicateNo</b>。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH9 ======================= -->
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>AbilityTask 与 TargetData：技能中的异步</h1>
+    <p class="lead">技能几乎都要"等待"：等动画、等出手帧、等玩家松手、等选择目标。AbilityTask 就是 GAS 用来处理这些等待的工具。</p>
+  </div>
+
+  <h2>9.1 Task 是技能里的 await</h2>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <line x1="120" y1="226" x2="840" y2="226" stroke="#9CA3AF"/><text x="130" y="242" class="xs">时间 →</text>
+    <text x="122" y="45" text-anchor="end" class="sm b">GA_Fireball</text>
+    <rect x="120" y="30" width="640" height="22" rx="6" fill="#F3EEFE" stroke="#6D28D9"/><text x="440" y="46" text-anchor="middle" class="xs" style="fill:#6D28D9">ActivateAbility ………………………………………… 技能处于激活状态 ………………………………………… EndAbility</text>
+    <text x="124" y="95" text-anchor="end" class="xs">PlayMontageAndWait</text>
+    <rect x="130" y="80" width="560" height="22" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="410" y="96" text-anchor="middle" class="xs">Montage 播放中</text>
+    <circle cx="690" cy="91" r="6" fill="#2F5BD3"/><text x="700" y="80" class="xs">OnCompleted → EndAbility</text>
+    <text x="124" y="145" text-anchor="end" class="xs">WaitGameplayEvent</text>
+    <rect x="130" y="130" width="210" height="22" rx="6" fill="#FFF4EC" stroke="#C2410C"/><text x="235" y="146" text-anchor="middle" class="xs">等待 Event.Montage.Fire</text>
+    <circle cx="340" cy="141" r="6" fill="#C2410C"/><text x="350" y="134" class="xs">AnimNotify 发出事件 → 生成火球</text>
+    <text x="124" y="195" text-anchor="end" class="xs">（可选）WaitDelay</text>
+    <rect x="340" y="180" width="160" height="22" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="420" y="196" text-anchor="middle" class="xs">0.5 秒后施加自身 Buff</text>
+    <line x1="760" y1="30" x2="760" y2="226" stroke="#B91C1C" stroke-dasharray="4 3"/>
+    <text x="754" y="216" text-anchor="end" class="xs" style="fill:#B91C1C">技能结束 → 仍在运行的 Task 全部被 OnDestroy 清理</text>
+  </svg>
+  <figcaption><b>图 9-1</b> 一个技能同时运行多个 Task，每个 Task 通过委托通知技能；技能结束时所有 Task 一起被销毁</figcaption>
+  </figure>
+  <p>与普通的计时器或委托相比，Task 有三点好处：①<strong>生命周期与技能绑定</strong>，技能结束时自动清理；②<strong>与预测系统集成</strong>，部分 Task 会在回调时开启新的预测窗口；③在蓝图中显示为带多个输出引脚的异步节点，策划也能看懂。</p>
+
+  <h2>9.2 常用的内置 Task</h2>
+  <div class="tbl"><table>
+    <tr><th>Task</th><th>作用</th><th>网络说明</th></tr>
+    <tr><td><code>PlayMontageAndWait</code></td><td>播放 Montage，等待完成 / 中断 / BlendOut</td><td>通过 ASC 的 RepAnimMontageInfo 复制给模拟端</td></tr>
+    <tr><td><code>WaitGameplayEvent</code></td><td>等待发给自己的 GameplayEvent</td><td>两端各自等待；事件一般来自两端都会执行的 AnimNotify</td></tr>
+    <tr><td><code>WaitTargetData</code></td><td>生成 TargetActor 让玩家选择目标</td><td>客户端产生的 TargetData 通过 RPC 发给服务器</td></tr>
+    <tr><td><code>WaitInputPress</code> / <code>WaitInputRelease</code></td><td>等待再次按下或松开激活键</td><td>客户端回调时会开启新的预测窗口，并把输入事件同步给服务器</td></tr>
+    <tr><td><code>WaitGameplayTagAdded</code> / <code>Removed</code></td><td>等待自身 Tag 变化</td><td>两端独立判断</td></tr>
+    <tr><td><code>WaitAttributeChange</code></td><td>等待属性变化</td><td>客户端以复制值为准</td></tr>
+    <tr><td><code>WaitDelay</code></td><td>延时</td><td>两端各自计时</td></tr>
+    <tr><td><code>ApplyRootMotionConstantForce</code> 等</td><td>Root Motion 位移（冲刺、击退）</td><td>接入 CharacterMovement 的移动预测，详见 13.3</td></tr>
+    <tr><td><code>WaitNetSync</code></td><td>两端互相等待对方执行到同一位置</td><td>会增加一个往返的延迟，按需使用</td></tr>
+    <tr><td><code>WaitConfirmCancel</code></td><td>等待确认或取消输入</td><td>配合 TargetData 使用</td></tr>
+  </table></div>
+
+  <h2>9.3 自定义 Task：蓄力</h2>
+<!--code:cpp:AbilityTask_Charge.h / .cpp-->
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FChargeDelegate, float, ChargeRatio);
+
+UCLASS()
+class UAbilityTask_Charge : public UAbilityTask
+{
+    GENERATED_BODY()
+public:
+    UPROPERTY(BlueprintAssignable) FChargeDelegate OnProgress;   // 每帧回调：蓄力进度 0~1
+    UPROPERTY(BlueprintAssignable) FChargeDelegate OnFullyCharged;
+
+    // 蓝图节点工厂函数：DefaultToSelf/HidePin 让蓝图里不显示 OwningAbility 引脚
+    UFUNCTION(BlueprintCallable, Category = "Ability|Tasks", meta = (HidePin = "OwningAbility", DefaultToSelf = "OwningAbility", BlueprintInternalUseOnly = "true"))
+    static UAbilityTask_Charge* WaitCharge(UGameplayAbility* OwningAbility, float MaxChargeTime);
+
+    virtual void Activate() override;
+    virtual void TickTask(float DeltaTime) override;
+
+private:
+    float MaxTime = 1.f;
+    float Elapsed = 0.f;
+};
+
+UAbilityTask_Charge* UAbilityTask_Charge::WaitCharge(UGameplayAbility* OwningAbility, float MaxChargeTime)
+{
+    UAbilityTask_Charge* Task = NewAbilityTask<UAbilityTask_Charge>(OwningAbility);
+    Task->MaxTime = FMath::Max(0.01f, MaxChargeTime);
+    Task->bTickingTask = true;               // 需要每帧 Tick
+    return Task;
+}
+
+void UAbilityTask_Charge::Activate() { Elapsed = 0.f; }
+
+void UAbilityTask_Charge::TickTask(float DeltaTime)
+{
+    Super::TickTask(DeltaTime);
+    Elapsed += DeltaTime;
+    const float Ratio = FMath::Min(Elapsed / MaxTime, 1.f);
+    // 技能可能已经结束：这里统一检查后再广播
+    if (ShouldBroadcastAbilityTaskDelegates()) { OnProgress.Broadcast(Ratio); }
+    if (Ratio >= 1.f)
+    {
+        if (ShouldBroadcastAbilityTaskDelegates()) { OnFullyCharged.Broadcast(1.f); }
+        EndTask();
+    }
+}
+<!--/code-->
+  <div class="co warn"><span class="h">⚠️ 坑点</span><ul>
+    <li>在 C++ 中创建 Task 后<strong>必须调用 <code>ReadyForActivation()</code></strong>，否则 <code>Activate</code> 不会执行（蓝图节点会自动调用）。</li>
+    <li>广播委托之前检查 <code>ShouldBroadcastAbilityTaskDelegates()</code>，避免技能结束后回调还在执行。</li>
+    <li>"按住蓄力、松手释放"应该组合使用 <code>WaitInputRelease</code> 和这个 Task。松手的时机由 <code>WaitInputRelease</code> 同步给服务器，不要在 Task 里自己读取输入。</li>
+  </ul></div>
+
+  <h2>9.4 TargetData：技能的"选择目标"</h2>
+  <p><code>FGameplayAbilityTargetDataHandle</code> 是一个可复制的多态容器，里面可以装命中结果（<code>FGameplayAbilityTargetData_SingleTargetHit</code>）、Actor 列表（<code>_ActorArray</code>）、位置信息（<code>_LocationInfo</code>），也可以装自定义结构体。它主要解决一个问题：<strong>目标只有客户端最清楚</strong>（玩家的准星、点击的位置），但结算必须在服务器进行。</p>
+  <div class="tbl"><table>
+    <tr><th>ConfirmationType</th><th>含义</th></tr>
+    <tr><td>Instant</td><td>立即生成 TargetData（射线检测、自身周围范围）</td></tr>
+    <tr><td>UserConfirmed</td><td>等待玩家确认（地面指示器 → 点击释放）</td></tr>
+    <tr><td>Custom / CustomMulti</td><td>由 TargetActor 自己决定何时产出（例如可以多次产出的锁定类技能）</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">✅ 实践建议</span><p>内置的 <code>AGameplayAbilityTargetActor</code> 体系比较笨重（每次都要生成 Actor）。射击类游戏可以参考 Lyra 的 <code>LyraGameplayAbility_RangedWeapon</code>：客户端自己做射线检测，打包成 TargetData，通过 <code>ServerSetReplicatedTargetData</code> 发给服务器，服务器校验后再结算。完整流程见 13.4。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>Task 是技能里的异步步骤，生命周期与技能绑定，并且与预测系统集成。</li>
+    <li>自定义 Task 的要点：工厂函数用 <code>NewAbilityTask</code> 创建，需要 Tick 时设置 <code>bTickingTask</code>，广播前检查，结束时调用 <code>EndTask</code>。</li>
+    <li>TargetData 把"客户端选择的目标"安全地交给服务器结算。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH10 ======================= -->
+<section class="chapter" id="ch10">
+  <div class="ch-head">
+    <div class="no">CHAPTER 10</div>
+    <h1>GameplayCue：逻辑与表现分离</h1>
+    <p class="lead">特效、音效、震屏、受击闪白都属于表现。Cue 让表现资源和逻辑代码完全解耦，并提供了一套省带宽、可预测的同步方式。</p>
+  </div>
+
+  <h2>10.1 工作原理</h2>
+  <p>Cue 通过 Tag 路由：所有 Cue Tag 必须以 <code>GameplayCue.</code> 开头。<code>UGameplayCueManager</code> 在启动时扫描配置的目录，建立"Tag → Notify 类"的映射表。逻辑层只需要说"触发 <code>GameplayCue.Hero.Q.Hit</code>"，不需要知道具体播放什么粒子或音效。</p>
+<!--code:ini:DefaultGame.ini-->
+[/Script/GameplayAbilities.AbilitySystemGlobals]
+; 只扫描这些目录，能明显缩短启动时间
++GameplayCueNotifyPaths="/Game/GAS/Cues"
+<!--/code-->
+
+  <h2>10.2 四种事件</h2>
+  <figure>
+  <svg viewBox="0 0 860 230" xmlns="http://www.w3.org/2000/svg">
+    <line x1="120" y1="200" x2="840" y2="200" stroke="#9CA3AF"/>
+    <text x="20" y="58" class="b">持续型 GE</text><text x="20" y="76" class="xs">（燃烧 3 秒）</text>
+    <rect x="200" y="46" width="460" height="26" rx="6" fill="#E6F7F7" stroke="#0F766E"/><text x="430" y="64" text-anchor="middle" class="xs" style="fill:#0F766E">GE 生效中：循环燃烧特效</text>
+    <g>
+      <circle cx="200" cy="59" r="7" fill="#0F766E"/><text x="200" y="100" text-anchor="middle" class="sm b">OnActive</text><text x="200" y="116" text-anchor="middle" class="xs">施加瞬间（爆燃）</text>
+      <circle cx="240" cy="59" r="7" fill="#15803D"/><text x="300" y="140" text-anchor="middle" class="sm b">WhileActive</text><text x="300" y="156" text-anchor="middle" class="xs">开始循环（中途进入视野也会触发）</text>
+      <circle cx="660" cy="59" r="7" fill="#B91C1C"/><text x="660" y="100" text-anchor="middle" class="sm b">Removed</text><text x="660" y="116" text-anchor="middle" class="xs">GE 结束（熄灭）</text>
+      <line x1="240" y1="66" x2="290" y2="126" stroke="#15803D" stroke-dasharray="3 3"/>
+    </g>
+    <text x="20" y="186" class="b">Instant / Period</text>
+    <g fill="#C2410C"><circle cx="200" cy="182" r="7"/><circle cx="350" cy="182" r="7"/><circle cx="500" cy="182" r="7"/><circle cx="650" cy="182" r="7"/></g>
+    <text x="760" y="186" text-anchor="middle" class="sm b">Executed</text>
+    <text x="760" y="168" text-anchor="middle" class="xs">每次执行一次（跳字）</text>
+  </svg>
+  <figcaption><b>图 10-1</b> Cue 的事件类型。OnActive 只在"亲眼看到施加"的客户端触发，WhileActive 对中途进入视野的客户端也会触发</figcaption>
+  </figure>
+  <div class="co tip"><span class="h">✅ 实践建议</span><p>循环特效放在 <b>WhileActive</b> 中启动，而不是 OnActive。否则后加入游戏或者刚进入视野的玩家，看不到已经在燃烧的目标身上的火焰。OnActive 只用于"施加瞬间"的一次性表现。</p></div>
+
+  <h2>10.3 Notify 的类型</h2>
+  <div class="tbl"><table>
+    <tr><th>类型</th><th>实例化</th><th>适合</th></tr>
+    <tr><td><code>UGameplayCueNotify_Static</code></td><td>不实例化，在 CDO 上执行</td><td>一次性 Executed：命中火花、跳字、音效</td></tr>
+    <tr><td><code>UGameplayCueNotify_Burst</code></td><td>同上，可在编辑器里直接配置粒子、音效、震屏</td><td>一次性表现，不需要写代码</td></tr>
+    <tr><td><code>AGameplayCueNotify_Actor</code></td><td>在目标上生成 Actor，可以保存状态</td><td>持续表现：燃烧、护盾、光环。<code>bAutoDestroyOnRemove</code>，支持对象池回收</td></tr>
+    <tr><td><code>AGameplayCueNotify_Looping</code></td><td>Actor 类型，内置开始 / 循环 / 结束三段配置</td><td>标准的循环表现</td></tr>
+    <tr><td><code>AGameplayCueNotify_BurstLatent</code></td><td>Actor 类型</td><td>需要持续一段时间的一次性表现（带延时）</td></tr>
+  </table></div>
+
+  <h2>10.4 触发方式</h2>
+  <div class="tbl"><table>
+    <tr><th>方式</th><th>同步方式</th><th>可预测</th><th>说明</th></tr>
+    <tr><td>写在 GE 的 GameplayCues 列表中</td><td>随 GE 生命周期：Instant 走多播，持续型随 GE 复制</td><td class="yes">是</td><td><b>首选</b>。参数（Magnitude、命中点）自动从 Spec 中获取</td></tr>
+    <tr><td>GA 中调用 <code>K2_ExecuteGameplayCue</code> / <code>K2_AddGameplayCue</code></td><td>服务器多播；本地预测时客户端会先执行</td><td class="yes">是</td><td>不需要 GE 的纯表现，例如挥刀拖尾</td></tr>
+    <tr><td>ASC 的 <code>ExecuteGameplayCue</code> / <code>AddGameplayCue</code></td><td>服务器 → Unreliable 多播</td><td class="mid">视调用位置而定</td><td>技能之外的通用入口</td></tr>
+    <tr><td><code>UGameplayCueManager::ExecuteGameplayCue_NonReplicated</code> 等</td><td><b>不同步</b>，只在本地执行</td><td>—</td><td>每个客户端都能自己判断的表现（例如本地计算出的命中特效）</td></tr>
+  </table></div>
+<!--code:cpp:自定义 Static Cue：命中跳字-->
+UCLASS()
+class UGCN_DamageNumber : public UGameplayCueNotify_Static
+{
+    GENERATED_BODY()
+public:
+    UGCN_DamageNumber() { GameplayCueTag = FGameplayTag::RequestGameplayTag("GameplayCue.UI.DamageNumber"); }
+
+    virtual bool OnExecute_Implementation(AActor* Target, const FGameplayCueParameters& Params) const override
+    {
+        // RawMagnitude：GE 中第一个 Modifier 的数值（或手动传入）；EffectContext 中有命中点、来源
+        const float Damage = Params.RawMagnitude;
+        const FVector Loc = Params.EffectContext.GetHitResult() ? FVector(Params.EffectContext.GetHitResult()->ImpactPoint)
+                                                                : Target->GetActorLocation();
+        if (UMyDamageNumberSubsystem* Sys = UWorld::GetSubsystem<UMyDamageNumberSubsystem>(Target->GetWorld()))
+        {
+            Sys->Spawn(Loc, Damage);
+        }
+        return true;
+    }
+};
+<!--/code-->
+
+  <h2>10.5 网络视角：Cue 是怎么到达每个客户端的</h2>
+  <div class="co net"><span class="h">🌐 三条同步路径</span><ul>
+    <li><b>Executed（一次性）</b>：服务器调用 ASC 上的 <code>NetMulticast_InvokeGameplayCueExecuted*</code> 系列 <strong>Unreliable 多播</strong>。网络拥塞时可能丢失，这对表现来说是可以接受的。</li>
+    <li><b>持续型（Add / Remove）</b>：拥有者通过复制下来的 ActiveGE 得知；模拟端通过 ASC 上的 <code>MinimalReplicationGameplayCues</code>（Mixed / Minimal 模式）得知，后者是可靠的属性复制，保证最终一致。</li>
+    <li><b>预测去重</b>：本地预测的客户端已经提前播放了 Cue。服务器多播时会带上预测键，拥有者识别出这是自己预测过的 Cue，就会<strong>跳过</strong>，避免重复播放。</li>
+  </ul></div>
+  <div class="co warn"><span class="h">⚠️ 坑点：同一帧大量 Cue 被丢弃</span><p>AOE 一次命中 20 个目标时，每个目标都会发出一个 Executed 多播，可能被网络层的 RPC 限流丢掉。可以考虑：①合并成一个 Cue，在参数中携带多个目标；②改为本地非复制 Cue，由每个客户端根据复制下来的结果自己判断；③检查项目中与多播 RPC 数量相关的网络配置。</p></div>
+  <div class="co tip"><span class="h">✅ 实践建议：皮肤特效替换</span><p>同一个技能在不同皮肤下要播放不同特效时，逻辑层的 Cue Tag 应该保持不变，由表现层做映射。GAS 提供了 <code>GameplayCueTranslator</code> 机制，可以按条件把 <code>GameplayCue.Hero.Q.Hit</code> 翻译成 <code>GameplayCue.Hero.Q.Hit.Skin01</code>；也可以在 Notify 内部根据 Instigator 的皮肤配置选择资源。这样逻辑和数值完全不需要关心皮肤。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>Cue 由 Tag 驱动，逻辑层只负责触发 Tag，具体表现由 Notify 实现。</li>
+    <li>事件分为 OnActive / WhileActive / Removed / Executed；循环表现放在 WhileActive 中。</li>
+    <li>一次性 Cue 走 Unreliable 多播，持续型 Cue 走可靠复制；预测过的 Cue 会自动去重。</li>
+    <li>首选在 GE 上配置 Cue，以获得自动参数和预测支持。</li>
+  </ul></div>
+</section>

@@ -1,0 +1,35 @@
+
+== E1 消息边界：UDP 保留边界，TCP 是字节流 ==
+  UDP recvfrom #1 ->  5 字节: "hello"
+  UDP recvfrom #2 -> 12 字节: "tcp-udp-book"
+  UDP recvfrom #3 -> 27 字节: "reliable-transport-over-udp"
+  TCP 发送方 send() 3 次（5+12+27=44 字节），接收方 recv() 1 次 -> 44 字节: "hellotcp-udp-bookreliable-transport-over-udp"
+
+== E2 UDP 无连接：发给没人监听的端口 ==
+  sendto 返回 4（发送"成功"——UDP 不知道对方在不在）
+  随后 recvfrom 返回 -1，WSAGetLastError=10054（10054=WSAECONNRESET：内核收到 ICMP 端口不可达）
+  关闭 SIO_UDP_CONNRESET 后：recvfrom 返回 -1，WSAGetLastError=10060（10060=超时，错误被静默丢弃）
+
+== E3 TCP connect 到没人监听的端口 ==
+  connect 返回 -1，WSAGetLastError=10061（10061=WSAECONNREFUSED，对端回了 RST），耗时 2048 ms
+
+== E4/E5 四次挥手的状态变化 + 半关闭 ==
+  [① 三次握手完成，accept 返回后]
+    服务端监听 127.0.0.1:40031 -> 127.0.0.1:0      LISTEN
+    服务端  127.0.0.1:40031 -> 127.0.0.1:53735  ESTABLISHED
+    客户端  127.0.0.1:53735 -> 127.0.0.1:40031  ESTABLISHED
+  [② 客户端 shutdown(SD_SEND) 发出 FIN，服务端内核自动回 ACK 之后]
+    服务端监听 127.0.0.1:40031 -> 127.0.0.1:0      LISTEN
+    服务端  127.0.0.1:40031 -> 127.0.0.1:53735  CLOSE_WAIT
+    客户端  127.0.0.1:53735 -> 127.0.0.1:40031  FIN_WAIT_2
+  服务端 recv 返回 0（0 = 读到 FIN，对方不会再发数据了）
+  客户端在 FIN_WAIT_2 中仍收到 21 字节: "server-still-can-send"  <- 这就是"半关闭"
+  客户端 recv 返回 0（读到服务端 FIN）
+  [③ 服务端 closesocket 发 FIN、客户端回最后一个 ACK 之后]
+    服务端监听 127.0.0.1:40031 -> 127.0.0.1:0      LISTEN
+    客户端  127.0.0.1:53735 -> 127.0.0.1:40031  TIME_WAIT
+
+== E6 SO_LINGER{1,0}：用 RST 代替四次挥手 ==
+  服务端 recv 返回 -1，WSAGetLastError=10054（10054=WSAECONNRESET）
+  [RST 之后（注意：客户端没有 TIME_WAIT）]
+    服务端监听 127.0.0.1:40041 -> 127.0.0.1:0      LISTEN

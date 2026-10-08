@@ -1,0 +1,399 @@
+<div class="part-head" data-toc="第四部分 · 实战" style="background:linear-gradient(135deg,#7C2D12 0%,#C2410C 60%,#EA7A3A 100%)">
+  <div class="no">PART FOUR</div>
+  <h1>第四部分　实战：从零做一个 MOBA 英雄</h1>
+  <p>把前面所有知识用在一个完整的联网英雄上：属性、伤害管线、普攻连招、被动叠层、位移、控制、地面 AOE、冷却 UI，并逐个分析每个技能的网络行为。</p>
+</div>
+
+<!-- ======================= CH14 ======================= -->
+<section class="chapter" id="ch14">
+  <div class="ch-head">
+    <div class="no">CHAPTER 14</div>
+    <h1>实战：英雄「炎刃」</h1>
+    <p class="lead">一份策划需求，从数据建模到每个技能的实现，再到联网测试清单。</p>
+  </div>
+
+  <h2>14.1 需求卡</h2>
+  <div class="tbl"><table>
+    <tr><th>技能</th><th>描述</th><th>关键机制</th></tr>
+    <tr><td><b>普攻</b></td><td>三段连击，第三段伤害 ×1.5</td><td>Montage Section、AnimNotify 事件、服务器扫掠检测</td></tr>
+    <tr><td><b>被动 · 炽焰</b></td><td>普攻命中叠 1 层炽焰（最多 3 层，5 秒）；满层后下次普攻额外造成 60 + 40% 法强的魔法伤害并清空层数</td><td>常驻技能、Stacking、GameplayEvent</td></tr>
+    <tr><td><b>Q · 冲锋斩</b></td><td>向前冲刺 600 距离，对路径上的敌人造成物理伤害；冲刺中免疫控制；耗 50 蓝，冷却 8 秒</td><td>LocalPredicted、RootMotion、免疫、互斥 Tag</td></tr>
+    <tr><td><b>W · 晕眩飞刃</b></td><td>掷出飞刃，命中第一个敌人造成魔法伤害并眩晕 1 秒；冷却 10 秒</td><td>服务器投射物、控制 GE、打断技能</td></tr>
+    <tr><td><b>R · 烈焰领域</b></td><td>选择地面位置，生成 4 秒的火焰领域，区域内敌人持续受到灼烧；冷却 60 秒</td><td>TargetData（地面选择）、周期伤害、领域 Actor</td></tr>
+  </table></div>
+
+  <h2>14.2 整体结构</h2>
+  <figure>
+  <svg viewBox="0 0 860 360" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="250" height="200" rx="12" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="145" y="44" text-anchor="middle" class="b" style="fill:#2F5BD3">AHeroPlayerState</text>
+    <rect x="40" y="58" width="210" height="34" rx="7" fill="#2F5BD3"/><text x="145" y="80" text-anchor="middle" class="sm wt">UHeroASC（Mixed）</text>
+    <rect x="40" y="100" width="100" height="50" rx="7" fill="#EAF7EF" stroke="#15803D"/><text x="90" y="122" text-anchor="middle" class="sm">HealthSet</text><text x="90" y="138" text-anchor="middle" class="xs">血 / 盾 / 蓝</text>
+    <rect x="150" y="100" width="100" height="50" rx="7" fill="#EAF7EF" stroke="#15803D"/><text x="200" y="122" text-anchor="middle" class="sm">CombatSet</text><text x="200" y="138" text-anchor="middle" class="xs">攻 / 法 / 甲 / 抗</text>
+    <text x="145" y="176" text-anchor="middle" class="xs">NetUpdateFrequency = 100</text>
+    <text x="145" y="196" text-anchor="middle" class="xs">重生后保留冷却与成长</text>
+
+    <rect x="300" y="20" width="250" height="200" rx="12" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="425" y="44" text-anchor="middle" class="b" style="fill:#6D28D9">DA_AbilitySet_Yanren</text>
+    <text x="320" y="72" class="sm">GA_Hero_BasicAttack  ← InputTag.Attack</text>
+    <text x="320" y="96" class="sm">GA_Hero_Passive_Blaze  （OnSpawn）</text>
+    <text x="320" y="120" class="sm">GA_Yanren_Q_Dash  ← InputTag.Q</text>
+    <text x="320" y="144" class="sm">GA_Yanren_W_StunBlade  ← InputTag.W</text>
+    <text x="320" y="168" class="sm">GA_Yanren_R_FlameField  ← InputTag.R</text>
+    <text x="320" y="196" class="xs">+ 初始化 GE：GE_Init_Yanren（曲线表）</text>
+
+    <rect x="580" y="20" width="260" height="200" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="710" y="44" text-anchor="middle" class="b" style="fill:#C2410C">通用 GE / 计算类</text>
+    <text x="598" y="72" class="sm">GE_Damage（ExecCalc_Damage）</text>
+    <text x="598" y="96" class="sm">GE_Cooldown（MMC_Cooldown）</text>
+    <text x="598" y="120" class="sm">GE_Cost_Mana（SetByCaller）</text>
+    <text x="598" y="144" class="sm">GE_Stun · GE_Unstoppable</text>
+    <text x="598" y="168" class="sm">GE_BlazeStack · GE_Burn</text>
+    <text x="598" y="196" class="xs">所有英雄共用，只有数值不同</text>
+
+    <rect x="20" y="250" width="250" height="90" rx="12" fill="#E6F7F7" stroke="#0F766E"/>
+    <text x="145" y="274" text-anchor="middle" class="b" style="fill:#0F766E">GameplayCues</text>
+    <text x="145" y="296" text-anchor="middle" class="xs">GC_Yanren_Q_Trail · GC_Status_Stun</text>
+    <text x="145" y="314" text-anchor="middle" class="xs">GC_Burn（Looping） · GC_DamageNumber</text>
+    <rect x="300" y="250" width="250" height="90" rx="12" fill="#fff" stroke="#6B7280"/>
+    <text x="425" y="274" text-anchor="middle" class="b">AHeroCharacter（Avatar）</text>
+    <text x="425" y="296" text-anchor="middle" class="xs">Enhanced Input → InputTag → ASC</text>
+    <text x="425" y="314" text-anchor="middle" class="xs">CMC 读取 MoveSpeed 与 State.Debuff.Stun</text>
+    <rect x="580" y="250" width="260" height="90" rx="12" fill="#fff" stroke="#6B7280"/>
+    <text x="710" y="274" text-anchor="middle" class="b">表现 / UI</text>
+    <text x="710" y="296" text-anchor="middle" class="xs">技能栏冷却：按 Cooldown Tag 查询</text>
+    <text x="710" y="314" text-anchor="middle" class="xs">Buff 栏：监听 ActiveGE 增删 + UIData</text>
+    <g stroke="#94A3B8" stroke-width="1.3" stroke-dasharray="4 3">
+      <line x1="270" y1="120" x2="298" y2="120"/><line x1="550" y1="120" x2="578" y2="120"/>
+      <line x1="145" y1="220" x2="145" y2="248"/><line x1="425" y1="220" x2="425" y2="248"/><line x1="710" y1="220" x2="710" y2="248"/>
+    </g>
+  </svg>
+  <figcaption><b>图 14-1</b> 「炎刃」的模块划分：英雄特有的只有 AbilitySet 中的五个技能，GE、计算类和 Cue 大部分是全英雄共用的</figcaption>
+  </figure>
+
+  <h2>14.3 数据建模</h2>
+  <h3>属性</h3>
+  <div class="tbl"><table>
+    <tr><th>属性集</th><th>属性</th><th>复制条件</th><th>说明</th></tr>
+    <tr><td rowspan="3">HealthSet</td><td>Health / MaxHealth</td><td>COND_None</td><td>所有人都要看血条</td></tr>
+    <tr><td>Shield</td><td>COND_None</td><td>护盾值，伤害先扣护盾</td></tr>
+    <tr><td>Mana / MaxMana</td><td>COND_OwnerOnly</td><td>只有自己需要看蓝量</td></tr>
+    <tr><td rowspan="3">CombatSet</td><td>AttackDamage / AbilityPower</td><td>COND_None</td><td>物攻 / 法强</td></tr>
+    <tr><td>Armor / MagicResist / ArmorPen / MagicPen</td><td>COND_None</td><td>防御与穿透（百分比）</td></tr>
+    <tr><td>CritChance / CooldownReduction / MoveSpeed</td><td>COND_None</td><td>CMC 读取 MoveSpeed</td></tr>
+    <tr><td>Meta</td><td>IncomingDamage / IncomingHeal</td><td>不复制</td><td>只在服务器使用的中转属性</td></tr>
+  </table></div>
+  <h3>Tag</h3>
+  <div class="tbl"><table>
+    <tr><th>类别</th><th>Tag</th></tr>
+    <tr><td>技能身份</td><td><code>Ability.Type.Attack</code> <code>Ability.Type.Active</code> <code>Ability.Type.Passive</code> <code>Ability.Yanren.Q/W/R</code></td></tr>
+    <tr><td>状态</td><td><code>State.Dead</code> <code>State.Dashing</code> <code>State.Debuff.Stun</code> <code>State.Buff.Unstoppable</code></td></tr>
+    <tr><td>冷却</td><td><code>Cooldown.Yanren.Q/W/R</code></td></tr>
+    <tr><td>GE 分类</td><td><code>Effect.Type.CC</code> <code>Effect.Type.Damage</code> <code>Effect.RemoveOnDeath</code></td></tr>
+    <tr><td>伤害类型</td><td><code>Damage.Type.Physical</code> <code>Damage.Type.Magic</code></td></tr>
+    <tr><td>事件</td><td><code>Event.Montage.Hit</code> <code>Event.Attack.Landed</code> <code>Event.Death</code></td></tr>
+    <tr><td>数值键</td><td><code>SetByCaller.Damage</code> <code>SetByCaller.AttackCoef</code> <code>SetByCaller.APCoef</code> <code>SetByCaller.Cooldown</code></td></tr>
+  </table></div>
+
+  <h2>14.4 伤害管线</h2>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <g>
+      <rect x="10" y="30" width="140" height="66" rx="9" fill="#F3EEFE" stroke="#6D28D9"/><text x="80" y="54" text-anchor="middle" class="sm b">技能构造 Spec</text><text x="80" y="72" text-anchor="middle" class="xs">SetByCaller 基础伤害</text><text x="80" y="87" text-anchor="middle" class="xs">+ 系数 + 伤害类型 Tag</text>
+      <rect x="175" y="30" width="140" height="66" rx="9" fill="#FEF6E4" stroke="#B45309"/><text x="245" y="54" text-anchor="middle" class="sm b">目标能否被施加</text><text x="245" y="72" text-anchor="middle" class="xs">免疫组件</text><text x="245" y="87" text-anchor="middle" class="xs">State.Dead → 拒绝</text>
+      <rect x="340" y="30" width="160" height="66" rx="9" fill="#FFF4EC" stroke="#C2410C"/><text x="420" y="54" text-anchor="middle" class="sm b">ExecCalc_Damage</text><text x="420" y="72" text-anchor="middle" class="xs">物理 → 护甲 / 魔法 → 魔抗</text><text x="420" y="87" text-anchor="middle" class="xs">穿透 · 暴击（仅物理）</text>
+      <rect x="525" y="30" width="150" height="66" rx="9" fill="#EAF7EF" stroke="#15803D"/><text x="600" y="54" text-anchor="middle" class="sm b">IncomingDamage</text><text x="600" y="72" text-anchor="middle" class="xs">PostGEExecute：</text><text x="600" y="87" text-anchor="middle" class="xs">先扣 Shield，再扣 Health</text>
+      <rect x="700" y="30" width="150" height="66" rx="9" fill="#2F5BD3"/><text x="775" y="54" text-anchor="middle" class="sm b wt">结果</text><text x="775" y="72" text-anchor="middle" class="xs" style="fill:#DCE6FF">跳字 Cue · 受击事件</text><text x="775" y="87" text-anchor="middle" class="xs" style="fill:#DCE6FF">Health≤0 → Event.Death</text>
+    </g>
+    <g stroke="#4B5563" stroke-width="1.5"><line x1="150" y1="63" x2="173" y2="63" marker-end="url(#a)"/><line x1="315" y1="63" x2="338" y2="63" marker-end="url(#a)"/><line x1="500" y1="63" x2="523" y2="63" marker-end="url(#a)"/><line x1="675" y1="63" x2="698" y2="63" marker-end="url(#a)"/></g>
+    <rect x="10" y="122" width="840" height="122" rx="10" fill="#fff" stroke="#E5E7EB"/>
+    <text x="28" y="146" class="sm b">数值示例：Q 冲锋斩（物理）</text>
+    <text x="28" y="170" class="mono">基础 120 + 物攻 200 × 0.8 = 280</text>
+    <text x="28" y="192" class="mono">目标护甲 100，穿透 20% → 有效护甲 80 → 减伤乘数 100/180 = 0.556 → 155.6</text>
+    <text x="28" y="214" class="mono">目标护盾 50 → 护盾 50→0，Health −105.6</text>
+    <text x="28" y="236" class="xs">全部发生在服务器；客户端只能通过属性复制和跳字 Cue 看到结果</text>
+  </svg>
+  <figcaption><b>图 14-2</b> 所有伤害共用一条管线：技能只负责"给多少基础值、用什么类型"</figcaption>
+  </figure>
+<!--code:cpp:ExecCalc_Damage —— 按伤害类型选择防御属性（在 7.3 的基础上扩展）-->
+const FGameplayTagContainer& AssetTags = Spec.GetDynamicAssetTags();   // 技能通过 AddDynamicAssetTag 写入
+const bool bMagic = AssetTags.HasTag(MyTags::Damage_Type_Magic);
+
+float Defense = 0.f, Pen = 0.f, Power = 0.f;
+ExecParams.AttemptCalculateCapturedAttributeMagnitude(bMagic ? S.MagicResistDef : S.ArmorDef,    P, Defense);
+ExecParams.AttemptCalculateCapturedAttributeMagnitude(bMagic ? S.MagicPenDef    : S.ArmorPenDef, P, Pen);
+ExecParams.AttemptCalculateCapturedAttributeMagnitude(bMagic ? S.AbilityPowerDef: S.AttackDamageDef, P, Power);
+
+const float Coef = Spec.GetSetByCallerMagnitude(bMagic ? MyTags::SetByCaller_APCoef : MyTags::SetByCaller_AttackCoef, false, 0.f);
+float Damage = Spec.GetSetByCallerMagnitude(MyTags::SetByCaller_Damage, false, 0.f) + Power * Coef;
+Damage *= 100.f / (100.f + FMath::Max(0.f, Defense * (1.f - Pen)));
+if (!bMagic && FMath::FRand() < CritChance) { Damage *= 2.f; }
+<!--/code-->
+<!--code:cpp:HealthSet::PostGameplayEffectExecute —— 护盾优先-->
+if (Data.EvaluatedData.Attribute == GetIncomingDamageAttribute())
+{
+    float Damage = GetIncomingDamage();
+    SetIncomingDamage(0.f);
+    if (Damage <= 0.f) return;
+
+    const float Absorbed = FMath::Min(GetShield(), Damage);
+    SetShield(GetShield() - Absorbed);
+    Damage -= Absorbed;
+
+    SetHealth(FMath::Clamp(GetHealth() - Damage, 0.f, GetMaxHealth()));
+
+    // 跳字：在目标身上执行一个 Cue，RawMagnitude 填实际伤害
+    FGameplayCueParameters CueParams;
+    CueParams.RawMagnitude  = Damage + Absorbed;
+    CueParams.EffectContext = Data.EffectSpec.GetContext();
+    Data.Target.ExecuteGameplayCue(MyTags::GameplayCue_UI_DamageNumber, CueParams);
+
+    if (GetHealth() <= 0.f && !Data.Target.HasMatchingGameplayTag(MyTags::State_Dead))
+    {
+        FGameplayEventData Ev; Ev.Instigator = Data.EffectSpec.GetContext().GetOriginalInstigator();
+        Data.Target.HandleGameplayEvent(MyTags::Event_Death, &Ev);   // 触发 GA_Death（ServerInitiated）
+    }
+}
+<!--/code-->
+
+  <h2>14.5 普攻连招与被动「炽焰」</h2>
+  <p>普攻是一个技能、三段 Section。玩家在连招窗口内再次按键时，跳转到下一段。命中检测只在服务器进行，命中后给<strong>自己</strong>发一个 <code>Event.Attack.Landed</code> 事件，被动技能监听这个事件，从而实现与普攻的解耦：</p>
+<!--code:cpp:GA_Hero_Passive_Blaze.cpp-->
+UGA_Hero_Passive_Blaze::UGA_Hero_Passive_Blaze()
+{
+    InstancingPolicy   = EGameplayAbilityInstancingPolicy::InstancedPerActor;
+    NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;   // 被动只在服务器运行
+}
+
+void UGA_Hero_Passive_Blaze::OnAvatarSet(const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilitySpec& Spec)
+{
+    Super::OnAvatarSet(ActorInfo, Spec);
+    // 获得技能 / 更换 Avatar 时自动激活（Lyra 中对应 ActivationPolicy = OnSpawn）
+    if (ActorInfo && ActorInfo->IsNetAuthority() && !Spec.IsActive())
+    {
+        ActorInfo->AbilitySystemComponent->TryActivateAbility(Spec.Handle);
+    }
+}
+
+void UGA_Hero_Passive_Blaze::ActivateAbility(...)
+{
+    // 常驻：不 Commit，不 End；一直等待普攻命中事件
+    UAbilityTask_WaitGameplayEvent* Wait = UAbilityTask_WaitGameplayEvent::WaitGameplayEvent(
+        this, MyTags::Event_Attack_Landed, nullptr, /*OnlyTriggerOnce*/ false);
+    Wait->EventReceived.AddDynamic(this, &ThisClass::OnAttackLanded);
+    Wait->ReadyForActivation();
+}
+
+void UGA_Hero_Passive_Blaze::OnAttackLanded(FGameplayEventData Payload)
+{
+    UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo();
+    const FGameplayEffectQuery Q = FGameplayEffectQuery::MakeQuery_MatchAnyOwningTags(FGameplayTagContainer(MyTags::State_Buff_Blaze));
+    const int32 Stacks = ASC->GetAggregatedStackCount(Q);
+
+    if (Stacks >= 3)
+    {
+        // 满层：对本次命中目标追加魔法伤害，并清空层数
+        FGameplayEffectSpecHandle Spec = MakeOutgoingGameplayEffectSpec(DamageGE, GetAbilityLevel());
+        Spec.Data->SetSetByCallerMagnitude(MyTags::SetByCaller_Damage, 60.f);
+        Spec.Data->SetSetByCallerMagnitude(MyTags::SetByCaller_APCoef, 0.4f);
+        Spec.Data->AddDynamicAssetTag(MyTags::Damage_Type_Magic);
+        if (UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Payload.Target.Get()))
+        {
+            ASC->ApplyGameplayEffectSpecToTarget(*Spec.Data.Get(), TargetASC);
+        }
+        ASC->RemoveActiveEffects(Q);
+    }
+    else
+    {
+        // GE_BlazeStack：HasDuration 5s · AggregateByTarget · 上限 3 · 刷新持续时间 · 授予 State.Buff.Blaze
+        ApplyGameplayEffectToOwner(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo,
+                                   BlazeStackGE.GetDefaultObject(), GetAbilityLevel());
+    }
+}
+<!--/code-->
+  <div class="co net"><span class="h">🌐 网络分析</span><p>被动使用 <code>ServerOnly</code>：它只关心服务器上的命中结果，客户端不需要实例。层数通过 GE_BlazeStack 复制给拥有者（Mixed），Buff 栏可以显示"炽焰 ×2"；模拟端通过 Cue 看到刀身燃烧的特效，但不知道具体层数。如果对手也需要看到层数（例如显示在头顶），就要改成 Full 模式，或者用一个 COND_None 的属性记录层数。</p></div>
+
+  <h2>14.6 Q · 冲锋斩：位移 + 免疫 + 预测</h2>
+  <div class="tbl"><table>
+    <tr><th>配置项</th><th>值</th></tr>
+    <tr><td>NetExecutionPolicy</td><td>LocalPredicted</td></tr>
+    <tr><td>AssetTags</td><td><code>Ability.Yanren.Q</code>、<code>Ability.Type.Active</code></td></tr>
+    <tr><td>ActivationOwnedTags</td><td><code>State.Dashing</code></td></tr>
+    <tr><td>BlockAbilitiesWithTag</td><td><code>Ability.Type.Attack</code>、<code>Ability.Type.Active</code>（冲刺中不能普攻和放其他技能）</td></tr>
+    <tr><td>ActivationBlockedTags</td><td><code>State.Debuff.Stun</code>、<code>State.Dead</code></td></tr>
+    <tr><td>Cost / Cooldown</td><td>GE_Cost_Mana（50）/ GE_Cooldown（8 秒，<code>Cooldown.Yanren.Q</code>）</td></tr>
+  </table></div>
+<!--code:cpp:GA_Yanren_Q_Dash.cpp-->
+void UGA_Yanren_Q_Dash::ActivateAbility(...)
+{
+    if (!CommitAbility(Handle, ActorInfo, ActivationInfo)) { EndAbility(Handle, ActorInfo, ActivationInfo, true, true); return; }
+
+    // ① 冲刺期间免疫控制：GE_Unstoppable 带 ImmunityComponent（免疫 AssetTag 含 Effect.Type.CC 的 GE）
+    //    在预测窗口内施加 → 客户端也会预测得到 State.Buff.Unstoppable
+    UnstoppableHandle = ApplyGameplayEffectToOwner(Handle, ActorInfo, ActivationInfo, UnstoppableGE.GetDefaultObject(), 1);
+
+    // ② 位移：RootMotion Task，由 CMC 负责预测与校正
+    const FVector Dir = GetAvatarActorFromActorInfo()->GetActorForwardVector();
+    UAbilityTask_ApplyRootMotionConstantForce* Move = UAbilityTask_ApplyRootMotionConstantForce::ApplyRootMotionConstantForce(
+        this, TEXT("Dash"), Dir, /*Strength*/ DashDistance / DashDuration, DashDuration,
+        /*bIsAdditive*/ false, /*StrengthOverTime*/ nullptr,
+        ERootMotionFinishVelocityMode::SetVelocity, FVector::ZeroVector, 0.f, /*bEnableGravity*/ false);
+    Move->OnFinish.AddDynamic(this, &ThisClass::OnDashFinished);
+    Move->ReadyForActivation();
+
+    // ③ 表现：拖尾 Cue（在预测窗口内 → 本地立即播放，服务器多播给其他人）
+    K2_AddGameplayCue(MyTags::GameplayCue_Yanren_Q_Trail, MakeEffectContext(Handle, ActorInfo), /*bRemoveOnAbilityEnd*/ true);
+
+    // ④ 命中检测只在服务器：每帧扫掠胶囊体，对每个目标只结算一次
+    if (HasAuthority(&ActivationInfo))
+    {
+        HitActors.Reset();
+        GetWorld()->GetTimerManager().SetTimer(SweepTimer, this, &ThisClass::ServerSweep, 0.03f, true, 0.f);
+    }
+}
+
+void UGA_Yanren_Q_Dash::EndAbility(..., bool bReplicateEndAbility, bool bWasCancelled)
+{
+    GetWorld()->GetTimerManager().ClearTimer(SweepTimer);
+    // 移除免疫：GE 的移除不能预测，客户端的预测版本会在 Key 追平时自动清理
+    BP_RemoveGameplayEffectFromOwnerWithHandle(UnstoppableHandle);
+    Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
+}
+<!--/code-->
+  <div class="co warn"><span class="h">⚠️ 注意</span><p>扫掠计时器的回调<strong>不在预测窗口内</strong>，但它只在服务器上运行，服务器施加 GE 不需要预测 Key，所以没有问题。反过来，如果在这个计时器里给自己施加"需要预测"的 GE，客户端就不会预测（见 12.6）。</p></div>
+
+  <h2>14.7 W · 晕眩飞刃：控制效果全链路</h2>
+  <p>GE_Stun 的配置：</p>
+  <div class="tbl"><table>
+    <tr><th>项</th><th>值</th><th>作用</th></tr>
+    <tr><td>Duration</td><td>HasDuration，1 秒（可按等级曲线）</td><td></td></tr>
+    <tr><td>AssetTagsComponent</td><td><code>Effect.Type.CC</code></td><td>让免疫、驱散能识别它</td></tr>
+    <tr><td>TargetTagsComponent</td><td><code>State.Debuff.Stun</code></td><td>技能的 ActivationBlockedTags、CMC、动画蓝图都读这个 Tag</td></tr>
+    <tr><td>BlockAbilityTagsComponent</td><td><code>Ability.Type.Active</code>、<code>Ability.Type.Attack</code></td><td>眩晕期间阻止主动技能和普攻（被动不受影响）</td></tr>
+    <tr><td>GameplayCues</td><td><code>GameplayCue.Status.Stun</code></td><td>头顶转圈的星星（WhileActive 循环）</td></tr>
+  </table></div>
+  <figure>
+  <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+    <rect x="10" y="20" width="150" height="60" rx="9" fill="#F3EEFE" stroke="#6D28D9"/><text x="85" y="44" text-anchor="middle" class="sm b">飞刃命中（服务器）</text><text x="85" y="64" text-anchor="middle" class="xs">施加 GE_Damage + GE_Stun</text>
+    <rect x="185" y="20" width="150" height="60" rx="9" fill="#FEF6E4" stroke="#B45309"/><text x="260" y="44" text-anchor="middle" class="sm b">免疫检查</text><text x="260" y="64" text-anchor="middle" class="xs">目标在冲锋斩中 → 被免疫</text>
+    <rect x="360" y="20" width="150" height="60" rx="9" fill="#FFF4EC" stroke="#C2410C"/><text x="435" y="44" text-anchor="middle" class="sm b">目标获得 Stun Tag</text><text x="435" y="64" text-anchor="middle" class="xs">Block 主动技能 / 普攻</text>
+    <rect x="535" y="20" width="150" height="60" rx="9" fill="#FDEEEE" stroke="#B91C1C"/><text x="610" y="44" text-anchor="middle" class="sm b">打断正在运行的技能</text><text x="610" y="64" text-anchor="middle" class="xs">Tag 事件 → CancelAbilities</text>
+    <rect x="710" y="20" width="140" height="60" rx="9" fill="#fff" stroke="#6B7280"/><text x="780" y="44" text-anchor="middle" class="sm b">移动停止</text><text x="780" y="64" text-anchor="middle" class="xs">CMC: GetMaxSpeed→0</text>
+    <g stroke="#4B5563" stroke-width="1.4"><line x1="160" y1="50" x2="183" y2="50" marker-end="url(#a)"/><line x1="335" y1="50" x2="358" y2="50" marker-end="url(#a)"/><line x1="510" y1="50" x2="533" y2="50" marker-end="url(#a)"/><line x1="685" y1="50" x2="708" y2="50" marker-end="url(#a)"/></g>
+    <rect x="10" y="104" width="840" height="92" rx="10" fill="#EAF0FD" stroke="#C9D7FA"/>
+    <text x="28" y="128" class="sm b" style="fill:#2F5BD3">🌐 被眩晕的玩家这边发生了什么</text>
+    <text x="28" y="150" class="sm">1. 服务器施加 GE_Stun 后，经过 RTT/2，拥有者客户端收到 ActiveGE，本地加上 Stun Tag，UI 和动画进入眩晕状态。</text>
+    <text x="28" y="170" class="sm">2. 在这 RTT/2 内，玩家可能按了技能：客户端预测激活成功，服务器却因为 Stun 拒绝 → 回滚（这就是图 12-3 的场景）。</text>
+    <text x="28" y="190" class="sm">3. 打断由服务器执行 CancelAbilities，结果通过 ClientCancelAbility RPC 同步给拥有者；移动停止通过 CMC 的服务器校正同步。</text>
+  </svg>
+  <figcaption><b>图 14-3</b> 控制效果的全链路，以及被控制方客户端上的时序</figcaption>
+  </figure>
+<!--code:cpp:HeroMovementComponent.cpp —— 移动读取属性与 Tag-->
+float UHeroMovementComponent::GetMaxSpeed() const
+{
+    if (const UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwner()))
+    {
+        if (ASC->HasMatchingGameplayTag(MyTags::State_Debuff_Stun) || ASC->HasMatchingGameplayTag(MyTags::State_Dead))
+        {
+            return 0.f;
+        }
+        bool bFound = false;
+        const float Speed = ASC->GetGameplayAttributeValue(UCombatSet::GetMoveSpeedAttribute(), bFound);
+        if (bFound) return Speed;
+    }
+    return Super::GetMaxSpeed();
+}
+<!--/code-->
+
+  <h2>14.8 R · 烈焰领域：地面选择 + 周期伤害</h2>
+  <ol>
+    <li>技能激活后使用 <code>WaitTargetData</code>，TargetActor 选用 <code>GameplayAbilityTargetActor_GroundTrace</code>，ConfirmationType = <b>UserConfirmed</b>，地面显示范围指示器。</li>
+    <li>玩家确认后，客户端把落点打包成 TargetData 发给服务器（13.4）；按右键取消则调用 <code>CancelAbility</code>，<strong>此时还没有 Commit，所以不会进入冷却</strong>。</li>
+    <li>收到 TargetData 后 Commit（扣蓝、进冷却），服务器校验施法距离，然后生成复制的 <code>AFlameFieldActor</code>（持续 4 秒）。领域的视觉效果由这个 Actor 自己的 Niagara 组件负责，因为 Actor 本身就是复制的。</li>
+    <li>领域 Actor 每 0.5 秒在服务器上检测范围内的敌人，施加 <b>GE_Burn</b>：HasDuration 1 秒、Period 0.5 秒、AggregateBySource、上限 1 层、刷新持续时间。站在领域里时持续时间不断被刷新；离开后最多再烧 1 秒。</li>
+    <li>GE_Burn 上挂 <code>GameplayCue.Status.Burn</code>（Looping），目标身上会出现火焰；伤害数字由每次周期执行时的跳字 Cue 显示。</li>
+  </ol>
+  <div class="co tip"><span class="h">✅ 为什么用"刷新的短 DOT"而不是"进入时施加、离开时移除"</span><p>"离开时移除"需要可靠地检测离开（目标死亡、传送、领域消失都要处理），而且 GE 的移除不能预测。用"持续时间很短、不断刷新"的 GE，在离开后自然过期，没有遗漏状态的风险，逻辑也更简单。</p></div>
+
+  <h2>14.9 UI：技能栏冷却与 Buff 栏</h2>
+<!--code:cpp:技能按钮冷却显示-->
+void USkillSlotWidget::NativeTick(const FGeometry& G, float Dt)
+{
+    Super::NativeTick(G, Dt);
+    if (!ASC.IsValid()) return;
+
+    const FGameplayEffectQuery Q = FGameplayEffectQuery::MakeQuery_MatchAnyOwningTags(CooldownTags); // 如 Cooldown.Yanren.Q
+    float Remaining = 0.f, Duration = 0.f;
+    for (const TPair<float, float>& P : ASC->GetActiveEffectsTimeRemainingAndDuration(Q))
+    {
+        if (P.Key > Remaining) { Remaining = P.Key; Duration = P.Value; }   // 取剩余时间最长的那个
+    }
+    // 平滑处理：避免 Key 追平时剩余时间小幅跳变（13.1）
+    DisplayRemaining = FMath::FInterpTo(DisplayRemaining, Remaining, Dt, 20.f);
+    SetCooldownPercent(Duration > 0.f ? DisplayRemaining / Duration : 0.f);
+}
+<!--/code-->
+  <p>Buff 栏：绑定 ASC 的 <code>OnActiveGameplayEffectAddedDelegateToSelf</code>，并通过 <code>OnGameplayEffectRemoved_InfoDelegate(Handle)</code> 监听移除；用 <code>GE->FindComponent&lt;UGameplayEffectUIData_TextOnly&gt;()</code>（或项目自定义的 UIData 组件）读取图标和名称。没有 UIData 的 GE（例如冷却、消耗）不显示。</p>
+
+  <h2>14.10 AbilitySet：一键授予整套技能</h2>
+<!--code:cpp:HeroAbilitySet.h / .cpp（参考 Lyra 的 ULyraAbilitySet）-->
+USTRUCT(BlueprintType)
+struct FHeroAbilityEntry
+{
+    GENERATED_BODY()
+    UPROPERTY(EditDefaultsOnly) TSubclassOf<UGameplayAbility> Ability;
+    UPROPERTY(EditDefaultsOnly) int32 Level = 1;
+    UPROPERTY(EditDefaultsOnly, meta = (Categories = "InputTag")) FGameplayTag InputTag;
+};
+
+UCLASS()
+class UHeroAbilitySet : public UPrimaryDataAsset
+{
+    GENERATED_BODY()
+public:
+    UPROPERTY(EditDefaultsOnly) TArray<FHeroAbilityEntry> Abilities;
+    UPROPERTY(EditDefaultsOnly) TArray<TSubclassOf<UGameplayEffect>> Effects;
+
+    void GiveToAbilitySystem(UAbilitySystemComponent* ASC, UObject* SourceObject, TArray<FGameplayAbilitySpecHandle>& OutHandles) const
+    {
+        check(ASC && ASC->IsOwnerActorAuthoritative());          // 只能在服务器授予
+        for (const FHeroAbilityEntry& E : Abilities)
+        {
+            FGameplayAbilitySpec Spec(E.Ability, E.Level);
+            Spec.SourceObject = SourceObject;
+            Spec.GetDynamicSpecSourceTags().AddTag(E.InputTag);  // 3.7 节的 InputTag 驱动
+            OutHandles.Add(ASC->GiveAbility(Spec));
+        }
+        for (const TSubclassOf<UGameplayEffect>& GE : Effects)
+        {
+            ASC->ApplyGameplayEffectToSelf(GE.GetDefaultObject(), 1.f, ASC->MakeEffectContext());
+        }
+    }
+};
+<!--/code-->
+
+  <h2>14.11 每个技能的网络行为总表</h2>
+  <div class="tbl"><table>
+    <tr><th>技能</th><th>执行策略</th><th>客户端预测</th><th>只在服务器</th><th>模拟端看到</th></tr>
+    <tr><td>普攻</td><td>LocalPredicted</td><td>Montage、连段跳转、挥砍拖尾 Cue</td><td>扫掠检测、伤害、Landed 事件</td><td>Montage 复制、命中 Cue、血量变化</td></tr>
+    <tr><td>被动</td><td>ServerOnly</td><td>—</td><td>全部</td><td>刀身燃烧 Cue（随 GE）</td></tr>
+    <tr><td>Q</td><td>LocalPredicted</td><td>扣蓝、冷却、免疫 Tag、RootMotion、拖尾</td><td>路径扫掠、伤害</td><td>位移（CMC）、拖尾 Cue</td></tr>
+    <tr><td>W</td><td>LocalPredicted</td><td>扣蓝、冷却、出手动画</td><td>生成投射物、命中、眩晕</td><td>投射物 Actor、眩晕 Cue</td></tr>
+    <tr><td>R</td><td>LocalPredicted</td><td>地面指示器（LocalOnly 表现）、确认后的扣蓝冷却</td><td>距离校验、生成领域、周期伤害</td><td>领域 Actor、燃烧 Cue</td></tr>
+  </table></div>
+
+  <h2>14.12 联网测试清单</h2>
+  <div class="cards">
+    <div class="card"><div class="t">基础</div><p>☐ Dedicated Server + 2 个客户端<br>☐ 150ms 延迟 + 5% 丢包<br>☐ 中途加入的客户端能看到正在燃烧的目标（WhileActive）</p></div>
+    <div class="card"><div class="t">预测</div><p>☐ 蓝量不足时按 Q：本地不扣蓝<br>☐ 冷却结束瞬间连续按键：没有闪烁、没有扣两次<br>☐ 被眩晕瞬间按键：回滚干净（蓝、冷却、动画、Cue）</p></div>
+    <div class="card"><div class="t">打断与死亡</div><p>☐ 冲刺中被 W 命中：被免疫<br>☐ 普攻中被眩晕：技能被打断，EndAbility 被调用<br>☐ 死亡：清除 RemoveOnDeath 效果，重生后冷却保留</p></div>
+    <div class="card"><div class="t">专用服务器</div><p>☐ 普攻的出手 AnimNotify 在服务器上能触发<br>☐ 服务器日志中没有 "No prediction key" 之类的警告<br>☐ <code>showdebug abilitysystem</code> 中两端的 Tag 一致</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>英雄特有的只有技能流程；GE、计算类、Cue、AbilitySet 结构都是通用的，新增英雄的成本主要在配置。</li>
+    <li>伤害全部走"Spec + SetByCaller → ExecCalc → Meta 属性 → 结算"这一条管线。</li>
+    <li>技能之间通过 Tag 和 GameplayEvent 通信（普攻 → 被动、眩晕 → 打断），不直接互相引用。</li>
+    <li>每个技能都要明确：哪些在客户端预测、哪些只在服务器、模拟端通过什么看到。</li>
+  </ul></div>
+</section>

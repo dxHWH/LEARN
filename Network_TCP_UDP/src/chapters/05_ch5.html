@@ -1,0 +1,309 @@
+<div class="part-head" data-toc="第三部分 · 连接管理">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　连接管理：握手与挥手</h1>
+  <p>面试出现频率最高的两道题。不仅要背出流程，更要讲清每一步"为什么"，以及每一步出了问题会怎样。</p>
+</div>
+
+<!-- ======================= CH5 ======================= -->
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>三次握手：建立一条连接需要什么</h1>
+    <p class="lead">握手的本质不是"打招呼"，而是让双方就各自的初始序号达成一致，并确认双向通路都是通的。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出三次握手的完整时序：每一步的标志位、seq、ack 以及双方状态变化</li>
+    <li>说清 ISN 为什么要随机，以及"为什么是三次而不是两次或四次"的三个理由</li>
+    <li>理解内核中的半连接队列与全连接队列，以及它们满了之后的行为</li>
+    <li>讲清 SYN Flood 攻击原理和 SYN Cookie 等防御手段</li>
+    <li>逐一分析握手中每个报文丢失、端口未监听、队列溢出等异常</li>
+  </ul></div>
+
+  <h2>5.1 握手要完成的四件事</h2>
+  <ol>
+    <li><strong>确认双方的收发能力</strong>：客户端能发、服务器能收；服务器能发、客户端能收。</li>
+    <li><strong>同步双方的初始序号（ISN）</strong>：TCP 是全双工的，两个方向各有一套序号，<em>双方都要把自己的 ISN 告诉对方，并得到对方的确认</em>。这是最核心的一件事，SYN 就是 Synchronize Sequence Numbers 的缩写。</li>
+    <li><strong>协商连接参数</strong>：MSS、窗口扩大因子、是否支持 SACK 和时间戳。这些选项只能出现在 SYN 报文中。</li>
+    <li><strong>分配连接资源</strong>：双方各自建立 TCB（传输控制块）、收发缓冲区。</li>
+  </ol>
+
+  <h2>5.2 逐步拆解</h2>
+  <figure>
+  <svg viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
+    <text x="190" y="22" text-anchor="middle" class="b">客户端</text>
+    <text x="670" y="22" text-anchor="middle" class="b">服务器</text>
+    <line x1="190" y1="32" x2="190" y2="400" stroke="#9CA3AF"/>
+    <line x1="670" y1="32" x2="670" y2="400" stroke="#9CA3AF"/>
+    <!-- states client -->
+    <g class="sm b">
+      <rect x="40" y="40" width="130" height="26" rx="6" fill="#F3F4F6" stroke="#6B7280"/><text x="105" y="58" text-anchor="middle">CLOSED</text>
+      <rect x="40" y="86" width="130" height="26" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="105" y="104" text-anchor="middle" style="fill:#15803D">SYN_SENT</text>
+      <rect x="40" y="222" width="130" height="26" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="105" y="240" text-anchor="middle" style="fill:#B45309">ESTABLISHED</text>
+      <rect x="690" y="40" width="130" height="26" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="755" y="58" text-anchor="middle" style="fill:#2F5BD3">LISTEN</text>
+      <rect x="690" y="140" width="130" height="26" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="755" y="158" text-anchor="middle" style="fill:#2F5BD3">SYN_RCVD</text>
+      <rect x="690" y="300" width="130" height="26" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="755" y="318" text-anchor="middle" style="fill:#B45309">ESTABLISHED</text>
+    </g>
+    <text x="105" y="128" text-anchor="middle" class="xs">connect() 阻塞中</text>
+    <text x="105" y="264" text-anchor="middle" class="xs">connect() 返回</text>
+    <text x="755" y="182" text-anchor="middle" class="xs">放入半连接队列</text>
+    <text x="755" y="342" text-anchor="middle" class="xs">移入全连接队列</text>
+    <text x="755" y="358" text-anchor="middle" class="xs">等待 accept() 取走</text>
+    <!-- 1 -->
+    <line x1="190" y1="100" x2="668" y2="150" stroke="#15803D" stroke-width="2" marker-end="url(#ag)"/>
+    <rect x="300" y="88" width="250" height="38" rx="6" fill="#fff" stroke="#9AD3AE"/>
+    <text x="425" y="104" text-anchor="middle" class="sm b" style="fill:#15803D">① SYN=1　seq = x</text>
+    <text x="425" y="119" text-anchor="middle" class="xs">选项：MSS=1460 · WS=7 · SACK_PERM · TS</text>
+    <!-- 2 -->
+    <line x1="670" y1="160" x2="192" y2="232" stroke="#2F5BD3" stroke-width="2" marker-end="url(#ab)"/>
+    <rect x="290" y="168" width="270" height="38" rx="6" fill="#fff" stroke="#93A9E8"/>
+    <text x="425" y="184" text-anchor="middle" class="sm b" style="fill:#2F5BD3">② SYN=1, ACK=1　seq = y, ack = x + 1</text>
+    <text x="425" y="199" text-anchor="middle" class="xs">服务器自己的 SYN + 对客户端 SYN 的确认（合并发送）</text>
+    <!-- 3 -->
+    <line x1="190" y1="240" x2="668" y2="310" stroke="#B45309" stroke-width="2" marker-end="url(#ao)"/>
+    <rect x="290" y="250" width="270" height="38" rx="6" fill="#fff" stroke="#F3DDA8"/>
+    <text x="425" y="266" text-anchor="middle" class="sm b" style="fill:#B45309">③ ACK=1　seq = x + 1, ack = y + 1</text>
+    <text x="425" y="281" text-anchor="middle" class="xs">可以携带应用数据（前两次不可以，TFO 除外）</text>
+    <text x="430" y="392" text-anchor="middle" class="xs">x、y 是双方各自随机生成的初始序号 ISN；SYN 消耗 1 个序号，所以确认号是 ISN + 1</text>
+  </svg>
+  <figcaption><b>图 5-1</b> 三次握手：两个 SYN 各自同步一个方向的序号，两个 ACK 各自确认对方的 SYN，中间两者合并成一个报文</figcaption>
+  </figure>
+
+  <div class="tbl"><table>
+    <tr><th>步骤</th><th>方向</th><th>标志位</th><th>seq / ack</th><th>状态变化</th><th>这一步证明了什么</th></tr>
+    <tr><td>①</td><td>C → S</td><td>SYN</td><td>seq = x</td><td>C：CLOSED → SYN_SENT<br>S（收到后）：LISTEN → SYN_RCVD</td><td>服务器知道：客户端能发、自己能收</td></tr>
+    <tr><td>②</td><td>S → C</td><td>SYN + ACK</td><td>seq = y，ack = x+1</td><td>C（收到后）：SYN_SENT → ESTABLISHED</td><td>客户端知道：双方都能收发；自己的 ISN 已被确认</td></tr>
+    <tr><td>③</td><td>C → S</td><td>ACK</td><td>seq = x+1，ack = y+1</td><td>S（收到后）：SYN_RCVD → ESTABLISHED</td><td>服务器知道：客户端能收；自己的 ISN 已被确认</td></tr>
+  </table></div>
+
+  <div class="term"><div class="bar">tcpdump 中的一次握手（典型输出，地址与序号为示例）</div><pre>10:00:00.000 IP 10.0.0.1.52344 &gt; 10.0.0.2.443: Flags [<span class="hl">S</span>],  seq <span class="hl">1705322911</span>, win 64240, options [mss 1460,sackOK,TS val 1 ecr 0,nop,wscale 7], length 0
+10:00:00.030 IP 10.0.0.2.443 &gt; 10.0.0.1.52344: Flags [<span class="hl">S.</span>], seq <span class="ok">3891201650</span>, ack <span class="hl">1705322912</span>, win 65160, options [mss 1460,sackOK,TS val 9 ecr 1,nop,wscale 7], length 0
+10:00:00.060 IP 10.0.0.1.52344 &gt; 10.0.0.2.443: Flags [<span class="hl">.</span>],  ack <span class="ok">3891201651</span>, win 502, length 0</pre></div>
+  <p class="xs" style="font-size:13px;color:#6B7280">tcpdump 中 <code>S</code> 表示 SYN，<code>.</code> 表示 ACK，<code>S.</code> 即 SYN+ACK；第三行的 ack 默认显示为相对值时会是 1。win 502 是窗口扩大前的原始值，实际窗口 = 502 × 2⁷ = 64256 字节。</p>
+
+  <div class="co warn"><span class="h">⚠️ 易错点</span>
+  <p>① <strong>ack 不是"收到的序号"，而是"期望的下一个序号"</strong>，所以是 x+1 而不是 x。<br>
+  ② <strong>SYN 不携带数据，却消耗一个序号</strong>（FIN 也一样）；纯 ACK 不消耗序号，所以第三次握手后客户端发的第一个数据段 seq 仍是 x+1。<br>
+  ③ 服务端的 <code>accept()</code> <strong>并不参与握手</strong>：握手完全由内核完成，accept 只是从全连接队列里取出一个已完成握手的连接。即使应用从不调用 accept，客户端的 connect 也能成功返回。<br>
+  ④ "SYN_RCVD"在一些资料里写作 "SYN_RECV"（Linux <code>ss</code> 的显示），两者是同一个状态。</p></div>
+
+  <h2>5.3 ISN 为什么要随机</h2>
+  <p>如果每条连接的 ISN 都从 0 开始，会有两个问题：</p>
+  <ul>
+    <li><strong>与旧连接的报文混淆</strong>：同一个四元组的连接关闭后又马上重建，旧连接在网络中滞留的报文可能恰好落在新连接的序号窗口里，被当成新数据接收。</li>
+    <li><strong>序号预测攻击</strong>：攻击者如果能猜到 ISN，就能伪造源地址完成握手、向连接中注入数据（1994 年著名的 Mitnick 攻击就是利用了当时可预测的 ISN）。</li>
+  </ul>
+  <p>RFC 6528 推荐的生成方式是 <code>ISN = M + F(本地IP, 本地端口, 远端IP, 远端端口, 密钥)</code>：M 是一个大约每 4 微秒加 1 的计时器（32 位约 4.55 小时回绕一次），F 是带密钥的哈希函数。这样<strong>同一四元组的 ISN 随时间单调递增</strong>（避免和旧连接重叠），而<strong>外人无法预测</strong>（因为有密钥）。Linux 的 <code>secure_tcp_seq()</code> 就是按这个思路实现的。</p>
+
+  <h2>5.4 为什么是三次，而不是两次或四次</h2>
+  <div class="co ana"><span class="h">📞 先看类比：打电话</span><p>A："喂，听得到吗？"（A 确认自己能说）<br>B："听得到，你听得到我吗？"（B 确认自己能听、也能说）<br>A："听得到。"（B 这才确认 A 能听）<br>少了第三句，B 无法知道自己的声音 A 是否听见了。但类比只能解释"双向确认"，面试真正要的是下面三条技术理由。</p></div>
+
+  <h3>理由一（RFC 793 给出的首要原因）：阻止历史连接</h3>
+  <p>网络可能把一个很久以前发出的 SYN 延迟送达。例如客户端先发了 SYN(seq=90)，迟迟没回应就放弃了（或者客户端重启了），接着又发了新的 SYN(seq=100)。如果旧 SYN 先到：</p>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="20" text-anchor="middle" class="b" style="fill:#15803D">三次握手：客户端有机会"否决"</text>
+    <text x="645" y="20" text-anchor="middle" class="b" style="fill:#B91C1C">假如只有两次握手</text>
+    <line x1="430" y1="8" x2="430" y2="322" stroke="#E5E7EB"/>
+    <text x="80" y="44" text-anchor="middle" class="sm b">客户端</text><text x="350" y="44" text-anchor="middle" class="sm b">服务器</text>
+    <line x1="80" y1="52" x2="80" y2="310" stroke="#9CA3AF"/><line x1="350" y1="52" x2="350" y2="310" stroke="#9CA3AF"/>
+    <line x1="80" y1="62" x2="348" y2="110" stroke="#9CA3AF" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#a)"/>
+    <text x="130" y="66" class="xs">旧 SYN seq=90（滞留很久）</text>
+    <line x1="80" y1="96" x2="348" y2="190" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="120" y="118" class="xs" style="fill:#15803D">新 SYN seq=100</text>
+    <line x1="350" y1="118" x2="82" y2="150" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="240" y="132" class="xs" style="fill:#2F5BD3">SYN+ACK ack=91</text>
+    <text x="90" y="166" class="xs" style="fill:#B91C1C">期望 101，却收到 91 → 是历史连接！</text>
+    <line x1="80" y1="176" x2="348" y2="208" stroke="#B91C1C" stroke-width="1.6" marker-end="url(#ar)"/>
+    <text x="150" y="186" class="xs" style="fill:#B91C1C">RST seq=91</text>
+    <text x="356" y="214" class="xs" style="fill:#B91C1C">释放半连接</text>
+    <line x1="350" y1="226" x2="82" y2="258" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="240" y="240" class="xs" style="fill:#2F5BD3">SYN+ACK ack=101</text>
+    <line x1="80" y1="266" x2="348" y2="296" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="150" y="276" class="xs" style="fill:#15803D">ACK → 正确的连接建立</text>
+
+    <text x="510" y="44" text-anchor="middle" class="sm b">客户端</text><text x="780" y="44" text-anchor="middle" class="sm b">服务器</text>
+    <line x1="510" y1="52" x2="510" y2="310" stroke="#9CA3AF"/><line x1="780" y1="52" x2="780" y2="310" stroke="#9CA3AF"/>
+    <line x1="510" y1="62" x2="778" y2="110" stroke="#9CA3AF" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#a)"/>
+    <text x="560" y="66" class="xs">旧 SYN seq=90</text>
+    <rect x="786" y="100" width="70" height="40" rx="6" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="821" y="116" text-anchor="middle" class="xs" style="fill:#B91C1C">直接进入</text><text x="821" y="132" text-anchor="middle" class="xs" style="fill:#B91C1C">ESTABLISHED</text>
+    <line x1="780" y1="118" x2="512" y2="150" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="670" y="132" class="xs" style="fill:#2F5BD3">SYN+ACK ack=91</text>
+    <text x="520" y="176" class="xs" style="fill:#B91C1C">客户端发 RST，但服务器已经</text>
+    <text x="520" y="192" class="xs" style="fill:#B91C1C">分配了资源，甚至可能已经</text>
+    <text x="520" y="208" class="xs" style="fill:#B91C1C">开始向客户端发送数据</text>
+    <text x="645" y="250" text-anchor="middle" class="xs">服务器在收到 SYN 的那一刻就认为连接已建立，</text>
+    <text x="645" y="266" text-anchor="middle" class="xs">没有给客户端任何"这不是我要的连接"的否决机会</text>
+  </svg>
+  <figcaption><b>图 5-2</b> 历史连接问题：三次握手让发起方在第三步确认"这是不是我当前想要的连接"</figcaption>
+  </figure>
+  <p>关键在于：<strong>只有发起方（客户端）才知道哪个 SYN 是"当前有效"的</strong>。三次握手把"最终拍板"的权力留给了客户端：服务器回 SYN+ACK 之后先不建立连接，由客户端根据确认号判断，是当前连接就回 ACK，是历史连接就回 RST。</p>
+
+  <h3>理由二：可靠地同步双方的初始序号</h3>
+  <p>双方都有自己的 ISN，<strong>每个 ISN 都需要"告知 + 确认"一来一回</strong>，理论上需要 4 个报文：C 发 SYN(x)、S 确认 x、S 发 SYN(y)、C 确认 y。中间两个都是服务器发给客户端的，可以合并成一个 SYN+ACK，所以是 3 个。两次握手只能保证客户端的 ISN 被确认，服务器的 ISN 发出去后不知道对方有没有收到。</p>
+
+  <h3>理由三：避免重复连接浪费资源</h3>
+  <p>如果只有两次握手，客户端因为超时重传了多个 SYN，服务器每收到一个 SYN 就建立一条连接、分配一次资源，而客户端只会使用其中一条，其余全部成为空占资源的"僵尸连接"。</p>
+
+  <h3>为什么不是四次？</h3>
+  <p>四次也能工作（同时打开时其实就是四个报文），只是没必要：服务器的"确认"和"自己的 SYN"可以放在同一个报文里发出，合并后三次已经足以完成全部目标。<strong>三次是满足可靠同步的最少次数</strong>。</p>
+
+  <div class="co tip"><span class="h">✅ 面试答法：为什么是三次握手？</span>
+  <p>三次握手的目的是同步双方的初始序号并确认双向通路。三次是最少次数：① 主要原因是<strong>防止历史连接</strong>，旧的 SYN 到达服务器后，客户端可以在第三步通过 RST 否决，两次握手做不到；② 双方的 ISN 都需要被对方确认，两次只能确认客户端的；③ 两次握手下，重传的重复 SYN 会让服务器建立多条无用连接。不需要四次，因为服务器的 ACK 和 SYN 可以合并在一个报文里。</p></div>
+
+  <h2>5.5 内核视角：半连接队列与全连接队列</h2>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="110" height="60" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="75" y="46" text-anchor="middle" class="b sm">客户端们</text><text x="75" y="64" text-anchor="middle" class="xs">connect()</text>
+    <rect x="200" y="20" width="460" height="230" rx="14" fill="#FBFAF7" stroke="#9CA3AF"/>
+    <text x="430" y="42" text-anchor="middle" class="b">服务器内核 · 一个 LISTEN socket</text>
+    <rect x="220" y="62" width="200" height="120" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="320" y="82" text-anchor="middle" class="b sm" style="fill:#2F5BD3">半连接队列（SYN 队列）</text>
+    <g class="xs">
+      <rect x="236" y="92" width="168" height="18" rx="3" fill="#fff" stroke="#93A9E8"/><text x="244" y="105">SYN_RCVD · 1.1.1.1:5001</text>
+      <rect x="236" y="114" width="168" height="18" rx="3" fill="#fff" stroke="#93A9E8"/><text x="244" y="127">SYN_RCVD · 2.2.2.2:6002</text>
+      <rect x="236" y="136" width="168" height="18" rx="3" fill="#fff" stroke="#93A9E8"/><text x="244" y="149">……</text>
+    </g>
+    <text x="320" y="174" text-anchor="middle" class="xs">上限 ≈ tcp_max_syn_backlog</text>
+    <rect x="440" y="62" width="200" height="120" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="540" y="82" text-anchor="middle" class="b sm" style="fill:#B45309">全连接队列（accept 队列）</text>
+    <g class="xs">
+      <rect x="456" y="92" width="168" height="18" rx="3" fill="#fff" stroke="#F3DDA8"/><text x="464" y="105">ESTABLISHED · 3.3.3.3:7003</text>
+      <rect x="456" y="114" width="168" height="18" rx="3" fill="#fff" stroke="#F3DDA8"/><text x="464" y="127">ESTABLISHED · 4.4.4.4:8004</text>
+    </g>
+    <text x="540" y="164" text-anchor="middle" class="xs">上限 = min(backlog, somaxconn)</text>
+    <line x1="132" y1="50" x2="218" y2="100" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/><text x="150" y="98" class="xs" style="fill:#15803D">① SYN</text>
+    <line x1="422" y1="120" x2="438" y2="120" stroke="#B45309" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="430" y="200" text-anchor="middle" class="xs" style="fill:#B45309">③ 收到第三次握手的 ACK：从半连接队列移入全连接队列</text>
+    <rect x="700" y="90" width="140" height="60" rx="10" fill="#F3EEFE" stroke="#6D28D9"/><text x="770" y="116" text-anchor="middle" class="b sm" style="fill:#6D28D9">应用进程</text><text x="770" y="134" text-anchor="middle" class="xs">accept() 取走一个</text>
+    <line x1="642" y1="120" x2="698" y2="120" stroke="#6D28D9" stroke-width="1.6" marker-end="url(#ap)"/>
+    <text x="430" y="236" text-anchor="middle" class="xs">② SYN+ACK 由内核在把请求放入半连接队列时发出</text>
+    <text x="430" y="280" text-anchor="middle" class="xs">应用 accept 太慢 → 全连接队列满；SYN 太多（或 SYN Flood）→ 半连接队列满</text>
+  </svg>
+  <figcaption><b>图 5-3</b> Linux 中一个监听 socket 维护两个队列：握手进行中的放在半连接队列，握手完成的放在全连接队列等 accept</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>队列满了</th><th>Linux 的行为</th><th>如何观察 / 调整</th></tr>
+    <tr><td>半连接队列满</td><td>默认开启 SYN Cookie（<code>tcp_syncookies=1</code>）时改用 Cookie 继续服务；否则丢弃新的 SYN</td><td><code>netstat -s | grep "SYNs to LISTEN"</code>；调大 <code>tcp_max_syn_backlog</code></td></tr>
+    <tr><td>全连接队列满</td><td><code>tcp_abort_on_overflow=0</code>（默认）：<strong>丢弃第三次握手的 ACK</strong>，服务器停留在 SYN_RCVD 并重传 SYN+ACK，期望应用稍后腾出空间；<code>=1</code>：直接回 RST</td><td><code>ss -lnt</code> 中监听 socket 的 Recv-Q（当前积压）/ Send-Q（队列上限）；<code>netstat -s | grep overflowed</code>；调大 <code>listen</code> 的 backlog 和 <code>net.core.somaxconn</code>（Linux 5.4 起默认 4096，之前为 128）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 易错点：客户端 connect 成功了，服务端却"没有这条连接"</span><p>全连接队列满且 <code>tcp_abort_on_overflow=0</code> 时，客户端收到 SYN+ACK 就进入了 ESTABLISHED，connect 返回成功，开始发送请求；而服务端把第三次握手的 ACK 丢了，连接还在半连接队列里。客户端的请求数据会被服务端丢弃或者等待，表现为"连接成功但请求超时"。线上排查"偶发连接超时"时，监听 socket 的 Recv-Q 是第一个要看的指标。</p></div>
+
+  <h2>5.6 SYN Flood 攻击与防御</h2>
+  <h3>原理</h3>
+  <p>攻击者伪造大量不存在的源 IP 发送 SYN。服务器为每个 SYN 在半连接队列中分配一个条目并回复 SYN+ACK，但这些 SYN+ACK 发往不存在的地址，永远收不到第三次握手的 ACK。每个半连接要等 SYN+ACK 重传若干次（Linux 默认 <code>tcp_synack_retries=5</code>，总计约 63 秒）才会被清理。只要攻击者发送 SYN 的速度超过清理速度，半连接队列很快就会被占满，<strong>正常用户的 SYN 被丢弃，服务不可用</strong>。它的厉害之处在于：攻击者几乎没有成本（不需要维持任何状态），却能耗尽服务器的资源——这是"<strong>状态不对称</strong>"导致的。</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="20" text-anchor="middle" class="b" style="fill:#B91C1C">SYN Flood：半连接队列被打满</text>
+    <text x="645" y="20" text-anchor="middle" class="b" style="fill:#15803D">SYN Cookie：收到 SYN 时不存状态</text>
+    <line x1="430" y1="8" x2="430" y2="292" stroke="#E5E7EB"/>
+    <rect x="20" y="40" width="110" height="90" rx="10" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="75" y="70" text-anchor="middle" class="b sm" style="fill:#B91C1C">攻击者</text>
+    <text x="75" y="90" text-anchor="middle" class="xs">伪造源 IP</text><text x="75" y="106" text-anchor="middle" class="xs">每秒数十万 SYN</text>
+    <g stroke="#B91C1C" stroke-width="1.2"><line x1="132" y1="60" x2="248" y2="70" marker-end="url(#ar)"/><line x1="132" y1="80" x2="248" y2="90" marker-end="url(#ar)"/><line x1="132" y1="100" x2="248" y2="110" marker-end="url(#ar)"/></g>
+    <rect x="250" y="40" width="160" height="150" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="330" y="60" text-anchor="middle" class="b sm" style="fill:#2F5BD3">半连接队列</text>
+    <g><rect x="264" y="70" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/><rect x="264" y="88" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/><rect x="264" y="106" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/><rect x="264" y="124" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/><rect x="264" y="142" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/></g>
+    <text x="330" y="178" text-anchor="middle" class="xs" style="fill:#B91C1C">全是假连接，已满</text>
+    <rect x="20" y="200" width="110" height="50" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="75" y="230" text-anchor="middle" class="sm b" style="fill:#15803D">正常用户</text>
+    <line x1="132" y1="224" x2="246" y2="180" stroke="#15803D" stroke-width="1.4" marker-end="url(#ag)"/>
+    <text x="250" y="226" class="xs" style="fill:#B91C1C">SYN 被丢弃 → connect 超时</text>
+    <text x="215" y="280" text-anchor="middle" class="xs">SYN+ACK 发往伪造地址，永远等不到 ACK，每个条目要占约 1 分钟</text>
+
+    <g class="xs">
+      <text x="450" y="52" class="b" style="fill:#15803D">① 收到 SYN：</text><text x="450" y="70">不进半连接队列，把关键信息"编码"进 ISN 后直接回 SYN+ACK：</text>
+    </g>
+    <g class="mono">
+      <rect x="450" y="80" width="56" height="26" fill="#FEF6E4" stroke="#B45309"/><text x="478" y="98" text-anchor="middle">t 5位</text>
+      <rect x="506" y="80" width="56" height="26" fill="#F3EEFE" stroke="#6D28D9"/><text x="534" y="98" text-anchor="middle">MSS 3位</text>
+      <rect x="562" y="80" width="270" height="26" fill="#EAF0FD" stroke="#2F5BD3"/><text x="697" y="98" text-anchor="middle">hash(四元组, t, 密钥) 24 位</text>
+    </g>
+    <g class="xs">
+      <text x="450" y="124">t：粗粒度时间计数（约 64 秒一格），用于判断 Cookie 是否过期</text>
+      <text x="450" y="140">MSS：只能取少数几个预设值（经典设计 3 位 / 8 个，Linux 现用 4 个）</text>
+      <text x="450" y="168" class="b" style="fill:#15803D">② 收到第三次握手的 ACK：</text>
+      <text x="450" y="186">取出 ack − 1 就是当初发出的 ISN，重新计算 hash 校验；</text>
+      <text x="450" y="202">通过则直接创建连接放入全连接队列，否则丢弃</text>
+      <text x="450" y="230" class="b" style="fill:#B45309">代价：</text>
+      <text x="450" y="248">· 无法保存窗口扩大、SACK 等选项（开启时间戳时可借用 TS 字段编码一部分）</text>
+      <text x="450" y="264">· 服务器不保存状态，就无法重传 SYN+ACK</text>
+      <text x="450" y="280">· 所以 Linux 只在半连接队列溢出时才启用 Cookie</text>
+    </g>
+  </svg>
+  <figcaption><b>图 5-4</b> 左：SYN Flood 利用"攻击者无状态、服务器有状态"的不对称性；右：SYN Cookie 把状态编码进 ISN，让服务器在握手完成前也不存状态</figcaption>
+  </figure>
+
+  <h3>防御手段</h3>
+  <div class="tbl"><table>
+    <tr><th>手段</th><th>做法</th><th>作用</th></tr>
+    <tr><td><strong>SYN Cookie</strong></td><td><code>net.ipv4.tcp_syncookies = 1</code>（Linux 默认）</td><td>根治"半连接队列被打满"，代价见上图</td></tr>
+    <tr><td>增大半连接队列</td><td>调大 <code>tcp_max_syn_backlog</code>，同时调大 <code>somaxconn</code> 与 backlog</td><td>提高承受上限</td></tr>
+    <tr><td>减少 SYN+ACK 重传次数</td><td>调小 <code>tcp_synack_retries</code>（如 2）</td><td>半连接更快被清理，代价是正常的弱网用户更容易握手失败</td></tr>
+    <tr><td>SYN Proxy / 防火墙</td><td>由前置设备（高防、负载均衡、iptables SYNPROXY）代替服务器完成握手，验证通过后再与后端建连</td><td>把攻击挡在服务器之外</td></tr>
+    <tr><td>流量清洗与限速</td><td>运营商 / 云厂商的 DDoS 清洗；按源地址限速</td><td>应对超大流量攻击</td></tr>
+  </table></div>
+  <div class="co ver"><span class="h">🎮 延伸：这件事对可靠 UDP 有什么启示</span><p>UDP 服务器没有半连接队列，看上去不怕 SYN Flood，但自己实现的"连接握手"如果在收到第一个包时就分配会话资源，就会重蹈覆辙；如果对一个很小的请求回复很大的应答，还会被利用来做<strong>反射放大攻击</strong>。QUIC 的应对方式值得借鉴：服务器在验证客户端地址之前，发送的数据量不得超过收到的 <strong>3 倍</strong>，并且可以发送 <strong>Retry 令牌</strong>（本质就是 SYN Cookie 的思想）要求客户端证明自己真的拥有这个地址（第 10 章）。</p></div>
+
+  <h2>5.7 握手过程中的异常情况</h2>
+  <div class="tbl"><table>
+    <tr><th>异常</th><th>客户端表现</th><th>服务器表现</th><th>最终结果</th></tr>
+    <tr><td><strong>① SYN 丢失</strong></td><td>停留在 SYN_SENT；按 1、2、4、8、16、32 s 指数退避重传 SYN，默认 <code>tcp_syn_retries=6</code></td><td>毫不知情</td><td>重传全部失败（共约 127 s）后 connect 返回 <code>ETIMEDOUT</code></td></tr>
+    <tr><td><strong>② SYN+ACK 丢失</strong></td><td>以为 SYN 丢了，<strong>重传 SYN</strong></td><td>停留在 SYN_RCVD，<strong>重传 SYN+ACK</strong>（默认 <code>tcp_synack_retries=5</code>）</td><td>双方都在重传，任何一个成功即可继续；都失败则客户端超时、服务器清理半连接</td></tr>
+    <tr><td><strong>③ ACK 丢失</strong></td><td>已进入 ESTABLISHED，connect 已返回</td><td>停留在 SYN_RCVD，重传 SYN+ACK；客户端收到后会再回 ACK</td><td>若客户端此时发送数据，<strong>数据段本身带有 ACK 标志和正确的确认号，服务器收到后同样会进入 ESTABLISHED</strong>；若客户端一直不发数据且服务器重传耗尽，服务器删除半连接，客户端之后发数据会收到 RST</td></tr>
+    <tr><td>端口无人监听</td><td>收到 RST → <code>ECONNREFUSED</code></td><td>内核直接回 RST</td><td>连接失败（Windows 会重试 SYN，见下方实测）</td></tr>
+    <tr><td>主机不可达 / 被防火墙丢弃</td><td>收不到任何回应，同"SYN 丢失"；若收到 ICMP 不可达则返回 <code>EHOSTUNREACH</code></td><td>—</td><td>超时或立即失败</td></tr>
+    <tr><td>全连接队列满</td><td>connect 成功，但请求无响应</td><td>丢弃第三次 ACK，重传 SYN+ACK</td><td>见 5.5 节</td></tr>
+    <tr><td>已建立的连接又收到一个 SYN（如客户端重启后恰好用了相同端口）</td><td>收到一个"挑战 ACK"，发现确认号不对，回 RST</td><td>按 RFC 5961 回复<strong>挑战 ACK</strong>（而不是直接重置，防止伪造 SYN 攻击）</td><td>旧连接被 RST 清理，客户端重试后建立新连接</td></tr>
+    <tr><td>同时打开（双方同时向对方发 SYN）</td><td colspan="2">双方都 SYN_SENT → 收到对方 SYN → SYN_RCVD → 发 SYN+ACK → 收到后 ESTABLISHED</td><td>4 个报文建立一条连接（P2P 打洞时可能出现）</td></tr>
+  </table></div>
+
+  <div class="co net"><span class="h">🧪 实测证据（d1 · E3）：connect 到没人监听的端口</span>
+  <div class="term"><div class="bar">d1_tcp_udp_behaviors.exe · E3</div><pre>== E3 TCP connect 到没人监听的端口 ==
+  connect 返回 -1，WSAGetLastError=<span class="hl">10061</span>（10061=WSAECONNREFUSED，对端回了 RST），耗时 <span class="hl">2048 ms</span></pre></div>
+  <p>同一台机器的回环地址，RTT 不到 0.1 ms，可 connect 却花了整整 2 秒才失败。这是 Windows 的特有行为：收到 RST 后它不会立即放弃，而是认为"对方可能刚好在重启"，再重试几次 SYN。Linux 收到 RST 会立即返回 <code>ECONNREFUSED</code>（通常不到 1 ms）。所以在 Windows 上做"端口是否开放"的探测或者"服务未启动时快速失败重连"，不要指望 connect 很快失败，应改用非阻塞 connect + 自己控制超时。</p></div>
+
+  <h2>5.8 握手优化：TCP Fast Open</h2>
+  <p>普通握手中，客户端最早要在第三步才能发送数据，HTTP 请求至少要等 1 个 RTT。<strong>TCP Fast Open（TFO，RFC 7413）</strong>允许在 SYN 里就携带数据：</p>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="20" text-anchor="middle" class="b">首次连接：获取 Cookie</text>
+    <text x="645" y="20" text-anchor="middle" class="b" style="fill:#15803D">之后的连接：SYN 携带数据（省 1 RTT）</text>
+    <line x1="430" y1="8" x2="430" y2="252" stroke="#E5E7EB"/>
+    <text x="80" y="44" text-anchor="middle" class="sm b">客户端</text><text x="350" y="44" text-anchor="middle" class="sm b">服务器</text>
+    <line x1="80" y1="52" x2="80" y2="240" stroke="#9CA3AF"/><line x1="350" y1="52" x2="350" y2="240" stroke="#9CA3AF"/>
+    <line x1="80" y1="64" x2="348" y2="94" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/><text x="120" y="68" class="xs">SYN + 请求 Cookie</text>
+    <line x1="350" y1="104" x2="82" y2="134" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/><text x="220" y="140" class="xs" style="fill:#2F5BD3">SYN+ACK + Cookie</text>
+    <line x1="80" y1="148" x2="348" y2="178" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/><text x="120" y="158" class="xs">ACK + HTTP 请求</text>
+    <line x1="350" y1="188" x2="82" y2="218" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/><text x="220" y="224" class="xs">HTTP 响应（第 2 个 RTT）</text>
+
+    <text x="510" y="44" text-anchor="middle" class="sm b">客户端</text><text x="780" y="44" text-anchor="middle" class="sm b">服务器</text>
+    <line x1="510" y1="52" x2="510" y2="240" stroke="#9CA3AF"/><line x1="780" y1="52" x2="780" y2="240" stroke="#9CA3AF"/>
+    <line x1="510" y1="64" x2="778" y2="94" stroke="#15803D" stroke-width="1.8" marker-end="url(#ag)"/><text x="530" y="68" class="xs" style="fill:#15803D">SYN + Cookie + HTTP 请求</text>
+    <text x="786" y="104" class="xs" style="fill:#15803D">验证 Cookie，</text><text x="786" y="118" class="xs" style="fill:#15803D">立即交给应用</text>
+    <line x1="780" y1="108" x2="512" y2="138" stroke="#2F5BD3" stroke-width="1.8" marker-end="url(#ab)"/><text x="600" y="146" class="xs" style="fill:#2F5BD3">SYN+ACK + HTTP 响应</text>
+    <line x1="510" y1="160" x2="778" y2="190" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/><text x="560" y="170" class="xs">ACK</text>
+    <text x="645" y="232" text-anchor="middle" class="xs">第 1 个 RTT 结束时就拿到了响应</text>
+  </svg>
+  <figcaption><b>图 5-5</b> TCP Fast Open：首次连接拿到服务器签发的 Cookie，之后 SYN 即可携带数据</figcaption>
+  </figure>
+  <p>TFO 的局限：① SYN 中的数据可能被<strong>重放</strong>（攻击者截获后重发），所以只适合幂等请求；② 不少中间设备会丢弃带数据的 SYN 或去掉未知选项；③ 需要客户端和服务器双方都支持（Linux 用 <code>net.ipv4.tcp_fastopen</code> 开启）。实际部署并不广泛，"省握手 RTT"这个目标后来主要由 TLS 1.3 的 0-RTT 和 QUIC 实现。</p>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>三次握手：<strong>SYN(seq=x) → SYN+ACK(seq=y, ack=x+1) → ACK(ack=y+1)</strong>；状态 C：SYN_SENT → ESTABLISHED，S：LISTEN → SYN_RCVD → ESTABLISHED。</li>
+    <li>SYN 不带数据但占 1 个序号；第三次握手可以携带数据；accept 不参与握手。</li>
+    <li>ISN 随机且随时间递增：防止与旧连接混淆、防止序号预测攻击（RFC 6528）。</li>
+    <li>为什么三次：<strong>防历史连接</strong>（首要）、同步双方 ISN、避免重复连接；ACK 与 SYN 合并所以不需要四次。</li>
+    <li>半连接队列（tcp_max_syn_backlog）/ 全连接队列（min(backlog, somaxconn)）；全连接队列满默认丢第三次 ACK。</li>
+    <li>SYN Flood 利用状态不对称耗尽半连接队列；SYN Cookie 把状态编码进 ISN；另有调参、SYN Proxy、清洗。</li>
+    <li>异常：SYN 丢 → 客户端退避重传；SYN+ACK 丢 → 双方都重传；ACK 丢 → 服务端重传，客户端的数据段可代替 ACK。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：第三次握手的 ACK 丢了，客户端紧接着发送了数据，会发生什么？</summary>
+  <p>客户端发送的数据段同样带 ACK 标志、ack = y+1。服务器在 SYN_RCVD 状态收到它，确认号正确，于是直接进入 ESTABLISHED 并接收数据（相当于第三次握手的 ACK "搭了数据的便车"）。所以第三次 ACK 丢失通常不会造成影响。只有在客户端一直不发数据、而服务器的 SYN+ACK 重传全部失败时，服务器才会删除这个半连接，客户端之后再发数据会收到 RST。</p></details>
+  <details class="quiz"><summary>思考题 2：服务器 listen(fd, 1024)，但 net.core.somaxconn = 128，全连接队列多大？大量短连接突发时会怎样？</summary>
+  <p>全连接队列上限取两者较小值 128。突发时如果应用 accept 不够快，队列溢出，默认会丢弃第三次握手的 ACK，表现为客户端连接成功但请求超时、服务器重传 SYN+ACK、客户端出现 1 秒以上的延迟。排查：<code>ss -lnt</code> 看 Recv-Q 是否接近 Send-Q，<code>netstat -s | grep overflowed</code> 看溢出计数。解决：调大 somaxconn 和 backlog，提高 accept 效率（多线程 / SO_REUSEPORT 多个监听 socket）。</p></details>
+  <details class="quiz"><summary>思考题 3：为什么 SYN Cookie 默认只在半连接队列满时才启用，而不是一直开着？</summary>
+  <p>因为 SYN Cookie 有代价：服务器不保存状态，就不能重传丢失的 SYN+ACK；MSS 只能取少数几个预设值之一；窗口扩大、SACK 等选项只有在开启时间戳时才能部分编码保存，否则会丢失，影响高带宽链路的性能。正常情况下用完整的半连接队列能获得最好的连接质量，只有在被攻击（队列溢出）时才退而求其次。</p></details>
+  <details class="quiz"><summary>思考题 4：客户端 connect 一个公网服务器，30 秒都没有返回，可能是什么原因？</summary>
+  <p>说明客户端一直处于 SYN_SENT，在指数退避重传 SYN，从未收到任何回应（收到 RST 会立即失败）。可能原因：① 服务器或中间防火墙静默丢弃了 SYN（安全组未放行端口最常见）；② 路由不可达但 ICMP 被过滤；③ 服务器半连接队列满且没开 SYN Cookie；④ 服务器的 SYN+ACK 在回程被丢弃（例如非对称路由被防火墙拦截）。排查可在两端抓包对照，或用 <code>tcptraceroute</code> 看 SYN 走到了哪一跳。</p></details>
+</section>

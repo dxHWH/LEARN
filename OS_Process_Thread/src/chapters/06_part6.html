@@ -1,0 +1,218 @@
+<div class="part-head" data-toc="第六部分 · 实战与自测">
+  <div class="no">PART SIX</div>
+  <h1>第六部分　实战选型与重点自测</h1>
+  <p>把前面的知识用起来：什么时候选多进程，什么时候选多线程；然后用面试题检验自己。</p>
+</div>
+
+<!-- ======================= CH10 ======================= -->
+<section class="chapter" id="ch10">
+  <div class="ch-head">
+    <div class="no">CHAPTER 10</div>
+    <h1>多进程还是多线程：选型方法与真实案例</h1>
+    <p class="lead">选型本质上是在问：你更需要"隔离"，还是更需要"共享"？</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>掌握一套多维度的选型方法，而不是只背"进程稳定、线程高效"</li>
+    <li>用实测数据感受创建和切换的开销差距</li>
+    <li>通过 Chrome、Nginx、数据库、游戏引擎等案例理解真实系统的取舍</li>
+  </ul></div>
+
+  <h2>10.1 实测：开销差多少</h2>
+  <div class="term"><div class="bar">d4_cost.exe —— 实测输出（3 次运行，绑定单核）</div><pre>创建+等待+销毁  线程:    103.0 us/次   进程: 311603.1 us/次
+创建+等待+销毁  线程:    122.7 us/次   进程: 342084.0 us/次
+创建+等待+销毁  线程:    112.8 us/次   进程: 371013.6 us/次
+单次切换(含事件系统调用)  线程间: <span class="ok">0.68 / 0.69 / 0.69 us</span>   进程间: <span class="bad">1.50 / 1.24 / 1.55 us</span></pre></div>
+  <div class="co warn"><span class="h">⚠️ 如何解读这组数据</span>
+  <p>进程创建测得约 <strong>300ms 一次</strong>，明显偏高。原因是本机装有企业安全软件，并且实验是在受监控的沙箱终端里运行的，<strong>每次启动新进程都会被扫描和审计</strong>。在一台干净的 Windows 机器上，CreateProcess 启动一个小程序通常在<strong>几毫秒</strong>量级；Linux 上 fork + exec 一个小程序通常在<strong>几百微秒到一毫秒</strong>量级；线程创建一般在<strong>十几到几十微秒</strong>量级（本实验绑定了单核并包含 join 等待，所以略高）。</p>
+  <p>不管环境怎样，结论都成立：<strong>进程创建比线程创建贵 1～3 个数量级，跨进程切换比线程切换贵</strong>。而在真实环境中，企业安全软件、杀毒软件让进程创建更贵，这也是工程上必须考虑的因素。</p></div>
+  <p>所以，"每来一个请求就创建一个进程"（早期 CGI 的做法）在高并发下不可行，需要<strong>预先创建好进程池</strong>（Nginx worker、PHP-FPM）；线程也应该用<strong>线程池</strong>复用，而不是每个任务新建一个。</p>
+
+  <h2>10.2 选型的六个维度</h2>
+  <div class="tbl"><table>
+    <tr><th>维度</th><th>倾向多进程</th><th>倾向多线程</th></tr>
+    <tr><td><strong>故障隔离</strong></td><td>某个模块可能崩溃（第三方插件、不可信输入解析、渲染不可控网页），不能连累主程序</td><td>所有代码可控、质量统一</td></tr>
+    <tr><td><strong>安全隔离</strong></td><td>需要沙箱，限制某部分代码的权限（浏览器渲染进程）</td><td>同一信任域</td></tr>
+    <tr><td><strong>数据共享</strong></td><td>各单元基本独立，偶尔通信</td><td><strong>频繁共享大量数据</strong>（游戏世界状态、内存缓存、大型矩阵）</td></tr>
+    <tr><td><strong>创建 / 切换频率</strong></td><td>长期运行、数量少</td><td>需要频繁创建和切换的轻量任务</td></tr>
+    <tr><td><strong>扩展方式</strong></td><td>未来要扩展到多台机器（进程间本来就用消息通信，换成网络更容易）</td><td>单机多核</td></tr>
+    <tr><td><strong>语言 / 运行时限制</strong></td><td>CPython 有 GIL，CPU 密集任务只能用多进程并行（3.13 起有实验性的无 GIL 构建）</td><td>C++ / Java / Go / Rust 线程可以真正并行</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">✅ 一句话原则</span><p><strong>默认用多线程（共享方便、开销小）；当"隔离"带来的价值超过"共享"带来的便利时，用多进程。</strong>真实系统几乎都是混合使用：多进程负责隔离和扩展，每个进程内部用多线程利用多核，再在线程上用事件循环或协程处理大量 I/O。</p></div>
+
+  <h2>10.3 案例一：Chrome 为什么是多进程</h2>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <rect x="320" y="20" width="220" height="60" rx="12" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="1.6"/>
+    <text x="430" y="46" text-anchor="middle" class="b" style="fill:#2F5BD3">Browser 主进程</text><text x="430" y="66" text-anchor="middle" class="xs">UI、标签管理、协调各进程（高权限）</text>
+    <g>
+      <rect x="20" y="150" width="150" height="70" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="95" y="174" text-anchor="middle" class="sm b">Renderer（站点 A）</text><text x="95" y="194" text-anchor="middle" class="xs">Blink + V8</text><text x="95" y="210" text-anchor="middle" class="xs">沙箱，低权限</text>
+      <rect x="185" y="150" width="150" height="70" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="260" y="174" text-anchor="middle" class="sm b">Renderer（站点 B）</text><text x="260" y="194" text-anchor="middle" class="xs">站点隔离</text><text x="260" y="210" text-anchor="middle" class="xs">崩溃只影响该页</text>
+      <rect x="350" y="150" width="150" height="70" rx="10" fill="#F3EEFE" stroke="#6D28D9"/><text x="425" y="174" text-anchor="middle" class="sm b">GPU 进程</text><text x="425" y="194" text-anchor="middle" class="xs">驱动不稳定</text><text x="425" y="210" text-anchor="middle" class="xs">崩了可重启</text>
+      <rect x="515" y="150" width="150" height="70" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="590" y="174" text-anchor="middle" class="sm b">Network 服务</text><text x="590" y="194" text-anchor="middle" class="xs">网络栈独立</text>
+      <rect x="680" y="150" width="160" height="70" rx="10" fill="#F3F4F6" stroke="#4B5563"/><text x="760" y="174" text-anchor="middle" class="sm b">扩展 / 插件 / 工具</text><text x="760" y="194" text-anchor="middle" class="xs">各自独立进程</text>
+    </g>
+    <g stroke="#4B5563" stroke-width="1.2"><line x1="400" y1="80" x2="95" y2="148"/><line x1="410" y1="80" x2="260" y2="148"/><line x1="430" y1="80" x2="425" y2="148"/><line x1="450" y1="80" x2="590" y2="148"/><line x1="460" y1="80" x2="760" y2="148"/></g>
+    <text x="430" y="122" text-anchor="middle" class="xs">进程间通过 Mojo IPC 通信</text>
+    <text x="430" y="242" text-anchor="middle" class="xs">每个进程内部仍然是多线程的：主线程、合成线程、IO 线程、线程池……</text>
+  </svg>
+  <figcaption><b>图 10-1</b> Chrome 的多进程架构（简化）</figcaption>
+  </figure>
+  <ul>
+    <li><strong>稳定性</strong>：网页内容不可控，渲染引擎和 JS 引擎极其复杂。一个页面崩溃只显示"喔唷，崩溃啦"，不影响其他标签页。这正是第 3.7 节"崩溃半径"的应用。</li>
+    <li><strong>安全</strong>：渲染进程运行在沙箱中，没有文件系统和网络的直接访问权限。即使 V8 被攻破，攻击者还需要另一个漏洞才能逃出沙箱。2018 年 Spectre 漏洞让"同一地址空间内的数据可能被推测执行读到"成为现实，Chrome 因此全面启用了<strong>站点隔离</strong>，让不同站点一定运行在不同进程中。这也说明：<strong>同进程内不存在真正的隔离</strong>（呼应第 11 章自测题 2）。</li>
+    <li><strong>代价</strong>：内存占用大（每个进程都有自己的 V8 堆、Blink 数据），所以 Chrome 在内存紧张时会让同站点的标签共享进程。</li>
+  </ul>
+
+  <h2>10.4 案例二：Nginx 的 master-worker 多进程</h2>
+  <ul>
+    <li><strong>master 进程</strong>：读配置、绑定端口、管理 worker，不处理请求。</li>
+    <li><strong>worker 进程</strong>：数量通常等于 CPU 核数，每个 worker 是<strong>单线程 + epoll 事件循环</strong>，一个 worker 能同时处理上万个连接（并发不并行）。多个 worker 在多核上并行。</li>
+    <li><strong>为什么用多进程而不是多线程</strong>：worker 之间几乎不需要共享数据（每个连接独立处理），多进程带来了隔离：一个 worker 因第三方模块的 bug 崩溃，master 会立即拉起新的 worker。<strong>热重载</strong>也很自然：<code>nginx -s reload</code> 时 master 用新配置启动新 worker，旧 worker 处理完手上的连接后退出，服务不中断。</li>
+    <li><strong>补充</strong>：读磁盘文件可能阻塞事件循环，所以 Nginx 1.7.11 起提供了线程池（<code>aio threads</code>）专门处理阻塞的文件 I/O，又是一个混合使用的例子。</li>
+  </ul>
+
+  <h2>10.5 案例三：数据库的连接模型</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>PostgreSQL</th><th>MySQL</th></tr>
+    <tr><td>模型</td><td><strong>每连接一个进程</strong>（postmaster fork 出 backend 进程）</td><td><strong>每连接一个线程</strong>（企业版 / Percona 等提供线程池）</td></tr>
+    <tr><td>共享数据</td><td>通过共享内存（shared buffers）在进程间共享缓存页</td><td>线程天然共享 buffer pool</td></tr>
+    <tr><td>优点</td><td>一个 backend 崩溃，postmaster 可以重置共享内存后恢复，隔离性好</td><td>连接开销小，可以支持更多连接</td></tr>
+    <tr><td>缺点</td><td>连接贵，大量连接时内存和切换开销大，生产中通常配合 PgBouncer 连接池</td><td>一个线程的内存破坏可能影响整个实例</td></tr>
+  </table></div>
+  <p>两种模型都能做出优秀的数据库，说明选型没有绝对的对错。PostgreSQL 社区近年也在讨论向多线程模型迁移，主要动机就是降低连接开销。</p>
+
+  <h2>10.6 案例四：游戏引擎与游戏服务器</h2>
+  <div class="co ver"><span class="h">🎮 游戏客户端：多线程为主</span>
+  <p>游戏世界状态（Actor、组件、物理、动画数据）在每一帧都要被逻辑、物理、动画、渲染频繁访问，共享量极大且对延迟敏感，跨进程通信无法承受，所以客户端以<strong>多线程</strong>为主。以 UE 为例：<strong>GameThread</strong> 执行游戏逻辑；<strong>RenderThread</strong> 把场景转换成渲染命令；<strong>RHIThread</strong> 把命令提交给图形 API；还有<strong>TaskGraph 工作线程</strong>执行动画、物理、粒子等并行任务，以及音频线程、异步加载线程。帧与帧之间通过流水线让 GameThread 和 RenderThread 并行。</p>
+  <p>但也有例外：<strong>Shader 编译</strong>交给独立的 <code>ShaderCompileWorker</code> 进程。Shader 编译器是第三方的、可能崩溃，并且每个编译任务相互独立、几乎不共享数据，符合"隔离价值大于共享便利"的条件。编辑器侧还能用 Job 机制管理这些子进程的生命周期。</p></div>
+  <div class="co ver"><span class="h">🎮 游戏服务器：多进程为骨架</span>
+  <p>大型在线游戏的服务端通常按功能或按房间拆成<strong>多个进程</strong>：网关、登录、匹配、战斗、聊天、存储代理等。对于 MOBA / 竞技类游戏，一场对局往往运行在战斗服务器进程（或进程中的一个独立房间）里。拆成多进程的理由是：<strong>故障隔离</strong>（一场对局出错不影响其他对局）、<strong>横向扩展</strong>（进程间本来就通过消息通信，部署到更多机器上很自然）、<strong>独立发布</strong>。进程内部则常见"单逻辑线程 + 若干网络 I/O 线程"的结构：逻辑单线程避免了复杂的锁，也让帧同步 / 状态同步的确定性更容易保证。</p></div>
+
+  <h2>10.7 面试答法模板</h2>
+  <div class="co tip"><span class="h">✅ "什么时候选多进程，什么时候选多线程？"</span>
+  <ol>
+    <li><strong>先说本质区别</strong>：进程隔离资源，线程共享资源。这一点决定了两者的所有优缺点。</li>
+    <li><strong>多线程适合</strong>：需要频繁共享大量数据、对通信延迟敏感、需要频繁创建和切换执行单元的场景，例如游戏客户端、内存缓存、并行计算。代价是需要同步，而且一个线程出错可能让整个进程崩溃。</li>
+    <li><strong>多进程适合</strong>：需要故障隔离或安全隔离、各单元相对独立、需要分布到多台机器、或者语言运行时限制了多线程并行的场景，例如浏览器、Nginx worker、Shader 编译、Python 的 CPU 密集任务。代价是创建和切换开销大、通信要走 IPC。</li>
+    <li><strong>最后说混合</strong>：真实系统通常是多进程 + 多线程 + 事件循环 / 协程分层组合。举一个自己熟悉的例子，比如 Chrome 或 Nginx。</li>
+  </ol></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>实测：进程创建比线程贵 1～3 个数量级（受安全软件影响可能更大），跨进程切换约为线程切换的 2 倍。</li>
+    <li>选型看六个维度：故障隔离、安全隔离、数据共享、创建切换频率、扩展方式、语言限制。</li>
+    <li>Chrome、Nginx、PostgreSQL 选多进程是为了隔离；游戏客户端、MySQL 选多线程是为了共享；真实系统几乎都是混合的。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= CH11 ======================= -->
+<section class="chapter" id="ch11">
+  <div class="ch-head">
+    <div class="no">CHAPTER 11</div>
+    <h1>重点自测与面试题库</h1>
+    <p class="lead">先自己作答，再展开参考答案。两道重点题给出完整的答题结构。</p>
+  </div>
+
+  <h2>11.1 重点题一：进程与线程有什么区别？</h2>
+  <div class="ans">
+    <div class="q">参考答案（按"定义 → 资源 → 开销 → 通信 → 健壮性 → 选型"组织）</div>
+    <ol>
+      <li><strong>定义</strong>：进程是资源分配和保护的基本单位；线程是 CPU 调度的基本单位。一个进程至少有一个线程，线程属于且只属于一个进程。</li>
+      <li><strong>资源</strong>：进程拥有独立的虚拟地址空间、句柄 / 文件描述符表、安全凭据等；同一进程的线程共享这些资源，但各自维护寄存器上下文、栈、TLS、线程 ID 和调度状态。（可以引用 Microsoft Learn 的说法：同一进程内的线程共享虚拟地址空间和系统资源，但各自具有寄存器上下文、线程局部存储和栈等状态。）</li>
+      <li><strong>开销</strong>：创建进程要建立地址空间和资源表，比创建线程贵 1～3 个数量级；切换进程要切换页表，导致 TLB 和缓存失效，比线程切换贵。（可以举自己实测的数据：同核切换线程 0.68μs、进程 1.50μs。）</li>
+      <li><strong>通信</strong>：线程直接读写共享内存，但需要锁、原子操作等同步；进程间要通过管道、共享内存、socket 等 IPC。</li>
+      <li><strong>健壮性</strong>：进程之间由 MMU 和独立页表强制隔离，一个进程崩溃不影响其他进程；线程共享地址空间，一个线程的非法访问会导致整个进程终止。</li>
+      <li><strong>补充（加分）</strong>：Linux 内核里两者都是 <code>task_struct</code>，区别只在 <code>clone</code> 时共享哪些资源；Windows 内核中进程对象和线程对象是分开的，进程只是容器。</li>
+    </ol>
+    <div class="q">追问：什么时候选多进程，什么时候选多线程？</div>
+    <p>见 10.7 节的答题模板：<strong>需要共享、追求效率选多线程；需要隔离、追求稳定和安全选多进程；实际系统多为混合。</strong>结合 Chrome（隔离）、游戏客户端（共享）各举一例。</p>
+  </div>
+
+  <h2>11.2 重点题二：线程有自己的栈，是否意味着其他线程不能通过指针访问其中的数据？</h2>
+  <div class="ans">
+    <div class="q">结论：不是。其他线程完全可以通过指针读写另一个线程栈上的数据。</div>
+    <ol>
+      <li><strong>"栈私有"的真实含义</strong>：每个线程分配到一块专用的地址区间来保存自己的调用链，编译器生成的代码只通过本线程的栈指针访问它。这是<strong>分配上和约定上的私有</strong>，不是访问权限上的私有。</li>
+      <li><strong>为什么能访问</strong>：线程的用户栈位于所属进程的虚拟地址空间中（Microsoft Learn 原文：线程上下文包括"a user stack in the address space of the thread's process"），而同一进程的所有线程共用一套页表。MMU 只检查页面是否映射、是否可写，不区分是哪个线程在访问。</li>
+      <li><strong>实测证明</strong>：d2_stack_ptr 中，线程 A 把栈上数组 <code>buf</code> 的地址交给线程 B；B 自己的栈范围是 <code>[...2121A00000, ...2121B00000)</code>，指针 <code>...21219FF7F0</code> 落在 A 的栈范围内，B 把数组每个元素乘以 100，A 随后读到 <code>{100, 200, 300, 400}</code>。</li>
+      <li><strong>真正的风险</strong>：
+        <ul>
+          <li><strong>生命周期</strong>：栈上数据随函数返回而失效。如果 A 的函数已经返回、或者 A 线程已经退出，B 再访问就是悬垂指针，读到垃圾或者写坏 A 后续的栈帧，且极难复现。</li>
+          <li><strong>数据竞争</strong>：A、B 同时读写时，和共享全局变量一样需要同步。</li>
+        </ul></li>
+      <li><strong>正确用法</strong>：保证栈帧的生命周期覆盖所有使用者，例如在同一作用域内 <code>join</code>（或使用 <code>std::jthread</code>）、同步等待任务完成；否则就把数据放到堆上，用 <code>shared_ptr</code> 管理，或按值传递。</li>
+      <li><strong>对比（加分）</strong>：不同进程之间才有硬件强制的隔离，另一个进程拿着同样的地址值也访问不到。即便如此，有权限的进程仍可以通过内核提供的接口（Windows 的 <code>ReadProcessMemory</code>/<code>WriteProcessMemory</code>，Linux 的 <code>ptrace</code>、<code>process_vm_readv</code>、<code>/proc/&lt;pid&gt;/mem</code>）访问其他进程的内存，调试器就是这么工作的，但这需要经过内核和权限检查。同理，<code>thread_local</code> 变量也只是"每线程一份副本"，取地址交给别的线程照样能访问。</li>
+    </ol>
+  </div>
+
+  <h2>11.3 更多自测题</h2>
+  <details class="quiz"><summary>1. 线程共享进程的哪些资源？各自独有哪些？</summary>
+  <p>共享：代码段、全局与静态变量、堆、内存映射、文件描述符 / 句柄表、当前目录、用户凭据、信号处理方式、PID。独有：线程 ID、寄存器（PC/SP 等）、用户栈与内核栈、TLS（包括 errno）、调度优先级与状态、信号屏蔽字、异常处理链。判断规则：记录"执行到哪里"的必须独有。</p></details>
+  <details class="quiz"><summary>2. 一个线程崩溃会导致整个进程崩溃吗？为什么？有没有例外？</summary>
+  <p>通常会。线程共享地址空间，出错的线程可能已经破坏了共享数据或持有锁，系统无法判断其余线程的状态是否可信，因此默认终止整个进程（Linux SIGSEGV 发给整个线程组；Windows 未处理异常终止进程）。d3 实测：工作线程空指针访问后，整个子进程以 0xC0000005 退出。例外：可以通过 SEH（<code>__try/__except</code>）或注册 SIGSEGV 处理函数"接住"异常，Java/JVM 会把某些空指针访问转换为 <code>NullPointerException</code>，但这通常只用于特定场景，不能作为一般的容错手段。</p></details>
+  <details class="quiz"><summary>3. 就绪和阻塞有什么区别？为什么阻塞不能直接变为运行？</summary>
+  <p>就绪是"除了 CPU，什么都有了"；阻塞是"在等某个事件，给它 CPU 也运行不了"。事件发生后，任务只是具备了运行条件，CPU 可能正被别人使用，必须进入就绪队列由调度器统一分配。</p></details>
+  <details class="quiz"><summary>4. 进程切换为什么比线程切换慢？</summary>
+  <p>两者都要保存和恢复寄存器、切换内核栈。进程切换还要切换页表（写 CR3），导致 TLB 失效（PCID 可以缓解）；而且新进程的代码和数据不在缓存中，缓存命中率下降。间接开销往往比直接开销更大。</p></details>
+  <details class="quiz"><summary>5. 什么是僵尸进程？如何避免？kill -9 能杀死僵尸吗？</summary>
+  <p>子进程已退出，父进程尚未调用 wait，内核保留其 PID 与退出状态，即为僵尸。避免：父进程 wait；处理 SIGCHLD 并循环 <code>waitpid(-1, NULL, WNOHANG)</code>；设置 <code>SIGCHLD</code> 为 <code>SIG_IGN</code>；两次 fork。kill -9 无效，因为它已经死了；只能让父进程回收，或杀死父进程让 init 接管回收。</p></details>
+  <details class="quiz"><summary>6. fork 之后父子进程共享文件偏移吗？</summary>
+  <p>共享。fork 复制的是 fd 表，但两个 fd 指向内核中同一个"打开文件表项"，偏移量和状态标志就记录在那里。所以父子进程交替 write 同一个 fd，内容会接在一起，不会互相覆盖。如果父子进程各自 <code>open</code> 同一个文件，则是两个独立的表项，偏移量不共享。</p></details>
+  <details class="quiz"><summary>7. 多线程程序中调用 fork 有什么风险？</summary>
+  <p>fork 只复制调用线程。其他线程持有的锁（包括 malloc、stdio 内部锁）在子进程中永远处于锁定状态，子进程调用相关函数会死锁。POSIX 要求子进程在 exec 之前只调用异步信号安全的函数。建议 fork 后立即 exec，或使用 posix_spawn。</p></details>
+  <details class="quiz"><summary>8. exec 之后，原来打开的文件还在吗？信号处理函数呢？</summary>
+  <p>未设置 FD_CLOEXEC 的 fd 仍然打开；PID 不变。自定义的信号处理函数被重置为默认（因为函数地址在新映像中已无意义），被设为忽略的信号保持忽略。</p></details>
+  <details class="quiz"><summary>9. 用户级线程和内核级线程的区别？M:N 模型解决了什么问题？</summary>
+  <p>根本区别是内核是否可见。用户级线程切换快、可定制调度，但不能用多核、一个阻塞全部阻塞（d6 实测 Fiber 阻塞 307ms）。M:N 用多个内核线程承载用户线程以利用多核，并通过把阻塞 I/O 转为非阻塞 + 事件通知、在阻塞系统调用时移交处理器等手段解决阻塞问题，代价是运行时复杂。Go、Java 21 虚拟线程是代表。</p></details>
+  <details class="quiz"><summary>10. 协程和线程有什么区别？有栈协程和无栈协程呢？</summary>
+  <p>线程由内核抢占式调度，切换要进内核，有独立的 MB 级栈；协程由用户态协作式调度，在明确的挂起点切换，开销是函数调用级别。有栈协程有独立栈，可以在调用链任意深度挂起；无栈协程由编译器改写成状态机，帧放在堆上，只能在协程函数本身挂起，C++20 协程属于后者。</p></details>
+  <details class="quiz"><summary>11. errno 是全局变量，多线程下为什么不会互相干扰？</summary>
+  <p>现代 C 库把 errno 定义为宏，展开后是对一个线程局部变量的访问（glibc：<code>(*__errno_location())</code>），每个线程一份。Windows 的 <code>GetLastError</code> 值保存在每线程的 TEB 中。</p></details>
+  <details class="quiz"><summary>12. 线程栈默认多大？如何避免栈溢出？</summary>
+  <p>Windows 默认保留 1MB（链接器 <code>/STACK</code> 或创建线程时指定），d1 实测每线程 1024KB；Linux 主线程由 <code>ulimit -s</code> 决定（常见 8MB），glibc 线程默认也是 8MB。避免：不要在栈上放大数组，改用堆或 <code>std::vector</code>；控制递归深度或改为迭代；必要时为工作线程指定更大的栈。</p></details>
+  <details class="quiz"><summary>13. 下面代码有什么问题？<code>void f(){ int x = 0; std::thread t([&amp;]{ x++; }); t.detach(); }</code></summary>
+  <p>线程按引用捕获了 f 栈上的 x，然后被 detach。f 返回后 x 的栈帧失效，工作线程如果还没执行或正在执行 <code>x++</code>，就会写入已经失效的栈内存，属于未定义行为，可能悄悄破坏调用 f 之后的其他函数的局部变量。这正是"其他线程可以通过指针访问栈"带来的生命周期问题。修复：按值捕获，或 join，或使用 <code>std::jthread</code>。</p></details>
+  <details class="quiz"><summary>14. Windows 上父进程退出，子进程会怎样？如何让子进程跟随父进程退出？</summary>
+  <p>不受影响，继续运行；Windows 没有强制的进程树，也没有过继机制。要让子进程跟随退出，把它放进设置了 <code>JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE</code> 的 Job 对象中，父进程（持有 Job 的最后一个句柄）退出或崩溃时，Job 内的所有进程都会被终止。</p></details>
+  <details class="quiz"><summary>15. 单核 CPU 上多线程有意义吗？</summary>
+  <p>对 I/O 密集任务有意义：一个线程等待 I/O 时，CPU 可以运行其他线程，提高利用率和响应性（例如 UI 线程不被后台任务卡住）。对纯 CPU 密集任务没有加速作用，反而增加切换开销。</p></details>
+  <details class="quiz"><summary>16. volatile 能保证多线程下 counter++ 正确吗？</summary>
+  <p>在 C++ 中不能。volatile 只保证每次访问都真正读写内存、不被编译器优化掉，不提供原子性，也不提供跨线程的顺序保证。d5 实测：volatile 变量 4 线程各加 100 万次，结果只有 118 万～339 万。应使用 <code>std::atomic</code> 或互斥锁。</p></details>
+</section>
+
+<!-- ======================= APPENDIX ======================= -->
+<section class="chapter" id="appx">
+  <div class="ch-head">
+    <div class="no">APPENDIX</div>
+    <h1>附录 · 考前速记卡</h1>
+    <p class="lead">面试前 10 分钟过一遍。</p>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="t">① 三者关系</div><p>程序 = 静态文件；进程 = 资源容器（分配与保护单位）；线程 = 执行流（调度单位）。1 个程序 → N 个进程；1 个进程 → ≥1 个线程。</p></div>
+    <div class="card"><div class="t">② 并发 vs 并行</div><p>并发 = 结构上重叠推进（单核也行）；并行 = 物理上同时执行（需多核）。Amdahl：上限 1/(1−p)。</p></div>
+    <div class="card"><div class="t">③ 共享</div><p>地址空间（代码、全局、堆、映射、各线程栈所在区域）、fd / 句柄表、凭据、cwd、信号处置、PID。</p></div>
+    <div class="card"><div class="t">④ 独立</div><p>TID、寄存器（PC/SP）、用户栈 + 内核栈、TLS（errno）、调度状态 / 优先级、信号屏蔽字、SEH 链。</p></div>
+    <div class="card"><div class="t">⑤ 栈私有 ≠ 不可访问</div><p>同一地址空间 + 同一套页表 → 拿到指针就能读写。风险在生命周期和数据竞争。进程间才有硬件隔离。</p></div>
+    <div class="card"><div class="t">⑥ 五状态</div><p>新建 → 就绪 ⇄ 运行 → 终止；运行 → 阻塞 → 就绪。没有阻塞 → 运行、就绪 → 阻塞。就绪差 CPU，阻塞差事件。</p></div>
+    <div class="card"><div class="t">⑦ Linux 状态</div><p>R（就绪 + 运行）、S（可中断睡眠）、D（不可中断，kill -9 无效）、T（停止）、Z（僵尸）。load = R + D。</p></div>
+    <div class="card"><div class="t">⑧ 上下文切换</div><p>保存/恢复寄存器、换内核栈和 TLS 基址；跨进程还要换页表 → TLB/缓存失效。实测 0.68μs vs 1.50μs。</p></div>
+    <div class="card"><div class="t">⑨ PCB / TCB</div><p>PCB：标识、内存、资源、家族、统计。TCB：上下文、调度信息、栈。Linux task_struct 用 mm/files 指针表达共享。</p></div>
+    <div class="card"><div class="t">⑩ ULT / KLT</div><p>关键：内核是否可见。ULT 快但不能多核、一阻塞全阻塞；KLT 反之。1:1（Linux/Windows）、N:1（Fiber）、M:N（Go/虚拟线程）。</p></div>
+    <div class="card"><div class="t">⑪ 协程 / 任务</div><p>协程：用户态、协作式、可挂起的函数；有栈（Fiber、goroutine）vs 无栈（C++20，状态机 + 堆帧）。任务：工作单元抽象，跑在线程池或协程上。</p></div>
+    <div class="card"><div class="t">⑫ fork</div><p>返回两次（子 0，父 子PID）；COW；fd 表复制但共享偏移；只复制调用线程；fork 前 fflush。</p></div>
+    <div class="card"><div class="t">⑬ exec / wait</div><p>exec 换映像保 PID 和非 CLOEXEC 的 fd，handler 重置，成功不返回。wait 取退出码并释放 task_struct。</p></div>
+    <div class="card"><div class="t">⑭ 僵尸 / 孤儿</div><p>僵尸：子死父未收，占 PID，kill 不掉 → wait / SIGCHLD 循环 / SIG_IGN / 两次 fork。孤儿：父先死 → init/subreaper 收养，无害。</p></div>
+    <div class="card"><div class="t">⑮ Windows</div><p>CreateProcess 一步建新进程；CREATE_SUSPENDED 先设置后运行；句柄引用计数，忘关 = 泄漏；无进程树，用 Job 管理；句柄默认不继承。</p></div>
+    <div class="card"><div class="t">⑯ 选型</div><p>默认多线程（共享、高效）；隔离价值更大时多进程（稳定、安全、扩展、GIL）。真实系统 = 多进程 × 多线程 × 事件循环/协程。</p></div>
+  </div>
+
+  <h2>参考资料</h2>
+  <ul>
+    <li>Microsoft Learn：<em>About Processes and Threads</em>、<em>Creating Processes</em>、<em>Thread Stack Size</em>、<em>Fibers</em>、<em>Job Objects</em>。</li>
+    <li>Pavel Yosifovich 等，<em>Windows Internals, 7th Edition, Part 1</em>，第 3 章（进程与 Job）、第 4 章（线程）。</li>
+    <li>Remzi H. Arpaci-Dusseau, Andrea C. Arpaci-Dusseau，<em>Operating Systems: Three Easy Pieces</em>，进程 API、线程、并发相关章节。</li>
+    <li>W. Richard Stevens, Stephen A. Rago，<em>Advanced Programming in the UNIX Environment, 3rd Edition</em>，第 8 章（进程控制）、第 11～12 章（线程）。</li>
+    <li>Linux man-pages：<code>fork(2)</code>、<code>execve(2)</code>、<code>wait(2)</code>、<code>clone(2)</code>、<code>prctl(2)</code>、<code>pthreads(7)</code>。</li>
+    <li>Andrew Baumann et al., <em>A fork() in the road</em>, HotOS 2019。</li>
+    <li>Christian Gyrling, <em>Parallelizing the Naughty Dog Engine Using Fibers</em>, GDC 2015。</li>
+  </ul>
+</section>

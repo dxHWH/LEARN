@@ -1,0 +1,82 @@
+<header class="cover">
+  <div class="kicker">UNREAL ENGINE 5 · GAMEPLAY ABILITY SYSTEM</div>
+  <h1>深入浅出 <em>GAS</em><br>从原理、网络同步到实战</h1>
+  <p class="sub">一本面向 UE 客户端 / 玩法程序的系统学习书：先建立正确的心智模型，再逐个拆解 Tag、Attribute、Effect、Ability、Task、Cue，然后把网络复制和客户端预测讲透，最后用一个完整的 MOBA 英雄把所有知识串起来。</p>
+  <div class="meta">
+    <span class="pill b">基准版本 UE 5.4 – 5.6</span>
+    <span class="pill o">15 章 + 4 篇附录</span>
+    <span class="pill g">20+ 原理插图</span>
+    <span class="pill p">2 个交互实验</span>
+    <span class="pill">C++ 为主 · 兼顾蓝图</span>
+  </div>
+</header>
+
+<section class="chapter" id="ch0">
+  <div class="ch-head">
+    <div class="no">CHAPTER 00</div>
+    <h1>阅读指南</h1>
+    <p class="lead">这本书怎么读、读完能达到什么程度，以及书里各种标记的含义。</p>
+  </div>
+
+  <h2>写给谁</h2>
+  <p>本书假设你已经会写 UE C++：懂 <code>UCLASS</code>/<code>UPROPERTY</code>、Actor 生命周期，知道 Server/Client、RPC、属性复制大概是什么。<strong>不要求你用过 GAS。</strong>如果你已经用过 GAS、但一碰到"客户端扣蓝扣了两次""冷却 UI 抖动""眩晕打断不了技能""模拟端看不到特效"这类问题就没底，那么第三部分（网络同步）就是为你写的。</p>
+
+  <h2>全书路线图</h2>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <rect x="10" y="40" width="190" height="170" rx="14" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="105" y="70" text-anchor="middle" class="b" style="fill:#2F5BD3">第一部分 · 入门</text>
+    <text x="105" y="100" text-anchor="middle" class="sm">1 为什么需要 GAS</text>
+    <text x="105" y="124" text-anchor="middle" class="sm">2 全景架构</text>
+    <text x="105" y="148" text-anchor="middle" class="sm">3 最小可运行工程</text>
+    <text x="105" y="188" text-anchor="middle" class="xs">目标：建立心智模型</text>
+
+    <rect x="225" y="40" width="190" height="170" rx="14" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="320" y="70" text-anchor="middle" class="b" style="fill:#15803D">第二部分 · 核心机制</text>
+    <text x="320" y="96" text-anchor="middle" class="sm">4 Tags  5 Attributes</text>
+    <text x="320" y="118" text-anchor="middle" class="sm">6–7 GameplayEffect</text>
+    <text x="320" y="140" text-anchor="middle" class="sm">8 GameplayAbility</text>
+    <text x="320" y="162" text-anchor="middle" class="sm">9 AbilityTask 10 Cue</text>
+    <text x="320" y="188" text-anchor="middle" class="xs">目标：每个零件吃透</text>
+
+    <rect x="440" y="40" width="190" height="170" rx="14" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="535" y="70" text-anchor="middle" class="b" style="fill:#6D28D9">第三部分 · 网络同步</text>
+    <text x="535" y="100" text-anchor="middle" class="sm">11 谁复制什么</text>
+    <text x="535" y="124" text-anchor="middle" class="sm">12 预测键全流程</text>
+    <text x="535" y="148" text-anchor="middle" class="sm">13 网络专题十讲</text>
+    <text x="535" y="188" text-anchor="middle" class="xs">目标：联网不出错</text>
+
+    <rect x="655" y="40" width="195" height="170" rx="14" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="752" y="70" text-anchor="middle" class="b" style="fill:#C2410C">第四部分 · 实战</text>
+    <text x="752" y="100" text-anchor="middle" class="sm">14 完整 MOBA 英雄</text>
+    <text x="752" y="124" text-anchor="middle" class="sm">15 调试 / 性能 / 工程化</text>
+    <text x="752" y="148" text-anchor="middle" class="sm">附录 速查卡</text>
+    <text x="752" y="188" text-anchor="middle" class="xs">目标：能独立落地</text>
+
+    <line x1="200" y1="125" x2="223" y2="125" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <line x1="415" y1="125" x2="438" y2="125" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <line x1="630" y1="125" x2="653" y2="125" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <text x="430" y="24" text-anchor="middle" class="sm">由浅入深：概念 → 零件 → 联网 → 落地</text>
+    <text x="430" y="238" text-anchor="middle" class="xs">赶时间的读者：1 → 2 → 3 → 5 → 6 → 8 → 11 → 12 → 14 是最短路径</text>
+  </svg>
+  <figcaption><b>图 0-1</b> 全书四个部分与推荐阅读路径</figcaption>
+  </figure>
+
+  <h2>书中的标记</h2>
+  <div class="co tip"><span class="h">✅ 实践建议</span>可以直接照做的工程经验。</div>
+  <div class="co warn"><span class="h">⚠️ 坑点</span>新手和老手都会踩的问题，通常对应一个真实 Bug。</div>
+  <div class="co deep"><span class="h">🔬 深入源码</span>引擎内部是怎么做的。第一遍可以跳过，第二遍再看。</div>
+  <div class="co net"><span class="h">🌐 网络视角</span>这个知识点在联网时有什么不同。这是本书的重点，建议每处都读。</div>
+  <div class="co ver"><span class="h">🕒 版本差异</span>UE4 / UE5 早期版本与 5.4+ 的 API 差异。</div>
+
+  <h2>版本约定</h2>
+  <p>正文以 <strong>UE 5.4 – 5.6</strong> 为准。和老教程（包括 tranek 的 GASDocumentation，它主要基于 UE4.27 / 5.0 时期）相比，有几处关键变化，读老资料时需要自己换算：</p>
+  <div class="tbl"><table>
+    <tr><th>变化</th><th>起始版本</th><th>影响</th></tr>
+    <tr><td>GameplayEffect 改为<strong>组件化</strong>（GEComponents），Tag 相关字段迁移到各个 <code>U*GameplayEffectComponent</code></td><td>5.3</td><td>老教程里 GE 面板上的 "GrantedTags / ApplicationTagRequirements" 等字段都改成了组件</td></tr>
+    <tr><td><code>EGameplayModOp</code> 扩展为 AddBase / MultiplyAdditive / DivideAdditive / MultiplyCompound / AddFinal / Override</td><td>5.x 新版</td><td>聚合公式多了"复合乘"和"最终加"两项，见第 6 章</td></tr>
+    <tr><td><code>NonInstanced</code> 实例化策略<strong>废弃</strong>，Ability 上的 Replicated 属性废弃</td><td>5.5</td><td>统一用 <code>InstancedPerActor</code>；Ability 内跨端传值改用 RPC</td></tr>
+    <tr><td><code>ATTRIBUTE_ACCESSORS_BASIC</code> 宏进入引擎头文件</td><td>5.6</td><td>不必再从注释里复制 <code>ATTRIBUTE_ACCESSORS</code></td></tr>
+  </table></div>
+  <div class="co ver"><span class="h">🕒 关于版本</span><p>GAS 是持续演进的插件。本书引用的类名、函数名都来自引擎源码与 Epic 官方文档。如果你所在的项目使用定制引擎，以项目里 <code>Engine/Plugins/Runtime/GameplayAbilities</code> 的实际源码为准，遇到对不上的地方，直接打开头文件看注释是最快的办法。</p></div>
+</section>

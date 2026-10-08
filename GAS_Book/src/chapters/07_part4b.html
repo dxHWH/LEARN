@@ -1,0 +1,234 @@
+<!-- ======================= CH15 ======================= -->
+<section class="chapter" id="ch15">
+  <div class="ch-head">
+    <div class="no">CHAPTER 15</div>
+    <h1>调试、性能与工程化</h1>
+    <p class="lead">技能写出来只是开始。这一章讲如何快速定位问题、避免常见的性能陷阱，以及如何组织一个能长期维护的 GAS 工程。</p>
+  </div>
+
+  <h2>15.1 调试工具箱</h2>
+  <div class="tbl"><table>
+    <tr><th>工具</th><th>用法</th><th>看什么</th></tr>
+    <tr><td><code>showdebug abilitysystem</code></td><td>控制台输入；<code>AbilitySystem.Debug.NextCategory</code> 切换类别；PageUp / PageDown 切换目标</td><td>属性、Owned Tags（含计数）、技能列表与激活状态、ActiveGE 与剩余时间</td></tr>
+    <tr><td>Gameplay Debugger</td><td>按 <code>'</code>（撇号键）打开，用小键盘数字切换到 GAS 类别</td><td>准星所指的 Actor 的 GAS 状态，服务器端数据也能看到</td></tr>
+    <tr><td>日志</td><td><code>log LogAbilitySystem Verbose</code>、<code>log LogGameplayEffects Verbose</code></td><td>激活失败原因、GE 施加与移除、预测键相关警告</td></tr>
+    <tr><td>Visual Logger</td><td>Tools → Debug → Visual Logger</td><td>按时间轴回放 GAS 事件（ASC 会记录部分 VLog）</td></tr>
+    <tr><td>控制台命令</td><td>输入 <code>AbilitySystem.</code> 后按 Tab 查看补全列表</td><td>新版本提供了授予技能、施加 GE、列出效果等调试命令（具体以版本为准）</td></tr>
+    <tr><td>Unreal Insights（Networking）</td><td>启动参数 <code>-trace=net</code></td><td>每个 RPC 和属性的带宽占用，定位 GAS 的网络开销</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">✅ 排查"技能按了没反应"的固定顺序</span><ol>
+    <li><code>showdebug abilitysystem</code>：技能是否已授予？是否已处于激活状态（忘了 EndAbility）？</li>
+    <li>看 Owned Tags：是否有 Cooldown Tag？是否有 ActivationBlockedTags 中的 Tag？是否被 BlockAbilitiesWithTag 阻挡？</li>
+    <li>看属性：蓝量够不够 Cost？</li>
+    <li>打开 <code>LogAbilitySystem Verbose</code>，查看 CanActivateAbility 失败的具体原因。</li>
+    <li>只有客户端有问题？检查 ActorInfo 中的 PlayerController 是否为空（3.4）。</li>
+  </ol></div>
+
+  <h2>15.2 常见问题速查表</h2>
+  <div class="tbl"><table>
+    <tr><th>现象</th><th>原因</th><th>解决</th></tr>
+    <tr><td>技能只能放一次</td><td>某个出口没有调用 EndAbility</td><td>检查所有 Task 回调（Completed / Interrupted / Cancelled）</td></tr>
+    <tr><td>客户端预测技能不生效 / 全部等服务器</td><td>ActorInfo 中没有 PC；或者 NetExecutionPolicy 不是 LocalPredicted</td><td>PC 的 OnRep_PlayerState 中 RefreshAbilityActorInfo</td></tr>
+    <tr><td>属性在客户端偶尔算错</td><td>没有使用 REPNOTIFY_Always 或者没有调用 GAMEPLAYATTRIBUTE_REPNOTIFY</td><td>按 5.2 节修改</td></tr>
+    <tr><td>血条更新很慢，特效却很快</td><td>PlayerState 的 NetUpdateFrequency 太低</td><td>调高到 100 左右</td></tr>
+    <tr><td>Duration Buff 结束后数值没有恢复</td><td>在 PostGameplayEffectExecute 中直接改了属性；或者把 Buff 配成了带 Period 的 GE</td><td>持续加成只用 Modifier，不在回调中修改</td></tr>
+    <tr><td>DOT 不掉血</td><td>没有设置 Period</td><td>设置 Period</td></tr>
+    <tr><td>模拟端看不到动画</td><td>直接调用了 Montage_Play</td><td>使用 PlayMontageAndWait</td></tr>
+    <tr><td>专用服务器上技能卡住</td><td>AnimNotify 没有触发（动画不 Tick）</td><td>VisibilityBasedAnimTickOption 设置为 AlwaysTickPose…</td></tr>
+    <tr><td>后加入的玩家看不到持续特效</td><td>循环特效写在了 OnActive 中</td><td>改为 WhileActive</td></tr>
+    <tr><td>客户端调用 RemoveActiveGameplayEffect 后 Buff 又出现了</td><td>GE 的移除只能由服务器执行</td><td>在服务器上移除</td></tr>
+    <tr><td>Loose Tag 在其他客户端上没有</td><td>Loose Tag 默认不复制</td><td>使用复制版本的接口，或者改用 GE 授予</td></tr>
+    <tr><td>WaitGameplayEvent 在服务器上收不到客户端发出的事件</td><td>GameplayEvent 本身不同步</td><td>两端各自产生事件，或者使用 RPC（13.6）</td></tr>
+    <tr><td>冲刺被拉回</td><td>使用了 SetActorLocation / LaunchCharacter</td><td>使用 RootMotion Task</td></tr>
+    <tr><td>冷却 UI 跳变</td><td>预测版本与服务器版本的开始时间不同</td><td>平滑处理 + 输入缓冲（13.1）</td></tr>
+    <tr><td>同一个 AttributeSet 的属性在 GE 下拉中找不到 / 重复</td><td>AttributeSet 没有在 OwnerActor 上作为子对象创建，或者同类添加了两次</td><td>在 OwnerActor 构造函数中 CreateDefaultSubobject</td></tr>
+    <tr><td>Tag 改名后资产失效</td><td>没有配置重定向</td><td>添加 GameplayTagRedirects</td></tr>
+    <tr><td>伤害数字在客户端读到的 GEModData 为空</td><td>客户端收到的是属性复制，没有 GE 上下文</td><td>使用跳字 Cue（参数中带 Context）</td></tr>
+    <tr><td>AOE 命中很多目标时部分特效丢失</td><td>一帧内大量 Unreliable 多播</td><td>合并 Cue 或改用本地 Cue（10.5）</td></tr>
+  </table></div>
+
+  <h2>15.3 性能要点</h2>
+  <div class="cards">
+    <div class="card"><div class="t">GE 数量</div><p>每个 ActiveGE 都占用内存和复制开销。能用一个 GE 加 Stacking 实现的，不要创建多个独立 GE；能用 Tag 表示的简单状态，不需要一个空的 Infinite GE。</p></div>
+    <div class="card"><div class="t">聚合器重算</div><p>不快照的 Attribute Based Modifier 会在源属性每次变化时重新计算。依赖链很长时（A → B → C），一次修改会引发多次重算，要控制派生属性的层数。</p></div>
+    <div class="card"><div class="t">Tick 型 Task</div><p><code>bTickingTask</code> 的 Task 每帧都会执行，大量单位同时使用时开销明显。能用事件或计时器解决的，不要用 Tick。</p></div>
+    <div class="card"><div class="t">InstancedPerExecution</div><p>每次激活都创建一个 UObject，会增加 GC 压力。普攻这类高频技能必须使用 InstancedPerActor。</p></div>
+    <div class="card"><div class="t">Cue 加载</div><p>GameplayCueManager 默认会加载配置目录下的所有 Cue。Cue 多的项目应限制 <code>GameplayCueNotifyPaths</code>，并按需异步加载（Lyra 的 <code>ULyraGameplayCueManager</code> 就是这样做的）。Actor 类 Cue 开启对象池复用。</p></div>
+    <div class="card"><div class="t">复制</div><p>AI 使用 Minimal；只有自己需要的属性设为 COND_OwnerOnly；Full 模式要先做带宽分析；PlayerState 始终相关这一点要纳入评估（13.10）。</p></div>
+  </div>
+
+  <h2>15.4 参考架构：Lyra</h2>
+  <p>Epic 的 Lyra 示例项目是目前最完整的 GAS 工程化参考。它的核心结构如下：</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="200" height="60" rx="10" fill="#fff" stroke="#6B7280"/><text x="120" y="44" text-anchor="middle" class="sm b">ULyraPawnData</text><text x="120" y="64" text-anchor="middle" class="xs">角色配置的总入口</text>
+    <rect x="260" y="20" width="200" height="60" rx="10" fill="#F3EEFE" stroke="#6D28D9"/><text x="360" y="44" text-anchor="middle" class="sm b">ULyraAbilitySet[]</text><text x="360" y="64" text-anchor="middle" class="xs">技能 + InputTag · GE · 属性集</text>
+    <rect x="500" y="20" width="200" height="60" rx="10" fill="#fff" stroke="#6B7280"/><text x="600" y="44" text-anchor="middle" class="sm b">ULyraInputConfig</text><text x="600" y="64" text-anchor="middle" class="xs">InputAction ↔ InputTag</text>
+    <line x1="220" y1="50" x2="258" y2="50" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <path d="M220 60 Q 360 110 500 60" stroke="#4B5563" stroke-width="1.2" fill="none" stroke-dasharray="4 3" marker-end="url(#a)"/>
+    <rect x="20" y="130" width="260" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="150" y="154" text-anchor="middle" class="sm b">ULyraHeroComponent</text><text x="150" y="172" text-anchor="middle" class="xs">绑定 Enhanced Input，按下 / 松开时</text><text x="150" y="188" text-anchor="middle" class="xs">把 InputTag 转发给 ASC</text>
+    <rect x="310" y="120" width="270" height="90" rx="10" fill="#2F5BD3"/><text x="445" y="146" text-anchor="middle" class="sm b wt">ULyraAbilitySystemComponent</text><text x="445" y="166" text-anchor="middle" class="xs" style="fill:#DCE6FF">ProcessAbilityInput：每帧统一处理输入</text><text x="445" y="182" text-anchor="middle" class="xs" style="fill:#DCE6FF">激活组（Exclusive Replaceable / Blocking）</text><text x="445" y="198" text-anchor="middle" class="xs" style="fill:#DCE6FF">Tag 关系映射表（AbilityTagRelationshipMapping）</text>
+    <rect x="610" y="130" width="230" height="70" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="725" y="154" text-anchor="middle" class="sm b">ULyraHealthComponent</text><text x="725" y="172" text-anchor="middle" class="xs">监听 HealthSet，处理死亡流程</text><text x="725" y="188" text-anchor="middle" class="xs">（与属性集解耦）</text>
+    <line x1="280" y1="165" x2="308" y2="165" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <line x1="580" y1="165" x2="608" y2="165" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <rect x="20" y="230" width="260" height="56" rx="10" fill="#fff" stroke="#6D28D9"/><text x="150" y="252" text-anchor="middle" class="sm b">ULyraGameplayAbility</text><text x="150" y="270" text-anchor="middle" class="xs">ActivationPolicy：按下 / 按住 / OnSpawn</text>
+    <rect x="310" y="230" width="270" height="56" rx="10" fill="#fff" stroke="#C2410C"/><text x="445" y="252" text-anchor="middle" class="sm b">GameFeature Action: AddAbilities</text><text x="445" y="270" text-anchor="middle" class="xs">按玩法模式动态增减技能</text>
+    <rect x="610" y="230" width="230" height="56" rx="10" fill="#E6F7F7" stroke="#0F766E"/><text x="725" y="252" text-anchor="middle" class="sm b">ULyraGameplayCueManager</text><text x="725" y="270" text-anchor="middle" class="xs">按需加载 Cue</text>
+  </svg>
+  <figcaption><b>图 15-1</b> Lyra 的 GAS 结构（简化）。值得借鉴的三点：InputTag 输入、AbilitySet 资产、Tag 关系映射表</figcaption>
+  </figure>
+  <div class="co tip"><span class="h">✅ 值得借鉴：Tag 关系映射表</span><p>Lyra 把"哪类技能阻挡、打断哪类技能"集中写在一个 DataAsset（<code>ULyraAbilityTagRelationshipMapping</code>）中，ASC 在激活时统一查询，而不是在每个技能上分别配置 Block / Cancel Tag。技能数量多了以后，这能避免规则分散、互相矛盾。</p></div>
+
+  <h2>15.5 命名与目录规范</h2>
+  <div class="tbl"><table>
+    <tr><th>资产类型</th><th>前缀</th><th>示例</th></tr>
+    <tr><td>GameplayAbility</td><td><code>GA_</code></td><td><code>GA_Yanren_Q_Dash</code></td></tr>
+    <tr><td>GameplayEffect</td><td><code>GE_</code></td><td><code>GE_Damage</code>、<code>GE_Cooldown</code>、<code>GE_Stun</code></td></tr>
+    <tr><td>GameplayCue Notify</td><td><code>GC_</code> / <code>GCN_</code></td><td><code>GC_Status_Burn</code></td></tr>
+    <tr><td>AttributeSet</td><td><code>AS_</code> 或 <code>*Set</code></td><td><code>UHealthSet</code></td></tr>
+    <tr><td>ExecutionCalculation / MMC</td><td><code>ExecCalc_</code> / <code>MMC_</code></td><td><code>ExecCalc_Damage</code></td></tr>
+    <tr><td>AbilityTask</td><td><code>AbilityTask_</code> / <code>AT_</code></td><td><code>AbilityTask_Charge</code></td></tr>
+    <tr><td>AbilitySet</td><td><code>DA_AbilitySet_</code></td><td><code>DA_AbilitySet_Yanren</code></td></tr>
+  </table></div>
+<!--code:text:推荐的目录结构-->
+Content/
+└─ GAS/
+   ├─ Common/              通用：GE_Damage / GE_Cooldown / GE_Stun / ExecCalc / MMC
+   ├─ Cues/                所有 GameplayCue（GameplayCueNotifyPaths 指向这里）
+   │  ├─ Status/           眩晕、燃烧、减速等状态表现
+   │  └─ Heroes/Yanren/
+   ├─ Heroes/
+   │  └─ Yanren/           GA_Yanren_*、DA_AbilitySet_Yanren、英雄特有 GE
+   └─ Curves/              CT_HeroStats（属性成长）、CT_AbilityScaling（技能数值）
+Config/Tags/
+   ├─ AbilityTags.ini      Ability.* / Cooldown.*
+   ├─ StateTags.ini        State.* / Effect.*
+   └─ CueTags.ini          GameplayCue.*
+<!--/code-->
+
+  <h2>15.6 继续深入的方向</h2>
+  <ul>
+    <li><b>读源码</b>：按顺序阅读 <code>GameplayPrediction.h</code>（文件头注释）→ <code>AbilitySystemComponent_Abilities.cpp</code>（激活流程）→ <code>GameplayEffect.cpp</code> 中的 <code>FActiveGameplayEffectsContainer</code>（GE 的施加与聚合）。</li>
+    <li><b>读 Lyra</b>：重点看 <code>LyraAbilitySystemComponent</code>、<code>LyraGameplayAbility_RangedWeapon</code>、<code>LyraHealthSet</code>。</li>
+    <li><b>实践</b>：用本书第 14 章的结构再做一个风格完全不同的英雄（例如召唤、变身或者充能类技能），检验这套结构是否足够通用。</li>
+  </ul>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>排查问题先看 <code>showdebug abilitysystem</code>：技能、Tag、属性、GE 四项依次检查。</li>
+    <li>性能主要取决于 GE 数量、Tick Task、Cue 加载方式和复制模式。</li>
+    <li>工程化参考 Lyra：InputTag 输入、AbilitySet 资产、Tag 关系映射表、按需加载 Cue。</li>
+  </ul></div>
+</section>
+
+<!-- ======================= APPENDIX ======================= -->
+<div class="part-head" data-toc="附录" style="background:linear-gradient(135deg,#1F2937 0%,#374151 60%,#4B5563 100%)">
+  <div class="no">APPENDIX</div>
+  <h1>附录　速查</h1>
+  <p>术语表、API 速查、流程速查卡与参考资料。建议打印出来放在手边。</p>
+</div>
+
+<section class="chapter" id="appA">
+  <div class="ch-head"><div class="no">APPENDIX A</div><h1>术语表</h1></div>
+  <div class="tbl"><table>
+    <tr><th>术语</th><th>说明</th></tr>
+    <tr><td>ASC</td><td>AbilitySystemComponent，GAS 的核心组件</td></tr>
+    <tr><td>OwnerActor / AvatarActor</td><td>ASC 所在的 Actor / ASC 在世界中作用的身体</td></tr>
+    <tr><td>Spec / Handle</td><td>运行时实例数据 / 指向实例的轻量 ID</td></tr>
+    <tr><td>BaseValue / CurrentValue</td><td>永久值 / 经过持续型 Modifier 聚合后的值</td></tr>
+    <tr><td>Aggregator</td><td>每个属性上的 Modifier 聚合器</td></tr>
+    <tr><td>Meta Attribute</td><td>不复制的临时中转属性，例如 IncomingDamage</td></tr>
+    <tr><td>MMC</td><td>ModifierMagnitudeCalculation，单个 Modifier 的数值计算类</td></tr>
+    <tr><td>ExecCalc</td><td>GameplayEffectExecutionCalculation，多输入多输出的计算类，仅服务器运行</td></tr>
+    <tr><td>SetByCaller</td><td>施加 GE 前由代码以 Tag 为键写入的数值</td></tr>
+    <tr><td>Snapshot</td><td>在 Spec 创建时捕获并固定属性值</td></tr>
+    <tr><td>Stacking</td><td>同一 GE 多次施加时的叠层规则</td></tr>
+    <tr><td>GEComponent</td><td>5.3+ GE 的可插拔行为组件</td></tr>
+    <tr><td>Loose Tag</td><td>不来自 GE 或技能、手动添加的 Tag，默认不复制</td></tr>
+    <tr><td>PredictionKey</td><td>客户端生成的预测 ID，用于关联预测副作用与服务器结果</td></tr>
+    <tr><td>Prediction Window</td><td>存在有效预测 Key 的代码作用域</td></tr>
+    <tr><td>CaughtUp / Rejected</td><td>预测 Key 被服务器确认追平 / 被拒绝</td></tr>
+    <tr><td>Replication Mode</td><td>Full / Mixed / Minimal，决定 GE 信息的复制范围</td></tr>
+    <tr><td>TargetData</td><td>可复制的目标信息容器</td></tr>
+    <tr><td>GameplayCue</td><td>由 Tag 驱动的表现层回调</td></tr>
+  </table></div>
+</section>
+
+<section class="chapter" id="appB">
+  <div class="ch-head"><div class="no">APPENDIX B</div><h1>API 速查</h1></div>
+  <h3>ASC：技能</h3>
+  <div class="tbl"><table>
+    <tr><td><code>GiveAbility(Spec)</code> / <code>ClearAbility(Handle)</code></td><td>授予 / 收回（服务器）</td></tr>
+    <tr><td><code>TryActivateAbility(Handle)</code> / <code>TryActivateAbilitiesByTag(Tags)</code></td><td>尝试激活</td></tr>
+    <tr><td><code>CancelAbilities(WithTags, WithoutTags)</code> / <code>CancelAllAbilities()</code></td><td>打断</td></tr>
+    <tr><td><code>FindAbilitySpecFromHandle</code> / <code>GetActivatableAbilities()</code></td><td>查询</td></tr>
+    <tr><td><code>HandleGameplayEvent(Tag, Payload)</code></td><td>发送事件（蓝图：SendGameplayEventToActor）</td></tr>
+  </table></div>
+  <h3>ASC：效果与属性</h3>
+  <div class="tbl"><table>
+    <tr><td><code>MakeEffectContext()</code> / <code>MakeOutgoingSpec(Class, Level, Ctx)</code></td><td>构造 Spec</td></tr>
+    <tr><td><code>ApplyGameplayEffectSpecToSelf / ToTarget</code></td><td>施加</td></tr>
+    <tr><td><code>RemoveActiveGameplayEffect(Handle)</code> / <code>RemoveActiveEffects(Query)</code></td><td>移除（服务器）</td></tr>
+    <tr><td><code>GetActiveEffectsTimeRemainingAndDuration(Query)</code></td><td>剩余时间</td></tr>
+    <tr><td><code>GetAggregatedStackCount(Query)</code></td><td>层数</td></tr>
+    <tr><td><code>GetNumericAttribute(Attr)</code> / <code>SetNumericAttributeBase(Attr, V)</code></td><td>读 / 写属性</td></tr>
+    <tr><td><code>GetGameplayAttributeValueChangeDelegate(Attr)</code></td><td>属性变化委托</td></tr>
+  </table></div>
+  <h3>ASC：Tag 与 Cue</h3>
+  <div class="tbl"><table>
+    <tr><td><code>HasMatchingGameplayTag(Tag)</code> / <code>HasAnyMatchingGameplayTags</code> / <code>GetOwnedGameplayTags()</code></td><td>查询</td></tr>
+    <tr><td><code>AddLooseGameplayTag</code> / <code>RemoveLooseGameplayTag</code></td><td>本地 Tag</td></tr>
+    <tr><td><code>RegisterGameplayTagEvent(Tag, Type)</code></td><td>Tag 变化委托</td></tr>
+    <tr><td><code>ExecuteGameplayCue</code> / <code>AddGameplayCue</code> / <code>RemoveGameplayCue</code></td><td>Cue（服务器多播）</td></tr>
+  </table></div>
+  <h3>GameplayAbility</h3>
+  <div class="tbl"><table>
+    <tr><td><code>CanActivateAbility</code> / <code>ActivateAbility</code> / <code>ActivateAbilityFromEvent</code>（蓝图）</td><td>激活</td></tr>
+    <tr><td><code>CommitAbility</code> / <code>CommitAbilityCost</code> / <code>CommitAbilityCooldown</code></td><td>提交资源</td></tr>
+    <tr><td><code>EndAbility</code> / <code>CancelAbility</code></td><td>结束</td></tr>
+    <tr><td><code>MakeOutgoingGameplayEffectSpec</code> / <code>ApplyGameplayEffectSpecToOwner / ToTarget</code></td><td>施加 GE（自动带预测 Key）</td></tr>
+    <tr><td><code>HasAuthority(&amp;ActivationInfo)</code> / <code>IsPredictingClient()</code> / <code>IsLocallyControlled()</code></td><td>判断执行端</td></tr>
+    <tr><td><code>OnGiveAbility</code> / <code>OnAvatarSet</code> / <code>OnRemoveAbility</code></td><td>生命周期钩子</td></tr>
+    <tr><td><code>GetCooldownTags</code> / <code>ApplyCooldown</code> / <code>CheckCost</code></td><td>可重写的资源逻辑</td></tr>
+  </table></div>
+  <h3>AttributeSet</h3>
+  <div class="tbl"><table>
+    <tr><td><code>PreAttributeChange</code> / <code>PostAttributeChange</code></td><td>Current 变化前后（任何来源）</td></tr>
+    <tr><td><code>PreAttributeBaseChange</code> / <code>PostAttributeBaseChange</code></td><td>Base 变化前后</td></tr>
+    <tr><td><code>PreGameplayEffectExecute</code> / <code>PostGameplayEffectExecute</code></td><td>Instant / Periodic 执行前后（仅服务器 + 预测端）</td></tr>
+    <tr><td><code>GAMEPLAYATTRIBUTE_REPNOTIFY</code> / <code>DOREPLIFETIME_CONDITION_NOTIFY(..., REPNOTIFY_Always)</code></td><td>复制</td></tr>
+  </table></div>
+</section>
+
+<section class="chapter" id="appC">
+  <div class="ch-head"><div class="no">APPENDIX C</div><h1>流程速查卡</h1></div>
+  <div class="cards">
+    <div class="card"><div class="t">技能激活</div><p style="font-family:var(--mono);font-size:13px">TryActivate<br>→ CanActivate（Tag / Cost / CD / Block）<br>→ PreActivate（OwnedTags / Cancel / Block）<br>→ ActivateAbility<br>→ CommitAbility<br>→ Tasks…<br>→ EndAbility / CancelAbility</p></div>
+    <div class="card"><div class="t">GE 施加</div><p style="font-family:var(--mono);font-size:13px">MakeOutgoingSpec（源快照）<br>→ SetByCaller<br>→ Apply → 免疫 / 条件 / 概率<br>→ Instant：Execute → 改 Base → Executed Cue<br>→ Duration：叠层 or 新建 ActiveGE<br>　→ Modifier 入聚合器 → Tags → OnActive/WhileActive</p></div>
+    <div class="card"><div class="t">属性回调</div><p style="font-family:var(--mono);font-size:13px">PreGEExecute<br>→ PreAttributeBaseChange → Base<br>→ PreAttributeChange → Current<br>→ PostAttributeChange<br>→ PostGEExecute</p></div>
+    <div class="card"><div class="t">预测</div><p style="font-family:var(--mono);font-size:13px">客户端：窗口生成 Key → RPC → 本地执行<br>服务器：用同一 Key 执行 → Succeed/Failed<br>　→ 窗口结束写入 KeyMap<br>客户端：CaughtUp → 换成服务器版本<br>　　　　Rejected → 撤销全部副作用</p></div>
+    <div class="card"><div class="t">聚合公式</div><p style="font-family:var(--mono);font-size:13px">((Base + ΣAddBase)<br>× (1+Σ(M−1)) ÷ (1+Σ(D−1))<br>× ΠCompound) + ΣAddFinal<br>Override 优先</p></div>
+    <div class="card"><div class="t">复制模式</div><p style="font-family:var(--mono);font-size:13px">Full：所有人收到完整 GE<br>Mixed：拥有者完整，其他人 Tag + Cue<br>Minimal：所有人只有 Tag + Cue<br>玩家 Mixed · AI Minimal</p></div>
+  </div>
+</section>
+
+<section class="chapter" id="appD">
+  <div class="ch-head"><div class="no">APPENDIX D</div><h1>参考资料</h1></div>
+  <ul>
+    <li>Epic 官方文档：<a href="https://dev.epicgames.com/documentation/en-us/unreal-engine/gameplay-ability-system-for-unreal-engine" target="_blank">Gameplay Ability System for Unreal Engine</a></li>
+    <li>Epic 社区教程：<a href="https://dev.epicgames.com/community/learning/tutorials/DPpd/unreal-engine-gameplay-ability-system-best-practices-for-setup" target="_blank">Gameplay Ability System - Best Practices for Setup</a>（适用 5.4 / 5.5，含 5.5 / 5.6 的变更说明）</li>
+    <li>Epic Python API：<a href="https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/GameplayModOp?application_version=5.6" target="_blank">GameplayModOp（5.6）</a>：聚合公式的官方定义</li>
+    <li>tranek：<a href="https://github.com/tranek/GASDocumentation" target="_blank">GASDocumentation</a>：社区最全面的 GAS 文档（主要基于 UE4.27 / 5.0，阅读时注意版本差异）</li>
+    <li>Epic 示例：<a href="https://dev.epicgames.com/documentation/en-us/unreal-engine/lyra-sample-game-in-unreal-engine" target="_blank">Lyra Sample Game</a></li>
+    <li>引擎源码（<code>Engine/Plugins/Runtime/GameplayAbilities/Source/GameplayAbilities/</code>）：
+      <ul>
+        <li><code>Public/GameplayPrediction.h</code>：预测系统的设计说明（必读）</li>
+        <li><code>Public/AbilitySystemComponent.h</code> 与 <code>Private/AbilitySystemComponent_Abilities.cpp</code></li>
+        <li><code>Public/GameplayEffect.h</code> 与 <code>Private/GameplayEffect.cpp</code></li>
+        <li><code>Public/GameplayEffectTypes.h</code>：EGameplayModOp、FGameplayEffectContext</li>
+        <li><code>Public/AttributeSet.h</code>、<code>Public/Abilities/GameplayAbility.h</code>、<code>Public/GameplayCueManager.h</code></li>
+        <li><code>Public/GameplayEffectComponents/</code>：5.3+ 的所有 GE 组件</li>
+      </ul>
+    </li>
+  </ul>
+  <div class="co ver"><span class="h">🕒 最后提醒</span><p>本书以 UE 5.4 – 5.6 为基准。GAS 每个版本都有调整，遇到书中 API 与项目引擎对不上的情况，请以项目中的引擎源码为准。头文件注释通常就是最准确的文档。</p></div>
+</section>
