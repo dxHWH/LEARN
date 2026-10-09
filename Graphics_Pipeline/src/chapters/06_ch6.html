@@ -1,0 +1,205 @@
+<section class="chapter" id="ch6">
+  <div class="ch-head">
+    <div class="no">CHAPTER 06</div>
+    <h1>属性插值：重心坐标、透视校正与 2×2 Quad</h1>
+    <p class="lead">顶点只有三个，像素有成百上千个。每个像素的 uv、法线、颜色都要从三个顶点"插"出来——而屏幕空间里的直线插值是错的。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>理解重心坐标及其与边函数的关系</li>
+    <li>证明"1/w 在屏幕空间线性"，推导透视校正插值公式，并用实测看清不校正的后果</li>
+    <li>知道 <code>nointerpolation</code>、<code>noperspective</code>、<code>centroid</code> 这些插值修饰符的用途</li>
+    <li>理解像素着色器为什么按 2×2 Quad 执行、<code>ddx/ddy</code> 怎么来、Helper Lane 是什么</li>
+    <li>用实测数据说明小三角形为什么"贵"</li>
+  </ul></div>
+
+  <h2>6.1 重心坐标</h2>
+  <p>三角形内任一点 p 都可以唯一写成三个顶点的加权和：</p>
+  <div class="fm">p = λ₀·v₀ + λ₁·v₁ + λ₂·v₂，　λ₀ + λ₁ + λ₂ = 1，　内部时 λᵢ ≥ 0</div>
+  <p>λᵢ 就是 p 与"对边"围成的小三角形面积占总面积的比例。而第 5 章的边函数恰好是 2 倍有符号面积，所以光栅化时<strong>重心坐标几乎是免费的</strong>：</p>
+  <div class="fm">λ₀ = E₁₂(p) / 2A，　λ₁ = E₂₀(p) / 2A，　λ₂ = E₀₁(p) / 2A</div>
+  <p>有了重心坐标，任何顶点属性都可以插值：<code>attr(p) = λ₀·a₀ + λ₁·a₁ + λ₂·a₂</code>。问题在于：<strong>这里的 λ 是在屏幕空间算的</strong>，而属性是在三维空间里沿三角形表面线性分布的。</p>
+
+  <h2>6.2 为什么屏幕空间线性插值是错的</h2>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="18" text-anchor="middle" class="sm">一条从近到远的地面线段：三维空间里等距的点，投影到屏幕上越远越挤</text>
+    <circle cx="60" cy="130" r="6" fill="#1F2937"/><text x="60" y="152" text-anchor="middle" class="xs">相机</text>
+    <line x1="160" y1="40" x2="160" y2="220" stroke="#2F5BD3" stroke-width="2"/><text x="160" y="236" text-anchor="middle" class="xs" style="fill:#2F5BD3">屏幕（近平面）</text>
+    <line x1="200" y1="210" x2="820" y2="150" stroke="#1F2937" stroke-width="3"/>
+    <g fill="#C2410C">
+      <circle cx="200" cy="210" r="5"/><circle cx="324" cy="198" r="5"/><circle cx="448" cy="186" r="5"/><circle cx="572" cy="174" r="5"/><circle cx="696" cy="162" r="5"/><circle cx="820" cy="150" r="5"/>
+    </g>
+    <g class="xs" style="fill:#C2410C"><text x="200" y="230" text-anchor="middle">t=0</text><text x="324" y="218" text-anchor="middle">0.2</text><text x="448" y="206" text-anchor="middle">0.4</text><text x="572" y="194" text-anchor="middle">0.6</text><text x="696" y="182" text-anchor="middle">0.8</text><text x="820" y="170" text-anchor="middle">t=1</text></g>
+    <g stroke="#C2410C" stroke-dasharray="3 3" stroke-width="1">
+      <line x1="60" y1="130" x2="200" y2="210"/><line x1="60" y1="130" x2="324" y2="198"/><line x1="60" y1="130" x2="448" y2="186"/><line x1="60" y1="130" x2="572" y2="174"/><line x1="60" y1="130" x2="696" y2="162"/><line x1="60" y1="130" x2="820" y2="150"/>
+    </g>
+    <g fill="#C2410C"><circle cx="160" cy="187.1" r="3.5"/><circle cx="160" cy="155.8" r="3.5"/><circle cx="160" cy="144.4" r="3.5"/><circle cx="160" cy="138.6" r="3.5"/><circle cx="160" cy="135.0" r="3"/><circle cx="160" cy="132.6" r="3"/></g>
+    <text x="172" y="100" class="xs">屏幕上的间距：</text>
+    <text x="172" y="114" class="xs">31 → 11 → 6 → 4 → 2（示意单位）</text>
+    <text x="500" y="70" text-anchor="middle" class="sm">如果在屏幕上按"等间距"插值 t，远处的纹理会被压缩到近处</text>
+    <text x="500" y="92" text-anchor="middle" class="sm">→ 近处的纹理被拉伸、整张纹理看起来"弯折"</text>
+  </svg>
+  <figcaption><b>图 6-1</b>　透视投影不保持距离比例：三维中的线性分布在屏幕上不再线性。</figcaption>
+  </figure>
+
+  <h3>推导：什么在屏幕空间里是线性的</h3>
+  <p>考虑观察空间中一条线段，端点的齐次裁剪坐标为 c₀、c₁（w 分别为 w₀、w₁）。线段上的点 <code>c(t) = (1−t)c₀ + t·c₁</code>，它的 w 也是 <code>w(t) = (1−t)w₀ + t·w₁</code>。屏幕坐标是 x/w，设屏幕上的插值参数为 s：</p>
+  <div class="fm">x<sub>s</sub>(t) = [(1−t)x₀ + t·x₁] / [(1−t)w₀ + t·w₁]　＝　(1−s)·(x₀/w₀) + s·(x₁/w₁)</div>
+  <p>解出 s 与 t 的关系，可以得到一个关键结论（把 s 看成屏幕上的线性参数）：</p>
+  <div class="fm">1/w(s) = (1−s)·(1/w₀) + s·(1/w₁)　　a/w(s) = (1−s)·(a₀/w₀) + s·(a₁/w₁)</div>
+  <p>即：<strong>1/w 和 a/w 在屏幕空间是线性的，a 本身不是</strong>。所以透视校正插值的做法是：插值 a/w 和 1/w，再相除：</p>
+  <div class="fm">a(p) = ( Σ λᵢ · aᵢ / wᵢ ) / ( Σ λᵢ / wᵢ )</div>
+<!--code:cpp:soft_raster.cpp · Tri::interp（透视校正插值）-->
+void interp(float px, float py, float* out) const {
+    // 屏幕空间重心坐标：三个边函数 / 总面积
+    float e0 = (sx[2] - sx[1]) * (py - sy[1]) - (sy[2] - sy[1]) * (px - sx[1]);
+    float e1 = (sx[0] - sx[2]) * (py - sy[2]) - (sy[0] - sy[2]) * (px - sx[2]);
+    float e2 = (sx[1] - sx[0]) * (py - sy[0]) - (sy[1] - sy[0]) * (px - sx[0]);
+    float s = e0 + e1 + e2; float b0 = e0 / s, b1 = e1 / s, b2 = e2 / s;
+    if (persp) {  // 透视校正：权重乘以各顶点的 1/w，再归一化
+        float w0 = b0 * iw[0], w1 = b1 * iw[1], w2 = b2 * iw[2]; float r = 1.f / (w0 + w1 + w2);
+        b0 = w0 * r; b1 = w1 * r; b2 = w2 * r;
+    }
+    for (int i = 0; i < na; i++) out[i] = b0 * a[0][i] + b1 * a[1][i] + b2 * a[2][i];
+}
+<!--/code-->
+  <div class="co deep"><span class="h">🧠 深入：为什么深度不需要透视校正</span>
+  <p>z<sub>ndc</sub> = z<sub>clip</sub>/w 本身就是"某个量除以 w"的形式，而 z<sub>clip</sub> 在三维中是线性的，所以 z<sub>ndc</sub> 和 a/w 一样在屏幕空间线性。硬件直接用屏幕空间重心坐标插值深度（实测程序里 <code>zs[si]</code> 就是这样算的）。这也是"深度缓冲存的是 z/w 而不是 z"的根本原因：<strong>为了能线性插值</strong>，而代价是第 8 章的精度不均匀。</p></div>
+
+  <h2>6.3 实测：不做透视校正会怎样</h2>
+  <p>E5 渲染一块从相机脚下延伸到 60 米外的地面（棋盘格纹理），对比三种方式，并对每个像素用<strong>射线与地面求交</strong>得到 uv 的解析真值来计算误差：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E5</div><pre>配置                                 平均uv误差 最大uv误差 近处(<5m)平均误差
+仿射插值，地面 2 个三角形        <span class="bad">17.4443</span>      20.1966          17.0373
+仿射插值，地面细分 16x16=512 三角形       0.3785       0.6835           0.4684
+透视校正，地面 2 个三角形         <span class="ok">0.0001</span>       0.0066           0.0000
+像素(200,120) 仿射 uv=(3.3037, -19.6608)   射线求交真值 uv=(0.3648, -1.3479)
+像素(200,120) 透视校正 uv=(0.3648, -1.3479)   射线求交真值 uv=(0.3648, -1.3479)
+（uv 单位 = 纹理重复次数；1 个棋盘格 = 0.5。误差 0.5 就是错一整格）</pre></div>
+<!--img:e5_persp_affine:仿射插值（2 个三角形）;e5_persp_affine_tess:仿射插值（细分为 512 个三角形）;e5_persp_correct:透视校正（2 个三角形）|<b>图 6-2</b>　E5 实测渲染（320×180）。仿射插值下纹理完全错乱；细分后错误被限制在每个小三角形内部，但棋盘格的边仍是折线；透视校正与真值一致。-->
+  <div class="co ver"><span class="h">🔬 从输出里能读出什么</span>
+  <ul>
+    <li>只有 2 个大三角形时，仿射插值的平均 uv 误差高达 17 个纹理重复——这块地面的 uv 范围是 24×24，几乎完全错了。</li>
+    <li>细分到 512 个三角形，误差降到 0.38（不到一格）：<strong>细分能缓解但不能消除</strong>，因为误差和三角形在深度方向上的跨度成正比。这正是 PS1 时代的补救办法——地面和墙壁都切得很碎。</li>
+    <li>透视校正的结果与射线求交的解析真值在第 4 位小数上一致，最大误差 0.0066 来自 float 精度和像素中心的离散化。</li>
+  </ul></div>
+
+  <h2>6.4 插值修饰符：不是所有属性都该透视校正</h2>
+  <div class="tbl"><table>
+    <tr><th>HLSL / GLSL</th><th>含义</th><th>典型用途</th></tr>
+    <tr><td><code>linear</code>（默认）/ <code>smooth</code></td><td>透视校正插值</td><td>uv、法线、世界坐标、颜色</td></tr>
+    <tr><td><code>nointerpolation</code> / <code>flat</code></td><td>不插值，整个三角形使用"激发顶点"（provoking vertex）的值</td><td>材质 ID、实例 ID、整数属性（整数不能插值）、Low-Poly 平直着色</td></tr>
+    <tr><td><code>noperspective</code></td><td>屏幕空间线性插值</td><td>屏幕空间效果：线框渲染里"到边的像素距离"、屏幕空间 UV</td></tr>
+    <tr><td><code>centroid</code></td><td>MSAA 下在"被覆盖采样点的重心"处求值，而不是像素中心</td><td>避免像素中心在三角形外时属性被外插：纹理图集边缘串色、uv 超出 [0,1]</td></tr>
+    <tr><td><code>sample</code></td><td>在每个采样点求值，迫使 PS 按采样频率运行（变成 SSAA）</td><td>对边缘有高频着色的特殊材质</td></tr>
+  </table></div>
+
+  <h2>6.5 2×2 Quad 与屏幕空间导数</h2>
+  <p>像素着色器里经常需要知道"一个属性在屏幕上变化得有多快"——最典型的就是纹理采样选 Mip 层级（第 7 章）：uv 在相邻像素间变化越大，说明纹理被缩小得越厉害，越应该用更模糊的 Mip。</p>
+  <p>GPU 的做法简单粗暴：<strong>像素着色器永远以 2×2 的像素块（Quad）为单位执行</strong>，四个像素同时跑同一段代码，于是任何变量的导数都可以用 Quad 内相邻像素的差分得到：</p>
+  <figure>
+  <svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(40,20)">
+      <rect x="0" y="0" width="90" height="90" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/><rect x="90" y="0" width="90" height="90" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+      <rect x="0" y="90" width="90" height="90" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/><rect x="90" y="90" width="90" height="90" fill="#FEF6E4" stroke="#B45309" stroke-width="2" stroke-dasharray="5 3"/>
+      <text x="45" y="42" text-anchor="middle" class="b">p(0,0)</text><text x="45" y="62" text-anchor="middle" class="xs">uv₀₀</text>
+      <text x="135" y="42" text-anchor="middle" class="b">p(1,0)</text><text x="135" y="62" text-anchor="middle" class="xs">uv₁₀</text>
+      <text x="45" y="132" text-anchor="middle" class="b">p(0,1)</text><text x="45" y="152" text-anchor="middle" class="xs">uv₀₁</text>
+      <text x="135" y="128" text-anchor="middle" class="b" style="fill:#B45309">p(1,1)</text><text x="135" y="148" text-anchor="middle" class="xs" style="fill:#B45309">Helper Lane</text>
+      <text x="135" y="164" text-anchor="middle" class="xs" style="fill:#B45309">（不在三角形内）</text>
+      <polygon points="-10,-10 230,-10 -10,200" fill="none" stroke="#1F2937" stroke-width="2"/>
+      <text x="90" y="206" text-anchor="middle" class="xs">三角形只覆盖了 3 个像素，第 4 个仍要陪着跑</text>
+    </g>
+    <g transform="translate(320,30)">
+      <g class="mono">
+        <text x="0" y="16">ddx(uv) = uv₁₀ − uv₀₀     // 同一行相邻像素之差</text>
+        <text x="0" y="40">ddy(uv) = uv₀₁ − uv₀₀     // 同一列相邻像素之差</text>
+      </g>
+      <text x="0" y="74" class="sm">• Quad 内 4 个像素共享同一组导数（coarse），或按行/列分别求（fine）</text>
+      <text x="0" y="98" class="sm">• 不在三角形内的像素作为 <tspan class="b">Helper Lane</tspan> 照样执行，只是结果不写出</text>
+      <text x="0" y="122" class="sm">• 导数用的是"外插"的属性值，所以三角形边缘处导数仍然有效</text>
+      <text x="0" y="146" class="sm">• 一个 Warp(32) = 8 个 Quad；小三角形会让大量通道变成 Helper</text>
+      <rect x="0" y="162" width="500" height="44" rx="8" fill="#FDEEEE" stroke="#B91C1C"/>
+      <text x="250" y="182" text-anchor="middle" class="sm" style="fill:#B91C1C">在"非一致"的分支里调用 Sample()/ddx，导数是未定义的</text>
+      <text x="250" y="198" text-anchor="middle" class="xs">分支里请用 SampleLevel / SampleGrad，或者把采样移到分支外</text>
+    </g>
+  </svg>
+  <figcaption><b>图 6-3</b>　2×2 Quad 是屏幕空间导数的来源，也是 Helper Lane 开销的来源。</figcaption>
+  </figure>
+  <p>实测程序没有真的按 Quad 并行执行，而是在需要导数时直接用三角形的插值函数在 (x+1, y) 和 (x, y+1) 处再求一次值（效果等价于 Quad 差分的解析版本）：</p>
+<!--code:cpp:soft_raster.cpp · E9 中计算 uv 的屏幕空间导数-->
+float a1[MAXA], a2[MAXA];
+f.t->interp(f.px + 1, f.py, a1);            // 右边一个像素处的属性（≈ Quad 里的邻居）
+f.t->interp(f.px, f.py + 1, a2);            // 下边一个像素处的属性
+float dudx = a1[6] - f.a[6], dvdx = a1[7] - f.a[7];   // ddx(uv)
+float dudy = a2[6] - f.a[6], dvdy = a2[7] - f.a[7];   // ddy(uv)
+<!--/code-->
+
+  <h2>6.6 实测：小三角形为什么贵</h2>
+  <p>E8 在 512×512 的屏幕上随机光栅化 3000 个大小相同的三角形，统计"实际覆盖的像素数"和"像素着色器实际要跑的通道数（被触及的 Quad 数 × 4）"：</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="18" text-anchor="middle" class="sm">Quad 效率 = 覆盖像素 / PS 通道数（E8 实测，每组 3000 个三角形）</text>
+    <line x1="70" y1="240" x2="840" y2="240" stroke="#9CA3AF"/>
+    <line x1="70" y1="40" x2="70" y2="240" stroke="#9CA3AF"/>
+    <g class="xs"><text x="62" y="244" text-anchor="end">0%</text><text x="62" y="144" text-anchor="end">50%</text><text x="62" y="44" text-anchor="end">100%</text></g>
+    <line x1="70" y1="140" x2="840" y2="140" stroke="#E5E7EB" stroke-dasharray="3 3"/>
+    <g>
+      <rect x="85" y="190" width="44" height="50" fill="#B91C1C"/><text x="107" y="184" text-anchor="middle" class="xs">25.0</text><text x="107" y="256" text-anchor="middle" class="xs">0.5</text>
+      <rect x="145" y="185.8" width="44" height="54.2" fill="#B91C1C"/><text x="167" y="180" text-anchor="middle" class="xs">27.1</text><text x="167" y="256" text-anchor="middle" class="xs">1</text>
+      <rect x="205" y="172.8" width="44" height="67.2" fill="#C2410C"/><text x="227" y="167" text-anchor="middle" class="xs">33.6</text><text x="227" y="256" text-anchor="middle" class="xs">2</text>
+      <rect x="265" y="157.8" width="44" height="82.2" fill="#C2410C"/><text x="287" y="152" text-anchor="middle" class="xs">41.1</text><text x="287" y="256" text-anchor="middle" class="xs">4</text>
+      <rect x="325" y="140.8" width="44" height="99.2" fill="#B45309"/><text x="347" y="135" text-anchor="middle" class="xs">49.6</text><text x="347" y="256" text-anchor="middle" class="xs">8</text>
+      <rect x="385" y="123.6" width="44" height="116.4" fill="#B45309"/><text x="407" y="118" text-anchor="middle" class="xs">58.2</text><text x="407" y="256" text-anchor="middle" class="xs">16</text>
+      <rect x="445" y="93" width="44" height="147" fill="#2F5BD3"/><text x="467" y="87" text-anchor="middle" class="xs">73.5</text><text x="467" y="256" text-anchor="middle" class="xs">64</text>
+      <rect x="505" y="70.6" width="44" height="169.4" fill="#2F5BD3"/><text x="527" y="65" text-anchor="middle" class="xs">84.7</text><text x="527" y="256" text-anchor="middle" class="xs">256</text>
+      <rect x="565" y="56.6" width="44" height="183.4" fill="#15803D"/><text x="587" y="51" text-anchor="middle" class="xs">91.7</text><text x="587" y="256" text-anchor="middle" class="xs">1024</text>
+      <rect x="625" y="48.6" width="44" height="191.4" fill="#15803D"/><text x="647" y="43" text-anchor="middle" class="xs">95.7</text><text x="647" y="256" text-anchor="middle" class="xs">4096</text>
+      <rect x="715" y="144.2" width="44" height="95.8" fill="#6D28D9"/><text x="737" y="138" text-anchor="middle" class="xs">47.9</text><text x="737" y="256" text-anchor="middle" class="xs">细长 64</text>
+      <rect x="775" y="143.4" width="44" height="96.6" fill="#6D28D9"/><text x="797" y="138" text-anchor="middle" class="xs">48.3</text><text x="797" y="256" text-anchor="middle" class="xs">细长 256</text>
+    </g>
+    <text x="377" y="280" text-anchor="middle" class="xs">等边三角形面积（px²）</text>
+    <text x="767" y="280" text-anchor="middle" class="xs">底×高=64×2 / 256×2</text>
+  </svg>
+  <figcaption><b>图 6-4</b>　三角形越小、越细长，Quad 效率越低。面积 1 像素的三角形，像素着色器 3/4 的工作是白做的。</figcaption>
+  </figure>
+  <div class="term"><div class="bar">soft_raster.exe · E8（节选）</div><pre>三角形（面积 px²） 覆盖像素   PS lanes Quad效率 零覆盖三角形 每三角形lanes
+等边 0.5                       1489       5956      <span class="bad">25.0%</span>         <span class="bad">1511</span>          2.0
+等边 1                         2966      10936      27.1%          477          3.6
+等边 16                       48102      82632      58.2%            0         27.5
+等边 1024                   3072122    3349324      91.7%            0       1116.4
+细长 256（底256x高2）     746799    1544600      <span class="bad">48.3%</span>            0        514.9</pre></div>
+  <div class="co ver"><span class="h">🔬 从输出里能读出什么</span>
+  <ul>
+    <li>面积 0.5 像素的三角形，一半（1511/3000）一个像素都没覆盖——它们的顶点着色、三角形设置全部白做；覆盖到像素的那些，每覆盖 1 个像素要跑 4 个通道（效率 25%）。</li>
+    <li>效率随面积上升，但要到上千像素才超过 90%：<strong>边缘上的 Quad 总是半空的</strong>，三角形越小，边缘占比越大。</li>
+    <li>细长三角形面积 256 像素，效率却只有 48%，和面积 8 像素的等边三角形差不多——因为它<strong>几乎全是边缘</strong>。</li>
+  </ul></div>
+  <div class="co net"><span class="h">🎮 游戏实战：Micro-Triangle 问题</span>
+  <p>远处的高模角色、过度细分的地形、密集的毛发卡片都会产生大量 1～2 像素的三角形。对策：① <strong>LOD</strong>：保证三角形在屏幕上至少有约 10 像素量级的面积；② 不要对远处开曲面细分；③ UE5 Nanite 的做法是对小三角形改用<strong>计算着色器软光栅</strong>，绕过硬件的 Quad 打包——这在本章的数据下就很好理解了。</p></div>
+
+  <h2>6.7 交互实验：透视校正插值</h2>
+  <div class="lab" id="lab-persp">
+    <div class="t">🧪 实验 2 · 仿射插值 vs 透视校正</div>
+    <p style="margin:4px 0 8px;font-size:14px;color:#4B5563">一块贴了棋盘格纹理的正方形平面，绕水平轴倾斜。左边在屏幕空间直接线性插值 uv，右边做透视校正。增大倾角或减少细分，观察左图的"折痕"。</p>
+    <div class="row">
+      <label>倾斜角 <input type="range" id="pc-tilt" min="0" max="80" value="62"> <span id="pc-tilt-v"></span></label>
+      <label>每边细分 <input type="range" id="pc-seg" min="1" max="12" value="1"> <span id="pc-seg-v"></span></label>
+      <label><input type="checkbox" id="pc-wire" checked> 显示三角形边</label>
+    </div>
+    <canvas id="pc-cv" class="labc" width="720" height="300"></canvas>
+    <div class="out" id="pc-out"></div>
+  </div><!--/lab-->
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>重心坐标 = 边函数 / 2 倍面积，光栅化时顺手得到。</li>
+    <li>透视投影下 <strong>1/w 与 a/w 在屏幕空间线性</strong>，a 本身不是；透视校正：<code>a = Σλᵢaᵢ/wᵢ ÷ Σλᵢ/wᵢ</code>。</li>
+    <li>深度 z/w 本身是"除以 w"的形式，可直接线性插值。</li>
+    <li>E5：不校正时平均 uv 误差 17 个重复；细分 512 份降到 0.38 但仍有折线；校正后与解析真值一致。</li>
+    <li>PS 按 <strong>2×2 Quad</strong> 执行，导数由 Quad 内差分得到；三角形外的像素作为 Helper Lane 陪跑。</li>
+    <li>E8：面积 1 像素的三角形 Quad 效率 27%，细长三角形不到 50%——小三角形和细长三角形都很贵。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么在 if 分支里用 tex.Sample() 可能出现"块状"错误？</summary>
+  <p><code>Sample()</code> 依赖 Quad 内差分得到的导数来选 Mip。如果分支条件在 Quad 内的四个像素上不一致，有的像素没有执行这段代码，它对应的 uv 值就是未定义的，导数也就错了，表现为 2×2 块状的 Mip 错误或闪烁。解决办法：把采样移到分支外；或在分支外先用 <code>ddx/ddy</code> 求好导数，分支内用 <code>SampleGrad</code>；或干脆用 <code>SampleLevel</code> 指定 Mip。</p></details>
+  <details class="quiz"><summary>自测：顶点光照（Gouraud）和逐像素光照（Phong）的区别和插值有什么关系？</summary>
+  <p>Gouraud 在顶点着色器里算好光照颜色，再在三角形内插值颜色；Phong 着色插值的是法线，在像素着色器里逐像素计算光照。高光是强烈非线性的函数，插值颜色会把三角形中间的高光"抹掉"或在顶点处出现亮斑，所以高光必须逐像素算。移动端为了省 PS 开销，会把漫反射或远处 LOD 的光照放到顶点阶段。</p></details>
+</section>

@@ -1,0 +1,184 @@
+<div class="part-head" data-toc="第三部分 · O(n log n)">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　O(n log n) 三巨头：归并、快排、堆排</h1>
+  <p>三者都达到了比较排序的下界，但各有取舍。归并用空间换来稳定和最坏保证，快排用最坏情况换来最快的平均速度，堆排用缓存友好性换来 O(1) 空间和最坏保证。</p>
+</div>
+
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>归并排序：稳定、可靠、可以外排</h1>
+    <p class="lead">分治的教科书范例：一分为二，各自排好，再把两个有序序列合并成一个。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>写出自顶向下和自底向上两种归并排序，理解合并时“相等取左”为什么保证稳定</li>
+    <li>会用递推式或递归树分析 O(n log n)，说清 O(n) 额外空间从哪来</li>
+    <li>掌握两个高频变形：链表排序（LeetCode 148）和逆序对计数</li>
+  </ul></div>
+
+  <h2>4.1 分而治之</h2>
+  <p>归并排序分三步：<strong>分</strong>（从中间切开）、<strong>治</strong>（递归地排好两半）、<strong>合</strong>（把两个有序序列合并）。真正干活的是“合”。“分”只是算一下中点，一直切到每段只剩一个元素，单个元素天然有序。</p>
+  <!--trace {"rows":[
+    {"lab":"原始","a":[38,27,43,3,9,82,10,15]},
+    {"lab":"分 ①","a":[38,27,43,3,9,82,10,15],"sep":[4]},
+    {"lab":"分 ②","a":[38,27,43,3,9,82,10,15],"sep":[2,4,6]},
+    {"lab":"分 ③","a":[38,27,43,3,9,82,10,15],"sep":[1,2,3,4,5,6,7],"note":"切到单个元素：天然有序"},
+    {"lab":"合 ①","a":[27,38,3,43,9,82,10,15],"s":"wwww....","sep":[2,4,6],"note":"两两合并成长度 2"},
+    {"lab":"合 ②","a":[3,27,38,43,9,10,15,82],"s":"wwww.www","sep":[4],"note":"合并成长度 4"},
+    {"lab":"合 ③","a":[3,9,10,15,27,38,43,82],"s":"dddddddd","note":"合并成长度 8，完成"}],
+    "names":{"w":"本层合并改变了位置"},
+    "cap":"<b>图 4-1</b>　归并排序的递归过程：一共 log₂8 = 3 层，每层的合并总共处理 n 个元素"} -->
+
+  <h3>合并：双指针</h3>
+  <p>两个有序序列 L 和 R 各放一个指针，每次比较两个指针指向的元素，把较小的那个输出，对应指针后移。一边走完以后，把另一边剩下的部分原样拷贝过去。</p>
+  <!--trace {"rows":[
+    {"lab":"L | R","a":[3,27,38,43,9,10,15,82],"s":"c...c...","sep":[4],"p":{"i":0,"j":4},"note":"3 < 9 → 输出 3"},
+    {"lab":"","a":[3,27,38,43,9,10,15,82],"s":".c..c...","sep":[4],"p":{"i":1,"j":4},"note":"27 > 9 → 输出 9"},
+    {"lab":"","a":[3,27,38,43,9,10,15,82],"s":".c...c..","sep":[4],"p":{"i":1,"j":5},"note":"27 > 10 → 输出 10"},
+    {"lab":"","a":[3,27,38,43,9,10,15,82],"s":".c....c.","sep":[4],"p":{"i":1,"j":6},"note":"27 > 15 → 输出 15"},
+    {"lab":"","a":[3,27,38,43,9,10,15,82],"s":".ccc...c","sep":[4],"p":{"i":1,"j":7},"note":"27、38、43 都 < 82，依次输出"},
+    {"lab":"输出","a":[3,9,10,15,27,38,43,82],"s":"dddddddd","note":"L 走完，R 剩下的 82 直接拷贝"}],
+    "cap":"<b>图 4-2</b>　合并两个长度为 4 的有序序列：每次比较输出一个元素，最多比较 n−1 次"} -->
+
+  <h2>4.2 伪代码与 C++</h2>
+<!--code:text:归并排序 · 伪代码-->
+mergeSort(a, lo, hi):                  // 区间 [lo, hi)
+    if hi - lo < 2: return
+    mid = lo + (hi - lo) / 2           // 不写 (lo+hi)/2，避免溢出
+    mergeSort(a, lo, mid)
+    mergeSort(a, mid, hi)
+    merge(a, lo, mid, hi)
+
+merge(a, lo, mid, hi):
+    i = lo, j = mid, k = lo
+    while i < mid and j < hi:
+        if a[j] < a[i]: buf[k++] = a[j++]     // 只有右边“严格小于”才取右边
+        else:           buf[k++] = a[i++]     // 相等取左边 → 稳定
+    拷贝剩余部分；把 buf[lo, hi) 写回 a
+<!--/code-->
+<!--code:cpp:merge_sort.h（自顶向下，缓冲区只分配一次）-->
+template <class T, class Less>
+void merge_rec(T* a, T* buf, int lo, int hi, Less& less) {   // [lo, hi)
+    if (hi - lo <= 16) { insertion_sort(a + lo, hi - lo, less); return; }   // 优化 1：小区间插排
+    int mid = lo + (hi - lo) / 2;
+    merge_rec(a, buf, lo, mid, less);
+    merge_rec(a, buf, mid, hi, less);
+    if (!less(a[mid], a[mid - 1])) return;                    // 优化 2：两半已经衔接有序，跳过合并
+    int i = lo, j = mid, k = lo;
+    while (i < mid && j < hi)
+        buf[k++] = less(a[j], a[i]) ? std::move(a[j++]) : std::move(a[i++]);
+    while (i < mid) buf[k++] = std::move(a[i++]);
+    while (j < hi)  buf[k++] = std::move(a[j++]);
+    std::move(buf + lo, buf + hi, a + lo);
+}
+
+template <class T, class Less = std::less<T>>
+void merge_sort(T* a, int n, Less less = {}) {
+    std::vector<T> buf(n);                 // 只分配一次；千万别在每层递归里 new
+    merge_rec(a, buf.data(), 0, n, less);
+}
+<!--/code-->
+  <p>自底向上的版本不用递归：先把相邻的长度 1 的段两两合并，再合并长度 2 的段，然后是 4、8……配合<strong>乒乓缓冲</strong>（两块内存轮流做源和目标），还能省掉“写回”这一步。</p>
+<!--code:cpp:merge_sort_bottom_up.h-->
+template <class T, class Less = std::less<T>>
+void merge_sort_bottom_up(T* a, int n, Less less = {}) {
+    std::vector<T> buf(n);
+    T* src = a;
+    T* dst = buf.data();
+    for (int width = 1; width < n; width *= 2) {
+        for (int lo = 0; lo < n; lo += 2 * width) {
+            int mid = std::min(lo + width, n), hi = std::min(lo + 2 * width, n);
+            std::merge(src + lo, src + mid, src + mid, src + hi, dst + lo, less);   // std::merge 本身是稳定的
+        }
+        std::swap(src, dst);              // 乒乓：这一轮的输出就是下一轮的输入
+    }
+    if (src != a) std::copy(src, src + n, a);
+}
+<!--/code-->
+
+  <h2>4.3 复杂度与性质</h2>
+  <p>递推式是 T(n) = 2T(n/2) + O(n)。用递归树看最直观：一共 log₂n 层，每层的合并加起来正好处理 n 个元素，所以总共 O(n log n)。<strong>它和输入无关</strong>，最好、平均、最坏都是 n log n（如果加了“已衔接就跳过”的优化，有序输入会退化成 O(n)）。</p>
+  <div class="tbl"><table>
+    <tr><th>性质</th><th>结论</th><th>说明</th></tr>
+    <tr><td>时间</td><td>O(n log n)，三种情况都是</td><td>比较次数在 ½ n log₂n 到 n log₂n 之间。E2（n=1000 随机）：9401 次，是所有算法里最少的</td></tr>
+    <tr><td>空间</td><td>O(n) 缓冲 + O(log n) 递归栈</td><td>数组版本最大的缺点</td></tr>
+    <tr><td>稳定</td><td><span class="yes">✔</span></td><td>前提是合并时“相等取左”。写成 <code>a[i] &lt; a[j] ? 取左 : 取右</code> 就会在相等时取右，变成不稳定</td></tr>
+    <tr><td>自适应</td><td>加“已衔接跳过”后有一定自适应性</td><td>E2 有序输入：比较 999 次、写 0 次</td></tr>
+    <tr><td>访存</td><td>顺序读、顺序写</td><td>对缓存和预取都很友好，也适合磁盘、磁带</td></tr>
+  </table></div>
+  <div class="co ver"><span class="h">实测 E5：N = 100 万</span>
+    <p>本书实现的归并 70.07 ms（随机）/ 3.20 ms（有序），<code>std::stable_sort</code> 51.65 ms / 4.48 ms。MSVC 的 <code>stable_sort</code> 先用插入排序把每 32 个元素排好，再用乒乓缓冲合并，这是它比本书的教科书写法快约 26% 的主要原因，并且和 <code>std::sort</code>（51.38 ms）基本持平。</p>
+  </div>
+
+  <h2>4.4 变形一：链表排序（LeetCode 148）</h2>
+  <p>链表没法随机访问，快排找 pivot、堆排算 2i+1 都很别扭。<strong>归并只需要顺序遍历和改指针</strong>，而且合并时不需要额外缓冲，只是重新串链，所以链表排序的标准答案就是归并。<code>std::list::sort</code> 也是归并排序。</p>
+<!--code:cpp:链表归并排序-->
+struct Node { int val; Node* next; };
+
+Node* merge(Node* a, Node* b) {
+    Node dummy{0, nullptr};
+    Node* t = &dummy;
+    while (a && b) {
+        if (b->val < a->val) { t->next = b; b = b->next; }
+        else                 { t->next = a; a = a->next; }   // 相等取 a → 稳定
+        t = t->next;
+    }
+    t->next = a ? a : b;
+    return dummy.next;
+}
+
+Node* sort_list(Node* head) {
+    if (!head || !head->next) return head;
+    Node *slow = head, *fast = head->next;   // fast 从 head->next 出发：只有两个节点时也能正确断开
+    while (fast && fast->next) { slow = slow->next; fast = fast->next->next; }
+    Node* right = slow->next;
+    slow->next = nullptr;                    // 断开成两条链
+    return merge(sort_list(head), sort_list(right));
+}
+<!--/code-->
+  <div class="co warn"><span class="h">面试注意：快慢指针的起点</span>
+    <p>如果 <code>fast</code> 也从 <code>head</code> 出发，两个节点的链表中 <code>slow</code> 会停在第二个节点，<code>right</code> 为空，左半边仍是两个节点，于是无限递归。追问“空间复杂度”时，递归版是 O(log n) 栈；要做到 O(1)，得写自底向上的迭代版。</p>
+  </div>
+
+  <h2>4.5 变形二：逆序对计数</h2>
+  <p>合并时，如果右边的 <code>a[j]</code> 比左边的 <code>a[i]</code> 小，那么左边从 i 到 mid−1 的所有元素都比 <code>a[j]</code> 大，一次就能数出 <code>mid − i</code> 个逆序对。这样就能在 O(n log n) 内统计逆序对。</p>
+<!--code:cpp:归并统计逆序对-->
+long long count_inversions(int* a, int* buf, int lo, int hi) {   // [lo, hi)
+    if (hi - lo < 2) return 0;
+    int mid = lo + (hi - lo) / 2;
+    long long c = count_inversions(a, buf, lo, mid) + count_inversions(a, buf, mid, hi);
+    int i = lo, j = mid, k = lo;
+    while (i < mid && j < hi) {
+        if (a[j] < a[i]) { c += mid - i; buf[k++] = a[j++]; }   // a[i..mid) 全都比 a[j] 大
+        else             { buf[k++] = a[i++]; }
+    }
+    while (i < mid) buf[k++] = a[i++];
+    while (j < hi)  buf[k++] = a[j++];
+    std::copy(buf + lo, buf + hi, a + lo);
+    return c;
+}
+<!--/code-->
+  <div class="co net"><span class="h">游戏客户端视角：逆序对可以衡量“有多乱”</span>
+    <p>用逆序对数（或者抽样估计）判断一批数据离有序有多远，可以动态选择策略：几乎有序就做插入排序增量更新，很乱就整体 <code>std::sort</code>。渲染队列、排行榜的局部刷新都能用这个思路。</p>
+  </div>
+
+  <h2>4.6 外部排序：数据大到内存放不下</h2>
+  <p>归并的顺序访问特性，让它成为外部排序的基础：先把大文件切成能放进内存的块，每块排好后写回磁盘（称为“顺串”），再用一个<strong>大小为 k 的小顶堆做 k 路归并</strong>，每次从堆顶取出最小值输出。总复杂度是 O(n log n)，磁盘 IO 大约只需要 2 遍。游戏开发中，资源构建管线里对超大清单排序、对海量战斗日志做离线分析时会用到。</p>
+
+  <h2>4.7 交互实验</h2>
+  <p>注意观察浅蓝色背景表示的“当前子区间”：先一路缩小到长度 1，再逐层扩大合并。切到“大量重复”，看相等元素的先后顺序是否被保持。</p>
+  <div class="lab sortlab" id="lab-ms" data-algos="merge" data-n="16"></div><!--/lab-->
+
+  <div class="co warn"><span class="h">面试注意</span>
+    <ul>
+      <li>空间复杂度要答 <strong>O(n)</strong>，不是 O(n log n)。缓冲区只分配一次，每层复用。如果每次递归都 new 一个临时数组，那就是实现得不好。</li>
+      <li>原地归并存在（如 <code>std::inplace_merge</code> 在没有缓冲时的做法），但复杂度会变成 O(n log² n)，常数也大。<code>std::stable_sort</code> 申请不到内存时就会退回这种方案。</li>
+      <li>稳定性的关键就是一个符号：<strong>相等取左</strong>。手写时可以主动指出这一点。</li>
+    </ul>
+  </div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>归并：<strong>稳定</strong>、三种情况都是 <strong>O(n log n)</strong>、额外 <strong>O(n)</strong> 空间、顺序访存。</li>
+    <li>工程优化：小区间插排、已衔接跳过合并、缓冲只分配一次、乒乓缓冲省去写回。</li>
+    <li>链表排序首选归并（<code>std::list::sort</code>）；合并时可顺便统计逆序对；外部排序用 k 路归并 + 小顶堆。</li>
+  </ul></div>
+</section>

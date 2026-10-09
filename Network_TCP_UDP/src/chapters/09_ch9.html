@@ -1,0 +1,252 @@
+<!-- ======================= CH9 ======================= -->
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>KCP：以带宽换延迟的 ARQ 协议</h1>
+    <p class="lead">一千多行 C 代码、一个头文件、零系统调用。它的全部秘密就在"对 TCP 的六处修改"里。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说出 KCP 的定位（纯算法、无 IO、无连接管理）与设计目标</li>
+    <li>画出 KCP 的四个队列和数据流，背出 24 字节报文头</li>
+    <li>逐条说清 KCP 相对 TCP 的改动：RTO 不翻倍、选择重传、快速重传、非延迟 ACK、UNA+ACK、非退让流控</li>
+    <li>会写 KCP 的接入代码，理解 <code>ikcp_nodelay</code> 等参数的含义与调优</li>
+    <li>能用仿真数据解释 KCP 的"带宽换延迟"，并知道在工程中 KCP 之外还要补什么</li>
+  </ul></div>
+
+  <h2>9.1 KCP 是什么</h2>
+  <p>KCP 是由林伟（skywind3000）开源的一个快速可靠传输协议，项目 README 中对它的描述是：<strong>能以比 TCP 浪费 10%～20% 带宽的代价，换取平均延迟降低 30%～40%、最大延迟降低三倍的传输效果</strong>。它在手游、实时音视频、网络加速器等领域被广泛使用，也衍生出 kcp-go、KCP-Net 等多语言实现。</p>
+  <div class="cards">
+    <div class="card"><div class="t">纯算法实现</div><p>KCP 不负责收发 UDP，使用者通过回调函数 <code>output</code> 告诉它"怎么把一个包发出去"，收到包后调用 <code>ikcp_input</code> 喂给它。连时钟都由外部传入，内部没有任何系统调用——所以能嵌入任何引擎、平台和 IO 模型。</p></div>
+    <div class="card"><div class="t">只做 ARQ</div><p>对应图 7-2 中的第 ③ 层（外加消息分片）：序号、确认、重传、窗口、拥塞控制。<strong>不包含</strong>连接建立、会话管理、心跳、加密、FEC，这些都要使用者自己补。</p></div>
+    <div class="card"><div class="t">流速优先，而非流量优先</div><p>TCP 的设计目标是充分利用带宽（每秒传多少 KB）；KCP 的目标是降低单个包从发出到交付的时间（一个包花多少毫秒）。两者的取舍方向不同。</p></div>
+  </div>
+
+  <h2>9.2 架构：四个队列与时钟驱动</h2>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="820" height="290" rx="14" fill="#FBFAF7" stroke="#9CA3AF"/>
+    <text x="430" y="42" text-anchor="middle" class="b">ikcpcb（一个 KCP 对象 = 一个会话的一端）</text>
+    <!-- send path -->
+    <rect x="40" y="60" width="110" height="40" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="95" y="78" text-anchor="middle" class="sm b">ikcp_send()</text><text x="95" y="93" text-anchor="middle" class="xs">应用发送</text>
+    <rect x="190" y="60" width="150" height="40" rx="8" fill="#fff" stroke="#2F5BD3"/><text x="265" y="78" text-anchor="middle" class="sm b" style="fill:#2F5BD3">snd_queue</text><text x="265" y="93" text-anchor="middle" class="xs">已分片，等待进入窗口</text>
+    <rect x="380" y="60" width="170" height="40" rx="8" fill="#fff" stroke="#C2410C" stroke-width="2"/><text x="465" y="78" text-anchor="middle" class="sm b" style="fill:#C2410C">snd_buf</text><text x="465" y="93" text-anchor="middle" class="xs">已发送未确认（含重传计时）</text>
+    <rect x="590" y="60" width="110" height="40" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="645" y="78" text-anchor="middle" class="sm b" style="fill:#6D28D9">output 回调</text><text x="645" y="93" text-anchor="middle" class="xs">用户实现 sendto</text>
+    <rect x="730" y="60" width="90" height="100" rx="8" fill="#F3F4F6" stroke="#4B5563"/><text x="775" y="106" text-anchor="middle" class="b">UDP</text><text x="775" y="124" text-anchor="middle" class="xs">网络</text>
+    <line x1="150" y1="80" x2="188" y2="80" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <line x1="340" y1="80" x2="378" y2="80" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <line x1="550" y1="80" x2="588" y2="80" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <line x1="700" y1="80" x2="728" y2="80" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="359" y="118" text-anchor="middle" class="xs">窗口允许时移入</text>
+    <text x="465" y="118" text-anchor="middle" class="xs">flush 时检查超时 / 快速重传</text>
+    <!-- recv path -->
+    <rect x="590" y="200" width="110" height="40" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="645" y="218" text-anchor="middle" class="sm b" style="fill:#6D28D9">ikcp_input()</text><text x="645" y="233" text-anchor="middle" class="xs">用户收到 UDP 后调用</text>
+    <rect x="380" y="200" width="170" height="40" rx="8" fill="#fff" stroke="#15803D" stroke-width="2"/><text x="465" y="218" text-anchor="middle" class="sm b" style="fill:#15803D">rcv_buf</text><text x="465" y="233" text-anchor="middle" class="xs">乱序暂存（按 sn 排序）</text>
+    <rect x="190" y="200" width="150" height="40" rx="8" fill="#fff" stroke="#15803D"/><text x="265" y="218" text-anchor="middle" class="sm b" style="fill:#15803D">rcv_queue</text><text x="265" y="233" text-anchor="middle" class="xs">已按序，等待应用读取</text>
+    <rect x="40" y="200" width="110" height="40" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="95" y="218" text-anchor="middle" class="sm b">ikcp_recv()</text><text x="95" y="233" text-anchor="middle" class="xs">分片收齐才返回</text>
+    <line x1="728" y1="140" x2="702" y2="214" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <line x1="590" y1="220" x2="552" y2="220" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <line x1="380" y1="220" x2="342" y2="220" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <line x1="190" y1="220" x2="152" y2="220" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="359" y="258" text-anchor="middle" class="xs">sn == rcv_nxt 时移入</text>
+    <line x1="590" y1="208" x2="552" y2="96" stroke="#B45309" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#ao)"/>
+    <text x="586" y="160" text-anchor="end" class="xs" style="fill:#B45309">ACK / UNA：从 snd_buf 删除</text>
+    <rect x="40" y="270" width="660" height="30" rx="8" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="370" y="290" text-anchor="middle" class="sm"><tspan class="b" style="fill:#B45309">ikcp_update(kcp, now)</tspan>：每 interval 毫秒调用一次 → ikcp_flush：发送 ACK 列表、窗口探测、新数据、重传</text>
+  </svg>
+  <figcaption><b>图 9-1</b> KCP 的四个队列：发送侧 snd_queue → snd_buf，接收侧 rcv_buf → rcv_queue；一切发送都在 update / flush 中完成</figcaption>
+  </figure>
+
+  <h3>24 字节报文头</h3>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <g class="xs"><text x="110" y="20">0</text><text x="262" y="20">8</text><text x="418" y="20">16</text><text x="736" y="20">31</text></g>
+    <line x1="110" y1="26" x2="750" y2="26" stroke="#D1D5DB"/>
+    <rect x="110" y="30" width="640" height="32" fill="#EAF0FD" stroke="#2F5BD3"/><text x="430" y="51" text-anchor="middle" class="b">conv 会话编号（32）：通信双方必须相同</text>
+    <rect x="110" y="62" width="160" height="32" fill="#FFF4EC" stroke="#C2410C"/><text x="190" y="83" text-anchor="middle" class="b sm">cmd（8）</text>
+    <rect x="270" y="62" width="160" height="32" fill="#FEF6E4" stroke="#B45309"/><text x="350" y="83" text-anchor="middle" class="b sm">frg 分片（8）</text>
+    <rect x="430" y="62" width="320" height="32" fill="#F3EEFE" stroke="#6D28D9"/><text x="590" y="83" text-anchor="middle" class="b sm">wnd 剩余接收窗口（16）</text>
+    <rect x="110" y="94" width="640" height="32" fill="#FEF6E4" stroke="#B45309"/><text x="430" y="115" text-anchor="middle" class="b">ts 时间戳（32）</text>
+    <rect x="110" y="126" width="640" height="32" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="147" text-anchor="middle" class="b">sn 序号（32）</text>
+    <rect x="110" y="158" width="640" height="32" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="179" text-anchor="middle" class="b">una 此前的包全部收到（32）</text>
+    <rect x="110" y="190" width="640" height="26" fill="#F3F4F6" stroke="#6B7280"/><text x="430" y="208" text-anchor="middle" class="b sm">len 数据长度（32），之后是数据</text>
+    <g class="xs"><text x="770" y="80">PUSH=81 数据</text><text x="770" y="96">ACK=82 确认</text><text x="770" y="112">WASK=83 问窗口</text><text x="770" y="128">WINS=84 告窗口</text></g>
+  </svg>
+  <figcaption><b>图 9-2</b> KCP 报文头（IKCP_OVERHEAD = 24 字节）。多个 KCP 段可以拼进同一个 UDP 包；ACK 段的 sn 是被确认的包序号、ts 是原包的时间戳</figcaption>
+  </figure>
+
+  <h2>9.3 KCP 对 TCP 的六处改动</h2>
+  <p>KCP 的 README 用"vs TCP"的方式列出了它的关键设计，每一条都和前面讲过的 TCP 机制一一对应：</p>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>TCP 的做法</th><th>KCP 的做法</th><th>效果 / 代价</th></tr>
+    <tr><td>1</td><td><strong>RTO 翻倍</strong>：连续超时 3 次，等待时间变成 RTO × 8</td><td>nodelay 模式下每次超时 <strong>RTO × 1.5</strong>；RTO 下限从 100 ms 降为 30 ms</td><td>连续丢包时等待时间增长慢得多（见图 9-3）；代价是严重拥塞时退让不足</td></tr>
+    <tr><td>2</td><td>（早期 / 无 SACK）丢包后可能重传丢失点之后的所有数据</td><td><strong>选择性重传</strong>：只重传真正丢失的包</td><td>减少无效重传</td></tr>
+    <tr><td>3</td><td>3 个重复 ACK 触发快速重传</td><td><strong>被跳过 resend 次即重传</strong>（极速模式 resend=2）：发送 1～5，收到 ACK 1、3、4 时，2 已被跳过 2 次，立即重传</td><td>更早修复丢包；代价是轻微乱序也会触发重传</td></tr>
+    <tr><td>4</td><td><strong>延迟确认</strong>（最多数百毫秒）</td><td>ACK 不刻意延迟，在下一次 flush（≤ interval，极速模式 10 ms）时发出</td><td>RTT 测量更准、重传更及时；代价是 ACK 包更多</td></tr>
+    <tr><td>5</td><td>只有 UNA（累计确认），SACK 是可选扩展</td><td><strong>UNA + 逐包 ACK</strong>：每个包都带 una，同时有单独的 ACK 段</td><td>ACK 丢失时 UNA 兜底，逐包 ACK 保证精确</td></tr>
+    <tr><td>6</td><td>公平退让：发送窗口受拥塞窗口约束，丢包即减窗</td><td><strong>非退让流控</strong>（nc=1）：发送窗口只由发送缓冲和对端接收窗口决定，跳过慢启动和丢包退让</td><td>小流量实时数据不会因随机丢包降速；代价是失去对网络的"礼让"</td></tr>
+  </table></div>
+
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm b">同一个包连续超时 k 次，从第一次发送到第 k+1 次发送一共要等多久（初始 RTO = 100 ms）</text>
+    <line x1="80" y1="250" x2="830" y2="250" stroke="#4B5563"/><line x1="80" y1="250" x2="80" y2="40" stroke="#4B5563"/>
+    <g class="xs" text-anchor="end"><text x="74" y="254">0</text><text x="74" y="186">1 s</text><text x="74" y="122">2 s</text><text x="74" y="58">3 s</text></g>
+    <g stroke="#E5E7EB"><line x1="80" y1="186" x2="830" y2="186"/><line x1="80" y1="122" x2="830" y2="122"/><line x1="80" y1="58" x2="830" y2="58"/></g>
+    <!-- scale: 1s = 64px. TCP cumulative: 100,300,700,1500,3100 ; KCP: 100,250,475,813,1319 -->
+    <g>
+      <rect x="110" y="243.6" width="50" height="6.4" fill="#2F5BD3"/><rect x="162" y="243.6" width="50" height="6.4" fill="#C2410C"/>
+      <rect x="250" y="230.8" width="50" height="19.2" fill="#2F5BD3"/><rect x="302" y="234" width="50" height="16" fill="#C2410C"/>
+      <rect x="390" y="205.2" width="50" height="44.8" fill="#2F5BD3"/><rect x="442" y="219.6" width="50" height="30.4" fill="#C2410C"/>
+      <rect x="530" y="154" width="50" height="96" fill="#2F5BD3"/><rect x="582" y="198" width="50" height="52" fill="#C2410C"/>
+      <rect x="670" y="51.6" width="50" height="198.4" fill="#2F5BD3"/><rect x="722" y="165.6" width="50" height="84.4" fill="#C2410C"/>
+    </g>
+    <g class="xs" text-anchor="middle">
+      <text x="135" y="238">0.1</text><text x="187" y="238">0.1</text>
+      <text x="275" y="225">0.3</text><text x="327" y="228">0.25</text>
+      <text x="415" y="200">0.7</text><text x="467" y="214">0.48</text>
+      <text x="555" y="148">1.5</text><text x="607" y="192">0.81</text>
+      <text x="695" y="46">3.1 s</text><text x="747" y="160">1.32 s</text>
+    </g>
+    <g class="sm" text-anchor="middle"><text x="161" y="270">k=1</text><text x="301" y="270">k=2</text><text x="441" y="270">k=3</text><text x="581" y="270">k=4</text><text x="721" y="270">k=5</text></g>
+    <rect x="110" y="56" width="14" height="12" fill="#2F5BD3"/><text x="130" y="67" class="xs">TCP：RTO × 2</text>
+    <rect x="110" y="76" width="14" height="12" fill="#C2410C"/><text x="130" y="87" class="xs">KCP nodelay：RTO × 1.5</text>
+    <text x="430" y="292" text-anchor="middle" class="xs">TCP 实际的 RTO 下限是 200 ms，差距还要再翻一倍；KCP 极速模式的下限是 30 ms</text>
+  </svg>
+  <figcaption><b>图 9-3</b> 指数退避的累计等待：连续 5 次超时后，×2 要等 3.1 s，×1.5 只要 1.32 s</figcaption>
+  </figure>
+
+  <h2>9.4 接入代码</h2>
+<!--code:cpp:KCP 接入骨架（客户端，单会话；省略错误处理）-->
+#include "ikcp.h"
+
+static int UdpOutput(const char* buf, int len, ikcpcb* kcp, void* user) {
+    auto* s = static_cast<Session*>(user);
+    return sendto(s->sock, buf, len, 0, (sockaddr*)&s->peer, sizeof s->peer);   // KCP 只管"要发什么"
+}
+
+void Init(Session* s, uint32_t conv) {
+    s->kcp = ikcp_create(conv, s);           // conv 双方必须一致（通常由服务器在登录时分配）
+    s->kcp->output = UdpOutput;
+    ikcp_nodelay(s->kcp, 1, 10, 2, 1);       // 极速模式：nodelay=1, interval=10ms, resend=2, nc=1
+    ikcp_wndsize(s->kcp, 128, 128);          // 发送 / 接收窗口（默认 32 / 128）
+    ikcp_setmtu(s->kcp, 1200);               // 默认 1400；移动网络建议更保守
+    s->kcp->rx_minrto = 10;                  // 可选：进一步降低 RTO 下限
+}
+
+void Tick(Session* s, uint32_t nowMs) {      // 游戏主循环里每帧调用
+    char buf[1500];
+    for (int n; (n = recvfrom(s->sock, buf, sizeof buf, 0, nullptr, nullptr)) > 0;)
+        ikcp_input(s->kcp, buf, n);          // ① 把收到的 UDP 包喂给 KCP（非阻塞 socket）
+    ikcp_update(s->kcp, nowMs);              // ② 驱动时钟：发 ACK、发新数据、检查重传
+    for (int n; (n = ikcp_recv(s->kcp, buf, sizeof buf)) > 0;)
+        OnMessage(buf, n);                   // ③ 取出按序、完整的消息
+}
+
+void Send(Session* s, const void* msg, int len) {
+    ikcp_send(s->kcp, (const char*)msg, len);   // 放入 snd_queue，下一次 update/flush 时才真正发出
+    // 想更低延迟：ikcp_flush(s->kcp) 立即发送（会多一些小包）
+}
+<!--/code-->
+  <div class="co deep"><span class="h">🔬 ikcp_check：服务器上省 CPU 的关键</span><p>服务器上可能有上万个 KCP 会话，每 10 ms 对每个会话调用一次 <code>ikcp_update</code> 很浪费。<code>ikcp_check(kcp, now)</code> 返回"下一次真正需要调用 update 的时刻"（最近的重传时间或下一个 interval），服务器可以把会话按这个时间放进定时器堆或时间轮，只在需要时调度；收到包或有新消息要发时再立即调度一次。</p></div>
+
+  <h2>9.5 参数详解与调优</h2>
+  <div class="tbl"><table>
+    <tr><th>参数</th><th>默认</th><th>极速模式推荐</th><th>含义与调优</th></tr>
+    <tr><td><code>nodelay</code></td><td>0</td><td>1</td><td>开启后：RTO 下限 30 ms（<code>IKCP_RTO_NDL</code>），超时退避 ×1.5。否则下限 100 ms、退避约 ×2</td></tr>
+    <tr><td><code>interval</code></td><td>100 ms</td><td>10～20 ms</td><td>内部 flush 的周期，决定 ACK 和重传的时间精度；越小延迟越低、CPU 越高</td></tr>
+    <tr><td><code>resend</code></td><td>0（关闭）</td><td>2</td><td>快速重传阈值。设得太小（1）时对乱序过于敏感</td></tr>
+    <tr><td><code>nc</code></td><td>0</td><td>1</td><td>1 = 关闭拥塞控制（非退让流控）。<strong>需要配合应用层限速</strong></td></tr>
+    <tr><td><code>sndwnd / rcvwnd</code></td><td>32 / 128</td><td>按带宽时延积估算</td><td>窗口太小会限速（每 RTT 最多发 sndwnd 个包）；rcvwnd 应 ≥ sndwnd，且大于最大分片数</td></tr>
+    <tr><td><code>mtu</code></td><td>1400</td><td>1200～1400</td><td>单个 UDP 包的最大长度（含 24 字节头），超过会被分片</td></tr>
+    <tr><td><code>rx_minrto</code></td><td>100 / 30</td><td>10～30</td><td>RTO 下限；局域网或 RTT 稳定时可以调低</td></tr>
+    <tr><td><code>fastlimit</code></td><td>5</td><td>—</td><td>一个包最多被快速重传几次，超过后只能等超时</td></tr>
+    <tr><td><code>dead_link</code></td><td>20</td><td>—</td><td>一个包被重传这么多次仍未确认，<code>kcp-&gt;state</code> 置为 −1，可用于判定断线</td></tr>
+    <tr><td><code>stream</code></td><td>0</td><td>按需</td><td>1 = 流模式：像 TCP 一样不保留消息边界，可以把小消息合并进一个段，减少开销</td></tr>
+  </table></div>
+  <p>README 给出的两组典型配置：普通模式 <code>ikcp_nodelay(kcp, 0, 40, 0, 0)</code>，极速模式 <code>ikcp_nodelay(kcp, 1, 10, 2, 1)</code>。</p>
+
+  <h2>9.6 实测：100 Hz 实时消息流下的时延</h2>
+  <p>批量传输看的是"多久传完"，实时应用更关心"每条消息花了多少毫秒"。<code>d2</code> 的实验 B 模拟一个每 10 ms 产生一条消息（100 Hz，接近游戏的输入 / 状态发送频率）的流，持续 10 秒，测量每条消息从产生到<strong>按序交付</strong>给应用的时延。</p>
+  <div class="co net"><span class="h">🧪 实测证据（d2 · 实验 B）：时延分布</span>
+  <div class="term"><div class="bar">d2_rudp_sim.exe · 实验 B（RTT≈60ms，单向基础时延 30 ms）</div><pre>丢包 方案                                   平均ms    P99ms 最大ms 发送 丢失
+   0% T  类TCP：A4+SACK+延迟ACK+RTO×2+Reno     31.0       33       39   1000      0
+   0% T' 类TCP，但关闭拥塞控制            31.0       33       39   1000      0
+   0% K  类KCP极速：快重传2+立即ACK+RTO×1.5     31.0       31       40   1011      0
+   0% R  冗余发送k=3（不可靠）            31.0       33       40   1000      0
+   5% T  类TCP：A4+SACK+延迟ACK+RTO×2+Reno   <span class="bad">5085.4    10430    10676</span>   1052      0
+   5% T' 类TCP，但关闭拥塞控制            60.7      <span class="hl">185</span>      215   1077      0
+   5% K  类KCP极速：快重传2+立即ACK+RTO×1.5     <span class="ok">42.9       95</span>      167   1249      0
+   5% R  冗余发送k=3（不可靠）            31.6       41       51   1000      1
+  10% T' 类TCP，但关闭拥塞控制            73.8      <span class="hl">213</span>      225   1133      0
+  10% K  类KCP极速：快重传2+立即ACK+RTO×1.5     <span class="ok">53.4      123</span>      173   1474      0
+  20% T' 类TCP，但关闭拥塞控制           150.0      <span class="hl">513</span>      603   1393      0
+  20% K  类KCP极速：快重传2+立即ACK+RTO×1.5     <span class="ok">72.9      163</span>      183   1907      0
+  （完整输出见 demos/d2_rudp_sim.out.txt；T 在 10%、20% 丢包下时延达数十秒，R 的结果在第 11 章讨论）</pre></div></div>
+
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm b">P99 时延（ms）：100 Hz 消息流，RTT ≈ 60 ms</text>
+    <line x1="80" y1="250" x2="830" y2="250" stroke="#4B5563"/><line x1="80" y1="250" x2="80" y2="40" stroke="#4B5563"/>
+    <!-- scale: 600ms = 200px -> 1ms = 0.3333px -->
+    <g class="xs" text-anchor="end"><text x="74" y="254">0</text><text x="74" y="187">200</text><text x="74" y="120">400</text><text x="74" y="54">600</text></g>
+    <g stroke="#E5E7EB"><line x1="80" y1="183.3" x2="830" y2="183.3"/><line x1="80" y1="116.7" x2="830" y2="116.7"/><line x1="80" y1="50" x2="830" y2="50"/></g>
+    <!-- groups at 5%,10%,20%: T (capped), T', K, R -->
+    <g>
+      <rect x="120" y="42" width="40" height="208" fill="#9CA3AF"/><rect x="164" y="188.3" width="40" height="61.7" fill="#2F5BD3"/><rect x="208" y="218.3" width="40" height="31.7" fill="#C2410C"/><rect x="252" y="236.3" width="40" height="13.7" fill="#6D28D9"/>
+      <rect x="370" y="42" width="40" height="208" fill="#9CA3AF"/><rect x="414" y="179" width="40" height="71" fill="#2F5BD3"/><rect x="458" y="209" width="40" height="41" fill="#C2410C"/><rect x="502" y="236.3" width="40" height="13.7" fill="#6D28D9"/>
+      <rect x="620" y="42" width="40" height="208" fill="#9CA3AF"/><rect x="664" y="79" width="40" height="171" fill="#2F5BD3"/><rect x="708" y="195.7" width="40" height="54.3" fill="#C2410C"/><rect x="752" y="233" width="40" height="17" fill="#6D28D9"/>
+    </g>
+    <g class="xs" text-anchor="middle">
+      <text x="140" y="38">10.4 s</text><text x="184" y="183">185</text><text x="228" y="213">95</text><text x="272" y="231">41</text>
+      <text x="390" y="38">32.6 s</text><text x="434" y="174">213</text><text x="478" y="204">123</text><text x="522" y="231">41</text>
+      <text x="640" y="38">&gt;500 s</text><text x="684" y="74">513</text><text x="728" y="190">163</text><text x="772" y="228">51</text>
+    </g>
+    <g class="sm b" text-anchor="middle"><text x="206" y="270">丢包 5%</text><text x="456" y="270">丢包 10%</text><text x="706" y="270">丢包 20%</text></g>
+    <g class="xs">
+      <rect x="110" y="282" width="12" height="10" fill="#9CA3AF"/><text x="126" y="291">T 类 TCP（超出坐标，截断显示）</text>
+      <rect x="320" y="282" width="12" height="10" fill="#2F5BD3"/><text x="336" y="291">T' 关闭拥塞控制</text>
+      <rect x="460" y="282" width="12" height="10" fill="#C2410C"/><text x="476" y="291">K 类 KCP</text>
+      <rect x="570" y="282" width="12" height="10" fill="#6D28D9"/><text x="586" y="291">R 冗余发送 k=3（不可靠，见第 11 章）</text>
+    </g>
+  </svg>
+  <figcaption><b>图 9-4</b> 实验 B 的 P99 时延：拥塞控制是 T 崩溃的主因；在去掉拥塞控制之后，KCP 的激进重传仍把 P99 再压低 40%～70%</figcaption>
+  </figure>
+  <p>从这组数据可以读出三个层次的结论：</p>
+  <ol>
+    <li><strong>T → T'</strong>：随机丢包下，基于丢包的拥塞控制把发送速率压到了应用速率（100 条/秒）以下，消息在发送队列里越堆越多，时延滚雪球般增长到十几秒。这对应 Mathis 公式：Reno 的吞吐上限约为 <code>MSS / RTT × 1.22 / √p</code>，RTT 60 ms、p = 5% 时约 91 包/秒，恰好低于 100 Hz。<em>真实 Linux 有更多优化，不会这么极端，但"随机丢包被误判为拥塞"的问题确实存在。</em></li>
+    <li><strong>T' → K</strong>：同样没有拥塞控制，KCP 式参数（快重传 2、RTO 下限 30 ms、×1.5 退避、立即 ACK）把 P99 从 185/213/513 ms 压到 95/123/163 ms。</li>
+    <li><strong>代价</strong>：K 的发送次数是 1249/1474/1907，比 T' 多 16%～37%——这就是 KCP 所说的"带宽浪费"。而在 0% 丢包时它也多发了 11 个包（轻微乱序触发的伪快速重传）。</li>
+  </ol>
+
+  <h2>9.7 工程实践：KCP 之外还要补什么</h2>
+  <div class="tbl"><table>
+    <tr><th>KCP 不提供的</th><th>常见做法</th></tr>
+    <tr><td>连接建立与 conv 分配</td><td>先用 TCP / HTTP 登录拿到 conv 和密钥，再切到 UDP；或者自己实现带 Cookie 的 UDP 握手</td></tr>
+    <tr><td>会话识别</td><td>服务器用 conv 查会话（<code>ikcp_getconv</code> 可以从包头取出 conv），不依赖源地址，可支持 NAT 换端口</td></tr>
+    <tr><td>心跳与断线</td><td>应用层心跳；监控 <code>kcp-&gt;state == -1</code>（dead_link）；N 秒无包判定断线</td></tr>
+    <tr><td>加密与防篡改</td><td>在 output / input 处加一层 AEAD 加密；kcp-go 内置了多种加密</td></tr>
+    <tr><td>FEC</td><td>kcp-go 内置 Reed-Solomon FEC；或自己实现异或 FEC</td></tr>
+    <tr><td>不可靠消息</td><td>KCP 只有可靠有序一种语义；状态同步等不可靠数据<strong>绕过 KCP 直接走 UDP</strong>，在同一个 socket 上用首字节区分</td></tr>
+    <tr><td>TCP 兜底</td><td>UDP 不通时自动降级到 TCP（KCP over TCP 没有意义，直接用 TCP 传消息即可）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 易错点：KCP 不是"更快的 TCP"</span><p>KCP 降低的是<strong>丢包场景下的时延和抖动</strong>，代价是更多的带宽和 CPU。在不丢包的网络上，KCP 和 TCP 的时延几乎一样（实验 B 的 0% 行）；在大文件下载这类追求吞吐的场景，关闭拥塞控制的 KCP 可能挤占带宽、造成更多丢包，反而得不偿失。<strong>用 KCP 之前先确认：你的问题是"延迟抖动"而不是"带宽不够"。</strong></p></div>
+
+  <div class="co tip"><span class="h">✅ 面试答法：KCP 为什么比 TCP 快？</span>
+  <p>KCP 是一个运行在 UDP 之上的 ARQ 协议，"快"指的是丢包时延迟更低。它对 TCP 做了几处改动：① 超时重传时 RTO 只乘 1.5 而不是翻倍，RTO 下限也更低；② 选择性重传，只重传丢失的包；③ 快速重传阈值可配（比如被跳过 2 次就重传），不必等 3 个重复 ACK；④ ACK 不做延迟；⑤ 同时使用 UNA 和逐包 ACK；⑥ 可以关闭拥塞控制，避免随机丢包导致降速。代价是 10%～20% 甚至更多的额外带宽，以及需要自己处理连接管理、加密和不可靠消息。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>KCP：纯算法 ARQ 库，无 IO、无系统调用；只做可靠传输层，不含连接、加密、FEC。</li>
+    <li>四个队列：snd_queue → snd_buf → output；input → rcv_buf → rcv_queue；由 <code>ikcp_update</code> 时钟驱动。</li>
+    <li>24 字节头：conv、cmd（PUSH/ACK/WASK/WINS）、frg、wnd、ts、sn、una、len。</li>
+    <li>六处改动：<strong>RTO×1.5、选择重传、快速重传（resend）、非延迟 ACK、UNA+ACK、非退让流控（nc）</strong>。</li>
+    <li>极速模式 <code>ikcp_nodelay(kcp, 1, 10, 2, 1)</code>；窗口默认 32/128，MTU 1400，RTO 下限 100/30 ms。</li>
+    <li>仿真：随机丢包下拥塞控制是 TCP 时延崩溃的主因；KCP 在此基础上把 P99 再降 40%～70%，多花 16%～37% 带宽。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：KCP 关闭拥塞控制后，会不会把网络挤爆？应该怎么做？</summary>
+  <p>有可能。nc=1 后发送窗口只受 sndwnd 和对端 rcvwnd 限制，如果应用持续提交超过链路容量的数据，KCP 会把整个窗口塞进网络，造成排队和丢包，丢包又引发更多重传，形成恶性循环。做法：① 只在小流量实时数据（游戏、信令）上关闭拥塞控制；② 合理设置 sndwnd（≈ 期望速率 × RTT / 包长）；③ 应用层令牌桶限速；④ 监控 RTT 和重传率，异常时降低发送频率或数据精度；⑤ 大流量数据（资源下载）走 TCP / HTTP。</p></details>
+  <details class="quiz"><summary>思考题 2：KCP 的 interval 设为 100 ms 和 10 ms，对延迟有什么影响？</summary>
+  <p>KCP 所有的发送（包括 ACK）都在 flush 中完成，flush 每 interval 执行一次。interval = 100 ms 时，ACK 最多被延迟 100 ms，重传检查的精度也是 100 ms，RTT 测量会偏大，实际延迟明显变差；10 ms 时这些延迟都降到 10 ms 以内，代价是 CPU 占用增加、小包更多。也可以在 ikcp_send / ikcp_input 后主动调用 ikcp_flush 来降低延迟。</p></details>
+  <details class="quiz"><summary>思考题 3：为什么 KCP 的接收窗口默认比发送窗口大（128 vs 32）？</summary>
+  <p>接收窗口需要容纳乱序到达、等待前面缺失包的数据。如果接收窗口和发送窗口一样大甚至更小，丢包后后续到达的包可能因超出接收窗口被丢弃，引发额外的重传。另外，一条大消息被分成多个分片时，所有分片都要能放进接收窗口，ikcp_recv 才能把整条消息取出，所以 KCP 要求 rcvwnd 不小于最大分片数（源码注释中的 must >= max fragment size）。</p></details>
+</section>

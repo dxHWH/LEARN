@@ -1,0 +1,79 @@
+
+===== 1. 闭包对象大小 =====
+[]          sizeof = 1
+[a]  (int)  sizeof = 4
+[&a]        sizeof = 8
+[a, d]      sizeof = 16
+[&] (a,d)   sizeof = 16
+[s] string  sizeof = 32 (sizeof(std::string)=32)
+
+===== 2. 唯一类型 & 函数指针转换 =====
+两个一模一样的 []{} 类型相同吗? 0
+fp(21) = 42, fp2(41) = 42
+std::set<int, decltype(cmp)> 遍历: 3 2 1
+
+===== 3. 值捕获 / 引用捕获 / mutable =====
+x 改成 20 后: byVal() = 10, byRef() = 20
+counter 调用第 3 次 = 3
+copy() = 4, counter() = 4  (两份独立状态)
+无捕获 lambda 修改静态变量 s_hits = 2
+
+===== 4. this 捕获 =====
+hp 改成 50 后: [this]=50  [*this]=100  [hp=hp]=100
+sizeof: [this]=8  [*this]=4  [hp=hp]=4
+
+===== 5. std::function 大小与 SBO =====
+sizeof(std::function<void()>)     = 64
+sizeof(std::function<int(int,int)>) = 64
+sizeof(void*)                      = 8
+  捕获   8 字节 -> 堆分配 0 次
+  捕获  16 字节 -> 堆分配 0 次
+  捕获  32 字节 -> 堆分配 0 次
+  捕获  48 字节 -> 堆分配 0 次
+  捕获  56 字节 -> 堆分配 1 次
+  捕获  57 字节 -> 堆分配 1 次
+  捕获  64 字节 -> 堆分配 1 次
+  捕获 128 字节 -> 堆分配 1 次
+  存普通函数指针 -> 堆分配 0 次
+  捕获一个长 std::string -> 堆分配 1 次（string 自身拷贝 1 次）
+  拷贝一个持大闭包的 std::function -> 堆分配 1 次
+  移动一个持大闭包的 std::function -> 堆分配 0 次
+
+===== 6. 空 function / 成员函数 =====
+empty 转 bool = 0
+调用空 function 抛出 std::bad_function_call: bad function call
+std::function 包成员函数: cast(sk, 5) = 305
+lambda 代替 bind: bound(9) = 309
+
+===== 7. 只可移动的捕获 =====
+task() = 42, 原 unique_ptr 是否为空 = 1
+闭包可拷贝构造吗? 0
+std::move_only_function 接住了它: mf() = 42
+
+===== 8. 递归 lambda =====
+std::function 递归 fib(35)=9227465  35 ms
+auto self 递归     fib(35)=9227465  0 ms
+C++23 deducing this fib(35)=9227465  0 ms
+
+===== 9. 调用开销对比（/O2，2 亿次调用） =====
+模板参数(可内联)       0 ms  sum=19999999900000000
+std::function       200 ms  sum=19999999900000000
+函数指针             195 ms  sum=19999999900000000
+
+===== 10. 事件回调与生命周期 =====
+第一次广播（Boss 还活着）:
+  Boss 受到 30 点伤害
+Boss 离开作用域:
+  ~Monster(Boss) 析构
+第二次广播（Boss 已死）:
+  目标已销毁，回调安全跳过
+循环引用演示:
+  use_count = 2
+  离开作用域后 expired = 0  (没析构 = 泄漏)
+  ~Timer 析构
+  打断后 expired = 1
+
+===== 11. 泛型 / 模板 / constexpr lambda =====
+add(1,2)=3  add(1.5,2.25)=3.75
+vector<double>{1,2,3} 字节数 = 24
+std::array<int, sq(3)>::size() = 9

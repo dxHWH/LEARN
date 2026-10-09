@@ -1,0 +1,153 @@
+<div class="part-head" data-toc="第五部分 · 架构与工程">
+  <div class="no">PART FIVE</div>
+  <h1>第五部分　架构与工程：从逻辑管线到真实的一帧</h1>
+  <p>前面讲的是"逻辑管线"。这一部分换到硬件和引擎的视角：同一条管线在桌面和手机上是怎么跑的、一帧里的多个 Pass 怎样配合、性能问题怎样定位。</p>
+</div>
+
+<section class="chapter" id="ch10">
+  <div class="ch-head">
+    <div class="no">CHAPTER 10</div>
+    <h1>GPU 硬件视角：IMR 与 TBR / TBDR</h1>
+    <p class="lead">桌面 GPU 拿到一个三角形就立刻画；手机 GPU 先把整帧的三角形分到小块里，再一块一块在片上画完。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清立即模式渲染（IMR）和分块渲染（TBR/TBDR）的流程差异</li>
+    <li>理解 TBR 为什么能大幅节省带宽，以及"带宽 = 功耗 = 发热"对移动端的意义</li>
+    <li>掌握 Load/Store Action、Memoryless、Framebuffer Fetch / Subpass 这些移动端专属概念</li>
+    <li>理解 TBDR 的隐藏面消除（HSR），以及为什么 Alpha Test 在移动端格外昂贵</li>
+    <li>知道 TBR 的代价：Binning 开销、中途读回帧缓冲导致的 Flush</li>
+  </ul></div>
+
+  <h2>10.1 两种架构</h2>
+  <figure>
+  <svg viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
+    <!-- IMR -->
+    <text x="20" y="24" class="b" style="fill:#2F5BD3">IMR（立即模式）：NVIDIA / AMD 桌面 GPU</text>
+    <rect x="20" y="36" width="120" height="50" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="80" y="58" text-anchor="middle" class="sm">顶点处理</text><text x="80" y="76" text-anchor="middle" class="xs">三角形 1, 2, 3…</text>
+    <line x1="140" y1="61" x2="166" y2="61" stroke="#4B5563" marker-end="url(#a)"/>
+    <rect x="170" y="36" width="120" height="50" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="230" y="58" text-anchor="middle" class="sm">光栅化</text><text x="230" y="76" text-anchor="middle" class="xs">立刻处理</text>
+    <line x1="290" y1="61" x2="316" y2="61" stroke="#4B5563" marker-end="url(#a)"/>
+    <rect x="320" y="36" width="120" height="50" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="380" y="58" text-anchor="middle" class="sm">像素着色</text><text x="380" y="76" text-anchor="middle" class="xs">Early-Z 后</text>
+    <line x1="440" y1="61" x2="466" y2="61" stroke="#4B5563" marker-end="url(#a)"/>
+    <rect x="470" y="36" width="120" height="50" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="530" y="58" text-anchor="middle" class="sm">ROP</text><text x="530" y="76" text-anchor="middle" class="xs">深度/混合/写</text>
+    <rect x="620" y="30" width="220" height="62" rx="8" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="730" y="54" text-anchor="middle" class="b sm" style="fill:#B91C1C">DRAM 帧缓冲（整屏）</text>
+    <text x="730" y="74" text-anchor="middle" class="xs">每个片元的深度读写、颜色写都到这里</text>
+    <path d="M590,61 L616,61" stroke="#B91C1C" stroke-width="3" marker-end="url(#ar)"/>
+    <path d="M620,82 C580,110 560,110 540,90" fill="none" stroke="#B91C1C" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="560" y="118" class="xs" style="fill:#B91C1C">读深度/读 dst（混合）</text>
+    <text x="20" y="118" class="xs">靠大 L2 缓存 + 深度/颜色压缩缓解带宽；三角形按提交顺序流过管线</text>
+
+    <!-- TBR -->
+    <text x="20" y="168" class="b" style="fill:#15803D">TBR / TBDR（分块）：Mali / Adreno / PowerVR / Apple GPU</text>
+    <rect x="20" y="180" width="380" height="96" rx="10" fill="#F8FAFC" stroke="#94A3B8"/>
+    <text x="30" y="198" class="b sm">阶段 1：Binning（分块）—— 处理整帧所有顶点</text>
+    <rect x="34" y="210" width="100" height="50" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="84" y="232" text-anchor="middle" class="sm">顶点处理</text><text x="84" y="250" text-anchor="middle" class="xs">（只算位置）</text>
+    <line x1="134" y1="235" x2="156" y2="235" stroke="#4B5563" marker-end="url(#a)"/>
+    <rect x="160" y="210" width="110" height="50" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="215" y="232" text-anchor="middle" class="sm">分块</text><text x="215" y="250" text-anchor="middle" class="xs">三角形 → 哪些 Tile</text>
+    <line x1="270" y1="235" x2="292" y2="235" stroke="#4B5563" marker-end="url(#a)"/>
+    <rect x="296" y="210" width="96" height="50" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="344" y="232" text-anchor="middle" class="sm">图元列表</text><text x="344" y="250" text-anchor="middle" class="xs">写入 DRAM</text>
+
+    <rect x="420" y="180" width="420" height="96" rx="10" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="430" y="198" class="b sm">阶段 2：Rendering —— 逐个 Tile（16×16 / 32×32）</text>
+    <rect x="434" y="210" width="96" height="50" rx="8" fill="#fff" stroke="#15803D"/><text x="482" y="232" text-anchor="middle" class="sm">读本 Tile</text><text x="482" y="250" text-anchor="middle" class="xs">的图元列表</text>
+    <line x1="530" y1="235" x2="550" y2="235" stroke="#4B5563" marker-end="url(#a)"/>
+    <rect x="554" y="210" width="120" height="50" rx="8" fill="#fff" stroke="#15803D"/><text x="614" y="228" text-anchor="middle" class="sm">光栅化+HSR</text><text x="614" y="244" text-anchor="middle" class="xs">+ 着色 + 混合</text><text x="614" y="256" text-anchor="middle" class="xs">全部在片上</text>
+    <line x1="674" y1="235" x2="694" y2="235" stroke="#4B5563" marker-end="url(#a)"/>
+    <rect x="698" y="210" width="130" height="50" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="763" y="230" text-anchor="middle" class="sm">片上 Tile 内存</text><text x="763" y="248" text-anchor="middle" class="xs">颜色/深度/MSAA 样本</text>
+    <path d="M763,260 L763,300" stroke="#15803D" stroke-width="3" marker-end="url(#ag)"/>
+    <rect x="620" y="304" width="220" height="44" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="730" y="324" text-anchor="middle" class="b sm">Tile 完成后只写回一次颜色</text>
+    <text x="730" y="340" text-anchor="middle" class="xs">深度、MSAA 样本可以直接丢弃</text>
+
+    <!-- tiles illustration -->
+    <g transform="translate(40,300)">
+      <g stroke="#94A3B8" fill="#fff">
+        <rect x="0" y="0" width="40" height="30"/><rect x="40" y="0" width="40" height="30"/><rect x="80" y="0" width="40" height="30"/><rect x="120" y="0" width="40" height="30"/><rect x="160" y="0" width="40" height="30"/>
+        <rect x="0" y="30" width="40" height="30"/><rect x="40" y="30" width="40" height="30"/><rect x="80" y="30" width="40" height="30"/><rect x="120" y="30" width="40" height="30"/><rect x="160" y="30" width="40" height="30"/>
+      </g>
+      <rect x="80" y="0" width="40" height="30" fill="#D1FAE5" stroke="#15803D" stroke-width="2"/>
+      <polygon points="20,55 150,8 190,50" fill="#2F5BD3" opacity=".25" stroke="#2F5BD3"/>
+      <text x="0" y="78" class="xs">一个三角形被登记到它覆盖的所有 Tile；当前正在渲染绿色 Tile</text>
+    </g>
+    <text x="430" y="408" text-anchor="middle" class="xs">TBDR 的"D"（Deferred）：在着色之前先对整个 Tile 内所有不透明图元做完可见性判定（HSR），再只为最终可见的像素着色</text>
+  </svg>
+  <figcaption><b>图 10-1</b>　IMR 与 TBR/TBDR。关键区别：TBR 的深度测试、混合、MSAA 全部发生在片上，DRAM 只看到最终结果。</figcaption>
+  </figure>
+  <p>为什么手机要搞得这么复杂？因为<strong>访问 DRAM 是移动 SoC 上最耗电的操作之一</strong>：读写一次 DRAM 的能耗比片上 SRAM 高一到两个数量级，而手机的散热和电池都极其有限。桌面 GPU 有几百 GB/s 的独立显存和几百瓦的功耗预算，可以用大缓存和压缩硬扛；手机 GPU 只有几十 GB/s，还和 CPU 共享，于是选择从架构上减少带宽。</p>
+
+  <h2>10.2 实测：一帧的显存流量</h2>
+  <p>E12 用 E7 的统计数据（400 个随机方块、640×360）估算一帧的 DRAM 流量。模型很简化——IMR 每次深度读、深度写、颜色写都按 4 字节打到 DRAM，忽略缓存和压缩；TBR 只在每个 Tile 结束时写回 4 字节/像素的颜色：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E12（简化模型）</div><pre>画法（来自 E7）               IMR 流量 KB  TBR 流量 KB    IMR/TBR
+Late-Z 随机顺序                         29173            900      32.4x
+Early-Z 随机顺序                        29173            900      32.4x
+Early-Z 前->后                            25162            900      28.0x
+Early-Z 后->前                            70224            900      <span class="bad">78.0x</span>
+Z-Prepass                                   50576            900      56.2x
+MSAA4x Early-Z 随机（+Resolve）         121194            900     <span class="bad">134.7x</span>
+按 60fps 换算：IMR(Early-Z 随机) ≈ 1709 MB/s，TBR ≈ 53 MB/s；移动端 DRAM 每 GB/s 约耗数百 mW，带宽就是功耗和发热。</pre></div>
+  <div class="co ver"><span class="h">🔬 怎么读这组数据</span>
+  <ul>
+    <li>这是<strong>上限估算</strong>：真实 IMR 有 L2 缓存、深度压缩（Hi-Z、平面方程压缩）和颜色压缩（DCC），实际流量会小得多；真实 TBR 还有 Binning 阶段读写图元列表的流量。但量级关系是可靠的。</li>
+    <li>Late-Z 和 Early-Z 随机顺序的 IMR 流量相同：深度测试的读取次数不变，Early-Z 省的是着色而不是深度带宽。</li>
+    <li><strong>TBR 的流量与 Overdraw、绘制顺序、MSAA 都无关</strong>——这些都在片上消化了。这就是为什么在 TBR 上 MSAA 4× 几乎免费，而 IMR 上 MSAA 的流量是 4 倍。</li>
+    <li>反过来，TBR 上 Overdraw 也不是零成本：它仍然消耗片上的 ALU 和纹理带宽（半透明片元每一层都要着色、都要采样纹理）。</li>
+  </ul></div>
+
+  <h2>10.3 Load / Store Action：告诉驱动哪些数据不用搬</h2>
+  <p>TBR 在开始渲染一个 Tile 时，要决定 Tile 内存的初始内容；结束时要决定写不写回 DRAM。现代 API 让你显式声明：</p>
+  <div class="tbl"><table>
+    <tr><th>动作</th><th>选项</th><th>带宽</th><th>什么时候用</th></tr>
+    <tr><td rowspan="3">Load（开始）</td><td><code>Clear</code></td><td>0（片上直接清）</td><td>每帧开始的颜色和深度（最常见）</td></tr>
+    <tr><td><code>DontCare</code></td><td>0（内容未定义）</td><td>确定会被完全覆盖，如全屏后处理的目标</td></tr>
+    <tr><td><code>Load</code></td><td>读整个 RT</td><td>需要在上一个 Pass 的结果上继续画</td></tr>
+    <tr><td rowspan="2">Store（结束）</td><td><code>Store</code></td><td>写整个 RT</td><td>后面还要用：最终颜色、要采样的阴影贴图</td></tr>
+    <tr><td><code>DontCare</code> / Memoryless</td><td>0</td><td>深度/模板（用完就扔）、MSAA 多采样缓冲（Resolve 后就不要了）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 面试易错：每帧 Clear 是浪费吗？</span>
+  <p>在 IMR 上，Clear 要写整个缓冲（虽然有快速清除优化）；在 TBR 上 <strong>Clear 是最便宜的选择</strong>——它只是把 Tile 内存初始化，反而是"不 Clear"（Load）要把上一帧内容从 DRAM 读进来。所以移动端的规范是：每个 Pass 开始时颜色和深度都 Clear（或 DontCare），结束时深度 DontCare。Unity 里"相机不清除"或"Clear Flags = Don't Clear"在移动端是性能陷阱。</p></div>
+  <p>Vulkan 的 <strong>Subpass</strong> 和 Metal 的 <strong>Programmable Blending / Tile Shader</strong>（GLES 的 <code>EXT_shader_framebuffer_fetch</code>）更进一步：让后一个 Pass 直接读取当前像素在 Tile 内存里的值（例如 G-Buffer），整个延迟渲染可以在一个 Tile 里完成、G-Buffer 永远不写回 DRAM（Memoryless G-Buffer）。</p>
+
+  <h2>10.4 HSR：硬件替你做 Z-Prepass</h2>
+  <p>TBDR（PowerVR 的 HSR、Apple GPU、Mali 的 FPK—Forward Pixel Kill、Adreno 的 LRZ 等机制类似）在一个 Tile 的所有图元光栅化完之后、着色之前，先做一次完整的可见性判定，<strong>只为每个像素最终可见的那个不透明片元着色</strong>。效果相当于 E7 里"Z-Prepass"的结果，却不需要你多画一遍——所以：</p>
+  <ul>
+    <li>在 TBDR 上，不透明物体的前后排序收益变小（但仍建议大致排序，因为并非所有移动 GPU 的 HSR 都同样彻底，且 Binning 有容量上限）；</li>
+    <li>手动 Z-Prepass 在 TBDR 上通常是纯开销；</li>
+    <li><strong>Alpha Test（discard）和写深度会打断 HSR</strong>：硬件无法在着色前确定这个片元是否真的不透明，只能让它和它后面的东西都去着色。这就是"移动端少用 Alpha Test、多用 Alpha Blend 或者干脆用实体几何"的原因。</li>
+  </ul>
+
+  <h2>10.5 TBR 的代价与陷阱</h2>
+  <div class="cards">
+    <div class="card"><div class="t">Binning 开销</div><p>所有顶点要先处理一遍、结果（图元列表 + 变换后的顶点）写入 DRAM 再读回来。<strong>顶点越多，这部分越贵</strong>——TBR 对高面数场景比 IMR 更敏感。部分 GPU 只在 Binning 时计算位置（Position-only shading），把其他属性推迟到渲染阶段。</p></div>
+    <div class="card"><div class="t">中途读回帧缓冲</div><p>在一个 Pass 中间去采样当前的颜色或深度（"抓屏"做扭曲、读深度做软粒子），会强制把所有 Tile 写回 DRAM 再重新开始（Flush / Resolve）。一帧里 RenderTarget 切来切去是移动端最常见的性能杀手。</p></div>
+    <div class="card"><div class="t">巨大的三角形</div><p>一个全屏三角形会被登记到所有 Tile 里；大量覆盖全屏的半透明面片会让每个 Tile 的图元列表都很长。</p></div>
+    <div class="card"><div class="t">Tile 内存容量</div><p>MRT 数量、像素格式（如 RGBA16F）、MSAA 倍数都会占用 Tile 内存；超过容量时驱动会自动缩小 Tile 尺寸，增加 Tile 数和开销。</p></div>
+  </div>
+
+  <h2>10.6 游戏实战：移动端渲染清单</h2>
+  <div class="tbl"><table>
+    <tr><th>建议</th><th>原因（对应章节）</th></tr>
+    <tr><td>每个 RenderPass 开始时 Clear / DontCare，深度结束时 DontCare</td><td>避免 Load/Store 的整屏带宽（10.3）</td></tr>
+    <tr><td>减少 RenderTarget 切换，合并能合并的 Pass；后处理尽量合成一个 Uber Pass</td><td>每次切换都是一次整屏写回 + 读入（10.5）</td></tr>
+    <tr><td>MSAA 用 2×/4× 且多采样缓冲 Memoryless；避免在 MSAA Pass 中途读深度</td><td>片上 Resolve 几乎免费（9.6、10.2）</td></tr>
+    <tr><td>少用 Alpha Test；必须用时放在不透明之后绘制</td><td>打断 HSR / Early-Z（8.2、10.4）</td></tr>
+    <tr><td>控制半透明面积和层数（特效、UI）</td><td>Overdraw 消耗片上 ALU 和纹理带宽（10.2）</td></tr>
+    <tr><td>纹理用 ASTC + Mipmap；顶点属性压缩</td><td>纹理与顶点带宽（7.6、4.6）</td></tr>
+    <tr><td>精度用 half（mediump）</td><td>移动 GPU 的 FP16 吞吐通常是 FP32 的 2 倍，寄存器占用减半，Occupancy 提高（1.3）</td></tr>
+    <tr><td>控制顶点数与小三角形</td><td>Binning 开销与 Quad 效率（10.5、6.6）</td></tr>
+  </table></div>
+  <div class="co net"><span class="h">🎮 游戏实战：一个 MOBA 后处理的例子</span>
+  <p>一个常见的反模式：Bloom 需要降采样链（1/2、1/4、1/8……），每级一个 RT；再加上屏幕扭曲（要抓屏）、颜色校正、FXAA，每帧切换十几次 RT。在 TBR 手机上，这可能比整个场景渲染还贵。优化方向：Bloom 用更少的级数、在低分辨率 RT 上完成；扭曲特效用"预先渲染到单独 RT"而不是抓取主屏；颜色校正（LUT）、暗角、FXAA 合并成一个最终 Pass；能用 Framebuffer Fetch 的效果就别抓屏。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li><strong>IMR</strong>：三角形按提交顺序流过管线，深度/颜色直接读写 DRAM，靠大缓存和压缩扛带宽。</li>
+    <li><strong>TBR/TBDR</strong>：先 Binning 把整帧图元分到 Tile，再逐 Tile 在片上完成光栅化、深度、混合、MSAA，只写回最终颜色；TBDR 还在着色前做 HSR。</li>
+    <li>E12 简化模型：IMR 流量是 TBR 的 28～78 倍，MSAA 4× 时 134 倍；TBR 的 DRAM 流量与 Overdraw、顺序、MSAA 无关。</li>
+    <li>Load/Store Action 决定 Tile 内存的进出；Clear 和 DontCare 在 TBR 上最便宜；Memoryless 让深度和 MSAA 缓冲根本不占系统内存。</li>
+    <li>TBR 的敌人：顶点过多（Binning）、中途读回帧缓冲（Flush）、Alpha Test（打断 HSR）、RT 频繁切换。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：同一个游戏，为什么 PC 上很流畅的"屏幕扭曲"特效在手机上掉帧严重？</summary>
+  <p>扭曲需要采样"当前已经画好的屏幕颜色"（GrabPass / Opaque Texture）。在 IMR 上，这只是一次拷贝或直接采样已有 RT；在 TBR 上，它强制结束当前 RenderPass，把所有 Tile 的颜色（可能还有深度）写回 DRAM，再开一个新的 RenderPass 把内容读回来——两次整屏的带宽，还打断了 HSR 和 MSAA 的片上优势。手机上应限制扭曲的使用，或改用不需要读屏的近似做法。</p></details>
+  <details class="quiz"><summary>自测：TBR 是不是在所有场景下都比 IMR 好？</summary>
+  <p>不是。TBR 用 Binning 的开销换取帧缓冲带宽：顶点数极多、三角形极小的场景（高面数模型、大量曲面细分），Binning 的图元列表读写会变得很贵；需要在一帧中频繁读回帧缓冲的渲染方式也不适合 TBR。桌面 GPU 选择 IMR + 大缓存，是因为它们有足够的带宽和功耗预算，而且要应对极高的几何复杂度。实际上现代桌面 GPU 也引入了部分分块思想（如 NVIDIA 自 Maxwell 起的 Tiled Caching）。</p></details>
+</section>

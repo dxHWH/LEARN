@@ -1,0 +1,61 @@
+
+==== 1. 类模板全特化 ====
+  [主模板]  Print(42)
+  [全特化 bool] true
+  [全特化 bool] FALSE
+  Logger<T>::Log      通用版本
+  Logger<string>::Log 成员函数全特化
+  Logger<T>::Other    通用版本（特化 Log 不影响它）
+
+==== 2. 类模板偏特化的各种形状 ====
+  Traits<double>            -> 主模板 T
+  Traits<double*>           -> 偏特化 T*
+  Traits<int*>              -> 全特化 int*
+  Traits<const double>      -> 偏特化 const T
+  Traits<const double*>     -> 偏特化 T*   （指向 const 的指针，顶层不是 const）
+  Traits<double* const>     -> 偏特化 const T   （顶层 const）
+  Traits<float&>            -> 偏特化 T&
+  Traits<char[16]>          -> 偏特化 T[N]
+  Traits<vector<Hero>>      -> 偏特化 vector<T>
+  Traits<decltype(&Add)>    -> 偏特化 函数指针 R(*)(A...)
+  Traits<decltype(&Hero::hp)> -> 偏特化 成员指针 T C::*
+  Pair<float,double>        -> 主模板 <K,V>
+  Pair<float,int>           -> 偏特化 <K,int>
+  Pair<float,float>         -> 偏特化 <T,T>
+  Pair<int*,float*>         -> 偏特化 <K*,V*>
+  Pair<int,int>             -> 全特化 <int,int>（消歧）
+  Buffer<int,8>             -> 主模板 Buffer<T,N>
+  Buffer<int,0>             -> 偏特化 Buffer<T,0>（空缓冲）
+
+==== 3. 偏特化拆解类型 / 全特化终止递归 ====
+  MyRemovePtr / MyIsPointer / ElemOf 全部 static_assert 通过
+  Factorial<20> = 2432902008176640000（编译期计算）
+
+==== 4.1 函数模板全特化不参与重载决议（Dimov/Abrahams） ====
+  顺序 a,b,c：f(&x) -> (c) f<int*> 全特化
+  顺序 a,c,b：f(&x) -> (b) f(T*)   <-- 同样的代码换个顺序，特化被“绕过”了
+
+==== 4.2 重载决议：非模板 > 更特殊的模板 > 通用模板 ====
+  g(1)      -> 非模板 g(int)
+  g<>(1)    -> 模板 g(T)   （显式写 <> 排除非模板函数）
+  g(1L)     -> 模板 g(T)
+  g(&x)     -> 模板重载 g(T*)（相当于偏特化）
+  g(3.14)   -> 全特化 g<double>
+
+==== 4.3 / 4.4 函数“偏特化”的两种替代 ====
+  Serialize(42)         -> 通用序列化
+  Serialize(vector{1,2})-> vector 序列化, size=2
+  Describe(&x)          -> if constexpr: 指针
+  Describe(7)           -> if constexpr: 整数
+  Describe(1.5)         -> if constexpr: 其他
+
+==== 5. C++20 concepts 约束偏特化 ====
+  Codec<double> -> Codec 主模板
+  Codec<int>    -> Codec<integral>
+  Codec<char>   -> Codec<integral && 1字节>（约束更强，胜出）
+
+==== 6. 变量模板特化 ====
+  kTypeName<float>=unknown  kTypeName<float*>=pointer  kTypeName<int>=int
+
+==== 7. 特化 std::hash ====
+  grid[{3,4}] = 野怪

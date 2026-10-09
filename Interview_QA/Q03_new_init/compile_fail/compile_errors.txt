@@ -1,0 +1,19 @@
+### cf1_new_const_int.cpp  (/std:c++20)
+cf1_new_const_int.cpp(2): error C2737: “const int”: 必须初始化 const 对象
+
+### cf2_new_const_pod.cpp  (/std:c++20)
+cf2_new_const_pod.cpp(3): error C2737: “const Pod”: 必须初始化 const 对象
+
+### cf3_vexing_parse.cpp  (/std:c++20)
+cf3_vexing_parse.cpp(3): error C2228: “.a”的左边必须有类/结构/联合
+
+### cf4_brace_narrowing.cpp  (/std:c++20)
+cf4_brace_narrowing.cpp(2): warning C4244: “初始化”: 从“double”转换到“int”，可能丢失数据
+cf4_brace_narrowing.cpp(2): error C2397: 从“double”转换到“int”需要收缩转换
+
+### cf5_deleted_ctor_aggregate.cpp  (/std:c++17)
+(编译通过，exit=0)
+
+### cf5_deleted_ctor_aggregate.cpp  (/std:c++20)
+cf5_deleted_ctor_aggregate.cpp(3): error C2280: “NoDefault::NoDefault(void)”: 尝试引用已删除的函数
+

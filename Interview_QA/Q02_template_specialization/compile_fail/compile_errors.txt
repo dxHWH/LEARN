@@ -1,0 +1,20 @@
+### cf1_func_partial_spec.cpp
+cf1_func_partial_spec.cpp(3): error C2768: “h”: 非法使用显式模板参数
+
+### cf2_ambiguous_partial.cpp
+cf2_ambiguous_partial.cpp(5): error C2752: “Pair<int,int>”: 多个部分专用化与模板参数列表匹配
+
+### cf3_spec_after_use.cpp
+cf3_spec_after_use.cpp(4): error C2908: 显式专用化；已实例化“Box<int>”
+cf3_spec_after_use.cpp(4): error C2766: 显式专用化；已定义“Box<int>”
+
+### cf4_no_primary.cpp
+cf4_no_primary.cpp(2): error C3856: “Traits”: 符号不是 模板 类
+cf4_no_primary.cpp(2): error C2146: 语法错误: 缺少“;”(在标识符“T”的前面)
+cf4_no_primary.cpp(2): error C2059: 语法错误:“>”
+cf4_no_primary.cpp(2): error C2143: 语法错误: 缺少“;”(在“{”的前面)
+cf4_no_primary.cpp(2): error C2447: “{”: 缺少函数标题(是否是老式的形式表?)
+
+### cf5_partial_default_arg.cpp
+cf5_partial_default_arg.cpp(3): error C2756: “T”: 部分专用化中不允许有默认模板参数
+

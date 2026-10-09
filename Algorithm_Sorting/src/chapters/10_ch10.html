@@ -1,0 +1,196 @@
+<div class="part-head" data-toc="第六部分 · 游戏实战">
+  <div class="no">PART SIX</div>
+  <h1>第六部分　游戏客户端里的排序</h1>
+  <p>面试官问完原理，往往会接一句“你在项目里怎么用排序”。这一部分给出六个真实场景：每个场景里排序都不只是“调一下 std::sort”。</p>
+</div>
+
+<section class="chapter" id="ch10">
+  <div class="ch-head">
+    <div class="no">CHAPTER 10</div>
+    <h1>六个实战场景</h1>
+    <p class="lead">渲染队列、透明物体、UI 层级、帧同步、排行榜、碰撞粗检测，再加上小栈线程和内存分配这两条工程约束。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能设计一个 64 位渲染 sort key，并解释每个字段的排序意图</li>
+    <li>能说清帧同步里排序导致不同步的原因和解决办法</li>
+    <li>知道帧间相干性（数据在帧与帧之间变化很小）怎么用于加速排序</li>
+  </ul></div>
+
+  <h2>10.1 渲染队列：64 位 sort key + 基数排序</h2>
+  <p>每帧要提交几千到几万个 draw call。提交顺序会影响三件事：</p>
+  <ul>
+    <li><strong>状态切换开销</strong>：切换 shader、材质、纹理都很贵。相同材质的物体排在一起，就能少切换几次。</li>
+    <li><strong>Overdraw</strong>：不透明物体<strong>从近到远</strong>绘制，后画的远处像素会被深度测试（Early-Z）提前剔除，省掉片元着色。</li>
+    <li><strong>正确性</strong>：半透明物体必须<strong>从远到近</strong>绘制，否则混合结果是错的。</li>
+  </ul>
+  <p>这几个目标有优先级：先分渲染层（背景、世界、特效、UI），层内先不透明后透明；不透明物体优先按材质归并，透明物体只能按深度。经典做法是把这些字段<strong>按优先级从高到低压进一个 64 位整数</strong>，只对这个整数排序：</p>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <text x="60" y="22" class="b sm">不透明（Transparent 位 = 0）：先归并材质，减少状态切换；同材质内从近到远</text>
+    <g class="xs mono" text-anchor="middle"><text x="66" y="40">63</text><text x="116" y="40">59</text><text x="295" y="40">44</text><text x="580" y="40">20</text><text x="816" y="40">0</text></g>
+    <g stroke-width="1.5">
+      <rect x="60" y="46" width="47.5" height="40" fill="#F3EEFE" stroke="#6D28D9"/>
+      <rect x="107.5" y="46" width="11.9" height="40" fill="#FEF6E4" stroke="#B45309"/>
+      <rect x="119.4" y="46" width="178.1" height="40" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <rect x="297.5" y="46" width="285" height="40" fill="#EAF7EF" stroke="#15803D"/>
+      <rect x="582.5" y="46" width="237.5" height="40" fill="#F3F4F6" stroke="#6B7280"/>
+    </g>
+    <g class="sm" text-anchor="middle">
+      <text x="84" y="71">层</text><text x="208" y="71">材质 ID（15 bit）</text><text x="440" y="71">深度（24 bit，近 → 远）</text><text x="701" y="71">网格 ID（20 bit）</text>
+    </g>
+    <text x="60" y="122" class="b sm">半透明（Transparent 位 = 1）：深度必须优先，而且是从远到近（存 0xFFFFFF − depth）</text>
+    <g stroke-width="1.5">
+      <rect x="60" y="132" width="47.5" height="40" fill="#F3EEFE" stroke="#6D28D9"/>
+      <rect x="107.5" y="132" width="11.9" height="40" fill="#FEF6E4" stroke="#B45309"/>
+      <rect x="119.4" y="132" width="285" height="40" fill="#FDEEEE" stroke="#B91C1C"/>
+      <rect x="404.4" y="132" width="178.1" height="40" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <rect x="582.5" y="132" width="237.5" height="40" fill="#F3F4F6" stroke="#6B7280"/>
+    </g>
+    <g class="sm" text-anchor="middle">
+      <text x="84" y="157">层</text><text x="262" y="157">反向深度（24 bit，远 → 近）</text><text x="493" y="157">材质 ID</text><text x="701" y="157">网格 ID</text>
+    </g>
+    <path d="M113,176 V196" stroke="#B45309" stroke-width="1.4" marker-end="url(#ao)"/>
+    <text x="122" y="212" class="xs" style="fill:#B45309">T 位：同一层里，0（不透明）的 key 一定小于 1（透明）→ 不透明先画</text>
+    <text x="430" y="240" text-anchor="middle" class="sm">只比较一个 uint64：一条指令代替一串 if；还可以直接做基数排序</text>
+  </svg>
+  <figcaption><b>图 10-1</b>　渲染 sort key 的位布局（与 demo 中的 <code>make_key</code> 一致）：高位决定大顺序，低位决定小顺序</figcaption>
+  </figure>
+<!--code:cpp:make_key：把排序意图编码进整数-->
+uint64_t make_key(uint32_t layer, bool transparent, float depth01, uint32_t mat, uint32_t mesh) {
+    uint32_t d = uint32_t(depth01 * 0xFFFFFF);            // 深度量化到 24 bit（depth01 ∈ [0,1]）
+    uint64_t k = (uint64_t(layer & 0xF) << 60) | (uint64_t(transparent) << 59);
+    if (transparent)
+        k |= (uint64_t(0xFFFFFF - d) << 35) | (uint64_t(mat & 0x7FFF) << 20) | (mesh & 0xFFFFF);   // 远 → 近
+    else
+        k |= (uint64_t(mat & 0x7FFF) << 44) | (uint64_t(d) << 20) | (mesh & 0xFFFFF);               // 材质优先
+    return k;
+}
+
+struct SortItem { uint64_t key; uint32_t index; };      // 16 字节，只排它，不排 64 字节的 DrawItem
+// 每帧：items[i] = { make_key(...), i }；radix_sort_u64(items, tmp, n, [](auto& x){ return x.key; });
+// 提交：for (auto& it : items) submit(drawList[it.index]);
+<!--/code-->
+  <!--bars {"title":"实测 E8：N = 200,000 条 draw","unit":"ms","items":[["std::sort（64B DrawItem）",10.748,"r"],["std::sort（key + idx，16B）",9.660,"o"],["基数排序（key + idx）",1.722,"g"]],"labw":230,"cap":"<b>图 10-2</b>　20 万条 draw：基数排序比 std::sort 快约 5.6 倍；N=2 万时是 0.151 ms 对 0.761 ms；N=2000 时三者都在 0.03 ms 以内"} -->
+  <ul>
+    <li><strong>只排 (key, index)，不排大结构体</strong>：交换 16 字节比交换 64 字节便宜。本例中 DrawItem 只有 64 字节，差距约 10%；结构体越大、拷贝越贵（比如带 <code>std::string</code>），差距越大。</li>
+    <li><strong>基数排序非常适合 sort key</strong>：键定长、数据量大、每帧都要排。缓冲区用帧分配器（frame allocator）每帧复用，不要每帧 new。高位字节经常全部相同（比如所有物体都在同一层），可以跳过这些趟，demo 里就是这样做的。</li>
+    <li><strong>深度只量化成 24 bit</strong> 是有意为之：远处物体的精确先后对 Early-Z 影响很小，省下的位可以留给材质。</li>
+    <li>引擎里的对应物：UE 的 <code>FMeshDrawCommand</code> 带有排序键，Unity 按 Sorting Layer、Order in Layer、Render Queue、距离等依次决定顺序，思路是一致的。</li>
+  </ul>
+
+  <h2>10.2 透明物体与粒子：排序只能解决一部分</h2>
+  <ul>
+    <li><strong>按物体排序（画家算法）</strong>只能保证物体之间的先后。两个相互穿插的透明物体，无论谁先画都会有一部分是错的；要彻底解决得用 OIT（顺序无关透明），或者在美术上避免穿插。</li>
+    <li>排序依据一般用“包围盒中心到相机的距离平方”，不需要开方，因为平方保持大小顺序。</li>
+    <li>大规模粒子在 GPU 上排序：双调排序（bitonic sort，O(n log² n)，但比较的位置是固定的，适合大规模并行）或 GPU 基数排序。数量大但精度要求不高时，也可以用第 7 章的深度分桶做近似排序。</li>
+    <li><strong>帧间抖动</strong>：两个透明物体距离很接近时，相机稍微一动，它们的顺序就来回交换，画面出现闪烁。可以给距离加一个滞后阈值，或者用稳定的次级键（如实体 id）决出平局。</li>
+  </ul>
+
+  <h2>10.3 UI 层级：稳定性决定遮挡关系</h2>
+  <p>UI 节点先按 layer（或 sortingOrder）排，<strong>同一层内必须保持创建或层级顺序</strong>，后创建的盖在上面。用不稳定排序时，同层节点的先后会被打乱，表现为弹窗被背景盖住、点击穿透、每次打开顺序不一样。</p>
+  <div class="term"><div class="bar">E6 · 64 个 UI 节点，layer 只有 0/1/2，按 layer 排序</div><pre>std::sort    layer0: <span class="bad">N00 N21 N57 N03 N30 N54 N06 N39 N24 N09 N33 N51</span> ...
+stable_sort  layer0: <span class="ok">N00 N03 N06 N09 N12 N15 N18 N21 N24 N27 N30 N33</span> ...
+两种结果有 <span class="hl">57 / 64</span> 个位置不同（同层遮挡关系被打乱 → UI 闪烁 / 层级错乱）</pre></div>
+  <p>两种修法：①用 <code>std::stable_sort</code>；②把原始顺序放进键里，用 <code>std::tie(layer, siblingIndex)</code> 比较，这样任何排序算法都会得到同一结果。第二种更好：结果不依赖算法是否稳定，也避开了 <code>stable_sort</code> 的内存分配。</p>
+  <div class="co warn"><span class="h">面试注意：元素少时 std::sort 也“看起来稳定”</span>
+    <p>元素个数不超过插入排序阈值（MSVC 32、libstdc++ 16）时，<code>std::sort</code> 实际上只做了一遍插入排序，结果恰好是稳定的。所以测试时 10 个节点一切正常，上线后 100 个节点就乱了。E6 特意用了 64 个节点。<strong>“这次碰巧稳定”不等于“保证稳定”。</strong></p>
+  </div>
+
+  <h2>10.4 帧同步：平局顺序必须在所有客户端一致</h2>
+  <p>帧同步（lockstep）的 MOBA 中，所有客户端只交换玩家输入，各自运行同一套逻辑，要求每帧的计算结果<strong>逐位一致</strong>。如果某段逻辑“按威胁值排序，攻击第一个敌人”，而两个敌人的威胁值相等，那么谁排第一取决于排序算法如何处理平局：</p>
+  <div class="term"><div class="bar">E10 · 2000 个单位按威胁值排序（威胁值只有 10 档，大量平局）</div><pre>只比 score（有平局）：
+  std::sort (MSVC)         hash=<span class="bad">0867a2906420d9bb</span>  首个目标 id=<span class="bad">1115</span>
+  快排-工程 (另一种实现)    hash=<span class="bad">a9fd6e705baa4d93</span>  首个目标 id=<span class="bad">1228</span>
+  堆排序                   hash=<span class="bad">1dddafa554ba0db7</span>  首个目标 id=<span class="bad">1161</span>
+  stable_sort              hash=<span class="bad">32655e286d26c10b</span>  首个目标 id=<span class="bad">1</span>
+score 相同再比 id（全序）：
+  std::sort / 快排-工程 / 堆排序 / stable_sort   hash 全部 = <span class="ok">32655e286d26c10b</span>  首个目标 id=<span class="ok">1</span></pre></div>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="14" width="390" height="148" rx="12" fill="#FFFFFF" stroke="#CBD5E1"/>
+    <rect x="450" y="14" width="390" height="148" rx="12" fill="#FFFFFF" stroke="#CBD5E1"/>
+    <text x="215" y="38" text-anchor="middle" class="b">客户端 A：Windows（MSVC STL）</text>
+    <text x="645" y="38" text-anchor="middle" class="b">客户端 B：Android / iOS（libc++）</text>
+    <text x="215" y="64" text-anchor="middle" class="sm mono">输入相同：[敌1:威胁5, 敌2:威胁5, 敌3:威胁3]</text>
+    <text x="645" y="64" text-anchor="middle" class="sm mono">输入相同：[敌1:威胁5, 敌2:威胁5, 敌3:威胁3]</text>
+    <text x="215" y="90" text-anchor="middle" class="sm">std::sort(按威胁降序)</text>
+    <text x="645" y="90" text-anchor="middle" class="sm">std::sort(按威胁降序)：实现不同</text>
+    <rect x="95" y="104" width="240" height="30" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="215" y="124" text-anchor="middle" class="sm mono b">[敌1, 敌2, 敌3] → 打 敌1</text>
+    <rect x="525" y="104" width="240" height="30" rx="6" fill="#FDEEEE" stroke="#B91C1C"/><text x="645" y="124" text-anchor="middle" class="sm mono b">[敌2, 敌1, 敌3] → 打 敌2</text>
+    <text x="430" y="150" text-anchor="middle" class="b sm" style="fill:#B91C1C">≠</text>
+    <path d="M215,162 V186" stroke="#B91C1C" stroke-width="1.6" marker-end="url(#ar)"/><path d="M645,162 V186" stroke="#B91C1C" stroke-width="1.6" marker-end="url(#ar)"/>
+    <rect x="120" y="188" width="620" height="28" rx="6" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="430" y="207" text-anchor="middle" class="sm b" style="fill:#B91C1C">第 N 帧状态哈希不一致 → 不同步（desync），此后两端的战场完全不同</text>
+    <text x="430" y="240" text-anchor="middle" class="sm" style="fill:#15803D">修复：比较器 = (威胁降序, id 升序) 的全序 → 不存在平局 → 任何算法、任何平台结果都相同</text>
+  </svg>
+  <figcaption><b>图 10-3</b>　同一份输入、同一行代码，在两个平台上选出了不同的目标</figcaption>
+  </figure>
+  <h3>帧同步排序检查清单</h3>
+  <ol>
+    <li><strong>比较器必须是全序</strong>：最后一个比较字段用逻辑 id（网络 id / 创建序号）兜底，保证不存在“谁也不小于谁”的两个元素。</li>
+    <li><strong>不要用 Entity 的内存地址或运行时句柄排序</strong>：地址受 ASLR 和分配顺序影响，各端不同；客户端独有的实体（特效、本地 UI 实体）会让槽位编号错开。</li>
+    <li><strong>不要遍历哈希容器的顺序</strong>：<code>std::unordered_map</code> 的遍历顺序取决于哈希函数、桶数和插入历史，不同 STL 实现各不相同。要么先收集到数组里按 id 排序，要么用有序容器。</li>
+    <li><strong>排序键里不要有浮点运算的结果</strong>：距离等浮点值在不同编译器、不同指令集下可能有末位差异，平局判断会不同。帧同步逻辑一般使用定点数。</li>
+    <li><strong>想要绝对保险，就各端用同一份自己实现的排序</strong>（例如一份固定的归并排序），不依赖平台 STL。</li>
+  </ol>
+  <div class="co net"><span class="h">游戏客户端视角：这类不同步最难查</span>
+    <p>平局只在特定数据下出现，两端大多数时候结果一致，只有偶尔一局在某一帧分叉。排查时要在每帧对关键状态做哈希，不一致时把前后几帧的“排序输入 + 输出”都 dump 出来对比。本系列 Q04（ECS 怎么 debug）里“按 NetId 决胜”的修复思路，解决的也是同一类问题。</p>
+  </div>
+
+  <h2>10.5 排行榜与 Top-K</h2>
+  <ul>
+    <li><strong>只显示前 K 名</strong>：用 <code>partial_sort</code> 或大小为 K 的堆（E9：100 万人取前 100 名，0.22 ms / 0.41 ms，全量排序 58.61 ms）。</li>
+    <li><strong>只要第 K 名的分数线</strong>（例如“前 10% 的分数线”）：用 <code>nth_element</code>，平均 O(n)。</li>
+    <li><strong>单个玩家分数变化</strong>：不必整体重排。在有序数组里删掉旧位置、二分找到新位置插入，O(log n) 查找 + O(n) 移动；如果改动很频繁，就换成平衡树、跳表这类有序结构（服务端常用 Redis 的 ZSet，底层是跳表）。</li>
+    <li><strong>好友榜</strong>：好友数量一般不超过几百，直接 <code>std::sort</code> 就行。这时可读性比优化更重要。</li>
+  </ul>
+<!--code:cpp:前 K 名（降序，名次并列时按 id）-->
+struct Entry { int score; int id; };
+void top_k(std::vector<Entry>& v, size_t k) {
+    k = std::min(k, v.size());
+    std::partial_sort(v.begin(), v.begin() + k, v.end(), [](const Entry& a, const Entry& b) {
+        return a.score != b.score ? a.score > b.score : a.id < b.id;   // 全序：名次稳定可复现
+    });
+    // v[0..k) 就是前 k 名，且已经有序；v[k..) 的顺序不确定
+}
+<!--/code-->
+
+  <h2>10.6 Sweep and Prune：利用帧间相干性</h2>
+  <p>碰撞检测的粗检测阶段要找出“包围盒可能相交的物体对”。Sweep and Prune（SAP）把每个物体的 AABB 投影到 x 轴上，得到一个区间 [min, max]。<strong>把所有端点排序</strong>，然后从左到右扫一遍：遇到 min 就把物体加入“活动集”，遇到 max 就移出；加入时与活动集里的每个物体都构成候选对。</p>
+  <figure>
+  <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+    <line x1="40" y1="150" x2="820" y2="150" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/><text x="826" y="154" class="sm">x</text>
+    <rect x="100" y="30" width="220" height="22" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="210" y="46" text-anchor="middle" class="sm b">A</text>
+    <rect x="260" y="64" width="220" height="22" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="370" y="80" text-anchor="middle" class="sm b">B</text>
+    <rect x="540" y="30" width="160" height="22" rx="4" fill="#FEF6E4" stroke="#B45309"/><text x="620" y="46" text-anchor="middle" class="sm b">C</text>
+    <rect x="640" y="98" width="140" height="22" rx="4" fill="#F3EEFE" stroke="#6D28D9"/><text x="710" y="114" text-anchor="middle" class="sm b">D</text>
+    <g stroke="#9CA3AF" stroke-dasharray="3 3"><line x1="100" y1="52" x2="100" y2="150"/><line x1="260" y1="86" x2="260" y2="150"/><line x1="320" y1="52" x2="320" y2="150"/><line x1="480" y1="86" x2="480" y2="150"/><line x1="540" y1="52" x2="540" y2="150"/><line x1="640" y1="120" x2="640" y2="150"/><line x1="700" y1="52" x2="700" y2="150"/><line x1="780" y1="120" x2="780" y2="150"/></g>
+    <g class="xs mono" text-anchor="middle"><text x="100" y="168">A↑</text><text x="260" y="168">B↑</text><text x="320" y="168">A↓</text><text x="480" y="168">B↓</text><text x="540" y="168">C↑</text><text x="640" y="168">D↑</text><text x="700" y="168">C↓</text><text x="780" y="168">D↓</text></g>
+    <text x="430" y="192" text-anchor="middle" class="sm">端点有序序列：A↑ B↑ A↓ B↓ C↑ D↑ C↓ D↓ → 候选对 (A,B)、(C,D)</text>
+    <text x="430" y="208" text-anchor="middle" class="xs">下一帧物体只移动一点点，端点序列只有少数相邻元素需要交换 → 插入排序接近 O(n)，每次交换顺便增删候选对</text>
+  </svg>
+  <figcaption><b>图 10-4</b>　Sweep and Prune：端点排序是核心，帧间相干性让增量排序几乎免费</figcaption>
+  </figure>
+  <p>物体在一帧内只移动很小的距离，所以上一帧排好的端点序列这一帧几乎仍然有序。用插入排序增量更新，代价约为 O(n + 交换次数)，而且<strong>每发生一次相邻交换，就对应一对区间开始或停止重叠</strong>，可以顺便增删候选对。Bullet 物理引擎的 <code>btAxisSweep3</code> 就是这样增量维护的。这与 E8 的结论一致：近乎有序时插入排序 0.005 ms，<code>std::sort</code> 0.062 ms。</p>
+  <div class="co warn"><span class="h">注意它的退化</span>
+    <p>大量物体同时剧烈运动（爆炸、传送、场景切换）时，相干性没有了，插入排序会退化成 O(n²)。稳妥的做法是：如果一帧的交换次数超过阈值，或者检测到大规模传送，就改用 <code>std::sort</code> 整体重排。</p>
+  </div>
+
+  <h2>10.7 两条工程约束：栈和内存</h2>
+  <div class="cards">
+    <div class="card"><div class="t">小栈线程不能深递归</div>
+      <p>E4：朴素快排 + 有序输入，64 KB 栈大约 500 层就溢出，1 MB 栈 2 万个元素就溢出。Job 线程、纤程、协程的栈往往只有几十 KB。</p>
+      <p>对策：用 <code>std::sort</code>（深度有限）；自己实现时递归短边、加深度限制，或者改成迭代。</p></div>
+    <div class="card"><div class="t">每帧分配是性能杀手</div>
+      <p><code>std::stable_sort</code> 会尝试分配 O(n) 的临时缓冲；归并和基数排序都需要 O(n) 缓冲。</p>
+      <p>对策：缓冲区放在帧分配器或成员变量里复用；或者用“键 + 原始下标”的全序比较，配合 <code>std::sort</code> 得到确定的结果。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>渲染队列：64 位 sort key（层 → 透明 → 材质 / 深度 → 网格）；只排 (key, idx)；基数排序（E8：20 万条 1.72 ms 对 9.66 ms）。</li>
+    <li>透明物体从远到近，不透明物体从近到远；穿插问题排序解决不了。</li>
+    <li>UI 同层必须稳定：<code>stable_sort</code> 或在键里加 siblingIndex；n ≤ 16/32 时 std::sort 碰巧稳定，这是陷阱。</li>
+    <li>帧同步：比较器必须是带 id 兜底的全序；不按地址排序，不依赖哈希容器的遍历顺序。</li>
+    <li>Top-K 用 partial_sort / 堆；SAP 用插入排序做增量更新，剧烈变化时退回整体排序。</li>
+  </ul></div>
+</section>

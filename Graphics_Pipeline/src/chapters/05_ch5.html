@@ -1,0 +1,238 @@
+<div class="part-head" data-toc="第三部分 · 光栅化">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　光栅化：连续的三角形变成离散的像素</h1>
+  <p>几何阶段输出的是三个浮点坐标，像素阶段需要的是"哪些像素被覆盖、每个像素的属性是多少"。这一步是整条管线最"离散"的地方，也是走样、裂缝、精度问题的发源地。</p>
+</div>
+
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>光栅化：像素归谁</h1>
+    <p class="lead">三条边函数、一个定点网格、一条 Top-Left 规则，保证相邻三角形不漏一个像素、也不多画一个像素。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>理解"覆盖"的定义：像素中心（采样点）是否落在三角形内</li>
+    <li>掌握边函数：几何意义、增量计算、与重心坐标的关系</li>
+    <li>说清为什么 GPU 要把顶点吸附到定点亚像素网格上，以及 Top-Left 填充规则解决什么问题</li>
+    <li>了解包围盒遍历、分块遍历和层次化光栅化</li>
+    <li>能在交互实验里亲手观察覆盖、Top-Left 和 2×2 Quad</li>
+  </ul></div>
+
+  <h2>5.1 光栅化在回答什么问题</h2>
+  <p>光栅化的输入是一个屏幕空间三角形（三个顶点的浮点坐标），输出是一组<strong>片元（Fragment）</strong>——"这个像素被这个三角形覆盖了，它的深度和插值属性是多少"。</p>
+  <p>"覆盖"的标准定义是：<strong>像素的采样点落在三角形内部</strong>。不开 MSAA 时，每个像素只有一个采样点，就在像素中心 <code>(x+0.5, y+0.5)</code>。三角形哪怕盖住了一个像素 49% 的面积，只要没盖住中心，这个像素就不算覆盖——这就是锯齿（几何走样）的来源。</p>
+
+  <h2>5.2 边函数：用三个半平面圈出三角形</h2>
+  <p>对有向边 a→b 和任意点 p，定义边函数：</p>
+  <div class="fm">E<sub>ab</sub>(p) = (b.x − a.x)(p.y − a.y) − (b.y − a.y)(p.x − a.x)</div>
+  <p>它是向量 ab 与 ap 的二维叉积，有三层含义：</p>
+  <div class="cards">
+    <div class="card"><div class="t">① 半平面测试</div><p>E &gt; 0 表示 p 在边的一侧，E &lt; 0 在另一侧，E = 0 恰好在边上。三条边的 E 同号 ⇔ p 在三角形内。</p></div>
+    <div class="card"><div class="t">② 面积</div><p>E<sub>ab</sub>(p) 等于三角形 abp 面积的 2 倍（有符号）。把 p 换成第三个顶点 c，就得到整个三角形的 2 倍面积——也就是第 4 章背面剔除用的那个数。</p></div>
+    <div class="card"><div class="t">③ 重心坐标</div><p>E<sub>bc</sub>(p)/E<sub>bc</sub>(a) 正是 p 相对顶点 a 的重心坐标 λ<sub>a</sub>。光栅化算出来的边函数值，插值时直接复用（第 6 章）。</p></div>
+  </div>
+  <figure>
+  <svg viewBox="0 0 860 280" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(20,10)">
+      <text x="190" y="14" text-anchor="middle" class="b sm">三条边函数都 ≥ 0 的交集 = 三角形</text>
+      <polygon points="80,230 330,200 170,40" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+      <line x1="20" y1="237" x2="380" y2="194" stroke="#2F5BD3" stroke-dasharray="5 4"/>
+      <line x1="380" y1="250" x2="120" y2="-10" stroke="#C2410C" stroke-dasharray="5 4"/>
+      <line x1="65" y1="262" x2="189" y2="0" stroke="#6D28D9" stroke-dasharray="5 4"/>
+      <circle cx="80" cy="230" r="5" fill="#1F2937"/><text x="62" y="250" class="sm">v0</text>
+      <circle cx="330" cy="200" r="5" fill="#1F2937"/><text x="338" y="218" class="sm">v1</text>
+      <circle cx="170" cy="40" r="5" fill="#1F2937"/><text x="178" y="36" class="sm">v2</text>
+      <circle cx="190" cy="160" r="4" fill="#15803D"/><text x="198" y="164" class="xs" style="fill:#15803D">p：E₀₁,E₁₂,E₂₀ 都 ≥0</text>
+      <circle cx="320" cy="90" r="4" fill="#B91C1C"/><text x="270" y="80" class="xs" style="fill:#B91C1C">q：E₁₂ &lt; 0</text>
+    </g>
+    <g transform="translate(450,10)">
+      <text x="190" y="14" text-anchor="middle" class="b sm">增量计算：向右走一个像素只需加一个常数</text>
+      <g class="mono">
+        <text x="10" y="54">E(x+1, y) = E(x, y) − (b.y − a.y)</text>
+        <text x="10" y="80">E(x, y+1) = E(x, y) + (b.x − a.x)</text>
+      </g>
+      <text x="10" y="114" class="sm">→ 每像素每条边 1 次整数加法，3 条边 3 次加法</text>
+      <text x="10" y="138" class="sm">→ 2×2、4×4 的像素块可以一次并行算完</text>
+      <text x="10" y="162" class="sm">→ 定点整数运算：结果<tspan class="b">精确</tspan>，没有舍入误差</text>
+      <rect x="10" y="182" width="360" height="70" rx="8" fill="#FEF6E4" stroke="#B45309"/>
+      <text x="190" y="206" text-anchor="middle" class="sm">E 是 (x, y) 的线性函数（平面方程）</text>
+      <text x="190" y="228" text-anchor="middle" class="xs">所以一个矩形块四个角都 &lt;0 ⇒ 整块在边外，可整块跳过</text>
+      <text x="190" y="244" text-anchor="middle" class="xs">四个角都 ≥0 ⇒ 整块在边内，可整块接受</text>
+    </g>
+  </svg>
+  <figcaption><b>图 5-1</b>　边函数是线性函数：既能逐像素增量计算，也能对整块像素做快速接受/拒绝。</figcaption>
+  </figure>
+  <p>实测程序的光栅化内循环就是这三个边函数（为了可读性没有写成增量形式）：</p>
+<!--code:cpp:soft_raster.cpp · rasterTri 内循环（每像素、每采样点）-->
+auto E = [&](int a, int b, i64 px, i64 py) { return (X[b] - X[a]) * (py - Y[a]) - (Y[b] - Y[a]) * (px - X[a]); };
+for (int py = y0; py <= y1; py++) for (int px = x0; px <= x1; px++) {
+    for (int si = 0; si < T.S; si++) {                       // S = 采样数（1 或 MSAA 的 4）
+        i64 SX = (i64)px * ONE + T.offX[si], SY = (i64)py * ONE + T.offY[si];   // 采样点（定点）
+        i64 w0 = E(1, 2, SX, SY), w1 = E(2, 0, SX, SY), w2 = E(0, 1, SX, SY);
+        cov[si] = (w0 + b0 >= 0) && (w1 + b1 >= 0) && (w2 + b2 >= 0);       // b0..b2：Top-Left 偏置
+        if (cov[si]) zs[si] = ((float)w0 * t.z[0] + (float)w1 * t.z[1] + (float)w2 * t.z[2]) * invArea;
+    }
+    ...
+}
+<!--/code-->
+
+  <h2>5.3 定点亚像素：为什么不直接用浮点数</h2>
+  <p>GPU 在三角形设置阶段会把顶点的屏幕坐标<strong>吸附（snap）到一个定点网格</strong>上：D3D11 要求 8 位亚像素精度，即每个像素被细分为 256×256 个格子，坐标用整数表示。这样做有三个理由：</p>
+  <ol>
+    <li><strong>精确</strong>：边函数变成整数乘法和加法，结果没有舍入误差。共享同一条边的两个三角形，它们对这条边计算的 E 值<em>恰好互为相反数</em>，不会出现一个说"在内"、另一个也说"在内"（或都说"在外"）的情况——这叫<strong>水密（Watertight）</strong>。</li>
+    <li><strong>便宜</strong>：整数加法器比浮点加法器小得多、快得多。</li>
+    <li><strong>确定</strong>：结果不依赖运算顺序，同一个三角形每次光栅化结果完全一致——这是深度 EQUAL 测试（Z-Prepass）能工作的前提。</li>
+  </ol>
+  <div class="co ver"><span class="h">🔬 实测：浮点边函数真的会出错吗</span>
+  <p>E4 的压力测试：在 1024×768 的屏幕上，用 720 个细长三角形围成一个扇形（共享中心点和 720 条约 600 像素长的边），统计扇形内 75 万个像素有多少被漏画或重复画：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E4 压力测试</div><pre>配置                                         漏画 重复画 检查像素
+定点(8位亚像素) Top-Left，屏幕坐标整体平移 +0        0        0     757652
+定点(8位亚像素) Top-Left，屏幕坐标整体平移 +3000        0        0     757652
+定点(8位亚像素) Top-Left，屏幕坐标整体平移 +12000        0        0     757652
+float 边函数 Top-Left，屏幕坐标整体平移 +0        0        0     757652
+float 边函数 Top-Left，屏幕坐标整体平移 +3000        <span class="bad">2        1</span>     757652
+float 边函数 Top-Left，屏幕坐标整体平移 +12000        <span class="bad">1        1</span>     757652</pre></div>
+  <p>坐标较小时 float 也能碰巧算对；但把所有坐标平移到几千像素外（相当于一个很大的保护带坐标），float 边函数在共享边两侧的舍入不再对称，出现了漏画和重复画。数量不多，但<strong>"偶尔一个像素"的错误恰恰最难查</strong>：漏画表现为模型上闪烁的小黑点（"闪点"），重复画在半透明物体上表现为一条亮线。定点光栅化在任何位置都是 0。</p></div>
+  <div class="co deep"><span class="h">🧠 深入：PS1 为什么"顶点抖动"</span>
+  <p>初代 PlayStation 的 GTE 把顶点坐标直接取整到整像素，<strong>没有亚像素精度</strong>，物体缓慢移动时顶点会一格一格地跳，于是整个模型看起来在"抖"。再加上它不做透视校正（第 6 章 E5），就成了今天被刻意模仿的"PS1 风格"。8 位亚像素精度意味着顶点每次跳 1/256 像素，肉眼完全看不出来。</p></div>
+
+  <h2>5.4 Top-Left 规则：边上的像素归谁</h2>
+  <p>定点数解决了"算得准"，但还有一个逻辑问题：<strong>采样点恰好落在共享边上（E = 0）时，这个像素归哪个三角形？</strong></p>
+  <ul>
+    <li>如果"E ≥ 0 就算覆盖"，两个三角形都会画它——<strong>重复画</strong>（半透明叠两次、模板计数加两次）。</li>
+    <li>如果"E &gt; 0 才算覆盖"，两个三角形都不画它——<strong>漏画</strong>（一条缝）。</li>
+  </ul>
+  <p>D3D 和 OpenGL 采用 <strong>Top-Left 规则</strong>：E = 0 的采样点只有在<em>上边</em>或<em>左边</em>上才算覆盖。</p>
+  <ul>
+    <li><strong>上边</strong>：完全水平、且三角形其余部分在它下方的边；</li>
+    <li><strong>左边</strong>：三角形左侧的边（沿顺时针绕行时向上走的边）。</li>
+  </ul>
+  <p>一条共享边对一个三角形是"左边"，对另一个三角形必然是"右边"，所以 E=0 的像素恰好只归其中一个。实现上非常简单：对不是上边/左边的边，在比较前给 E 减去 1（定点最小单位），把 <code>E ≥ 0</code> 变成 <code>E &gt; 0</code>：</p>
+<!--code:cpp:soft_raster.cpp · Top-Left 偏置（屏幕 y 向下、面积已调整为正）-->
+auto isTL = [&](int a, int b) { i64 dx = X[b] - X[a], dy = Y[b] - Y[a];
+                                 return (dy == 0 && dx > 0) || dy < 0; };   // 上边：水平且向右；左边：向上
+i64 b0 = (s.topLeft && !isTL(1, 2)) ? -1 : 0;
+i64 b1 = (s.topLeft && !isTL(2, 0)) ? -1 : 0;
+i64 b2 = (s.topLeft && !isTL(0, 1)) ? -1 : 0;
+<!--/code-->
+  <figure>
+  <svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="18" text-anchor="middle" class="sm">两个三角形共享一条竖直边，边恰好穿过一列像素中心</text>
+    <g transform="translate(40,30)">
+      <g stroke="#E5E7EB">
+        <line x1="0" y1="0" x2="0" y2="180"/><line x1="30" y1="0" x2="30" y2="180"/><line x1="60" y1="0" x2="60" y2="180"/><line x1="90" y1="0" x2="90" y2="180"/><line x1="120" y1="0" x2="120" y2="180"/><line x1="150" y1="0" x2="150" y2="180"/><line x1="180" y1="0" x2="180" y2="180"/>
+        <line x1="0" y1="0" x2="180" y2="0"/><line x1="0" y1="30" x2="180" y2="30"/><line x1="0" y1="60" x2="180" y2="60"/><line x1="0" y1="90" x2="180" y2="90"/><line x1="0" y1="120" x2="180" y2="120"/><line x1="0" y1="150" x2="180" y2="150"/><line x1="0" y1="180" x2="180" y2="180"/>
+      </g>
+      <rect x="60" y="0" width="30" height="180" fill="#FDEEEE"/>
+      <polygon points="75,0 0,180 75,180" fill="#2F5BD3" opacity=".18"/><polygon points="75,0 180,180 75,180" fill="#C2410C" opacity=".18"/>
+      <line x1="75" y1="0" x2="75" y2="180" stroke="#1F2937" stroke-width="2"/>
+      <g fill="#B91C1C"><circle cx="75" cy="15" r="3.5"/><circle cx="75" cy="45" r="3.5"/><circle cx="75" cy="75" r="3.5"/><circle cx="75" cy="105" r="3.5"/><circle cx="75" cy="135" r="3.5"/><circle cx="75" cy="165" r="3.5"/></g>
+      <text x="90" y="204" text-anchor="middle" class="xs" style="fill:#B91C1C">E ≥ 0：中间一列被画两次</text>
+    </g>
+    <g transform="translate(330,30)">
+      <g stroke="#E5E7EB">
+        <line x1="0" y1="0" x2="0" y2="180"/><line x1="30" y1="0" x2="30" y2="180"/><line x1="60" y1="0" x2="60" y2="180"/><line x1="90" y1="0" x2="90" y2="180"/><line x1="120" y1="0" x2="120" y2="180"/><line x1="150" y1="0" x2="150" y2="180"/><line x1="180" y1="0" x2="180" y2="180"/>
+        <line x1="0" y1="0" x2="180" y2="0"/><line x1="0" y1="30" x2="180" y2="30"/><line x1="0" y1="60" x2="180" y2="60"/><line x1="0" y1="90" x2="180" y2="90"/><line x1="0" y1="120" x2="180" y2="120"/><line x1="0" y1="150" x2="180" y2="150"/><line x1="0" y1="180" x2="180" y2="180"/>
+      </g>
+      <rect x="60" y="0" width="30" height="180" fill="#F3F4F6"/>
+      <polygon points="75,0 0,180 75,180" fill="#2F5BD3" opacity=".18"/><polygon points="75,0 180,180 75,180" fill="#C2410C" opacity=".18"/>
+      <line x1="75" y1="0" x2="75" y2="180" stroke="#1F2937" stroke-width="2"/>
+      <g fill="none" stroke="#6B7280"><circle cx="75" cy="15" r="3.5"/><circle cx="75" cy="45" r="3.5"/><circle cx="75" cy="75" r="3.5"/><circle cx="75" cy="105" r="3.5"/><circle cx="75" cy="135" r="3.5"/><circle cx="75" cy="165" r="3.5"/></g>
+      <text x="90" y="204" text-anchor="middle" class="xs">E &gt; 0：中间一列谁都不画（裂缝）</text>
+    </g>
+    <g transform="translate(620,30)">
+      <g stroke="#E5E7EB">
+        <line x1="0" y1="0" x2="0" y2="180"/><line x1="30" y1="0" x2="30" y2="180"/><line x1="60" y1="0" x2="60" y2="180"/><line x1="90" y1="0" x2="90" y2="180"/><line x1="120" y1="0" x2="120" y2="180"/><line x1="150" y1="0" x2="150" y2="180"/><line x1="180" y1="0" x2="180" y2="180"/>
+        <line x1="0" y1="0" x2="180" y2="0"/><line x1="0" y1="30" x2="180" y2="30"/><line x1="0" y1="60" x2="180" y2="60"/><line x1="0" y1="90" x2="180" y2="90"/><line x1="0" y1="120" x2="180" y2="120"/><line x1="0" y1="150" x2="180" y2="150"/><line x1="0" y1="180" x2="180" y2="180"/>
+      </g>
+      <rect x="60" y="0" width="30" height="180" fill="#FFF4EC"/>
+      <polygon points="75,0 0,180 75,180" fill="#2F5BD3" opacity=".18"/><polygon points="75,0 180,180 75,180" fill="#C2410C" opacity=".18"/>
+      <line x1="75" y1="0" x2="75" y2="180" stroke="#1F2937" stroke-width="2"/>
+      <g fill="#C2410C"><circle cx="75" cy="15" r="3.5"/><circle cx="75" cy="45" r="3.5"/><circle cx="75" cy="75" r="3.5"/><circle cx="75" cy="105" r="3.5"/><circle cx="75" cy="135" r="3.5"/><circle cx="75" cy="165" r="3.5"/></g>
+      <text x="90" y="204" text-anchor="middle" class="xs" style="fill:#15803D">Top-Left：只归右侧三角形（这条边是它的左边）</text>
+    </g>
+  </svg>
+  <figcaption><b>图 5-2</b>　三种规则在共享边上的结果。只有 Top-Left 能做到"恰好一次"。</figcaption>
+  </figure>
+  <p>E4 的网格测试把这件事量化了：15×15 个四边形（450 个三角形）组成的网格，所有顶点都放在像素中心上，让共享边尽可能多地穿过采样点：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E4 网格测试（统计内部 3481 个像素）</div><pre>配置                                                 漏画 重复画
+网格A(顶点在像素中心) 定点  规则 w>=0（全收）        0     <span class="bad">2131</span>
+网格A(顶点在像素中心) 定点  规则 w>0 （全不收）     <span class="bad">2131</span>        0
+网格A(顶点在像素中心) 定点  Top-Left             <span class="ok">0        0</span>
+网格B(随机亚像素抖动) 定点  Top-Left             0        0
+网格B(随机亚像素抖动) 定点  Top-Left 坐标+32768        0        0</pre></div>
+  <p>3481 个像素里有 2131 个恰好落在边上（因为顶点和边都对齐了像素中心），"全收"会多画 2131 次，"全不收"会漏掉 2131 个，Top-Left 一个不差。</p>
+
+  <h2>5.5 遍历策略：哪些像素需要测试</h2>
+  <p>最朴素的做法是遍历三角形的<strong>包围盒</strong>（实测程序就是这样，钳制到屏幕范围内）。但细长的斜三角形包围盒里绝大部分像素都在外面，浪费严重。真实硬件用的是<strong>分块（Tiled）+ 层次化</strong>遍历：</p>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(40,20)">
+      <text x="160" y="0" text-anchor="middle" class="b sm">包围盒遍历</text>
+      <rect x="20" y="14" width="280" height="200" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="4 3"/>
+      <polygon points="20,214 300,14 260,214" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+      <text x="100" y="80" class="xs" style="fill:#B91C1C">包围盒里一大半</text>
+      <text x="100" y="96" class="xs" style="fill:#B91C1C">像素在三角形外</text>
+      <text x="160" y="236" text-anchor="middle" class="xs">每个像素都要算 3 条边函数</text>
+    </g>
+    <g transform="translate(470,20)">
+      <text x="170" y="0" text-anchor="middle" class="b sm">分块遍历（例如 8×8 Tile）</text>
+      <g stroke="#CBD5E1" fill="none">
+        <rect x="20" y="14" width="70" height="50"/><rect x="90" y="14" width="70" height="50"/><rect x="160" y="14" width="70" height="50"/><rect x="230" y="14" width="70" height="50"/>
+        <rect x="20" y="64" width="70" height="50"/><rect x="90" y="64" width="70" height="50"/><rect x="160" y="64" width="70" height="50"/><rect x="230" y="64" width="70" height="50"/>
+        <rect x="20" y="114" width="70" height="50"/><rect x="90" y="114" width="70" height="50"/><rect x="160" y="114" width="70" height="50"/><rect x="230" y="114" width="70" height="50"/>
+        <rect x="20" y="164" width="70" height="50"/><rect x="90" y="164" width="70" height="50"/><rect x="160" y="164" width="70" height="50"/><rect x="230" y="164" width="70" height="50"/>
+      </g>
+      <rect x="20" y="14" width="70" height="50" fill="#F3F4F6"/><rect x="90" y="14" width="70" height="50" fill="#F3F4F6"/><rect x="160" y="14" width="70" height="50" fill="#F3F4F6"/>
+      <rect x="20" y="64" width="70" height="50" fill="#F3F4F6"/><rect x="90" y="64" width="70" height="50" fill="#F3F4F6"/>
+      <rect x="20" y="114" width="70" height="50" fill="#F3F4F6"/>
+      <rect x="160" y="114" width="70" height="50" fill="#D1FAE5"/><rect x="90" y="164" width="70" height="50" fill="#D1FAE5"/><rect x="160" y="164" width="70" height="50" fill="#D1FAE5"/>
+      <polygon points="20,214 300,14 260,214" fill="none" stroke="#15803D" stroke-width="2"/>
+      <rect x="20" y="236" width="12" height="10" fill="#F3F4F6" stroke="#CBD5E1"/><text x="36" y="245" class="xs">整块拒绝（四角都在某边外）</text>
+      <rect x="190" y="236" width="12" height="10" fill="#D1FAE5" stroke="#CBD5E1"/><text x="206" y="245" class="xs">整块接受，免逐像素测试</text>
+    </g>
+  </svg>
+  <figcaption><b>图 5-3</b>　分块遍历：利用边函数的线性性，只用每块四个角的值就能整块拒绝或整块接受，剩下的"部分覆盖"块再逐像素测试。</figcaption>
+  </figure>
+  <p>分块遍历还天然配合两件事：<strong>Hi-Z 粗粒度深度剔除</strong>（一个 Tile 的最远深度如果都比三角形最近深度近，整块跳过，第 8 章）和<strong>Quad 打包</strong>（覆盖结果按 2×2 交给像素着色器，第 6 章）。</p>
+
+  <h2>5.6 交互实验：亲手光栅化一个三角形</h2>
+  <div class="lab" id="lab-raster">
+    <div class="t">🧪 实验 1 · 光栅化网格</div>
+    <p style="margin:4px 0 8px;font-size:14px;color:#4B5563">拖动三个顶点（会吸附到 1/4 像素网格，便于制造"边恰好穿过像素中心"的情况）。像素中心的圆点表示采样点；填色表示被覆盖。打开"显示 2×2 Quad"可以看到像素着色器实际要运行的通道数。</p>
+    <div class="row">
+      <label>覆盖规则 <select id="rs-rule"><option value="2">Top-Left（D3D/GL）</option><option value="0">E ≥ 0（全收）</option><option value="1">E &gt; 0（全不收）</option></select></label>
+      <label><input type="checkbox" id="rs-quad"> 显示 2×2 Quad</label>
+      <label><input type="checkbox" id="rs-bbox" checked> 显示包围盒</label>
+      <label><input type="checkbox" id="rs-pair" checked> 同时画相邻三角形（共享边 v1–v2）</label>
+    </div>
+    <div class="row">
+      <button class="st-btn" data-pre="0">预设：共享竖边穿过像素中心</button>
+      <button class="st-btn" data-pre="1">预设：细长三角形</button>
+      <button class="st-btn" data-pre="2">预设：微小三角形</button>
+      <button class="st-btn" data-pre="3">预设：大三角形</button>
+    </div>
+    <canvas id="rs-cv" class="labc" width="720" height="420"></canvas>
+    <div class="out" id="rs-out"></div>
+  </div><!--/lab-->
+
+  <h2>5.7 游戏实战：光栅化相关的几个工程问题</h2>
+  <div class="cards">
+    <div class="card"><div class="t">模型"闪点"</div><p>相邻三角形之间偶尔漏一个像素，通常不是光栅化器的问题（硬件是水密的），而是<strong>两个三角形的共享顶点坐标不完全相同</strong>：比如 LOD 接缝、地形块之间顶点高度不一致、顶点着色器里对同一顶点算出了不同结果（不同的计算顺序、<code>precise</code> 缺失）。</p></div>
+    <div class="card"><div class="t">细长三角形</div><p>边函数测试浪费多、2×2 Quad 效率低（E8 实测只有约 48%），还容易产生插值走样。建模时避免长条三角形，程序生成网格时注意剖分方式。</p></div>
+    <div class="card"><div class="t">保守光栅化</div><p>只要三角形和像素有任何重叠就算覆盖（而不只看中心）。用于体素化（GI）、光源分块剔除、遮挡剔除的软件光栅等"宁可多、不可漏"的场景。</p></div>
+    <div class="card"><div class="t">CPU 软件光栅</div><p>很多引擎在 CPU 上跑一个低分辨率、只写深度的软件光栅器做<strong>遮挡剔除</strong>（如 Intel 的 Masked Occlusion Culling），原理正是本章的边函数 + 分块。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>覆盖 = <strong>采样点</strong>（默认像素中心）落在三角形内；部分覆盖但没盖住中心的像素不算，这是几何走样的根源。</li>
+    <li>边函数 E 是二维叉积：同号即在内；它是线性函数，可增量计算、可整块判断；它还直接给出重心坐标。</li>
+    <li>顶点吸附到<strong>定点亚像素网格</strong>（8 位），使边函数精确、水密、确定；E4 实测浮点边函数在大坐标下会漏画/重复。</li>
+    <li><strong>Top-Left 规则</strong>决定边上的像素归谁，保证共享边的像素恰好被画一次（E4：2131 个边上像素零误差）。</li>
+    <li>硬件用分块 + 层次化遍历，配合 Hi-Z 和 Quad 打包。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么 D3D 要求 8 位亚像素精度，而不是 16 位？</summary>
+  <p>精度越高，定点数需要的位数越多：坐标范围（含保护带）若为 ±16K 像素需要 15 位整数部分，再加 8 位小数共 24 位；边函数是两个坐标差的乘积，需要约 48 位的乘法器。精度再翻倍，乘法器和面积会显著增大。8 位亚像素（1/256 像素）已经远小于人眼能察觉的顶点抖动，是精度与成本的折中。</p></details>
+  <details class="quiz"><summary>自测：一个三角形面积不为 0，却一个像素都没覆盖，可能吗？</summary>
+  <p>可能，而且很常见：微小三角形或细长三角形可能夹在像素中心之间，一个采样点都没盖住。E8 里面积 0.5 像素的三角形，3000 个中有 1511 个零覆盖——但它们仍然走完了顶点着色、裁剪和三角形设置，这部分开销白白浪费了。这就是"远处物体要用 LOD 降面数"的直接原因。</p></details>
+</section>

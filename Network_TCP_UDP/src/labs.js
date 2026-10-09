@@ -183,7 +183,7 @@
     xm.forEach((x, i) => {
       const d = document.createElement("span");
       const c = x <= 1 ? "#BBF7D0" : x === 2 ? "#FDE68A" : x === 3 ? "#FDBA74" : "#FCA5A5";
-      d.style.cssText = "display:inline-block;width:22px;height:18px;margin:1px;border-radius:3px;font:10px Consolas,monospace;line-height:18px;text-align:center;color:#374151;background:" + c;
+      d.style.cssText = "display:inline-block;vertical-align:top;width:22px;height:18px;margin:1px;border-radius:3px;font:10px Consolas,monospace;line-height:18px;text-align:center;color:#374151;background:" + c;
       d.title = "包 " + i + "：发送 " + x + " 次"; d.textContent = x > 1 ? x : "";
       box.appendChild(d);
     });
@@ -193,8 +193,10 @@
     $("arq-loss-v").textContent = $("arq-loss").value + "%"; $("arq-wnd-v").textContent = wnd; $("arq-rtt-v").textContent = rtt + " ms";
     const r = sim(key, N, loss, wnd, rtt, seed);
     grid(r.xm);
-    const ideal = Math.max(N, rtt) + rtt;
-    let s = MODES[key].name + "：传输 " + N + " 个包，耗时 " + r.done + " ms（理想值约 " + ideal + " ms，慢 " + (r.done / ideal).toFixed(1) + " 倍）\n";
+    const W = MODES[key].w || wnd, rate = Math.min(1, W / (rtt + 1));      // 每 ms 最多发 rate 个包（链路 1 包/ms，窗口受限时更少）
+    const ideal = Math.ceil(N / rate) + rtt;
+    let s = MODES[key].name + "：传输 " + N + " 个包，耗时 " + r.done + " ms（同窗口无丢包的理想值约 " + ideal + " ms，慢 " + (r.done / ideal).toFixed(1) + " 倍）\n";
+    if (rate < 1) s += "提示：窗口 " + W + " < 带宽时延积 ≈ " + (rtt + 1) + " 个包，即使不丢包也跑不满链路\n";
     s += "发送 " + r.sends + " 次，重传 " + (r.sends - N) + " 次，重传占比 " + (100 * (r.sends - N) / r.sends).toFixed(1) + "%\n\n同参数下各协议对比：\n";
     for(const k in MODES){ const q = sim(k, N, loss, wnd, rtt, seed); s += (k === key ? "▶ " : "  ") + MODES[k].name.padEnd(14, "　") + "耗时 " + String(q.done).padStart(6) + " ms　发送 " + String(q.sends).padStart(4) + " 次　重传占比 " + (100 * (q.sends - N) / q.sends).toFixed(1).padStart(5) + "%\n"; }
     $("arq-out").textContent = s;

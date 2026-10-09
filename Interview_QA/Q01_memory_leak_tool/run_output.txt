@@ -1,0 +1,88 @@
+
+==== 场景 1+2：裸指针泄漏 & shared_ptr 循环引用 ====
+  存活 12 块 / 360 字节，来自 3 个不同调用点
+  [1] 280 字节 / 10 块   tag=-
+        at SpawnBullets  (leak_tracker_demo.cpp:362)
+        at main  (leak_tracker_demo.cpp:425)
+  [2] 40 字节 / 1 块   tag=-
+        at CreateMonsterPair  (leak_tracker_demo.cpp:371)
+        at main  (leak_tracker_demo.cpp:426)
+  [3] 40 字节 / 1 块   tag=-
+        at CreateMonsterPair  (leak_tracker_demo.cpp:372)
+        at main  (leak_tracker_demo.cpp:426)
+
+== 场景 3：反复进出森林关卡 ==
+  第 1 次进出后，存活内存变化 +65663 字节
+  第 2 次进出后，存活内存变化 +65663 字节
+  第 3 次进出后，存活内存变化 +65663 字节
+
+==== 场景 3：关卡期间分配、卸载后仍存活 ====
+  存活 7 块 / 196989 字节，来自 3 个不同调用点
+  [1] 196725 字节 / 3 块   tag=Level_Forest
+        at Texture::Texture  (leak_tracker_demo.cpp:380)
+        at Level::Load  (leak_tracker_demo.cpp:388)
+        at PlayForestLevel  (leak_tracker_demo.cpp:399)
+  [2] 216 字节 / 3 块   tag=Level_Forest
+        at Level::Load  (leak_tracker_demo.cpp:388)
+        at PlayForestLevel  (leak_tracker_demo.cpp:399)
+        at main  (leak_tracker_demo.cpp:434)
+  [3] 48 字节 / 1 块   tag=Level_Forest
+        at Level::Load  (leak_tracker_demo.cpp:390)
+        at PlayForestLevel  (leak_tracker_demo.cpp:399)
+        at main  (leak_tracker_demo.cpp:434)
+
+==== 场景 4：4 个工作线程各 2 万次 new/delete 后 ====
+  存活 1 块 / 256 字节，来自 1 个不同调用点
+  [1] 256 字节 / 1 块   tag=Worker
+        at WorkerJob  (leak_tracker_demo.cpp:407)
+
+== 场景 5：越界写 / new[]-delete 不匹配 / 重复释放 ==
+
+[MemTracker][错误] 堆越界写：块 000002055ABE6AA0（8 字节）尾部哨兵被破坏
+      分配位置:
+        at main  (leak_tracker_demo.cpp:451)
+
+[MemTracker][错误] 分配用 new[]，释放用 delete，不匹配
+      分配位置:
+        at main  (leak_tracker_demo.cpp:452)
+
+[MemTracker][错误] 释放了未追踪/已释放的指针 0000020558379B90（重复释放或野指针），已拦截
+      释放位置:
+        at main  (leak_tracker_demo.cpp:453)
+
+==== 性能 ====
+  裸 malloc/free: 19 ns/次；带追踪 new/delete: 593 ns/次（约 32 倍）
+
+==== 按内存标签汇总（全部存活分配） ====
+  Level_Forest     196989 字节 / 7 块
+  (untagged)          360 字节 / 12 块
+  Worker              256 字节 / 1 块
+
+==== 追踪器统计 ====
+  累计分配 280149 次 / 释放 280129 次
+  当前存活 20 块 / 197605 字节，峰值 328747 字节
+  唯一调用栈 18 个（每个 136 字节，去重后只存一份）
+  非法/重复释放 1 次，越界写 1 次
+
+==== main 结束前仍存活（含全局对象，注意误报） ====
+  存活 20 块 / 197605 字节，来自 7 个不同调用点
+  [1] 196725 字节 / 3 块   tag=Level_Forest
+        at Texture::Texture  (leak_tracker_demo.cpp:380)
+        at Level::Load  (leak_tracker_demo.cpp:388)
+        at PlayForestLevel  (leak_tracker_demo.cpp:399)
+  [2] 280 字节 / 10 块   tag=-
+        at SpawnBullets  (leak_tracker_demo.cpp:362)
+        at main  (leak_tracker_demo.cpp:425)
+  [3] 256 字节 / 1 块   tag=Worker
+        at WorkerJob  (leak_tracker_demo.cpp:407)
+  [4] 216 字节 / 3 块   tag=Level_Forest
+        at Level::Load  (leak_tracker_demo.cpp:388)
+        at PlayForestLevel  (leak_tracker_demo.cpp:399)
+        at main  (leak_tracker_demo.cpp:434)
+  [5] 48 字节 / 1 块   tag=Level_Forest
+        at Level::Load  (leak_tracker_demo.cpp:390)
+        at PlayForestLevel  (leak_tracker_demo.cpp:399)
+        at main  (leak_tracker_demo.cpp:434)
+  [6] 40 字节 / 1 块   tag=-
+        at CreateMonsterPair  (leak_tracker_demo.cpp:371)
+        at main  (leak_tracker_demo.cpp:426)

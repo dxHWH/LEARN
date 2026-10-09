@@ -1,0 +1,230 @@
+<!-- ======================= CH10 ======================= -->
+<section class="chapter" id="ch10">
+  <div class="ch-head">
+    <div class="no">CHAPTER 10</div>
+    <h1>QUIC：把 TCP + TLS 搬到用户态重写一遍</h1>
+    <p class="lead">KCP 是一个 ARQ 算法，QUIC 是一个完整的、标准化的、加密的传输协议，也是 HTTP/3 的底座。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清 QUIC 的分层位置和它要解决的四个问题</li>
+    <li>理解 1-RTT / 0-RTT 握手、连接 ID 与连接迁移</li>
+    <li>理解 QUIC 的流为什么没有队头阻塞，以及"包号与流偏移分离"如何消除重传歧义</li>
+    <li>掌握 QUIC 的 ACK 帧、丢包检测（包阈值 / 时间阈值 / PTO）、两级流量控制、可插拔拥塞控制</li>
+    <li>知道 QUIC 的安全设计（抗放大、Retry、头部保护）与部署代价</li>
+  </ul></div>
+
+  <h2>10.1 背景与定位</h2>
+  <p>QUIC 最早由 Google 于 2012 年前后提出并在 Chrome 中部署（后称 gQUIC），之后由 IETF 标准化：<strong>RFC 9000（传输协议）、RFC 9001（与 TLS 1.3 的结合）、RFC 9002（丢包检测与拥塞控制）</strong>于 2021 年发布，基于 QUIC 的 <strong>HTTP/3（RFC 9114）</strong>于 2022 年发布。它要解决的正是第 4、7 章列出的 TCP 痛点：</p>
+  <div class="cards">
+    <div class="card"><div class="t">① 握手太慢</div><p>TCP 握手 1 RTT + TLS 1～2 RTT → QUIC 把传输握手和加密握手合并为 1 RTT，恢复连接时 0 RTT。</p></div>
+    <div class="card"><div class="t">② 队头阻塞</div><p>HTTP/2 的多个流共享一个 TCP 字节流 → QUIC 原生支持多个独立的流，丢包只影响所在的流。</p></div>
+    <div class="card"><div class="t">③ 换网断连</div><p>TCP 连接绑定四元组 → QUIC 用连接 ID 标识连接，IP / 端口变了连接仍在。</p></div>
+    <div class="card"><div class="t">④ 协议僵化</div><p>TCP 在内核里、头部明文、被中间设备"看懂"并干预 → QUIC 在用户态实现，几乎所有头部字段都加密，可以快速迭代。</p></div>
+  </div>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="22" text-anchor="middle" class="b">HTTP/2 协议栈</text>
+    <text x="645" y="22" text-anchor="middle" class="b" style="fill:#2F5BD3">HTTP/3 协议栈</text>
+    <g class="b sm" text-anchor="middle">
+      <rect x="90" y="36" width="250" height="38" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="215" y="60">HTTP/2（流、HPACK）</text>
+      <rect x="90" y="78" width="250" height="38" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="215" y="102">TLS 1.2 / 1.3</text>
+      <rect x="90" y="120" width="250" height="38" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="215" y="144">TCP（内核）</text>
+      <rect x="90" y="162" width="250" height="38" rx="6" fill="#F3F4F6" stroke="#6B7280"/><text x="215" y="186">IP</text>
+      <rect x="520" y="36" width="250" height="38" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="645" y="60">HTTP/3（QPACK）</text>
+      <rect x="520" y="78" width="250" height="80" rx="6" fill="#FFF4EC" stroke="#C2410C" stroke-width="2"/><text x="645" y="104" style="fill:#C2410C">QUIC（用户态）</text>
+      <text x="645" y="124" class="xs" style="font-weight:400">流复用 · 可靠传输 · 拥塞控制</text>
+      <text x="645" y="140" class="xs" style="font-weight:400">内置 TLS 1.3 · 连接迁移</text>
+      <rect x="520" y="162" width="250" height="38" rx="6" fill="#F3EEFE" stroke="#6D28D9"/><text x="645" y="186">UDP</text>
+      <rect x="520" y="204" width="250" height="30" rx="6" fill="#F3F4F6" stroke="#6B7280"/><text x="645" y="224">IP</text>
+    </g>
+    <line x1="350" y1="120" x2="510" y2="120" stroke="#9CA3AF" stroke-dasharray="4 3"/>
+    <text x="430" y="112" text-anchor="middle" class="xs">TLS + TCP 的职责</text>
+    <text x="430" y="138" text-anchor="middle" class="xs">合并进 QUIC</text>
+  </svg>
+  <figcaption><b>图 10-1</b> QUIC 把 TCP 的可靠传输、TLS 的加密和 HTTP/2 的流复用合并成一层，运行在 UDP 之上</figcaption>
+  </figure>
+
+  <h2>10.2 握手：1-RTT 与 0-RTT</h2>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm b">客户端发出第一个应用请求之前，需要等待几个 RTT</text>
+    <g class="sm b" text-anchor="end"><text x="200" y="62">TCP + TLS 1.2</text><text x="200" y="112">TCP + TLS 1.3</text><text x="200" y="162">QUIC 首次连接</text><text x="200" y="212">QUIC 恢复（0-RTT）</text></g>
+    <!-- 1 RTT = 180px -->
+    <rect x="210" y="44" width="180" height="28" fill="#EAF7EF" stroke="#15803D"/><text x="300" y="63" text-anchor="middle" class="xs">TCP 握手</text>
+    <rect x="390" y="44" width="360" height="28" fill="#FEF6E4" stroke="#B45309"/><text x="570" y="63" text-anchor="middle" class="xs">TLS 1.2 握手（2 RTT）</text>
+    <text x="760" y="63" class="sm b" style="fill:#B91C1C">3 RTT</text>
+    <rect x="210" y="94" width="180" height="28" fill="#EAF7EF" stroke="#15803D"/><text x="300" y="113" text-anchor="middle" class="xs">TCP 握手</text>
+    <rect x="390" y="94" width="180" height="28" fill="#FEF6E4" stroke="#B45309"/><text x="480" y="113" text-anchor="middle" class="xs">TLS 1.3（1 RTT）</text>
+    <text x="580" y="113" class="sm b" style="fill:#B45309">2 RTT</text>
+    <rect x="210" y="144" width="180" height="28" fill="#FFF4EC" stroke="#C2410C"/><text x="300" y="163" text-anchor="middle" class="xs">QUIC 握手（传输 + 加密合一）</text>
+    <text x="400" y="163" class="sm b" style="fill:#2F5BD3">1 RTT</text>
+    <rect x="210" y="194" width="8" height="28" fill="#2F5BD3"/>
+    <text x="228" y="213" class="sm b" style="fill:#15803D">0 RTT：第一个包就携带加密的 HTTP 请求</text>
+    <line x1="210" y1="236" x2="750" y2="236" stroke="#4B5563"/>
+    <g class="xs" text-anchor="middle"><text x="210" y="252">0</text><text x="390" y="252">1 RTT</text><text x="570" y="252">2 RTT</text><text x="750" y="252">3 RTT</text></g>
+  </svg>
+  <figcaption><b>图 10-2</b> 建连开销对比：冷启动 QUIC 比 TCP+TLS1.3 少 1 个 RTT；恢复连接时可以 0-RTT</figcaption>
+  </figure>
+  <ul>
+    <li><strong>1-RTT</strong>：客户端的第一个包（Initial）就包含 TLS 1.3 的 ClientHello 和 QUIC 的传输参数（初始流控窗口、最大流数量等），服务器一次回复就完成密钥协商，客户端随即可以发送应用数据。传输握手和加密握手共用同一个往返。</li>
+    <li><strong>0-RTT</strong>：客户端曾经连过这台服务器，保存了会话票据（session ticket），再次连接时可以用它派生的密钥直接加密应用数据，和 Initial 一起发出。</li>
+  </ul>
+  <div class="co warn"><span class="h">⚠️ 易错点：0-RTT 数据可以被重放</span><p>0-RTT 数据在服务器回复之前就发出了，不具备前向安全性，而且攻击者截获后可以原样重放给服务器。所以 0-RTT 只能用于<strong>幂等请求</strong>（如 GET），服务器端通常也会限制 0-RTT 能做的操作。这和 TCP Fast Open 面临的问题本质相同。</p></div>
+
+  <h2>10.3 连接 ID 与连接迁移</h2>
+  <figure>
+  <svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="40" width="150" height="60" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="95" y="66" text-anchor="middle" class="b sm">手机 · Wi-Fi</text><text x="95" y="86" text-anchor="middle" class="xs mono">192.168.1.5:50000</text>
+    <rect x="20" y="150" width="150" height="60" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="95" y="176" text-anchor="middle" class="b sm">手机 · 4G</text><text x="95" y="196" text-anchor="middle" class="xs mono">10.20.30.40:61234</text>
+    <line x1="95" y1="102" x2="95" y2="148" stroke="#C2410C" stroke-width="1.8" stroke-dasharray="5 3" marker-end="url(#ao)"/>
+    <text x="105" y="130" class="xs" style="fill:#C2410C">走出 Wi-Fi 范围</text>
+    <rect x="660" y="90" width="180" height="70" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="750" y="118" text-anchor="middle" class="b sm">服务器</text><text x="750" y="140" text-anchor="middle" class="xs">按连接 ID 查找连接</text>
+    <line x1="172" y1="70" x2="658" y2="110" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="400" y="78" text-anchor="middle" class="xs" style="fill:#2F5BD3">QUIC 包：目标连接 ID = C1</text>
+    <line x1="172" y1="180" x2="658" y2="140" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="400" y="182" text-anchor="middle" class="xs" style="fill:#15803D">QUIC 包：目标连接 ID = C2（同一连接的另一个 ID）</text>
+    <text x="400" y="200" text-anchor="middle" class="xs" style="fill:#15803D">服务器发 PATH_CHALLENGE 验证新路径，流和拥塞状态全部保留</text>
+    <text x="430" y="232" text-anchor="middle" class="xs">TCP：四元组变了 = 连接断了，所有请求失败、重新握手。QUIC：连接继续，用户感知不到</text>
+  </svg>
+  <figcaption><b>图 10-3</b> 连接迁移：QUIC 连接由连接 ID 标识，换网后用新的连接 ID 继续通信（换 ID 是为了防止旁观者把新旧路径关联起来）</figcaption>
+  </figure>
+  <p>这和第 8 章自研协议用 <code>conv</code> 识别会话是同一个思想。QUIC 做得更完整：双方可以通过 <code>NEW_CONNECTION_ID</code> 帧提前交换多个连接 ID，迁移时换用新 ID 以保护隐私；切换到新路径时必须先用 <code>PATH_CHALLENGE / PATH_RESPONSE</code> 验证对方确实在新地址上（防止被利用来攻击第三方），并重新评估这条路径的 RTT 和拥塞窗口。</p>
+
+  <h2>10.4 流：没有队头阻塞的多路复用</h2>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="20" text-anchor="middle" class="b">HTTP/2 over TCP</text>
+    <text x="645" y="20" text-anchor="middle" class="b" style="fill:#2F5BD3">HTTP/3 over QUIC</text>
+    <line x1="430" y1="8" x2="430" y2="210" stroke="#E5E7EB"/>
+    <g class="mono" text-anchor="middle">
+      <rect x="30" y="40" width="50" height="28" fill="#EAF0FD" stroke="#2F5BD3"/><text x="55" y="59">A1</text>
+      <rect x="84" y="40" width="50" height="28" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="4 3"/><text x="109" y="59" style="fill:#B91C1C">B1✕</text>
+      <rect x="138" y="40" width="50" height="28" fill="#F3EEFE" stroke="#6D28D9"/><text x="163" y="59">C1</text>
+      <rect x="192" y="40" width="50" height="28" fill="#EAF0FD" stroke="#2F5BD3"/><text x="217" y="59">A2</text>
+      <rect x="246" y="40" width="50" height="28" fill="#F3EEFE" stroke="#6D28D9"/><text x="271" y="59">C2</text>
+      <rect x="300" y="40" width="50" height="28" fill="#EAF7EF" stroke="#15803D"/><text x="325" y="59">B2</text>
+    </g>
+    <text x="215" y="90" text-anchor="middle" class="xs">TCP 只看到一条字节流：B1 所在的段丢失 = 整条流在此处断开</text>
+    <rect x="30" y="104" width="370" height="100" rx="8" fill="#FDEEEE" stroke="#F5C7C7"/>
+    <text x="215" y="128" text-anchor="middle" class="sm" style="fill:#B91C1C">流 A：A2 已到达，但被阻塞 ✕</text>
+    <text x="215" y="152" text-anchor="middle" class="sm" style="fill:#B91C1C">流 B：等待 B1 重传</text>
+    <text x="215" y="176" text-anchor="middle" class="sm" style="fill:#B91C1C">流 C：C1、C2 已到达，但被阻塞 ✕</text>
+    <text x="215" y="196" text-anchor="middle" class="xs">三个流全部等待一次重传</text>
+    <g class="mono" text-anchor="middle">
+      <rect x="460" y="40" width="50" height="28" fill="#EAF0FD" stroke="#2F5BD3"/><text x="485" y="59">A1</text>
+      <rect x="514" y="40" width="50" height="28" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="4 3"/><text x="539" y="59" style="fill:#B91C1C">B1✕</text>
+      <rect x="568" y="40" width="50" height="28" fill="#F3EEFE" stroke="#6D28D9"/><text x="593" y="59">C1</text>
+      <rect x="622" y="40" width="50" height="28" fill="#EAF0FD" stroke="#2F5BD3"/><text x="647" y="59">A2</text>
+      <rect x="676" y="40" width="50" height="28" fill="#F3EEFE" stroke="#6D28D9"/><text x="701" y="59">C2</text>
+      <rect x="730" y="40" width="50" height="28" fill="#EAF7EF" stroke="#15803D"/><text x="755" y="59">B2</text>
+    </g>
+    <text x="645" y="90" text-anchor="middle" class="xs">QUIC 知道每个帧属于哪个流、在流中的偏移量</text>
+    <rect x="460" y="104" width="370" height="100" rx="8" fill="#EAF7EF" stroke="#BFE6CC"/>
+    <text x="645" y="128" text-anchor="middle" class="sm" style="fill:#15803D">流 A：A1、A2 立即交付 ✔</text>
+    <text x="645" y="152" text-anchor="middle" class="sm" style="fill:#B91C1C">流 B：只有它等待 B1 重传</text>
+    <text x="645" y="176" text-anchor="middle" class="sm" style="fill:#15803D">流 C：C1、C2 立即交付 ✔</text>
+    <text x="645" y="196" text-anchor="middle" class="xs">每个流独立排序，互不影响</text>
+    <text x="430" y="236" text-anchor="middle" class="xs">注意：单个流内部仍然是可靠有序的字节流，B2 仍要等 B1——QUIC 消除的是"流与流之间"的队头阻塞</text>
+  </svg>
+  <figcaption><b>图 10-4</b> 同样丢了一个包：TCP 让三个流一起等，QUIC 只让受影响的流等</figcaption>
+  </figure>
+  <p>QUIC 的流用 62 位的流 ID 标识，最低两位表示由哪一方发起、是双向还是单向。HTTP/3 中每个请求 / 响应占用一个双向流。流的开销很小，开新流不需要握手，这让 HTTP/3 可以随意并发请求。</p>
+
+  <h2>10.5 可靠性设计：包号与流偏移分离</h2>
+  <p>这是 QUIC 相对 TCP 最精巧的设计之一。TCP 用同一个序号同时表示"这是哪个包"和"这是字节流的哪个位置"，所以重传的段和原段序号相同，ACK 到达时分不清确认的是哪一次发送（第 3 章的重传歧义）。QUIC 把两者拆开：</p>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm">
+      <rect x="40" y="30" width="220" height="70" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="150" y="52" text-anchor="middle" class="b" style="fill:#2F5BD3">包号 PN = 7</text>
+      <text x="150" y="74" text-anchor="middle" class="mono">STREAM(id=4, off=1000, len=500)</text>
+      <text x="150" y="92" text-anchor="middle" class="xs">首次发送</text>
+      <text x="300" y="70" class="b" style="fill:#B91C1C">✕ 丢失</text>
+      <rect x="400" y="30" width="220" height="70" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="510" y="52" text-anchor="middle" class="b" style="fill:#2F5BD3">包号 PN = 12（新包号！）</text>
+      <text x="510" y="74" text-anchor="middle" class="mono">STREAM(id=4, off=1000, len=500)</text>
+      <text x="510" y="92" text-anchor="middle" class="xs">重传：同样的帧，放进一个全新的包</text>
+      <line x1="262" y1="65" x2="398" y2="65" stroke="#C2410C" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ao)"/>
+      <rect x="660" y="30" width="170" height="70" rx="8" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="745" y="52" text-anchor="middle" class="b" style="fill:#15803D">ACK 帧</text>
+      <text x="745" y="74" text-anchor="middle" class="mono">Largest=12, Delay=2ms</text>
+      <text x="745" y="92" text-anchor="middle" class="xs">明确是对 PN 12 的确认</text>
+      <line x1="622" y1="65" x2="658" y2="65" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    </g>
+    <g class="xs">
+      <text x="40" y="130">• <tspan class="b">包号</tspan>（Packet Number）：每发一个包加 1，<tspan class="b">永不重复</tspan>，只用于确认、丢包检测和 RTT 测量 → 不存在重传歧义，每个 ACK 都能采样 RTT</text>
+      <text x="40" y="150">• <tspan class="b">流偏移</tspan>（Stream Offset）：帧中的数据在所属流中的字节位置，用于接收端重组 → 重传的数据可以放进任何新包，甚至和别的帧拼在一起</text>
+      <text x="40" y="170">• QUIC 重传的是"<tspan class="b">帧中承载的信息</tspan>"而不是"包"：丢失的 ACK 帧不重传（会发新的），丢失的 MAX_DATA 帧重传时发送<tspan class="b">最新值</tspan>，而不是旧值</text>
+      <text x="40" y="190">• ACK 帧最多可以携带很多个 ACK Range（远多于 TCP SACK 的 3～4 个块），还带有 ACK Delay 字段（接收方故意延迟了多久才确认），RTT 估计更准确</text>
+      <text x="40" y="210">• 三个包号空间：Initial、Handshake、1-RTT（应用数据）各自独立编号与确认</text>
+    </g>
+  </svg>
+  <figcaption><b>图 10-5</b> 包号只增不减、与流偏移分离：重传 = 把丢失的帧放进新包号的包里</figcaption>
+  </figure>
+
+  <h3>丢包检测（RFC 9002）</h3>
+  <div class="tbl"><table>
+    <tr><th>机制</th><th>规则</th><th>对应 TCP 的</th></tr>
+    <tr><td>包阈值</td><td>某个包之后又有 <strong>3 个</strong>更大包号的包被确认（kPacketThreshold = 3），判定它丢失</td><td>3 个重复 ACK</td></tr>
+    <tr><td>时间阈值</td><td>某个包发出后超过 <strong>9/8 × max(SRTT, 最新 RTT)</strong> 仍未被确认，而它之后发送的包已被确认，判定丢失</td><td>RACK（RFC 8985）</td></tr>
+    <tr><td>PTO 探测超时</td><td>一段时间（SRTT + max(4×RTTVAR, 1ms) + max_ack_delay）内收不到任何确认时，<strong>发送 1～2 个探测包</strong>，而不是直接判定丢失</td><td>RTO + TLP；但 PTO 触发时<strong>不会把拥塞窗口降到 1</strong>，只有持续拥塞时才大幅降窗</td></tr>
+  </table></div>
+
+  <h2>10.6 流量控制与拥塞控制</h2>
+  <ul>
+    <li><strong>两级流量控制</strong>：每个流有自己的接收上限（<code>MAX_STREAM_DATA</code>），整个连接还有一个总上限（<code>MAX_DATA</code>）；另外用 <code>MAX_STREAMS</code> 限制对方能同时打开多少个流。这样一个"慢流"不会吃光整个连接的缓冲。</li>
+    <li><strong>可插拔拥塞控制</strong>：RFC 9002 给出了一个类似 NewReno 的参考算法，但实现可以自由替换为 CUBIC、BBR 等。因为在用户态，<strong>升级拥塞算法只需要更新应用</strong>，不需要等操作系统——这正是 Google 能在 QUIC 上快速迭代 BBR 的原因。</li>
+    <li><strong>Pacing</strong>：推荐按速率平滑发包，而不是一次性把整个窗口突发出去，减少路由器队列压力。</li>
+  </ul>
+
+  <h2>10.7 安全设计</h2>
+  <div class="cards">
+    <div class="card"><div class="t">几乎全部加密</div><p>除了少量必要字段（标志位、连接 ID），QUIC 头部和所有帧都被加密；连包号也用"头部保护"加密了。中间设备看不到、也就改不了 QUIC 的内部字段——这是对抗协议僵化的主动设计。</p></div>
+    <div class="card"><div class="t">抗放大攻击</div><p>在验证客户端地址之前，服务器发送的数据<strong>不得超过收到数据的 3 倍</strong>；客户端的 Initial 包必须填充到至少 <strong>1200 字节</strong>，既保证了路径 MTU，也让放大倍数可控。</p></div>
+    <div class="card"><div class="t">Retry 令牌</div><p>服务器可以先回一个 Retry 包，要求客户端带着令牌重新发送 Initial，证明自己真的拥有这个源地址——这就是 SYN Cookie 思想在 QUIC 中的体现（第 5 章）。</p></div>
+  </div>
+
+  <h2>10.8 代价与现状</h2>
+  <ul>
+    <li><strong>CPU 开销</strong>：用户态协议栈、每包加解密、缺少成熟的硬件卸载，服务器 CPU 消耗通常高于 TCP + TLS。业界通过 UDP GSO / GRO、<code>sendmmsg</code>、内核旁路等手段优化。</li>
+    <li><strong>UDP 被限制</strong>：部分企业网络封禁 UDP 443，部分运营商对 UDP 限速。浏览器会通过 <code>Alt-Svc</code> 头部发现服务器支持 HTTP/3，并在 QUIC 失败时<strong>自动回退到 TCP</strong>。</li>
+    <li><strong>实现复杂</strong>：一个完整的 QUIC 实现动辄数万行代码。主流开源实现有 Chromium QUIC、Cloudflare quiche、Microsoft MsQuic、ngtcp2、quic-go、LiteSpeed lsquic 等。</li>
+    <li><strong>扩展</strong>：RFC 9221 定义了 <strong>DATAGRAM 帧</strong>，在 QUIC 连接中发送不可靠、不重传的数据（共享加密和拥塞控制），使 QUIC 也能承载"不可靠 · 只要最新"类的实时数据（WebTransport 就基于此）。</li>
+  </ul>
+
+  <h2>10.9 QUIC vs TCP vs KCP</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>TCP (+TLS)</th><th>KCP</th><th>QUIC</th></tr>
+    <tr><td>定位</td><td>内核传输协议</td><td>用户态 ARQ 算法库</td><td>用户态完整传输协议（IETF 标准）</td></tr>
+    <tr><td>建连</td><td>1 RTT + TLS 1～2 RTT</td><td>无（自行实现）</td><td>1 RTT，恢复时 0 RTT</td></tr>
+    <tr><td>连接标识</td><td>四元组</td><td>conv</td><td>连接 ID，支持迁移</td></tr>
+    <tr><td>多路复用</td><td>无（单字节流）</td><td>无（单消息流，需多个 KCP 对象）</td><td>原生多流，流间无队头阻塞</td></tr>
+    <tr><td>序号</td><td>字节序号，重传序号不变</td><td>包序号，重传 sn 不变（靠 ts 测 RTT）</td><td>包号永增 + 流偏移</td></tr>
+    <tr><td>确认</td><td>累计 ACK + SACK（3～4 块）</td><td>UNA + 逐包 ACK</td><td>ACK 帧（多 Range + ACK Delay）</td></tr>
+    <tr><td>重传策略</td><td>RTO×2，3 dup ACK，RACK/TLP</td><td>RTO×1.5，跳过 N 次快重传</td><td>包阈值 3 / 时间阈值 9/8 RTT / PTO</td></tr>
+    <tr><td>拥塞控制</td><td>CUBIC / BBR（内核）</td><td>类 Reno，可关闭</td><td>可插拔（NewReno / CUBIC / BBR）</td></tr>
+    <tr><td>加密</td><td>TLS（可选，头部明文）</td><td>无</td><td>强制 TLS 1.3，头部也加密</td></tr>
+    <tr><td>不可靠数据</td><td>不支持</td><td>不支持（需绕过 KCP 发裸 UDP）</td><td>DATAGRAM 扩展</td></tr>
+    <tr><td>典型场景</td><td>几乎所有可靠传输</td><td>游戏、加速器、实时信令</td><td>HTTP/3、移动 App、WebTransport</td></tr>
+  </table></div>
+
+  <div class="co tip"><span class="h">✅ 面试答法：QUIC 相比 TCP 有哪些改进？</span>
+  <p>① <strong>握手更快</strong>：传输和 TLS 1.3 握手合并，首次 1 RTT，恢复连接 0 RTT；② <strong>无队头阻塞</strong>：原生多流，每个流独立排序，一个丢包只影响所在的流；③ <strong>连接迁移</strong>：用连接 ID 而不是四元组标识连接，切换网络不断线；④ <strong>更好的丢包恢复</strong>：包号单调递增、与流偏移分离，消除重传歧义，ACK 帧可以携带大量范围和 ACK 延迟；⑤ <strong>用户态实现</strong>：拥塞控制可插拔、迭代快，且头部加密防止中间设备僵化；⑥ 内置抗放大和地址验证。代价是 CPU 开销更高，以及部分网络对 UDP 的限制需要回退 TCP。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>QUIC：RFC 9000/9001/9002（2021），HTTP/3 RFC 9114（2022）；= 可靠传输 + TLS 1.3 + 流复用，跑在 UDP 上。</li>
+    <li>握手 1-RTT，恢复 0-RTT（0-RTT 数据可被重放，只用于幂等请求）。</li>
+    <li>连接 ID 标识连接 → 连接迁移；迁移需 PATH_CHALLENGE 验证，换用新 ID 保护隐私。</li>
+    <li>多流复用：流间无队头阻塞，流内仍有序。</li>
+    <li><strong>包号永增、与流偏移分离</strong> → 无重传歧义；重传的是帧不是包；丢包检测：包阈值 3、时间阈值 9/8 RTT、PTO。</li>
+    <li>两级流控（MAX_STREAM_DATA / MAX_DATA）；拥塞控制可插拔；抗放大 3 倍、Initial ≥ 1200 字节、Retry 令牌。</li>
+    <li>代价：CPU 高、UDP 可能被封需回退 TCP、实现复杂；DATAGRAM 扩展支持不可靠数据。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：HTTP/3 一定比 HTTP/2 快吗？</summary>
+  <p>不一定。在低丢包、低 RTT 的有线网络中，两者差别很小，HTTP/3 甚至可能因为 CPU 开销更高、UDP 未被优化而略慢。HTTP/3 的优势集中在：高 RTT（握手少）、有丢包（无流间队头阻塞、恢复更快）、频繁切换网络（连接迁移）的移动场景。此外如果网络限制 UDP，浏览器会回退到 HTTP/2。</p></details>
+  <details class="quiz"><summary>思考题 2：为什么说 QUIC 的"包号永不重复"解决了 TCP 的重传歧义？KCP 是怎么解决的？</summary>
+  <p>TCP 重传段与原段序号相同，ACK 到来时无法判断确认的是哪一次发送，RTT 采样只能放弃（Karn 算法）或依赖时间戳选项。QUIC 每次发送都使用新的包号，ACK 确认的是具体包号，因此一定能对应到唯一一次发送，可以精确测量 RTT 并判断丢包。KCP 的重传仍然使用相同的 sn，但每次发送都更新 ts，接收方在 ACK 中回显 ts，发送方用 now − ts 计算 RTT，同样避免了歧义。</p></details>
+  <details class="quiz"><summary>思考题 3：QUIC 运行在用户态，那它还能利用内核的拥塞控制吗？这对公平性有什么影响？</summary>
+  <p>不能直接使用内核 TCP 的拥塞控制，QUIC 在用户态自己实现拥塞控制（RFC 9002 要求必须实现，不能不做）。这使得每个应用可以选择不同的算法，迭代更快；但也意味着公平性依赖于实现者的自律——如果某个实现采用过于激进的算法，会挤占同一瓶颈上其他 TCP 流的带宽。IETF 通过标准中的拥塞控制要求和互操作测试来约束这一点。</p></details>
+</section>

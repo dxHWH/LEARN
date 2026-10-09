@@ -1,0 +1,186 @@
+<div class="part-head" data-toc="第四部分 · 非比较排序">
+  <div class="no">PART FOUR</div>
+  <h1>第四部分　非比较排序：绕开 n log n</h1>
+  <p>不再问“谁大谁小”，而是直接利用键的数值结构：用键做数组下标，或者按数位逐位分配。代价是对键有要求，并且要额外的内存。</p>
+</div>
+
+<section class="chapter" id="ch7">
+  <div class="ch-head">
+    <div class="no">CHAPTER 07</div>
+    <h1>计数排序、基数排序、桶排序</h1>
+    <p class="lead">三者都是“分配式”排序。计数排序是基础，基数排序是多轮计数排序，桶排序是按值域粗分以后再细排。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>写出稳定的计数排序，理解前缀和与“倒序回填”各自的作用</li>
+    <li>理解 LSD 基数排序为什么要求每一趟都稳定，并能对负数、浮点数排序</li>
+    <li>知道桶排序在什么分布下有效、什么情况下会退化</li>
+    <li>明白它们在游戏里的典型用途：渲染 sort key、分组、直方图</li>
+  </ul></div>
+
+  <h2>7.1 计数排序：直接把值当下标</h2>
+  <p>如果键是 [0, k) 范围内的整数，可以开一个大小为 k 的计数数组，数一下每个值出现了几次，再按值从小到大输出。只要统计和输出两遍扫描，时间 O(n + k)。</p>
+  <p>只输出“值”时直接按计数展开就行。但如果要排的是带着其他字段的<strong>记录</strong>，并且要求稳定，就需要“前缀和 + 倒序回填”。下例中 a/b/c 用来区分键相同的记录：</p>
+  <!--trace {"rows":[
+    {"lab":"输入","a":["2a","5","3a","0","2b","3b","0b","3c"],"ix":true},
+    {"lab":"① 计数","a":[2,0,2,3,0,1],"s":"kkkkkk","ix":true,"note":"cnt[v] = 值 v 出现的次数"},
+    {"lab":"② 前缀和","a":[2,2,4,7,7,8],"s":"wwwwww","ix":true,"note":"cnt[v] = ≤ v 的个数 = v 段的结束位置"},
+    {"lab":"③ i=7","a":["","","","","","","3c",""],"s":"......x.","note":"3c：--cnt[3] → 6，放到 out[6]"},
+    {"lab":"i=6","a":["","0b","","","","","3c",""],"s":".x......","note":"0b：--cnt[0] → 1"},
+    {"lab":"i=5","a":["","0b","","","","3b","3c",""],"s":".....x..","note":"3b：--cnt[3] → 5，落在 3c 前面"},
+    {"lab":"完成","a":["0","0b","2a","2b","3a","3b","3c","5"],"s":"dddddddd","note":"同键记录保持原顺序 → 稳定"}],
+    "names":{"k":"计数数组","w":"前缀和","x":"本步写入 out"},
+    "cap":"<b>图 7-1</b>　稳定的计数排序：倒序扫描输入，每个值从它那一段的末尾往前填"} -->
+<!--code:cpp:counting_sort.h（稳定版）-->
+// key(x) 返回 [0, k) 的整数
+template <class T, class Key>
+void counting_sort(std::vector<T>& a, int k, Key key) {
+    std::vector<int> cnt(k + 1, 0);
+    for (const T& x : a) ++cnt[key(x) + 1];             // 存到 cnt[v+1]
+    for (int v = 0; v < k; ++v) cnt[v + 1] += cnt[v];   // 前缀和：cnt[v] 变成 v 段的起始位置
+    std::vector<T> out(a.size());
+    for (const T& x : a) out[cnt[key(x)]++] = x;        // 正序扫描 + 从起始位置往后填，同样稳定
+    a.swap(out);
+}
+<!--/code-->
+  <p>图 7-1 用的是“结束位置 + 倒序扫描”（教材常见写法），代码用的是“起始位置 + 正序扫描”，两者等价，都是稳定的。<strong>不能混用</strong>：结束位置配正序扫描，同键记录会被反过来。</p>
+  <div class="tbl"><table>
+    <tr><th>性质</th><th>结论</th></tr>
+    <tr><td>时间</td><td>O(n + k)，和输入顺序无关</td></tr>
+    <tr><td>空间</td><td>O(n + k)：输出数组 + 计数数组</td></tr>
+    <tr><td>稳定</td><td><span class="yes">✔</span>（按上面的写法）</td></tr>
+    <tr><td>适用</td><td>k 和 n 同一量级或更小。k 远大于 n 时（比如对 100 个 32 位整数排序）就得不偿失</td></tr>
+  </table></div>
+  <div class="co net"><span class="h">游戏客户端视角：计数排序到处都是，只是不叫这个名字</span>
+    <ul>
+      <li>背包按品质（白 / 绿 / 蓝 / 紫 / 橙，k=5）分组；英雄列表按职业分组。</li>
+      <li>粒子按发射器分组、实例按网格 ID 分批，都是“先计数，再前缀和得到偏移，再回填”。GPU 上用 compute shader 做的直方图 + prefix sum 完全是同一套思路。</li>
+      <li>空间哈希网格：每个格子统计一下物体数，做前缀和，就得到一个紧凑的“格子 → 物体列表”数组，比给每个格子开一个 <code>std::vector</code> 对缓存友好得多。</li>
+    </ul>
+  </div>
+
+  <h2>7.2 基数排序：按位多轮计数</h2>
+  <p>键的值域太大（比如 32 位整数）时，直接计数需要 40 亿个计数器。基数排序把键拆成若干“位”（比如每 8 比特一位，共 4 位），<strong>从最低位开始，每一位做一次稳定的计数排序</strong>，这叫 LSD（Least Significant Digit first）基数排序。</p>
+  <!--trace {"rows":[
+    {"lab":"原始","a":[170,45,75,90,802,24,2,66]},
+    {"lab":"按个位","a":[170,90,802,2,24,45,75,66],"s":"kkkkkkkk","g":[[0,1,"0"],[2,3,"2"],[4,4,"4"],[5,6,"5"],[7,7,"6"]],"note":"个位相同的保持原顺序：170 在 90 前"},
+    {"lab":"按十位","a":[802,2,24,45,66,170,75,90],"s":"kkkkkkkk","g":[[0,1,"0","o"],[2,2,"2","o"],[3,3,"4","o"],[4,4,"6","o"],[5,6,"7","o"],[7,7,"9","o"]],"note":"十位都是 7 时，个位小的 170 仍排在 75 前"},
+    {"lab":"按百位","a":[2,24,45,66,75,90,170,802],"s":"dddddddd","g":[[0,5,"0","g"],[6,6,"1","g"],[7,7,"8","g"]],"note":"三趟后整体有序"}],
+    "names":{"k":"本趟按当前位分组"},
+    "cap":"<b>图 7-2</b>　LSD 基数排序（十进制演示）：每一趟都必须稳定，低位排好的顺序才会被保留下来"} -->
+  <p><strong>为什么每一趟都必须稳定？</strong>以 170 和 75 为例：按十位排时，两者十位都是 7，平局。它们的个位顺序（0 &lt; 5）是上一趟排好的，只有稳定排序才能把这个顺序保留下来。如果这一趟不稳定，75 就可能跑到 170 前面，结果错误。这正是第 1 章说的多关键字排序：<strong>先按次要键排，再用稳定排序按主要键排</strong>。</p>
+
+<!--code:cpp:radix_sort.h（8 比特一趟，可跳过无用趟）-->
+// 对 uint64_t 键做 LSD 基数排序；tmp 是调用方提供的、和 a 等长的缓冲（可每帧复用）
+template <class T, class KeyFn>
+void radix_sort_u64(T* a, T* tmp, size_t n, KeyFn key) {
+    T* src = a; T* dst = tmp;
+    for (int pass = 0; pass < 8; ++pass) {
+        const int shift = pass * 8;
+        uint32_t cnt[257] = {};
+        for (size_t i = 0; i < n; ++i) ++cnt[((key(src[i]) >> shift) & 0xFF) + 1];
+        if (std::find(cnt + 1, cnt + 257, uint32_t(n)) != cnt + 257) continue;   // 这一字节全部相同：跳过
+        for (int b = 0; b < 256; ++b) cnt[b + 1] += cnt[b];
+        for (size_t i = 0; i < n; ++i) dst[cnt[(key(src[i]) >> shift) & 0xFF]++] = src[i];
+        std::swap(src, dst);                                                     // 乒乓缓冲
+    }
+    if (src != a) std::memcpy(a, src, n * sizeof(T));   // 示意；非平凡类型请用 std::move
+}
+<!--/code-->
+  <h3>复杂度：O(d · (n + b))</h3>
+  <p>d 是趟数，b 是每一位的取值个数（基数）。32 位整数用 8 比特一位，d = 4、b = 256，复杂度就是 O(4 · (n + 256))，对大 n 而言是线性的。基数选得越大，趟数越少，但计数数组越大：256 个计数器正好能放进 L1；如果选 16 比特一位（65536 个计数器），计数数组会超出 L1，反而变慢。</p>
+  <div class="co ver"><span class="h">实测 E5：N = 100 万个随机 int</span>
+    <p>基数排序 <strong>4.31 ms</strong>，<code>std::sort</code> 51.38 ms，快了约 12 倍。但它<strong>不是自适应的</strong>：输入有序时基数排序要 5.97 ms，<code>std::sort</code> 只要 3.91 ms。小数据量时优势也不明显，E8 中 N=2000 时二者分别是 0.016 ms 和 0.023 ms，基本持平。</p>
+  </div>
+
+  <h3>负数和浮点数</h3>
+  <p>LSD 基数排序是按无符号整数的二进制位排序的，所以要先把键<strong>映射成一个保持大小顺序的无符号整数</strong>：</p>
+<!--code:cpp:把有符号整数、浮点数映射成可排序的无符号键-->
+inline uint32_t key_of(int32_t x) {
+    return uint32_t(x) ^ 0x80000000u;          // 翻转符号位：负数变到 [0, 2^31)，正数变到 [2^31, 2^32)
+}
+
+inline uint32_t key_of(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);                    // 别用 *(uint32_t*)&f：违反严格别名规则
+    return (u & 0x80000000u) ? ~u              // 负数：全部取反（负得越多，原始位模式越大）
+                             : u | 0x80000000u; // 正数：只翻转符号位
+}
+// 渲染里的深度一般非负，可以直接把 float 位模式当键；NaN 要提前处理掉
+<!--/code-->
+
+  <h3>LSD 和 MSD</h3>
+  <div class="tbl"><table>
+    <tr><th></th><th>LSD（从低位开始）</th><th>MSD（从高位开始）</th></tr>
+    <tr><td>做法</td><td>每一趟处理整个数组</td><td>按最高位分桶，再在每个桶内递归处理下一位</td></tr>
+    <tr><td>要求</td><td>每一趟必须稳定</td><td>桶内递归，不要求稳定</td></tr>
+    <tr><td>适合</td><td>定长键：整数、64 位 sort key</td><td>变长键：字符串；可以提前结束（桶里只剩 1 个元素）</td></tr>
+    <tr><td>实现</td><td>简单，无递归，适合 GPU</td><td>递归；小桶要转插入排序</td></tr>
+  </table></div>
+
+  <h2>7.3 桶排序：按值域均匀分桶</h2>
+  <p>假设数据在 [0, 1) 内<strong>均匀分布</strong>。开 n 个桶，第 i 个桶装 [i/n, (i+1)/n) 范围的数，平均每个桶只有 1 个元素；对每个桶做插入排序，再按桶的顺序拼起来。</p>
+  <figure>
+  <svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="30" class="b sm">输入</text>
+    <g class="mono" text-anchor="middle">
+      <rect x="80" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="112" y="31">.78</text>
+      <rect x="148" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="180" y="31">.17</text>
+      <rect x="216" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="248" y="31">.39</text>
+      <rect x="284" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="316" y="31">.26</text>
+      <rect x="352" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="384" y="31">.72</text>
+      <rect x="420" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="452" y="31">.94</text>
+      <rect x="488" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="520" y="31">.21</text>
+      <rect x="556" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="588" y="31">.12</text>
+      <rect x="624" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="656" y="31">.23</text>
+      <rect x="692" y="12" width="64" height="28" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/><text x="724" y="31">.68</text>
+    </g>
+    <text x="20" y="92" class="b sm">10 个桶</text>
+    <g class="sm" text-anchor="middle">
+      <rect x="80" y="70" width="64" height="100" rx="6" fill="#F9FAFB" stroke="#9CA3AF"/><text x="112" y="186" class="xs">[0,.1)</text>
+      <rect x="148" y="70" width="64" height="100" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="180" y="186" class="xs">[.1,.2)</text>
+      <rect x="216" y="70" width="64" height="100" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="248" y="186" class="xs">[.2,.3)</text>
+      <rect x="284" y="70" width="64" height="100" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="316" y="186" class="xs">[.3,.4)</text>
+      <rect x="352" y="70" width="64" height="100" rx="6" fill="#F9FAFB" stroke="#9CA3AF"/><text x="384" y="186" class="xs">[.4,.5)</text>
+      <rect x="420" y="70" width="64" height="100" rx="6" fill="#F9FAFB" stroke="#9CA3AF"/><text x="452" y="186" class="xs">[.5,.6)</text>
+      <rect x="488" y="70" width="64" height="100" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="520" y="186" class="xs">[.6,.7)</text>
+      <rect x="556" y="70" width="64" height="100" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="588" y="186" class="xs">[.7,.8)</text>
+      <rect x="624" y="70" width="64" height="100" rx="6" fill="#F9FAFB" stroke="#9CA3AF"/><text x="656" y="186" class="xs">[.8,.9)</text>
+      <rect x="692" y="70" width="64" height="100" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="724" y="186" class="xs">[.9,1)</text>
+    </g>
+    <g class="mono" text-anchor="middle">
+      <text x="180" y="98">.12</text><text x="180" y="120">.17</text>
+      <text x="248" y="98">.21</text><text x="248" y="120">.23</text><text x="248" y="142">.26</text>
+      <text x="316" y="98">.39</text><text x="520" y="98">.68</text>
+      <text x="588" y="98">.72</text><text x="588" y="120">.78</text><text x="724" y="98">.94</text>
+    </g>
+    <text x="430" y="218" text-anchor="middle" class="sm">桶 i = ⌊x · n⌋；桶内插入排序后按桶的顺序拼接：.12 .17 .21 .23 .26 .39 .68 .72 .78 .94</text>
+  </svg>
+  <figcaption><b>图 7-3</b>　桶排序（CLRS 的经典例子）：分布均匀时每个桶只有很少的元素，桶内排序几乎不花时间</figcaption>
+  </figure>
+  <ul>
+    <li><strong>期望时间 O(n)</strong>：要求数据均匀分布。<strong>最坏 O(n²)</strong>：所有数据挤进同一个桶，退化成一次插入排序。</li>
+    <li>是否稳定取决于桶内用的算法：桶内用插入排序就是稳定的。</li>
+    <li>工程上不要给每个桶开一个 <code>std::vector</code>，每个桶都要分配内存，非常慢。本书 demo 先计数、再前缀和、再回填到一个扁平数组，最后在每段内做插入排序。实测 E5：100 万个均匀分布的 float，桶排序 9.68 ms，<code>std::sort</code> 63.61 ms。</li>
+  </ul>
+  <div class="co net"><span class="h">游戏客户端视角：透明物体的“深度分桶”</span>
+    <p>透明物体需要从远到近绘制。如果数量很多（比如成千上万个粒子），可以把视锥的深度范围分成 k 个桶，只按桶的顺序绘制，桶内不再排序。这是一个用少量误差换取速度的近似排序。GPU 粒子系统常在 compute shader 里做双调排序（bitonic sort）或基数排序，原因是它们的数据访问模式是固定的，适合并行。</p>
+  </div>
+
+  <h2>7.4 交互实验</h2>
+  <p>计数排序那一栏显示的是输出数组的填充过程：注意它是从右往左（倒序扫描输入）填的。基数排序用的是 3 位十进制数，观察每趟之后“低几位”逐渐有序。</p>
+  <div class="lab sortlab" id="lab-ns" data-algos="counting,radix" data-n="16" data-pattern="few"></div><!--/lab-->
+
+  <div class="co warn"><span class="h">面试注意</span>
+    <ul>
+      <li>“基数排序 O(n)，所以总比快排快”——<strong>不对</strong>。它有前提：键是定长整数或可以映射成定长整数，数据量足够大，有 O(n) 的额外内存。数据量小或基本有序时它可能更慢（E5 有序：5.97 ms 对 3.91 ms）。</li>
+      <li>被问“基数排序为什么从低位开始”：因为从低位开始时，每一趟都处理整个数组，只要求每趟稳定，不需要递归；从高位开始就要在每个桶内递归。</li>
+      <li>被问“1 亿个 0~100 岁的年龄怎么排”：计数排序，k = 101，一遍计数一遍展开，O(n)，计数数组只有 101 个 int。</li>
+    </ul>
+  </div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>计数排序：O(n + k)，稳定的关键是<strong>前缀和 + 回填方向配对</strong>（起始位置 + 正序，或结束位置 + 倒序）。</li>
+    <li>LSD 基数排序：O(d(n + b))，<strong>每一趟必须稳定</strong>；8 比特一趟，256 个计数器正好放进 L1。</li>
+    <li>负整数翻转符号位，浮点数“负数全取反、正数翻符号位”，就能按无符号整数排序。</li>
+    <li>桶排序：均匀分布时期望 O(n)，最坏 O(n²)；用扁平数组实现。</li>
+  </ul></div>
+</section>

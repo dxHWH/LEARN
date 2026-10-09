@@ -1,0 +1,92 @@
+
+==================== D1 new 表达式拆解 ====================
+[1] Tracer* t = new Tracer(1); delete t;
+    Tracer::operator new(size=4) -> 000001C8DDA30650
+    Tracer(1) 构造, this=000001C8DDA30650
+    ~Tracer(1) 析构
+    Tracer::operator delete(000001C8DDA30650)
+[2] 构造函数抛异常：编译器自动调用『匹配的』operator delete 回收内存，不调用析构
+    Tracer::operator new(size=4) -> 000001C8DDA306F0
+    Tracer(-1) 构造, this=000001C8DDA306F0
+    Tracer::operator delete(000001C8DDA306F0)
+    捕获异常: 构造失败
+[3] 手动两步走（等价于 new 表达式），注意必须写 ::new，类内 operator new 会隐藏全局 placement new
+    Tracer::operator new(size=4) -> 000001C8DDA30620
+    Tracer(2) 构造, this=000001C8DDA30620
+    ~Tracer(2) 析构
+    Tracer::operator delete(000001C8DDA30620)
+[4] ::new / ::delete 强制走全局版本，跳过类专属版本
+    [全局 operator new] size=4
+    Tracer(3) 构造, this=000001C8DDA305F0
+    ~Tracer(3) 析构
+    [全局 operator delete(sized)] 000001C8DDA305F0 size=4
+
+==================== D2 new[] 与数组 cookie ====================
+[new PodItem[5]]  sizeof(PodItem)=4, 平凡析构=是
+    PodItem::operator new[](size=20) 原始块=000001C8DDA44520
+    表达式返回=000001C8DDA44520, 与原始块偏移=0 字节
+    PodItem::operator delete[](000001C8DDA44520)
+[new DtorItem[5]]  sizeof(DtorItem)=4, 平凡析构=否
+    DtorItem::operator new[](size=28) 原始块=000001C8DDA4F990
+    表达式返回=000001C8DDA4F998, 与原始块偏移=8 字节  → cookie 里存的元素个数=5
+    DtorItem::operator delete[](000001C8DDA4F990)
+[new SizedItem[5]]  sizeof(SizedItem)=4, 平凡析构=是
+    SizedItem::operator new[](size=20) 原始块=000001C8DDA441E0
+    表达式返回=000001C8DDA441E0, 与原始块偏移=0 字节
+    SizedItem::operator delete[](000001C8DDA441E0, size=4)
+[new int[0]] 合法，返回非空且唯一的指针
+    [全局 operator new] size=0
+    返回 000001C8DDA30640 (非空=是)
+    [全局 operator delete] 000001C8DDA30640
+
+==================== D3 分配失败的处理路径 ====================
+[1] 普通 new：失败 → 循环调用 new_handler → 最终抛 std::bad_alloc
+    new_handler 第 1 次被调用
+    → 释放 64MB 应急内存后重试（真实项目里还会触发资源卸载/GC）
+    new_handler 第 2 次被调用
+    → 已无可释放内存，卸载 handler，下次失败将抛 bad_alloc
+    捕获 bad allocation
+[2] new (std::nothrow)：分配失败返回 nullptr，不抛异常
+    返回 0000000000000000
+[3] new (std::nothrow) 只管『分配』不管『构造』：构造函数的异常照样抛出
+    [全局 operator new] size=1
+    [全局 operator delete] 000001C8DDA305D0
+    捕获 Thrower 构造失败（内存已被自动释放，见上一行 delete）
+[4] 元素个数 * sizeof 溢出 / 负数长度 → std::bad_array_new_length（bad_alloc 的派生类）
+    捕获 bad_alloc: bad allocation
+    捕获 bad_alloc: bad allocation
+
+==================== D4 过对齐类型与 align_val_t ====================
+__STDCPP_DEFAULT_NEW_ALIGNMENT__ = 16, alignof(CacheLineData) = 64
+    [全局 operator new(align_val_t)] size=64 align=64
+    地址 000001C8DDA41700, 地址 % 64 = 0
+    [全局 operator new(align_val_t)] size=64 align=64
+    地址 000001C8DDA40740, 地址 % 64 = 0
+    [全局 operator new(align_val_t)] size=64 align=64
+    地址 000001C8DDA41100, 地址 % 64 = 0
+[vector<CacheLineData>] std::allocator 也会自动走对齐版本:
+    [全局 operator new(align_val_t)] size=256 align=64
+    data()=000001C8DDA5A480, % 64 = 0
+
+==================== D5 sized delete / destroying delete ====================
+sizeof(Base)=16, sizeof(Derived)=120
+[delete Base* 指向 Derived，有虚析构] 虚『删除析构函数』传入真实大小:
+    Base::operator delete(000001C8DDA3E5D0, size=120)
+[delete PooledEnemy*]
+    destroying delete：手动析构 hp=100 的对象并还给池子（这里简单 free）
+
+==================== D6 隐藏的堆分配 ====================
+    std::string 10 字符（SSO）                 分配   0 次,      0 字节
+    std::string 33 字符                          分配   1 次,     48 字节
+    vector push_back x1000（无 reserve）        分配  18 次,  12851 字节
+    vector push_back x1000（先 reserve）        分配   1 次,   4000 字节
+    shared_ptr<Monster>(new Monster)               分配   2 次,     40 字节
+    make_shared<Monster>()                         分配   1 次,     32 字节
+    make_unique<Monster>()                         分配   1 次,     16 字节
+
+==================== D7 性能对比：100 万个 64B 子弹，分配→写入→释放 ====================
+    逐个 new/delete（malloc → HeapAlloc）    63.17 ms  ( 63.2 ns/个,   1.0x)
+    ObjectPool + placement new                   5.59 ms  (  5.6 ns/个,  11.3x)
+    FrameArena（bump 指针 + Reset）          3.54 ms  (  3.5 ns/个,  17.8x)
+    pmr::monotonic_buffer_resource               4.02 ms  (  4.0 ns/个,  15.7x)
+    (sink=9.99881e+12)

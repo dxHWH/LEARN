@@ -1,0 +1,173 @@
+<div class="part-head" data-toc="第四部分 · 像素阶段">
+  <div class="no">PART FOUR</div>
+  <h1>第四部分　像素阶段：颜色、可见性与合成</h1>
+  <p>片元到了这里要回答三个问题：它是什么颜色（像素着色与纹理）、它能不能被看见（深度与模板）、它怎样和已有的颜色合在一起（混合与抗锯齿）。</p>
+</div>
+
+<section class="chapter" id="ch7">
+  <div class="ch-head">
+    <div class="no">CHAPTER 07</div>
+    <h1>片元着色与纹理采样</h1>
+    <p class="lead">纹理是被采样的信号：放大时要插值，缩小时要先滤波——Mipmap 就是一张预先滤好波的金字塔。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>知道像素着色器的输入输出、<code>discard</code> 与写深度的代价</li>
+    <li>理解纹理放大（magnification）与缩小（minification）是两个不同的问题</li>
+    <li>掌握点采样、双线性、三线性、各向异性过滤的原理与开销</li>
+    <li>能写出 Mip LOD 的计算公式，解释"远处模糊""远处闪烁""斜看糊成一片"分别是什么原因</li>
+    <li>理解纹理缓存、纹理压缩、sRGB 与 Mip 对带宽的意义</li>
+  </ul></div>
+
+  <h2>7.1 像素着色器做什么</h2>
+  <p>像素着色器（Fragment Shader）对每个片元运行一次，输入是插值好的属性（uv、法线、世界坐标……）和系统值（<code>SV_Position</code> 的像素坐标、<code>SV_IsFrontFace</code>、MSAA 的 <code>SV_SampleIndex</code> 等），输出是一个或多个颜色（MRT），可选输出深度和覆盖掩码。</p>
+  <div class="tbl"><table>
+    <tr><th>在 PS 里做的事</th><th>对管线的影响</th></tr>
+    <tr><td>纹理采样、光照计算</td><td>正常；开销取决于 ALU 指令数和纹理带宽</td></tr>
+    <tr><td><code>discard</code> / <code>clip()</code>（Alpha Test）</td><td>深度写入必须等 PS 执行完才能决定 → <strong>Early-Z 的写入被推迟</strong>，移动端 TBDR 的隐藏面消除也会失效（第 8、10 章）</td></tr>
+    <tr><td>写 <code>SV_Depth</code></td><td>深度要等 PS 算完才知道 → <strong>Early-Z 完全关闭</strong>；可以用 <code>SV_DepthGreaterEqual</code> 等保守深度挽回一部分</td></tr>
+    <tr><td>写 UAV / 原子操作</td><td>有副作用的 PS 不能被跳过，需要 <code>[earlydepthstencil]</code> 显式要求早测</td></tr>
+  </table></div>
+
+  <h2>7.2 纹理是被采样的信号</h2>
+  <p>纹理是一张离散的 texel 网格，而像素着色器给出的 uv 是连续的。于是有两种情况：</p>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(30,20)">
+      <text x="170" y="0" text-anchor="middle" class="b sm">放大：一个 texel 覆盖很多像素</text>
+      <g stroke="#94A3B8"><rect x="40" y="16" width="80" height="80" fill="#1F2937"/><rect x="120" y="16" width="80" height="80" fill="#F3F4F6"/><rect x="40" y="96" width="80" height="80" fill="#F3F4F6"/><rect x="120" y="96" width="80" height="80" fill="#1F2937"/></g>
+      <g stroke="#C2410C" stroke-width="0.6" fill="none">
+        <rect x="40" y="16" width="20" height="20"/><rect x="60" y="16" width="20" height="20"/><rect x="80" y="16" width="20" height="20"/><rect x="100" y="16" width="20" height="20"/><rect x="120" y="16" width="20" height="20"/><rect x="140" y="16" width="20" height="20"/>
+      </g>
+      <text x="220" y="70" class="xs">像素（橙色小格）</text>
+      <text x="220" y="86" class="xs">比 texel 小得多</text>
+      <text x="170" y="196" text-anchor="middle" class="xs">问题是"块状"→ 用双线性插值把 texel 之间连起来</text>
+    </g>
+    <g transform="translate(460,20)">
+      <text x="180" y="0" text-anchor="middle" class="b sm">缩小：一个像素覆盖很多 texel</text>
+      <g>
+        <rect x="40" y="16" width="160" height="160" fill="#F3F4F6" stroke="#94A3B8"/>
+        <g fill="#1F2937">
+          <rect x="40" y="16" width="20" height="20"/><rect x="80" y="16" width="20" height="20"/><rect x="120" y="16" width="20" height="20"/><rect x="160" y="16" width="20" height="20"/>
+          <rect x="60" y="36" width="20" height="20"/><rect x="100" y="36" width="20" height="20"/><rect x="140" y="36" width="20" height="20"/><rect x="180" y="36" width="20" height="20"/>
+          <rect x="40" y="56" width="20" height="20"/><rect x="80" y="56" width="20" height="20"/><rect x="120" y="56" width="20" height="20"/><rect x="160" y="56" width="20" height="20"/>
+          <rect x="60" y="76" width="20" height="20"/><rect x="100" y="76" width="20" height="20"/><rect x="140" y="76" width="20" height="20"/><rect x="180" y="76" width="20" height="20"/>
+          <rect x="40" y="96" width="20" height="20"/><rect x="80" y="96" width="20" height="20"/><rect x="120" y="96" width="20" height="20"/><rect x="160" y="96" width="20" height="20"/>
+          <rect x="60" y="116" width="20" height="20"/><rect x="100" y="116" width="20" height="20"/><rect x="140" y="116" width="20" height="20"/><rect x="180" y="116" width="20" height="20"/>
+          <rect x="40" y="136" width="20" height="20"/><rect x="80" y="136" width="20" height="20"/><rect x="120" y="136" width="20" height="20"/><rect x="160" y="136" width="20" height="20"/>
+          <rect x="60" y="156" width="20" height="20"/><rect x="100" y="156" width="20" height="20"/><rect x="140" y="156" width="20" height="20"/><rect x="180" y="156" width="20" height="20"/>
+        </g>
+        <rect x="40" y="16" width="160" height="160" fill="none" stroke="#C2410C" stroke-width="3"/>
+        <circle cx="70" cy="46" r="5" fill="#C2410C"/>
+      </g>
+      <text x="220" y="70" class="xs">一个像素 = 64 个 texel</text>
+      <text x="220" y="86" class="xs">只在橙点取 1 个 → 结果随机黑/白</text>
+      <text x="180" y="196" text-anchor="middle" class="xs">问题是"闪烁/摩尔纹"→ 必须先低通滤波（Mipmap）</text>
+    </g>
+  </svg>
+  <figcaption><b>图 7-1</b>　放大和缩小是两回事。缩小时，只取一个点等于用远低于奈奎斯特频率的采样率去采一个高频信号。</figcaption>
+  </figure>
+  <p>缩小时的走样有一个精确的信号处理解释：采样定理要求采样频率至少是信号最高频率的两倍。一个像素覆盖 8×8 个 texel，相当于每 8 个 texel 只采一次，纹理里任何周期小于 16 texel 的细节都会"折叠"成错误的低频图案——这就是远处地面的摩尔纹，镜头移动时它还会闪烁。<strong>解决办法只有一个：采样之前先把高频去掉。</strong></p>
+
+  <h2>7.3 Mipmap：预先滤好波的金字塔</h2>
+  <p>Mipmap 预先把纹理逐级缩小一半（box 滤波或更好的 Kaiser 滤波），得到 Level 0（原图）、1（1/2）、2（1/4）……直到 1×1。采样时根据"一个像素覆盖多少个 texel"选择合适的层级，于是每次采样都只需要读少量 texel，却得到了大范围的平均值。</p>
+  <ul>
+    <li><strong>内存开销</strong>：1 + 1/4 + 1/16 + … = 4/3，只多 33%。</li>
+    <li><strong>带宽收益</strong>：远处像素读的是小 Mip，texel 在内存里很集中，缓存命中率大幅提高（E9：80.8% → 99.3%）。</li>
+  </ul>
+  <h3>LOD 怎么算</h3>
+  <p>用第 6 章的屏幕空间导数：一个像素在纹理空间里的"脚印"可以用两个向量近似——沿屏幕 x 方向走一个像素，uv 变化 <code>(∂u/∂x, ∂v/∂x)</code>；沿 y 方向变化 <code>(∂u/∂y, ∂v/∂y)</code>。乘以纹理尺寸换成 texel 单位后：</p>
+  <div class="fm">ρ = max( √((∂u/∂x·W)² + (∂v/∂x·H)²),　√((∂u/∂y·W)² + (∂v/∂y·H)²) )　　LOD λ = log₂ ρ</div>
+<!--code:cpp:soft_raster.cpp · Tex::sampleGrad（各向同性部分）-->
+float lx = std::sqrt(dudx * W * dudx * W + dvdx * H * dvdx * H);   // 像素 x 方向在纹理中的长度（texel）
+float ly = std::sqrt(dudy * W * dudy * W + dvdy * H * dvdy * H);   // 像素 y 方向
+float lod = log2f(std::max(std::max(lx, ly), 1e-8f));             // 取长边 → 宁可模糊，不可闪烁
+return trilinear(u, v, lod);                                        // 在 floor(lod) 和 floor(lod)+1 两层间插值
+<!--/code-->
+
+  <h2>7.4 四种过滤方式</h2>
+  <div class="tbl"><table>
+    <tr><th>过滤</th><th>做法</th><th>每次采样读 texel</th><th>问题</th></tr>
+    <tr><td>点采样 Point</td><td>取最近的一个 texel，LOD 0</td><td>1</td><td>放大成马赛克、缩小严重闪烁</td></tr>
+    <tr><td>双线性 Bilinear</td><td>取最近的 2×2 texel 按距离加权</td><td>4</td><td>放大平滑；缩小仍然走样（只是"软一点的走样"）</td></tr>
+    <tr><td>三线性 Trilinear</td><td>在相邻两层 Mip 上各做一次双线性，再按 LOD 小数部分插值</td><td>8</td><td>斜视角下过度模糊（用长边选 LOD，短边方向被过度平均）</td></tr>
+    <tr><td>各向异性 Anisotropic (N×)</td><td>沿像素脚印的长轴方向取多个三线性样本，LOD 按短边选</td><td>最多 8N</td><td>贵；但对地面、道路这种掠射角表面效果显著</td></tr>
+  </table></div>
+  <figure>
+  <svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="18" text-anchor="middle" class="sm">一个屏幕像素在纹理空间的"脚印"：斜看地面时是一个细长的四边形</text>
+    <g transform="translate(60,30)">
+      <rect x="0" y="0" width="120" height="120" fill="#F3F4F6" stroke="#94A3B8"/>
+      <rect x="20" y="20" width="80" height="80" fill="none" stroke="#2F5BD3" stroke-width="2"/>
+      <text x="60" y="140" text-anchor="middle" class="xs">正对表面：脚印≈正方形</text>
+      <text x="60" y="156" text-anchor="middle" class="xs">三线性就够了</text>
+    </g>
+    <g transform="translate(300,30)">
+      <rect x="0" y="0" width="220" height="120" fill="#F3F4F6" stroke="#94A3B8"/>
+      <polygon points="10,50 210,40 210,70 10,80" fill="none" stroke="#B91C1C" stroke-width="2"/>
+      <circle cx="110" cy="60" r="56" fill="none" stroke="#B91C1C" stroke-dasharray="4 3"/>
+      <text x="110" y="140" text-anchor="middle" class="xs" style="fill:#B91C1C">三线性：按长边选 LOD → 用一个大圆去平均</text>
+      <text x="110" y="156" text-anchor="middle" class="xs" style="fill:#B91C1C">短边方向被过度模糊</text>
+    </g>
+    <g transform="translate(580,30)">
+      <rect x="0" y="0" width="220" height="120" fill="#F3F4F6" stroke="#94A3B8"/>
+      <polygon points="10,50 210,40 210,70 10,80" fill="none" stroke="#15803D" stroke-width="2"/>
+      <g fill="none" stroke="#15803D"><circle cx="30" cy="64" r="14"/><circle cx="70" cy="62" r="14"/><circle cx="110" cy="60" r="14"/><circle cx="150" cy="58" r="14"/><circle cx="190" cy="56" r="14"/></g>
+      <text x="110" y="140" text-anchor="middle" class="xs" style="fill:#15803D">各向异性：按短边选 LOD，沿长轴取 N 个样本</text>
+      <text x="110" y="156" text-anchor="middle" class="xs" style="fill:#15803D">既不走样，也不过度模糊</text>
+    </g>
+  </svg>
+  <figcaption><b>图 7-2</b>　各向异性过滤的思想：脚印是长条形时，用多个小样本去铺满它，而不是用一个大圆。</figcaption>
+  </figure>
+
+  <h2>7.5 实测：远处的地面</h2>
+  <p>E9 渲染一块高 1 米视角、一直延伸到 300 米的棋盘格地面。参考图用 8×8=64 次超采样（每个子样本做 LOD0 双线性）近似"像素内的真实平均颜色"，然后比较各种过滤方式的误差和开销：</p>
+<!--img:e9_point:点采样（无 Mip）;e9_bilinear:双线性（无 Mip）;e9_trilinear:三线性 Mipmap|<b>图 7-3a</b>　E9 实测（384×216）。点采样在中远处出现强烈摩尔纹；双线性只是让摩尔纹"软"一点；三线性去掉了摩尔纹，但远处糊成了一片灰。-->
+<!--img:e9_aniso16:三线性 + 16× 各向异性;e9_lodbias:三线性 + LOD Bias −2;e9_ref:参考（64× 超采样）|<b>图 7-3b</b>　各向异性过滤在远处保留了棋盘格的细节且没有走样，最接近参考图；负的 LOD Bias 让画面"看起来更锐"，实际是重新引入了走样。-->
+  <div class="term"><div class="bar">soft_raster.exe · E9</div><pre>采样方式                   RMSE全图    近<3m  中3~12m 每像素texel 缓存命中 平均LOD
+点采样 LOD0（无 mip）       <span class="bad">0.3063</span>    0.2152    0.3694          1.0      80.8%     0.00
+双线性 LOD0（无 mip）       0.2210    0.0873    0.2913          4.0      93.7%     0.00
+三线性 mipmap                  0.0874    0.0550    0.1268          7.6      <span class="ok">99.3%</span>     2.50
+三线性 + 16x 各向异性      <span class="ok">0.0261</span>    0.0173    0.0293         <span class="hl">39.3</span>      98.5%     0.70
+三线性 + LOD Bias -2（过锐）    0.1221    0.0872    0.1719          5.8      97.0%     2.50</pre></div>
+  <div class="co ver"><span class="h">🔬 从输出里能读出什么</span>
+  <ul>
+    <li><strong>Mipmap 是降误差的第一功臣</strong>：从双线性到三线性，全图误差降为 40%，中距离降为 44%。</li>
+    <li><strong>Mipmap 同时也是省带宽的功臣</strong>：每像素虽然读了 7.6 个 texel（比双线性多），但缓存命中率从 93.7% 升到 99.3%——真正打到显存的未命中次数反而更少。<em>"开 Mipmap 会更慢"是错误的直觉。</em></li>
+    <li><strong>各向异性把误差再降到 1/3</strong>（0.087 → 0.026），平均 LOD 从 2.5 降到 0.7（用短边选 LOD，所以更清晰），代价是每像素读 39 个 texel、是三线性的 5 倍。真实硬件对此做了大量优化（按实际各向异性程度自适应取样数），桌面 GPU 上 16× 各向异性几乎免费，移动端则要慎重（常用 2×～4×，只对地面开）。</li>
+    <li><strong>LOD Bias −2 "看起来更清楚"，误差却比三线性高 40%</strong>——它用更高分辨率的 Mip 去采样，等于又把高频放了回来。TAA/DLSS 这类时域方法会刻意使用负 LOD Bias，因为它们靠多帧抖动累积来去走样。</li>
+  </ul></div>
+
+  <h2>7.6 纹理缓存、压缩与格式</h2>
+  <p>纹理采样的瓶颈通常不是计算，而是<strong>带宽和延迟</strong>。几个关键事实：</p>
+  <div class="cards">
+    <div class="card"><div class="t">纹理缓存按块组织</div><p>texel 在显存中按 Tile / Morton（Z 序）排列，2D 上相邻的 texel 在内存里也相邻；缓存行一次取一小块（实测程序模拟为 4×4）。所以"屏幕上相邻像素采样纹理上相邻位置"时命中率极高——这依赖 Mipmap 和规则的 uv。</p></div>
+    <div class="card"><div class="t">块压缩（BCn / ASTC / ETC2）</div><p>以 4×4（ASTC 可变）为块固定码率压缩，GPU 解压是硬件完成的、可随机访问。RGBA8 是 32 bpp，BC1/ETC2 RGB 是 4 bpp，ASTC 6×6 约 3.56 bpp——<strong>带宽直接降为 1/8～1/9</strong>。移动端统一用 ASTC。</p></div>
+    <div class="card"><div class="t">sRGB 纹理</div><p>颜色贴图以 sRGB 存储（感知均匀，8 位够用），采样时硬件自动转成线性空间再插值和计算；法线、粗糙度、遮罩等"数据纹理"必须标记为线性，否则数值被错误地做了伽马变换。</p></div>
+    <div class="card"><div class="t">依赖纹理读取</div><p>用一次采样的结果去算另一次采样的 uv（视差、扭曲特效）会让第二次采样无法提前发出，延迟隐藏能力下降；在 Warp 数少（寄存器多）时尤其明显。</p></div>
+  </div>
+  <div class="co warn"><span class="h">⚠️ 面试易错</span>
+  <ul>
+    <li>"Mipmap 是为了让远处的纹理更清楚"——错，Mipmap 让远处<strong>更模糊</strong>，它是为了<strong>消除走样和闪烁、提高缓存命中率</strong>。</li>
+    <li>"UI 也应该开 Mipmap"——不一定。UI 通常 1:1 显示，不会缩小，开 Mipmap 只会多占 33% 内存；但会被缩放显示的图标、世界空间 UI 应该开。</li>
+    <li>"纹理 Wrap 模式不影响 Mip"——图集（Atlas）里相邻的子图在低 Mip 会互相渗色，需要留出足够的 padding 或使用 Texture Array。</li>
+  </ul></div>
+
+  <h2>7.7 游戏实战：贴图预算与 Mip Streaming</h2>
+  <ul>
+    <li><strong>Mip Streaming / 纹理流送</strong>：根据物体在屏幕上的大小只加载需要的 Mip 层级（例如远处的建筑只加载 256×256 及以下），内存可省一半以上。Unity 的 Mipmap Streaming、UE 的 Texture Streaming 都基于第 7.3 节的 LOD 估计。</li>
+    <li><strong>MOBA 的地表</strong>：俯视 45°～60° 左右，各向异性需求没有第一/三人称游戏强，但地面贴图分辨率大、重复多，Mipmap + ASTC 必不可少；地表常用多层混合（Splat Map），每多一层就多一组采样。</li>
+    <li><strong>特效贴图</strong>：粒子常用小尺寸的序列帧图集，注意图集 padding 和 Mip 渗色；全屏扭曲/热浪是依赖纹理读取，移动端要控制使用范围。</li>
+  </ul>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li><code>discard</code> 推迟深度写入、写 <code>SV_Depth</code> 关闭 Early-Z——PS 的写法会反过来影响固定功能阶段。</li>
+    <li>纹理<strong>放大</strong>要插值（双线性），<strong>缩小</strong>要先滤波（Mipmap），否则高频折叠成摩尔纹和闪烁。</li>
+    <li>LOD = log₂(像素脚印在纹理中的长边长度)，长度来自 2×2 Quad 求出的 uv 导数。</li>
+    <li>E9：三线性比无 Mip 误差降 60%、缓存命中 99%；16× 各向异性误差再降 70%，但取样数是 5 倍；负 LOD Bias 重新引入走样。</li>
+    <li>块压缩（ASTC/BCn）把纹理带宽降到 1/8 左右；颜色贴图用 sRGB，数据贴图用线性。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么非 2 的幂（NPOT）纹理在老设备上有限制？</summary>
+  <p>Mip 链每级减半，NPOT 尺寸在逐级缩小时会出现奇数，需要定义取整规则和滤波方式；Wrap 寻址对 2 的幂可以用位与实现（实测程序里就是 <code>x &amp;= w-1</code>）；部分压缩格式要求 4 的倍数。早期 GLES2 设备对 NPOT 纹理不支持 Mipmap 和 Repeat。现代硬件都支持，但 2 的幂仍是贴图制作的默认规范。</p></details>
+  <details class="quiz"><summary>自测：同样的 Shader，换成更小的贴图为什么能明显变快？</summary>
+  <p>有两种情况：①纹理被缩小显示时，更小的贴图意味着更少的未命中（虽然 Mip 已经在帮你选小层级，但若没开 Mipmap，效果就非常明显）；②纹理被放大显示时，小贴图更容易整体放进纹理缓存。这两种都说明该 Pass 是<strong>纹理带宽受限</strong>。如果换小贴图毫无变化，说明瓶颈在别处（ALU、顶点或 ROP）。这正是第 12 章"改变一个变量看帧时间"的定位思路。</p></details>
+</section>

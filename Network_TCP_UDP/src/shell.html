@@ -97,6 +97,9 @@ figure svg .xs{font-size:10.5px;fill:#6B7280}
 figure svg .b{font-weight:700}
 figure svg .mono{font-family:var(--mono);font-size:11.5px}
 figure svg .wt{fill:#FFFFFF}
+figure svg text{paint-order:stroke fill;stroke:#FFFFFF;stroke-width:3px;stroke-linejoin:round}
+figure svg .wt{stroke:none}
+@media print{figure svg text{stroke:none}}
 figure svg g.sm text{font-size:11.5px}
 figure svg g.xs text{font-size:10.5px}
 figure svg g.mono text{font-family:var(--mono);font-size:11px}

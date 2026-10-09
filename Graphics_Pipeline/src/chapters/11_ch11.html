@@ -1,0 +1,177 @@
+<section class="chapter" id="ch11">
+  <div class="ch-head">
+    <div class="no">CHAPTER 11</div>
+    <h1>综合案例：一帧里的多个 Pass</h1>
+    <p class="lead">把前十章的每个阶段串起来：先从光源"看"一遍场景写出阴影贴图，再从相机"看"一遍做光照——然后再看看大型项目怎样组织几十个 Pass。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>完整走一遍 Shadow Map 两遍渲染，并能指出每一步用到了管线的哪个阶段</li>
+    <li>理解阴影痤疮（Shadow Acne）和彼得潘（Peter Panning）的成因，以及深度偏移、斜率缩放偏移、PCF 的作用</li>
+    <li>比较前向渲染、延迟渲染、Forward+ / Clustered 的结构和适用场景</li>
+    <li>能对着一个 RenderDoc 截帧说出每个 Pass 在做什么</li>
+  </ul></div>
+
+  <h2>11.1 案例场景</h2>
+  <p>E13 渲染一个最小但"五脏俱全"的场景：一块 12×12 米、贴了棋盘格纹理（带 Mipmap）的地面，一个旋转 30° 的立方体，一个球体，一盏平行光。两遍渲染：</p>
+  <div class="tbl"><table>
+    <tr><th>Pass</th><th>相机</th><th>渲染目标</th><th>用到的管线阶段</th></tr>
+    <tr><td>1 · Shadow Pass</td><td>光源方向的<strong>正交投影</strong>（14m×14m，深度范围 30m）</td><td>1024×1024 深度贴图，<strong>不写颜色</strong></td><td>VS → 裁剪 → 光栅化 → 深度测试/写入（无 PS）</td></tr>
+    <tr><td>2 · Main Pass</td><td>主相机透视投影（FOV 45°）</td><td>480×270 颜色 + 深度</td><td>VS → 裁剪 → 背面剔除 → 光栅化 → 透视校正插值 → Early-Z → PS（三线性采样 + Blinn-Phong + 阴影查询 + 3×3 PCF）→ 写入</td></tr>
+  </table></div>
+<!--img:e13_final:最终结果（斜率缩放偏移 + 3×3 PCF）;e13_shadowmap:Pass 1：光源视角的深度贴图（越亮越近）|<b>图 11-1</b>　E13 两遍渲染的输出。右图是从光源方向看到的深度，左图在主相机下查询它得到阴影。-->
+
+  <h2>11.2 Pass 1：从光源"看"场景</h2>
+  <p>平行光没有位置，只有方向，所以用正交投影：把相机放在光源方向上足够远处，看向场景中心，视锥是一个能框住所有投射阴影物体的长方体。这一遍只需要深度：</p>
+<!--code:cpp:soft_raster.cpp · E13 Pass 1（只写深度）-->
+V3 toL = nrm({-0.8f, 1.0f, -0.3f});                         // 指向光源的方向
+M4 lightVP = ortho(-7, 7, -7, 7, 0.1f, 30) * lookAt(toL * 15.f, {0, 0, 0}, {0, 1, 0});
+Target SMT(SM, SM); SMT.clear({0, 0, 0, 1}, 1.f);
+State sp; sp.colorWrite = false; sp.cull = false;            // 只写深度；不剔除背面（让薄物体也投影）
+drawMesh(SMT, sp, ground, mGround, lightVP, nullptr);        // fs = nullptr：没有像素着色器
+drawMesh(SMT, sp, cube,   mCube,   lightVP, nullptr);
+drawMesh(SMT, sp, sphere, mSph,    lightVP, nullptr);
+<!--/code-->
+  <div class="co tip"><span class="h">✅ 对应到真实引擎</span>
+  <p>Shadow Pass 的 Shader 通常只有顶点着色器（或只有一个空 PS）——没有颜色输出、没有纹理采样，是最"纯粹"的几何负载。所以阴影 Pass 的开销主要取决于<strong>投射阴影物体的顶点数和 Draw Call 数</strong>，优化手段是：给远处物体关闭投影、用更低的 LOD 渲染阴影、对静态物体缓存阴影贴图。Alpha Test 的树叶在 Shadow Pass 里需要 PS 做 discard，会让这个 Pass 显著变贵。</p></div>
+
+  <h2>11.3 Pass 2：查询阴影</h2>
+  <p>主 Pass 的像素着色器拿到片元的世界坐标 P，用<strong>同一个 lightVP</strong> 把它变换到光源的裁剪空间，得到它在阴影贴图上的位置 (sx, sy) 和它到光源的深度 z，然后比较：</p>
+  <div class="fm">lit = ( z − bias ≤ ShadowMap[sx, sy] ) ? 1 : 0</div>
+<!--code:cpp:soft_raster.cpp · E13 阴影查询（含偏移与 PCF）-->
+auto smLookup = [&](V3 P, V3 N, int mode, int pcf) -> float {
+    V4 lp = lightVP * V4{P.x, P.y, P.z, 1};                          // 世界 → 光源裁剪空间（正交：w=1）
+    float sx = (lp.x * 0.5f + 0.5f) * SM, sy = (0.5f - 0.5f * lp.y) * SM, z = lp.z;
+    float ndl = std::max(dot(N, toL), 0.f);
+    float tanT = std::sqrt(std::max(1 - ndl * ndl, 0.f)) / std::max(ndl, 0.05f);   // 表面与光线夹角的正切
+    float bias = /* mode 3：斜率缩放 */ std::min(0.0002f + 0.0006f * tanT, 0.01f);
+    int r = pcf ? 1 : 0; float lit = 0; int n = 0;
+    for (int dy = -r; dy <= r; dy++) for (int dx = -r; dx <= r; dx++) {          // PCF：3x3 次比较取平均
+        int ix = (int)floorf(sx) + dx, iy = (int)floorf(sy) + dy; n++;
+        lit += (z - bias <= SMT.depth[(size_t)iy * SM + ix]) ? 1.f : 0.f;
+    }
+    return lit / n;
+};
+<!--/code-->
+  <h3>阴影痤疮与彼得潘</h3>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(20,20)">
+      <text x="190" y="0" text-anchor="middle" class="b sm" style="fill:#B91C1C">痤疮：bias 太小</text>
+      <line x1="20" y1="150" x2="360" y2="150" stroke="#1F2937" stroke-width="3"/>
+      <g fill="#FDEEEE" stroke="#B91C1C">
+        <polygon points="20,150 80,150 80,138"/><polygon points="80,150 140,150 140,138"/><polygon points="140,150 200,150 200,138"/><polygon points="200,150 260,150 260,138"/><polygon points="260,150 320,150 320,138"/>
+      </g>
+      <g stroke="#B45309" stroke-dasharray="3 3"><line x1="40" y1="30" x2="60" y2="140"/><line x1="100" y1="30" x2="120" y2="140"/><line x1="160" y1="30" x2="180" y2="140"/><line x1="220" y1="30" x2="240" y2="140"/></g>
+      <text x="190" y="22" text-anchor="middle" class="xs" style="fill:#B45309">光线（斜射）</text>
+      <text x="190" y="176" text-anchor="middle" class="xs">每个阴影 texel 覆盖一段表面，它只存一个深度（红色"台阶"）</text>
+      <text x="190" y="192" text-anchor="middle" class="xs">表面上一半的点比"台阶"更远 → 被判定为在自己的阴影里</text>
+      <text x="190" y="208" text-anchor="middle" class="xs" style="fill:#B91C1C">结果：受光面上出现条纹/摩尔纹</text>
+    </g>
+    <g transform="translate(450,20)">
+      <text x="190" y="0" text-anchor="middle" class="b sm" style="fill:#6D28D9">彼得潘：bias 太大</text>
+      <line x1="20" y1="150" x2="360" y2="150" stroke="#1F2937" stroke-width="3"/>
+      <rect x="140" y="80" width="70" height="70" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="2"/>
+      <polygon points="210,150 300,150 210,80" fill="#E5E7EB" opacity=".8"/>
+      <polygon points="230,150 300,150 230,96" fill="#94A3B8" opacity=".6"/>
+      <line x1="210" y1="150" x2="230" y2="150" stroke="#6D28D9" stroke-width="4"/>
+      <text x="220" y="170" text-anchor="middle" class="xs" style="fill:#6D28D9">漏光</text>
+      <text x="190" y="192" text-anchor="middle" class="xs">把深度推远太多，接触点附近本应在阴影里的地面也被判为受光</text>
+      <text x="190" y="208" text-anchor="middle" class="xs" style="fill:#6D28D9">结果：阴影和物体"脱开"，像飘在空中</text>
+    </g>
+  </svg>
+  <figcaption><b>图 11-2</b>　深度偏移的两难：太小出痤疮，太大出彼得潘。光线越斜，每个 texel 覆盖的表面深度差越大，需要的偏移越大——所以要"斜率缩放"。</figcaption>
+  </figure>
+  <div class="term"><div class="bar">soft_raster.exe · E13</div><pre>光源方向 toLight=(-0.61,0.76,-0.23)，Shadow Map 1024x1024，正交范围 14m x 14m（1 texel ≈ 1.4cm），深度范围 29.9m
+深度偏移                           误判为阴影(痤疮+边缘) 漏光(误判受光) 受光面像素
+bias = 0                                       <span class="bad">46.65%</span>          0.02%        68963
+常量 bias = 0.0005 (≈1.5cm)                 0.28%          0.03%        68963
+常量 bias = 0.003 (≈9cm)                    <span class="ok">0.02%</span>          0.03%        68963
+斜率缩放 bias（0.0002+0.0006·tanθ）          <span class="ok">0.02%</span>          0.03%        68963
+常量 bias = 0.02 (≈60cm)                    0.02%          <span class="bad">0.08%</span>        68963
+最终图（斜率缩放 bias + 3x3 PCF）：Shadow Pass 8.8 ms，Main Pass 9.4 ms；主 Pass 输入三角形 2348，剔除 1246，光栅化 1102，片元 84016，PS 执行 75801，深度剔除 8215</pre></div>
+<!--img:e13_bias0:bias = 0（痤疮）;e13_bias_slope:斜率缩放 bias;e13_bias_big:bias = 0.02（彼得潘）|<b>图 11-3</b>　E13 三种偏移下的渲染（无 PCF）。左：受光面布满摩尔纹；中：干净；右：立方体底部阴影与物体之间出现亮缝。-->
+  <div class="co ver"><span class="h">🔬 从输出里能读出什么</span>
+  <ul>
+    <li>"误判"是与<strong>逐像素射线求交的解析真值</strong>对比得到的。bias=0 时 46.65% 的受光像素被错判为阴影——几乎一半，正是图 11-2 的"一半在台阶下面"。</li>
+    <li>常量 bias 1.5cm 已经消除了大部分痤疮，9cm 基本干净；但 60cm 时漏光比例是最小 bias 时的 2.7 倍。这个场景里光线比较陡，所以常量 bias 和斜率缩放的差异不大；光线越斜（日出日落），常量 bias 的"两难"越明显。</li>
+    <li>主 Pass：2348 个三角形中背面剔除掉 1246 个（53%）；先画立方体和球、最后画地面，让地面被遮挡的 8215 个片元在 Early-Z 阶段就被丢弃——第 4、8 章的结论在这里同时生效。</li>
+  </ul></div>
+  <div class="co deep"><span class="h">🧠 深入：真实引擎里的阴影</span>
+  <ul>
+    <li><strong>硬件深度偏移</strong>：D3D 的 <code>DepthBias / SlopeScaledDepthBias</code>（GL 的 <code>glPolygonOffset</code>）在光栅化阶段直接按三角形的深度斜率加偏移，Shadow Pass 里设置一次即可。另一种思路是 Normal Offset：查询时把 P 沿法线推出去一点。</li>
+    <li><strong>PCF</strong>：硬件支持"比较采样器"（<code>SampleCmp</code> / <code>sampler2DShadow</code>），一次采样就返回 2×2 比较结果的双线性加权，比手写 3×3 循环便宜得多。</li>
+    <li><strong>级联阴影 CSM</strong>：把主相机视锥按距离切成 2～4 段，每段一张阴影贴图，近处精度高、远处覆盖广。MOBA 视角固定、范围小，通常一级或两级就够。</li>
+    <li><strong>MOBA 手游的折中</strong>：英雄用实时 Shadow Map（甚至只给英雄投影），场景静态阴影烘焙进光照贴图；低端机退化为脚底的圆形"假阴影"贴片。</li>
+  </ul></div>
+
+  <h2>11.4 渲染路径：前向、延迟与 Forward+</h2>
+  <p>场景里只有一盏光时，怎么画都行；当有几十上百盏动态光（技能光效、路灯、爆炸）时，"每个像素要算哪些光"就成了架构问题。</p>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(10,10)">
+      <rect x="0" y="0" width="270" height="300" rx="12" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="135" y="26" text-anchor="middle" class="b" style="fill:#2F5BD3">前向渲染 Forward</text>
+      <g class="sm"><text x="16" y="56">for 每个物体:</text><text x="34" y="78">for 影响它的每盏光:</text><text x="52" y="100">PS 中累加光照</text></g>
+      <text x="16" y="134" class="xs">✓ 简单、支持 MSAA、支持半透明</text>
+      <text x="16" y="154" class="xs">✓ 材质多样（每个 Shader 随便写）</text>
+      <text x="16" y="174" class="xs">✓ 带宽低，适合移动端 TBR</text>
+      <text x="16" y="200" class="xs" style="fill:#B91C1C">✗ 光源多时：物体×光源 组合爆炸</text>
+      <text x="16" y="220" class="xs" style="fill:#B91C1C">✗ Overdraw 下被挡住的片元也算光照</text>
+      <text x="16" y="240" class="xs" style="fill:#B91C1C">✗ 通常要限制每物体光源数（如 4～8）</text>
+      <text x="135" y="282" text-anchor="middle" class="xs">手游主流（URP Forward）</text>
+    </g>
+    <g transform="translate(295,10)">
+      <rect x="0" y="0" width="270" height="300" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="135" y="26" text-anchor="middle" class="b" style="fill:#15803D">延迟渲染 Deferred</text>
+      <g class="sm"><text x="16" y="56">Pass 1：写 G-Buffer</text><text x="34" y="76" class="xs">（反照率、法线、粗糙度、深度…）</text><text x="16" y="100">Pass 2：for 每盏光:</text><text x="34" y="120" class="xs">只对它覆盖的像素读 G-Buffer 算光照</text></g>
+      <text x="16" y="150" class="xs">✓ 光照开销 ≈ 像素数 × 影响该像素的光数</text>
+      <text x="16" y="170" class="xs">✓ 着色与几何复杂度解耦，无 Overdraw 浪费</text>
+      <text x="16" y="190" class="xs">✓ G-Buffer 可供 SSAO / SSR 复用</text>
+      <text x="16" y="216" class="xs" style="fill:#B91C1C">✗ G-Buffer 带宽巨大（4～5 张 RT）</text>
+      <text x="16" y="236" class="xs" style="fill:#B91C1C">✗ 不支持半透明（另走前向）、MSAA 困难</text>
+      <text x="16" y="256" class="xs" style="fill:#B91C1C">✗ 材质模型受 G-Buffer 布局限制</text>
+      <text x="135" y="282" text-anchor="middle" class="xs">PC/主机 3A 主流；移动端需 Memoryless G-Buffer</text>
+    </g>
+    <g transform="translate(580,10)">
+      <rect x="0" y="0" width="270" height="300" rx="12" fill="#F3EEFE" stroke="#6D28D9"/>
+      <text x="135" y="26" text-anchor="middle" class="b" style="fill:#6D28D9">Forward+ / Clustered</text>
+      <g class="sm"><text x="16" y="56">Pass 0：深度 Prepass（可选）</text><text x="16" y="80">计算着色器：把屏幕切成 Tile</text><text x="34" y="100" class="xs">（Clustered 再按深度切片）</text><text x="34" y="118" class="xs">为每个 Tile 列出影响它的光源</text><text x="16" y="142">前向 Pass：PS 只遍历本 Tile 的光</text></g>
+      <text x="16" y="172" class="xs">✓ 支持大量光源</text>
+      <text x="16" y="192" class="xs">✓ 保留前向的 MSAA、半透明、材质自由</text>
+      <text x="16" y="212" class="xs">✓ 不需要 G-Buffer 的带宽</text>
+      <text x="16" y="238" class="xs" style="fill:#B91C1C">✗ 需要计算着色器与光源列表缓冲</text>
+      <text x="16" y="258" class="xs" style="fill:#B91C1C">✗ Tile 内光源数不均时有 Warp 发散</text>
+      <text x="135" y="282" text-anchor="middle" class="xs">Unity URP Forward+、Doom 2016、众多新项目</text>
+    </g>
+  </svg>
+  <figcaption><b>图 11-4</b>　三种渲染路径。核心区别在于"光照计算和几何绘制是否解耦"以及"解耦的代价由谁来付"。</figcaption>
+  </figure>
+  <div class="co warn"><span class="h">⚠️ 面试易错：延迟渲染"光源再多也不影响性能"</span>
+  <p>不对。延迟渲染把光照开销从"物体数 × 光源数"降到了"像素数 × 每像素光源数"，但每盏光仍要读一遍它覆盖范围内的 G-Buffer（带宽），大量重叠的光源依然很贵——Tiled/Clustered Deferred 就是为此而生，让每个像素一次读 G-Buffer、在寄存器里累加所有光。另外，G-Buffer 本身的写入和读取是固定的高额带宽成本，这在移动端往往比光照计算更致命。</p></div>
+
+  <h2>11.5 一帧的真实结构：读懂截帧</h2>
+  <p>用 RenderDoc（PC/Android）、Xcode GPU Capture（iOS）、Snapdragon Profiler / Mali Graphics Debugger 截一帧，事件列表大致是这样的（以一款延迟渲染的 PC 游戏为例）：</p>
+  <div class="tbl"><table>
+    <tr><th>顺序</th><th>Pass</th><th>本书对应</th><th>看什么</th></tr>
+    <tr><td>1</td><td>Depth Prepass</td><td>8.3</td><td>是否只写深度、物体是否从前往后</td></tr>
+    <tr><td>2</td><td>Shadow Depths（CSM 若干级 + 点光阴影）</td><td>11.2</td><td>投影物体数量、是否有不必要的投影者</td></tr>
+    <tr><td>3</td><td>G-Buffer / Base Pass</td><td>11.4</td><td>G-Buffer 格式与数量；Overdraw 视图</td></tr>
+    <tr><td>4</td><td>SSAO、接触阴影等屏幕空间效果</td><td>—</td><td>分辨率（常为半分辨率）</td></tr>
+    <tr><td>5</td><td>Lighting（Tiled / Clustered）</td><td>11.4</td><td>每 Tile 光源数热力图</td></tr>
+    <tr><td>6</td><td>天空、雾、体积光</td><td>8.6</td><td>天空是否在不透明之后、深度测试是否开启</td></tr>
+    <tr><td>7</td><td>Translucency（半透明、粒子）</td><td>9.4</td><td>排序、Overdraw、是否关闭深度写入</td></tr>
+    <tr><td>8</td><td>后处理：TAA → Bloom → 色调映射 → UI</td><td>9.6、10.6</td><td>RT 切换次数、各 Pass 耗时</td></tr>
+  </table></div>
+  <p>对于一个移动端前向渲染的 MOBA，结构更简单：Shadow → Opaque（英雄/建筑/地面）→ Skybox → Transparent（技能特效）→ 少量后处理 → UI。第 12 章讲怎样在这样的截帧里找到瓶颈。</p>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>Shadow Map = 两遍渲染：Pass 1 从光源只写深度（无 PS），Pass 2 把片元变换到光源空间比较深度。</li>
+    <li>阴影 texel 覆盖一段表面却只存一个深度 → bias=0 时近一半受光像素误判（E13：46.65%）；bias 太大 → 阴影与物体脱开（漏光增加 2.7 倍）；光线越斜需要的 bias 越大 → 斜率缩放偏移。PCF 柔化边缘。</li>
+    <li>前向：简单、MSAA/半透明友好、移动端主流；延迟：光照与几何解耦，但 G-Buffer 带宽大、不支持半透明和 MSAA；Forward+/Clustered：用计算着色器做光源分块，兼顾两者。</li>
+    <li>读截帧时按 Pass 对应到管线阶段，逐个检查剔除、排序、Overdraw、RT 切换。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：Shadow Pass 为什么经常剔除正面而不是背面？</summary>
+  <p>剔除正面后，写入阴影贴图的是物体的<strong>背面</strong>深度。对封闭物体而言，受光的正面离"背面深度"有整个物体厚度的距离，自然不会出现自阴影痤疮，相当于免费得到了一个很大的 bias。缺点是薄物体（单面的墙、叶片）没有背面，和地面接触处仍可能漏光；且背光面本来就在阴影里，所以背面的痤疮被 N·L ≤ 0 掩盖。</p></details>
+  <details class="quiz"><summary>自测：延迟渲染里半透明物体怎么画？</summary>
+  <p>G-Buffer 每个像素只存一层表面属性，无法表达半透明的多层叠加。所以延迟渲染管线在不透明物体完成光照后，再单独走一个<strong>前向</strong> Pass 绘制半透明物体（从后往前、关深度写入），光照用前向方式或借助 Clustered 光源列表计算。这也是为什么即便是延迟渲染引擎，也必须同时维护一套前向光照代码。</p></details>
+</section>

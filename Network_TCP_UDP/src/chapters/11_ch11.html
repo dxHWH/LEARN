@@ -1,0 +1,172 @@
+<div class="part-head" data-toc="第五部分 · 实战与面试">
+  <div class="no">PART FIVE</div>
+  <h1>第五部分　实战与面试：把知识串成网</h1>
+  <p>把前面所有机制放回真实场景：一个 MOBA 游戏的网络层怎么设计？视频会议为什么不怕丢包？然后用一张横向对照表把 TCP、KCP、QUIC 串起来，最后是面试题库与速记卡。</p>
+</div>
+
+<!-- ======================= CH11 ======================= -->
+<section class="chapter" id="ch11">
+  <div class="ch-head">
+    <div class="no">CHAPTER 11</div>
+    <h1>场景选型与游戏网络实战</h1>
+    <p class="lead">同一个问题，在 TCP、KCP、QUIC、游戏引擎里各有各的答案。看懂这些答案之间的对应关系，知识才算连成了网。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>掌握主流传输方案的能力对比，能为具体业务选型</li>
+    <li>能设计一个帧同步 MOBA 的网络层，并用仿真数据论证"冗余发送 + 可靠兜底"</li>
+    <li>理解状态同步、实时音视频、网页加载三类场景的传输策略</li>
+    <li>知道如何做弱网测试，以及用哪些指标衡量传输质量</li>
+    <li>用一张横向对照表把全书的机制串起来</li>
+  </ul></div>
+
+  <h2>11.1 方案全景</h2>
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>可靠性模式</th><th>多路 / 通道</th><th>拥塞控制</th><th>加密</th><th>连接管理</th><th>典型使用</th></tr>
+    <tr><td>TCP</td><td>可靠有序</td><td>无</td><td>有（内核）</td><td>需 TLS</td><td>有</td><td>绝大多数业务、回合制游戏</td></tr>
+    <tr><td>裸 UDP</td><td>不可靠</td><td>应用自定</td><td>无</td><td>无</td><td>无</td><td>DNS、遥测、状态广播</td></tr>
+    <tr><td>KCP</td><td>可靠有序</td><td>无（多会话需多个对象）</td><td>可关闭</td><td>无</td><td>无</td><td>实时游戏可靠通道、加速器</td></tr>
+    <tr><td>ENet</td><td>可靠 / 不可靠 / 不可靠有序（sequenced）</td><td>多通道</td><td>带宽节流</td><td>无</td><td>有</td><td>独立游戏、中小型联机游戏</td></tr>
+    <tr><td>WebRTC DataChannel</td><td>可配：有序 / 无序，可靠 / 部分可靠（最大重传次数或最大生存时间）</td><td>多流</td><td>有</td><td>DTLS</td><td>有（ICE 打洞）</td><td>浏览器 P2P 数据、云游戏输入</td></tr>
+    <tr><td>QUIC</td><td>流：可靠有序；DATAGRAM：不可靠</td><td>多流</td><td>有（可插拔）</td><td>TLS 1.3 强制</td><td>有 + 连接迁移</td><td>HTTP/3、移动 App</td></tr>
+    <tr><td>游戏引擎网络层（如 UE IpNetDriver）</td><td>可靠 RPC / 不可靠 RPC / 属性复制（只要最新）</td><td>按 Actor 通道</td><td>按带宽预算与优先级调度</td><td>可选</td><td>有</td><td>引擎内置的多人游戏</td></tr>
+  </table></div>
+  <p>WebRTC DataChannel 的"部分可靠"值得一提：它允许指定"最多重传 N 次"或"超过 T 毫秒就放弃"，正好落在第 7 章可靠性光谱的中间地带，非常适合"晚到一点可以接受、太晚就没用了"的数据。</p>
+
+  <h2>11.2 实战一：帧同步 MOBA 的网络层设计</h2>
+  <p>帧同步（Lockstep）的核心思想是：服务器不计算游戏逻辑，只负责收集所有玩家每个逻辑帧的操作并转发；每个客户端用相同的初始状态、相同的操作序列、确定性的逻辑，独立算出一致的结果。它对网络的要求是：<strong>每一帧的操作必须送达且按帧序执行</strong>（可靠有序），但又必须<strong>低延迟、低抖动</strong>，否则所有玩家都会卡。</p>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="30" width="200" height="330" rx="12" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="120" y="54" text-anchor="middle" class="b" style="fill:#2F5BD3">客户端</text>
+    <g class="xs">
+      <rect x="36" y="68" width="168" height="44" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="86" text-anchor="middle" class="b sm">输入采集</text><text x="120" y="102" text-anchor="middle">每个逻辑帧打包本帧操作</text>
+      <rect x="36" y="122" width="168" height="56" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="140" text-anchor="middle" class="b sm">上行冗余</text><text x="120" y="156" text-anchor="middle">每包携带所有"未被确认"的</text><text x="120" y="170" text-anchor="middle">操作帧（通常 1～4 帧）</text>
+      <rect x="36" y="188" width="168" height="56" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="206" text-anchor="middle" class="b sm">帧缓冲（抖动缓冲）</text><text x="120" y="222" text-anchor="middle">缓存 1～3 帧再执行，</text><text x="120" y="236" text-anchor="middle">吸收网络抖动</text>
+      <rect x="36" y="254" width="168" height="44" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="272" text-anchor="middle" class="b sm">缺帧检测</text><text x="120" y="288" text-anchor="middle">收到 N+2 却没有 N → 请求补帧</text>
+      <rect x="36" y="308" width="168" height="40" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="326" text-anchor="middle" class="b sm">确定性逻辑 + 表现插值</text><text x="120" y="340" text-anchor="middle">定点数 / 固定随机种子</text>
+    </g>
+    <rect x="320" y="30" width="220" height="330" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="430" y="54" text-anchor="middle" class="b" style="fill:#C2410C">战斗服务器（帧转发）</text>
+    <g class="xs">
+      <rect x="336" y="68" width="188" height="56" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="86" text-anchor="middle" class="b sm">按固定节奏推进帧号</text><text x="430" y="102" text-anchor="middle">例如每秒 15 个逻辑帧（≈66 ms）</text><text x="430" y="116" text-anchor="middle">不等慢玩家：迟到的输入并入下一帧</text>
+      <rect x="336" y="134" width="188" height="56" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="152" text-anchor="middle" class="b sm">下行冗余广播</text><text x="430" y="168" text-anchor="middle">每包携带最近 k 帧的帧包</text><text x="430" y="182" text-anchor="middle">（或所有该客户端未确认的帧）</text>
+      <rect x="336" y="200" width="188" height="44" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="218" text-anchor="middle" class="b sm">ACK 位图 / 帧确认</text><text x="430" y="234" text-anchor="middle">知道每个客户端收到了哪些帧</text>
+      <rect x="336" y="254" width="188" height="44" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="272" text-anchor="middle" class="b sm">补帧（可靠通道）</text><text x="430" y="288" text-anchor="middle">响应客户端的缺帧请求</text>
+      <rect x="336" y="308" width="188" height="40" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="326" text-anchor="middle" class="b sm">全量帧存档</text><text x="430" y="340" text-anchor="middle">断线重连 / 观战 / 回放</text>
+    </g>
+    <line x1="222" y1="150" x2="318" y2="150" stroke="#2F5BD3" stroke-width="1.8" marker-end="url(#ab)"/><text x="270" y="142" text-anchor="middle" class="xs" style="fill:#2F5BD3">UDP 上行</text>
+    <line x1="318" y1="166" x2="222" y2="216" stroke="#C2410C" stroke-width="1.8" marker-end="url(#ao)"/><text x="270" y="206" text-anchor="middle" class="xs" style="fill:#C2410C">UDP 下行</text>
+    <line x1="222" y1="276" x2="318" y2="276" stroke="#15803D" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ag)"/><text x="270" y="268" text-anchor="middle" class="xs" style="fill:#15803D">KCP 可靠通道</text>
+    <rect x="620" y="30" width="220" height="150" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="730" y="54" text-anchor="middle" class="b" style="fill:#15803D">为什么这样设计</text>
+    <g class="xs">
+      <text x="636" y="78">• 操作数据很小，冗余几乎不增加带宽</text>
+      <text x="636" y="98">• 冗余让 99.9% 的丢包"零 RTT"恢复</text>
+      <text x="636" y="118">• 剩下极少数连续丢包交给可靠通道</text>
+      <text x="636" y="138">• 帧缓冲用少量固定延迟换平滑</text>
+      <text x="636" y="158">• 服务器不等人：一人卡不拖累全场</text>
+    </g>
+    <rect x="620" y="196" width="220" height="164" rx="12" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="730" y="220" text-anchor="middle" class="b">其他通道</text>
+    <g class="xs">
+      <text x="636" y="244">• 登录、匹配、商城：TCP / HTTPS</text>
+      <text x="636" y="264">• 聊天、结算：TCP 或可靠通道</text>
+      <text x="636" y="284">• 重连拉取历史帧：TCP / HTTP 批量下载</text>
+      <text x="636" y="304">• 心跳：每 1～2 s，兼测 RTT、保活 NAT</text>
+      <text x="636" y="324">• UDP 不通：整局自动降级 TCP</text>
+      <text x="636" y="344">• 全部数据：AEAD 加密 + 防重放</text>
+    </g>
+  </svg>
+  <figcaption><b>图 11-1</b> 一个典型的帧同步网络层：UDP 冗余发送承担主要流量，可靠通道兜底，其他业务走 TCP</figcaption>
+  </figure>
+
+  <div class="co net"><span class="h">🧪 实测证据（d2 · 实验 B 中的 R 行）：冗余发送的效果</span>
+  <div class="term"><div class="bar">d2_rudp_sim.exe · 实验 B 摘录（100 Hz 消息流，RTT≈60 ms）</div><pre>丢包 方案                                   平均ms    P99ms 最大ms 发送 丢失
+   5% K  类KCP极速：快重传2+立即ACK+RTO×1.5     42.9       95      167   1249      0
+   5% R  冗余发送k=3（不可靠）            <span class="ok">31.6       41       51</span>   <span class="ok">1000</span>      <span class="hl">1</span>
+  10% K  类KCP极速：快重传2+立即ACK+RTO×1.5     53.4      123      173   1474      0
+  10% R  冗余发送k=3（不可靠）            <span class="ok">32.0       41       61</span>   <span class="ok">1000</span>      <span class="hl">0</span>
+  20% K  类KCP极速：快重传2+立即ACK+RTO×1.5     72.9      163      183   1907      0
+  20% R  冗余发送k=3（不可靠）            <span class="ok">33.3       51       61</span>   <span class="ok">1000</span>      <span class="hl">1</span></pre></div>
+  <p>R 方案的每个包携带本条和前 3 条消息（共 4 条）。它的 P99 只比单程时延 30 ms 多 10～20 ms，<strong>在 20% 丢包下依然稳定</strong>，而且发送次数恒为 1000（只是每个包大一点）。代价是它不保证送达：理论残余丢失率约为 p⁴，20% 丢包时约 0.16%，1000 条中丢了 1 条，与理论吻合。这就是为什么图 11-1 用"冗余为主、可靠通道兜底"：冗余处理掉绝大部分丢包，极少数漏网之鱼由 KCP 补发。</p></div>
+
+  <div class="co ver"><span class="h">🎮 游戏开发视角：几个容易忽略的细节</span>
+  <p>① <strong>上行冗余的终止条件</strong>：客户端持续冗余发送某帧输入，直到服务器的包头 ACK 表明已收到——这就是第 8 章 UNA + ACK 位图的直接应用。<br>
+  ② <strong>帧缓冲的大小要自适应</strong>：根据实测抖动动态调整缓冲帧数，网络好时减少输入延迟，网络差时增加平滑度。<br>
+  ③ <strong>包要小</strong>：控制在 MTU 以内，避免 IP 分片（第 1 章）；10 个玩家 × 若干字节的操作，一个帧包通常只有几十到一两百字节。<br>
+  ④ <strong>不要让一个慢玩家拖住所有人</strong>：服务器按固定节奏推进帧号，没收到某玩家的输入就当作"无操作"，这和 TCP 的"必须等"截然不同。</p></div>
+
+  <h2>11.3 实战二：状态同步</h2>
+  <p>状态同步（如 UE 的 Actor 复制）由服务器计算权威状态，按需把属性变化发给客户端。它的传输策略可以对照可靠性光谱来理解：</p>
+  <div class="tbl"><table>
+    <tr><th>数据</th><th>可靠性</th><th>机制</th></tr>
+    <tr><td>属性复制（位置、血量……）</td><td>可靠 · 只要最新</td><td>不可靠发送；检测到包丢失时，<strong>不重传旧包</strong>，而是把相关属性标记为"脏"，在下一次复制时发送<strong>当前值</strong></td></tr>
+    <tr><td>Reliable RPC（开火、技能、交互）</td><td>可靠有序（同一 Actor 通道内）</td><td>丢失后重传；过多的可靠 RPC 积压会导致通道溢出、连接被断开，所以要节制使用</td></tr>
+    <tr><td>Unreliable RPC（特效、音效）</td><td>不可靠</td><td>发了就不管；带宽紧张时可能被丢弃</td></tr>
+    <tr><td>移动同步</td><td>不可靠 + 客户端预测 / 服务器校正</td><td>客户端先本地执行移动，服务器验证后纠正；输入用不可靠 RPC 高频发送，并冗余携带最近的移动</td></tr>
+  </table></div>
+  <p>另外，状态同步还要做<strong>相关性裁剪</strong>（只同步玩家附近 / 视野内的对象）和<strong>优先级与带宽预算</strong>（每帧按优先级在预算内挑选要发送的对象），本质上是第 7 章架构图中"通道与调度层"的工作。</p>
+
+  <h2>11.4 实战三：实时音视频（WebRTC）</h2>
+  <div class="cards">
+    <div class="card"><div class="t">RTP / RTCP over UDP</div><p>RTP 携带媒体数据（序号 + 时间戳），RTCP 反馈接收质量（丢包率、抖动、RTT）。全部通过 SRTP / DTLS 加密。</p></div>
+    <div class="card"><div class="t">NACK：有条件的重传</div><p>接收方发现缺包时发 NACK 请求重传，但只有在"重传的包能在播放截止前到达"时才有意义——RTT 大时就放弃，改靠 FEC 或丢帧。</p></div>
+    <div class="card"><div class="t">FEC + 抖动缓冲</div><p>FlexFEC / ULPFEC 用冗余包恢复丢包；抖动缓冲（jitter buffer）动态调整缓冲时长，平滑到达时间的波动。</p></div>
+    <div class="card"><div class="t">基于时延的拥塞控制</div><p>GCC（Google Congestion Control）监测包到达间隔的变化趋势，在队列开始积压时就降低码率，而不是等到丢包。码率调整直接作用于编码器。</p></div>
+  </div>
+  <p>对比游戏和音视频会发现一个共同规律：<strong>越是实时的场景，越倾向于"用带宽和画质换时延"</strong>——FEC、冗余发送、主动降码率、降低快照频率，都是这个思路。</p>
+
+  <h2>11.5 实战四：网页加载</h2>
+  <div class="tbl"><table>
+    <tr><th>优化</th><th>省掉了什么</th><th>对应章节</th></tr>
+    <tr><td>DNS 预解析（<code>dns-prefetch</code>）</td><td>DNS 查询的 RTT</td><td>第 1 章</td></tr>
+    <tr><td>预连接（<code>preconnect</code>）、HTTP Keep-Alive、连接池</td><td>TCP 握手 + TLS 握手；也避免了 TIME_WAIT 堆积</td><td>第 5、6 章</td></tr>
+    <tr><td>TLS 1.3 + 会话恢复</td><td>TLS 握手从 2 RTT 降到 1 RTT / 0 RTT</td><td>第 10 章</td></tr>
+    <tr><td>HTTP/2 多路复用</td><td>应用层队头阻塞、多连接的开销</td><td>第 4 章</td></tr>
+    <tr><td>HTTP/3（通过 Alt-Svc 升级）</td><td>传输层队头阻塞；弱网下的握手和恢复时间；换网断连</td><td>第 10 章</td></tr>
+    <tr><td>CDN 就近接入</td><td>物理 RTT</td><td>第 1 章</td></tr>
+    <tr><td>服务端 BBR、增大初始窗口</td><td>慢启动阶段的 RTT 数</td><td>第 3 章</td></tr>
+  </table></div>
+
+  <h2>11.6 弱网测试与质量指标</h2>
+  <div class="cards">
+    <div class="card"><div class="t">模拟工具</div><p>Windows：<strong>clumsy</strong>（可注入延迟、丢包、乱序、重复）；Linux：<code>tc qdisc add dev eth0 root netem delay 100ms 20ms loss 5%</code>；macOS / iOS：Network Link Conditioner；移动端还要实测地铁、电梯、弱信号场景。</p></div>
+    <div class="card"><div class="t">关键指标</div><p>RTT 均值与 P99、<strong>抖动</strong>（RTT 的波动）、丢包率（上下行分别统计）、<strong>重传占比</strong>、消息端到端时延的 P99 / 最大值、卡顿次数（例如帧缓冲被打空的次数）、断线率与重连耗时。</p></div>
+    <div class="card"><div class="t">经验法则</div><p>只看平均值会骗人：实验 B 中 T' 的平均时延只有 61 ms，但 P99 是 185 ms。玩家感知到的"卡"几乎都来自尾部时延，所以优化目标应该写成 P99 / P999。</p></div>
+  </div>
+
+  <h2>11.7 横向对照：一个问题，多种答案</h2>
+  <p>最后，用一张表把全书串起来。每一行是一个传输层问题，每一列是不同协议给出的答案。面试时如果能从一个点出发，横向联想到其他协议的同类设计，就是"有体系"的表现。</p>
+  <div class="tbl"><table>
+    <tr><th>问题</th><th>TCP</th><th>KCP / 自研 RUDP</th><th>QUIC</th><th>游戏引擎 / 音视频</th></tr>
+    <tr><td>如何标识一条连接</td><td>四元组</td><td>conv 会话 ID</td><td>连接 ID（可迁移）</td><td>会话 ID / 玩家 ID</td></tr>
+    <tr><td>如何防伪造握手</td><td>随机 ISN、SYN Cookie</td><td>Cookie 握手（自行实现）</td><td>Retry 令牌、3 倍抗放大</td><td>先 TCP 登录拿票据</td></tr>
+    <tr><td>如何编号</td><td>字节序号</td><td>包序号 sn</td><td>包号（永增）+ 流偏移</td><td>包序号（常为 16 位）</td></tr>
+    <tr><td>如何确认</td><td>累计 ACK + SACK</td><td>UNA + 逐包 ACK / 位图</td><td>ACK 帧（多 Range）</td><td>包头捎带 ACK 位图</td></tr>
+    <tr><td>如何测 RTT</td><td>时间戳选项 / Karn</td><td>ts 回显</td><td>包号唯一 + ACK Delay</td><td>心跳 / 包头时间戳</td></tr>
+    <tr><td>如何发现丢包</td><td>RTO、3 dup ACK、RACK、TLP</td><td>RTO×1.5、跳过 N 次</td><td>包阈值 3、时间阈值 9/8、PTO</td><td>位图空洞、NACK</td></tr>
+    <tr><td>丢了怎么办</td><td>重传原数据</td><td>重传原包</td><td>把帧放进新包重传</td><td>发送最新状态 / FEC / 冗余 / 放弃</td></tr>
+    <tr><td>队头阻塞</td><td>有（整条连接）</td><td>有（单个 KCP 对象）</td><td>只在单个流内</td><td>分通道、不可靠数据不排队</td></tr>
+    <tr><td>流量控制</td><td>rwnd、零窗口探测</td><td>wnd、WASK / WINS</td><td>MAX_STREAM_DATA / MAX_DATA</td><td>带宽预算</td></tr>
+    <tr><td>拥塞控制</td><td>CUBIC / BBR</td><td>可关闭（nc=1）+ 限速</td><td>可插拔</td><td>基于时延（GCC）/ 降频降精度</td></tr>
+    <tr><td>旧报文 / 序号回绕</td><td>TIME_WAIT、PAWS</td><td>序号算术、窗口 &lt; 空间一半</td><td>包号 62 位，实际不回绕</td><td>序号算术</td></tr>
+    <tr><td>如何发现对端消失</td><td>Keepalive（默认 2 h）</td><td>心跳、dead_link</td><td>空闲超时、PING 帧</td><td>应用心跳（秒级）</td></tr>
+    <tr><td>如何关闭</td><td>四次挥手 / RST</td><td>CLOSE 命令 + 超时</td><td>CONNECTION_CLOSE 帧 + 空闲超时</td><td>业务层退出协议</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>选型先看数据的可靠性需求，再看是否需要多路复用、加密、连接迁移、浏览器兼容。</li>
+    <li>帧同步：UDP 冗余发送为主（仿真中 20% 丢包 P99 仍只有 51 ms），可靠通道兜底，帧缓冲吸收抖动，TCP 处理非实时业务与降级。</li>
+    <li>状态同步：属性复制"只发最新值"、Reliable RPC 节制使用、相关性与优先级调度。</li>
+    <li>音视频：NACK 有条件重传 + FEC + 抖动缓冲 + 基于时延的拥塞控制。</li>
+    <li>网页：减少 RTT 个数是主线（预连接、长连接、TLS 1.3、HTTP/3、CDN）。</li>
+    <li>弱网测试看 P99 和抖动，不要只看平均值。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：帧同步中，如果某个玩家网络特别差，服务器应该等他吗？</summary>
+  <p>不应该。如果服务器等最慢的玩家（严格锁步），所有人都会被拖慢，体验极差。现代帧同步服务器按固定节奏推进帧号，迟到的输入被放入下一帧（或丢弃），该玩家看到的是自己的操作稍有延迟；他的客户端如果落后太多，会进入"追帧"模式快速执行积压的帧。网络长时间不可用时，服务器可以让 AI 托管该玩家。</p></details>
+  <details class="quiz"><summary>思考题 2：为什么说"只看平均时延会骗人"？请用本书的仿真数据说明。</summary>
+  <p>实验 B 中 5% 丢包时，T'（关闭拥塞控制的类 TCP）平均时延 60.7 ms，看起来只比无丢包时多 30 ms；但 P99 是 185 ms、最大 215 ms，意味着每 100 条消息里就有 1 条要等 6 倍的单程时延。游戏中这 1% 正好对应玩家感知到的"卡了一下"。KCP 把平均值从 60.7 降到 42.9（降 29%），P99 从 185 降到 95（降 49%），尾部的改善远比平均值明显——这也是 KCP 官方说"最大延迟降低三倍"比"平均延迟降低 30%～40%"更有意义的原因。</p></details>
+  <details class="quiz"><summary>思考题 3：设计一个手游的网络层，UDP 被运营商封了怎么办？</summary>
+  <p>① 登录时（走 TCP/HTTPS）由服务器下发 UDP 地址与会话票据；② 客户端先尝试 UDP 握手，若在限定时间（如 1～2 秒）内失败，或运行中连续一段时间收不到 UDP 包，则切换到 TCP 通道；③ 业务层对两种通道使用统一的消息接口（TCP 上直接传输应用消息，开 TCP_NODELAY，不再套 KCP）；④ 记录降级比例，作为网络质量监控指标；⑤ 可选：对 UDP 流量做端口随机化、伪装等对抗策略（需评估合规性）。</p></details>
+</section>

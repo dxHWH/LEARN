@@ -97,6 +97,9 @@ figure svg .xs{font-size:10.5px;fill:#6B7280}
 figure svg .b{font-weight:700}
 figure svg .mono{font-family:var(--mono);font-size:11.5px}
 figure svg .wt{fill:#FFFFFF}
+figure svg text{paint-order:stroke fill;stroke:#FFFFFF;stroke-width:3px;stroke-linejoin:round}
+figure svg .wt{stroke:none}
+@media print{figure svg text{stroke:none}}
 figure svg g.sm text{font-size:11.5px}
 figure svg g.xs text{font-size:10.5px}
 figure svg g.mono text{font-family:var(--mono);font-size:11px}
@@ -438,7 +441,7 @@ details.quiz[open] summary{margin-bottom:6px}
       <rect x="770" y="208" width="70" height="28" rx="4" fill="#F3F4F6" stroke="#6B7280"/><text x="805" y="227" text-anchor="middle">FCS 4</text>
     </g>
     <line x1="855" y1="40" x2="855" y2="226" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
-    <text x="848" y="270" text-anchor="end" class="xs" style="fill:#2F5BD3">发送：逐层加头（封装）↓　　接收：逐层拆头（解封装）↑</text>
+    <text x="848" y="16" text-anchor="end" class="xs" style="fill:#2F5BD3">发送：逐层加头（封装）↓　　接收：逐层拆头（解封装）↑</text>
     <text x="210" y="270" class="xs">以太网帧的"数据部分"最大 1500 字节 = MTU；去掉 IP 头 20、TCP 头 20，TCP 每段最多放 1460 字节 = MSS</text>
     <text x="210" y="290" class="xs">接收方靠 以太网"类型"字段 → IP"协议"字段（6=TCP，17=UDP）→ 传输层"端口" 一路找到目标进程</text>
   </svg>
@@ -1170,6 +1173,2115 @@ void OnBytes(std::vector&lt;uint8_t&gt;&amp; buf, auto&amp;&amp; onMessage) {
   <p>不是。窗口达到带宽时延积（BDP）就足以跑满带宽，再大也不会更快，只会让更多数据堆在路由器队列里，增加排队时延（即 Bufferbloat），并在丢包时需要重传更多数据、占用更多内存。这正是 BBR 把在途数据控制在 BDP 附近的原因。</p></details>
 </section>
 
+<!-- ======================= CH4 ======================= -->
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>TCP vs UDP：全面对比与场景选型</h1>
+    <p class="lead">不是"谁更好"，而是"你的数据最怕什么"：怕丢，还是怕晚？</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能从 12 个维度对比 TCP 与 UDP，并说出每个差异背后的原因</li>
+    <li>理解"按序可靠交付"带来的队头阻塞，这是两者在实时场景下差异的根源</li>
+    <li>能针对网页、视频、在线游戏给出协议选型并说出理由</li>
+    <li>应对"TCP 一定比 UDP 慢吗"等高频追问</li>
+  </ul></div>
+
+  <h2>4.1 全维度对比</h2>
+  <div class="tbl"><table>
+    <tr><th>维度</th><th>TCP</th><th>UDP</th><th>根本原因</th></tr>
+    <tr><td>连接</td><td>面向连接，三次握手 / 四次挥手</td><td>无连接</td><td>TCP 需要双方同步序号、窗口等状态</td></tr>
+    <tr><td>可靠性</td><td>不丢、不重、不错</td><td>尽力交付</td><td>TCP 有确认 + 重传；UDP 没有</td></tr>
+    <tr><td>有序性</td><td>严格按序交付</td><td>按到达顺序交付</td><td>TCP 接收缓冲区按序号重排</td></tr>
+    <tr><td>数据单位</td><td>字节流，无边界（会粘包）</td><td>数据报，保留边界</td><td>TCP 为了合并 / 拆分以提高效率</td></tr>
+    <tr><td>头部开销</td><td>20～60 字节</td><td>8 字节</td><td>TCP 要携带序号、确认号、窗口、选项</td></tr>
+    <tr><td>流量控制</td><td>有（滑动窗口 rwnd）</td><td>无</td><td>—</td></tr>
+    <tr><td>拥塞控制</td><td>有（慢启动、CUBIC、BBR 等）</td><td>无</td><td>—</td></tr>
+    <tr><td>通信模式</td><td>仅一对一</td><td>一对一、一对多、多对多（广播 / 多播）</td><td>连接是两端之间的状态</td></tr>
+    <tr><td>首包时延</td><td>至少 1 RTT 握手后才能发数据（TFO 除外）</td><td>0 RTT，第一个包即业务数据</td><td>握手</td></tr>
+    <tr><td>丢包时的时延</td><td>后续数据被阻塞，直到重传成功（队头阻塞）</td><td>不受影响，后续数据照常交付</td><td>按序交付的代价</td></tr>
+    <tr><td>服务器资源</td><td>每连接一份内核状态和缓冲区</td><td>一个 socket 服务所有客户端</td><td>连接状态</td></tr>
+    <tr><td>典型应用</td><td>HTTP/1.1、HTTP/2、文件传输、邮件、SSH、数据库</td><td>DNS、DHCP、音视频通话、直播、游戏、QUIC</td><td>业务"怕丢"还是"怕晚"</td></tr>
+  </table></div>
+
+  <h2>4.2 根源：队头阻塞</h2>
+  <p>上表中最影响实时应用的一行是"丢包时的时延"。TCP 承诺<strong>按序交付</strong>：只要第 2 个段没到，就算第 3～6 个段早已躺在接收缓冲区里，应用也一个字节都读不到。这叫<strong>队头阻塞（Head-of-Line Blocking，HOL）</strong>。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="22" class="b">网络到达时刻（RTT = 100 ms，第 2 个包丢失，快速重传后在 t = 120 ms 补到）</text>
+    <line x1="90" y1="60" x2="840" y2="60" stroke="#9CA3AF"/>
+    <g class="xs"><text x="90" y="80" text-anchor="middle">0</text><text x="240" y="80" text-anchor="middle">20</text><text x="390" y="80" text-anchor="middle">40</text><text x="540" y="80" text-anchor="middle">60</text><text x="690" y="80" text-anchor="middle">80</text><text x="840" y="80" text-anchor="middle">120 ms</text></g>
+    <g class="sm b" text-anchor="middle">
+      <rect x="80" y="36" width="24" height="22" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="92" y="52">1</text>
+      <rect x="215" y="36" width="24" height="22" rx="4" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="3 2"/><text x="227" y="52" style="fill:#B91C1C">2✕</text>
+      <rect x="290" y="36" width="24" height="22" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="302" y="52">3</text>
+      <rect x="440" y="36" width="24" height="22" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="452" y="52">4</text>
+      <rect x="590" y="36" width="24" height="22" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="602" y="52">5</text>
+      <rect x="740" y="36" width="24" height="22" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="752" y="52">6</text>
+      <rect x="815" y="36" width="24" height="22" rx="4" fill="#FEF6E4" stroke="#B45309"/><text x="827" y="52">2</text>
+    </g>
+
+    <text x="20" y="130" class="b" style="fill:#15803D">TCP：应用读到数据的时刻</text>
+    <line x1="90" y1="160" x2="840" y2="160" stroke="#9CA3AF"/>
+    <g class="sm b" text-anchor="middle">
+      <rect x="80" y="136" width="24" height="22" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="92" y="152">1</text>
+      <rect x="720" y="136" width="120" height="22" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="780" y="152">2 3 4 5 6 一起到</text>
+    </g>
+    <rect x="108" y="140" width="608" height="14" rx="3" fill="#FDEEEE"/>
+    <text x="412" y="151" text-anchor="middle" class="xs" style="fill:#B91C1C">3、4、5、6 已在内核缓冲区，但被缺失的 2 堵住，应用读不到</text>
+
+    <text x="20" y="210" class="b" style="fill:#6D28D9">UDP（或"可靠无序"的可靠 UDP）：应用读到数据的时刻</text>
+    <line x1="90" y1="240" x2="840" y2="240" stroke="#9CA3AF"/>
+    <g class="sm b" text-anchor="middle">
+      <rect x="80" y="216" width="24" height="22" rx="4" fill="#F3EEFE" stroke="#6D28D9"/><text x="92" y="232">1</text>
+      <rect x="290" y="216" width="24" height="22" rx="4" fill="#F3EEFE" stroke="#6D28D9"/><text x="302" y="232">3</text>
+      <rect x="440" y="216" width="24" height="22" rx="4" fill="#F3EEFE" stroke="#6D28D9"/><text x="452" y="232">4</text>
+      <rect x="590" y="216" width="24" height="22" rx="4" fill="#F3EEFE" stroke="#6D28D9"/><text x="602" y="232">5</text>
+      <rect x="740" y="216" width="24" height="22" rx="4" fill="#F3EEFE" stroke="#6D28D9"/><text x="752" y="232">6</text>
+      <rect x="815" y="216" width="24" height="22" rx="4" fill="#FEF6E4" stroke="#B45309"/><text x="827" y="232">2</text>
+    </g>
+    <text x="430" y="276" text-anchor="middle" class="xs">游戏里包 3～6 是更新的位置：TCP 让玩家多等了 100 ms 才看到它们；UDP 让玩家立即看到，丢失的旧位置 2 直接作废即可</text>
+    <text x="430" y="294" text-anchor="middle" class="xs">若触发的是超时重传（RTO ≥ 200 ms 且会翻倍），TCP 的卡顿还会更长</text>
+  </svg>
+  <figcaption><b>图 4-1</b> 队头阻塞：TCP 的"按序交付"让一个丢包拖住它后面所有的数据</figcaption>
+  </figure>
+
+  <div class="co ana"><span class="h">📦 场景案例：HTTP/2 的"多路复用"为什么还会卡</span>
+  <p>HTTP/1.1 一条 TCP 连接同一时间只能处理一个请求，浏览器只好对同一域名开 6 条连接。HTTP/2 在<strong>一条 TCP 连接</strong>里同时传多个请求（多个流），解决了<em>应用层</em>的队头阻塞。可是这些流共享同一个 TCP 字节流：只要丢一个 TCP 段，<strong>所有流</strong>都被卡住——这是<em>传输层</em>的队头阻塞。在丢包率 2% 的弱网下，HTTP/2 甚至可能比开 6 条连接的 HTTP/1.1 更慢。HTTP/3 把传输层换成 QUIC，让每个流独立排序，才真正解决了这个问题（第 10 章）。</p></div>
+
+  <h2>4.3 三个场景的选型分析</h2>
+  <h3>场景一：网页与 API</h3>
+  <p>网页、REST API、文件下载的数据<strong>一个字节都不能错</strong>，晚几十毫秒用户感知不强，所以长期以来都用 TCP（HTTP/1.1、HTTP/2 over TLS over TCP）。变化发生在移动互联网时代：弱网、高 RTT、频繁切换网络让"握手太多、队头阻塞、换网断连"成了主要矛盾，于是出现了 <strong>HTTP/3 over QUIC over UDP</strong>。截至目前，主流浏览器和大型 CDN 都已支持 HTTP/3，但 TCP 依然是服务端内部通信的绝对主力。</p>
+
+  <h3>场景二：视频</h3>
+  <div class="tbl"><table>
+    <tr><th>子场景</th><th>对延迟的要求</th><th>常用传输</th><th>理由</th></tr>
+    <tr><td>点播（看剧、短视频）</td><td>可以缓冲几秒到几十秒</td><td>HTTP（TCP 或 QUIC）分片下载：HLS / DASH</td><td>有缓冲区兜底，可靠更重要；可以借用 CDN</td></tr>
+    <tr><td>普通直播</td><td>2～10 秒</td><td>RTMP 推流（TCP）+ HLS / FLV 拉流</td><td>生态成熟，延迟可接受</td></tr>
+    <tr><td>低延迟直播 / 连麦</td><td>&lt; 1 秒</td><td>WebRTC、SRT（UDP）</td><td>TCP 重传造成的卡顿不可接受</td></tr>
+    <tr><td>视频会议 / 语音通话</td><td>&lt; 200～300 ms 端到端</td><td>RTP / SRTP over UDP（WebRTC）</td><td>迟到的帧没有意义；用 FEC、NACK、抖动缓冲、丢帧插值替代重传</td></tr>
+  </table></div>
+  <p>规律很清楚：<strong>延迟预算越小，越倾向 UDP + 应用层定制的可靠性</strong>。视频会议的 NACK 机制其实就是"有选择的重传"：只有当 RTT 足够小、重传的包还来得及在播放前到达时才请求重传，否则直接放弃——这是 TCP 做不到的"可靠性按需"。</p>
+
+  <h3>场景三：在线游戏</h3>
+  <div class="tbl"><table>
+    <tr><th>游戏类型</th><th>典型延迟要求</th><th>常用方案</th></tr>
+    <tr><td>回合制、卡牌、棋牌</td><td>数百毫秒都可接受</td><td>TCP（或 WebSocket）足够，开发简单</td></tr>
+    <tr><td>MMORPG 非战斗部分</td><td>100～300 ms</td><td>TCP 为主，部分项目战斗走 UDP</td></tr>
+    <tr><td>MOBA、FPS、格斗、竞速</td><td>每帧都敏感（几十毫秒）</td><td>UDP + 应用层可靠：KCP、ENet、引擎自带网络层（UE 的 NetDriver、Unity Netcode 等）</td></tr>
+  </table></div>
+  <div class="co ver"><span class="h">🎮 游戏开发视角：游戏数据要拆成三类</span>
+  <p>一个实时对战游戏里，数据对可靠性的需求截然不同：<br>
+  ① <strong>状态类</strong>（位置、朝向、血量快照）：只要最新值，旧的丢了就丢了 → <em>不可靠、只取最新</em>；<br>
+  ② <strong>事件类</strong>（释放技能、购买装备、聊天）：一个都不能丢 → <em>可靠</em>，但不同事件之间未必需要严格有序；<br>
+  ③ <strong>输入流</strong>（帧同步下每帧的操作）：每帧都需要，且必须按帧序执行 → <em>可靠有序</em>，常用"每个包冗余携带最近几帧"的方式降低重传依赖。<br>
+  TCP 只能对所有数据一视同仁地"可靠有序"，所以①会被②③的丢包重传拖累。这就是游戏需要可靠 UDP 的根本原因，第 7 章会系统展开。</p></div>
+
+  <h2>4.4 选型决策树</h2>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <rect x="300" y="14" width="260" height="40" rx="10" fill="#F3F4F6" stroke="#4B5563"/>
+    <text x="430" y="39" text-anchor="middle" class="b">需要广播 / 多播吗？</text>
+    <line x1="560" y1="34" x2="680" y2="34" stroke="#6D28D9" stroke-width="1.6" marker-end="url(#ap)"/><text x="620" y="28" text-anchor="middle" class="xs">是</text>
+    <rect x="684" y="18" width="160" height="34" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="764" y="40" text-anchor="middle" class="sm b" style="fill:#6D28D9">UDP（DHCP、发现）</text>
+    <line x1="430" y1="54" x2="430" y2="88" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/><text x="440" y="76" class="xs">否</text>
+
+    <rect x="260" y="90" width="340" height="44" rx="10" fill="#F3F4F6" stroke="#4B5563"/>
+    <text x="430" y="110" text-anchor="middle" class="b">数据过期后是否就失去价值？</text>
+    <text x="430" y="126" text-anchor="middle" class="xs">（晚 200 ms 送到 = 没用？）</text>
+    <line x1="260" y1="112" x2="190" y2="160" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/><text x="206" y="130" class="xs">否</text>
+    <line x1="600" y1="112" x2="670" y2="160" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/><text x="646" y="130" class="xs">是</text>
+
+    <rect x="30" y="162" width="320" height="44" rx="10" fill="#F3F4F6" stroke="#4B5563"/>
+    <text x="190" y="182" text-anchor="middle" class="b">弱网 / 移动网络 / 高 RTT 是主要矛盾吗？</text>
+    <text x="190" y="198" text-anchor="middle" class="xs">（握手延迟、队头阻塞、换网断连）</text>
+    <line x1="110" y1="206" x2="110" y2="250" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/><text x="96" y="232" class="xs" text-anchor="end">否</text>
+    <line x1="280" y1="206" x2="280" y2="250" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/><text x="292" y="232" class="xs">是</text>
+    <rect x="20" y="252" width="180" height="70" rx="10" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+    <text x="110" y="276" text-anchor="middle" class="b" style="fill:#15803D">TCP</text>
+    <text x="110" y="296" text-anchor="middle" class="xs">网页、API、文件、数据库</text>
+    <text x="110" y="312" text-anchor="middle" class="xs">RPC、回合制游戏</text>
+    <rect x="210" y="252" width="160" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="2"/>
+    <text x="290" y="276" text-anchor="middle" class="b" style="fill:#2F5BD3">QUIC</text>
+    <text x="290" y="296" text-anchor="middle" class="xs">HTTP/3、移动 App</text>
+    <text x="290" y="312" text-anchor="middle" class="xs">弱网下载</text>
+
+    <rect x="500" y="162" width="340" height="44" rx="10" fill="#F3F4F6" stroke="#4B5563"/>
+    <text x="670" y="182" text-anchor="middle" class="b">是否有"必须送达"的数据混在其中？</text>
+    <text x="670" y="198" text-anchor="middle" class="xs">（技能指令、聊天、交易）</text>
+    <line x1="580" y1="206" x2="580" y2="250" stroke="#6D28D9" stroke-width="1.6" marker-end="url(#ap)"/><text x="566" y="232" class="xs" text-anchor="end">否</text>
+    <line x1="760" y1="206" x2="760" y2="250" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/><text x="772" y="232" class="xs">是</text>
+    <rect x="490" y="252" width="180" height="70" rx="10" fill="#F3EEFE" stroke="#6D28D9" stroke-width="2"/>
+    <text x="580" y="276" text-anchor="middle" class="b" style="fill:#6D28D9">UDP + 应用层容错</text>
+    <text x="580" y="296" text-anchor="middle" class="xs">语音视频（FEC/NACK）</text>
+    <text x="580" y="312" text-anchor="middle" class="xs">纯状态广播、遥测</text>
+    <rect x="680" y="252" width="170" height="70" rx="10" fill="#FFF4EC" stroke="#C2410C" stroke-width="2"/>
+    <text x="765" y="276" text-anchor="middle" class="b" style="fill:#C2410C">可靠 UDP（分级）</text>
+    <text x="765" y="296" text-anchor="middle" class="xs">KCP / ENet / 引擎网络层</text>
+    <text x="765" y="312" text-anchor="middle" class="xs">MOBA、FPS、帧同步</text>
+    <text x="430" y="358" text-anchor="middle" class="xs">现实工程中还要考虑：团队对自研协议的维护能力、运营商对 UDP 的 QoS 限速、企业防火墙是否放行 UDP（需要 TCP 兜底通道）</text>
+    <text x="430" y="378" text-anchor="middle" class="xs">很多游戏的做法是"UDP 优先，探测失败时自动降级到 TCP"</text>
+  </svg>
+  <figcaption><b>图 4-2</b> 传输协议选型决策树：核心判据是"数据是否怕晚"以及"是否混有必须送达的数据"</figcaption>
+  </figure>
+
+  <h2>4.5 高频追问</h2>
+  <div class="ans">
+    <div class="q">Q1：TCP 一定比 UDP 慢吗？</div>
+    <p>不一定，要区分<strong>吞吐</strong>和<strong>时延</strong>。<br>
+    吞吐：大块数据传输时 TCP 往往<strong>更快</strong>。内核对 TCP 有大量优化（TSO/GSO 分段卸载、GRO 合并、零拷贝 sendfile），而 UDP 每个数据报都要走一遍系统调用和协议栈，高包率下 CPU 开销更大（需要 <code>sendmmsg/recvmmsg</code>、UDP GSO 等手段弥补）。这也是 QUIC 服务端 CPU 开销通常高于 TCP+TLS 的原因之一。<br>
+    时延：网络良好时两者几乎一样（都是一个 RTT/2 的传播时延）；<strong>差别出现在丢包和建连</strong>：TCP 需要 1 RTT 握手，且丢包时有队头阻塞和 RTO 退避。</p>
+    <div class="q">Q2：同一个端口号能同时被 TCP 和 UDP 绑定吗？</div>
+    <p>可以。TCP 和 UDP 是两个独立的端口空间，内核按 IP 头的协议字段先区分 TCP/UDP，再查各自的端口表。DNS 服务器就同时监听 TCP 53 和 UDP 53。</p>
+    <div class="q">Q3：既然 UDP 不可靠，QUIC 为什么还要基于 UDP，而不是设计一个新的 IP 协议号？</div>
+    <p>因为<strong>中间设备僵化（ossification）</strong>：互联网上大量 NAT、防火墙只认识 TCP 和 UDP，一个新的协议号（比如 SCTP 的 132）基本无法穿越公网。同时，TCP 实现在操作系统内核里，升级要等系统更新，周期以年计。基于 UDP 就能穿越现有网络，在用户态快速迭代。UDP 在这里只充当"能穿越网络的最薄封装"。</p>
+    <div class="q">Q4：用 TCP 做实时游戏会有什么问题？如果必须用 TCP 怎么优化？</div>
+    <p>问题：① 队头阻塞，一个丢包卡住后面所有新状态；② RTO 指数退避，连续丢包时卡顿可达秒级；③ Nagle + 延迟确认带来额外几十～几百毫秒；④ 拥塞控制把弱网随机丢包当拥塞，降低发送速率。优化：开 <code>TCP_NODELAY</code>；减小发送缓冲区避免数据在内核堆积（过时的状态宁可在应用层丢弃）；应用层心跳快速检测断线；状态同步只发最新值并做合并；必要时开多条连接隔离不同优先级的数据。</p>
+    <div class="q">Q5：UDP 包丢了，发送方知道吗？</div>
+    <p>不知道。UDP 没有确认机制，唯一可能的反馈是 ICMP（如端口不可达），但它不可靠、可能被防火墙过滤，也不对应"包在中途丢失"的情况。需要知道就要在应用层实现 ACK。</p>
+  </div>
+
+  <div class="co tip"><span class="h">✅ 面试答法：TCP 和 UDP 的区别（30 秒版）</span>
+  <p>TCP 面向连接、可靠、有序、基于字节流，有流量控制和拥塞控制，头部 20 字节起，只支持一对一，适合要求数据完整的场景，比如网页、文件传输。UDP 无连接、不保证可靠和顺序、面向数据报、保留消息边界，头部只有 8 字节，没有流控和拥塞控制，支持广播多播，延迟低开销小，适合实时性要求高、能容忍丢包的场景，比如音视频、游戏、DNS。<em>（追加一句体现深度）</em>两者实时性差异的根源是 TCP 的按序可靠交付带来的队头阻塞，所以 QUIC、KCP 这类协议在 UDP 之上按需实现可靠性。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>选型的核心问题：数据<strong>怕丢</strong>还是<strong>怕晚</strong>；是否混有必须送达的数据；是否需要广播多播。</li>
+    <li>实时场景中 TCP 的根本劣势是<strong>队头阻塞</strong>：按序交付让一个丢包拖住后面所有数据。</li>
+    <li>HTTP/2 解决了应用层队头阻塞，却仍受 TCP 层队头阻塞影响 → HTTP/3 改用 QUIC。</li>
+    <li>视频：点播 TCP、普通直播 TCP、低延迟直播与通话 UDP；游戏：回合制 TCP、实时对战 UDP + 分级可靠。</li>
+    <li>TCP 并不一定慢：大流量吞吐往往更优；差异主要在建连与丢包时的时延。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：直播推流常用 RTMP（基于 TCP），而视频会议用 UDP。同样是实时视频，为什么选择不同？</summary>
+  <p>延迟预算不同。直播是单向的，观众感知不到 3～5 秒的延迟，播放端有缓冲区吸收 TCP 重传带来的抖动，而且 TCP 能穿越几乎所有网络、生态成熟。视频会议是双向交互，端到端延迟超过 300 ms 就会出现"抢话"，没有余地缓冲，所以必须用 UDP，并用 FEC、选择性重传、丢帧等手段在质量和延迟之间做实时取舍。连麦、互动直播对延迟要求高，也逐渐改用 WebRTC / SRT。</p></details>
+  <details class="quiz"><summary>思考题 2：一个 MOBA 游戏如果把"位置同步"和"技能释放"放进同一条可靠有序的通道，会有什么问题？</summary>
+  <p>一旦某个技能消息丢包重传，排在它后面的所有位置更新都会被阻塞（队头阻塞），玩家看到其他英雄"卡住再瞬移"。而且位置消息本身是可以丢弃的旧状态，却因为在可靠通道里而被反复重传，浪费带宽。正确做法是分通道：位置走不可靠（或只保留最新）的通道，技能走可靠通道，不同通道互不阻塞。</p></details>
+  <details class="quiz"><summary>思考题 3：为什么说"UDP 的无拥塞控制"既是优点也是社会责任问题？</summary>
+  <p>优点是应用可以完全掌控发送节奏，不会被算法误判降速。但互联网是共享的：如果一个应用用 UDP 无节制地发包，会挤占同一瓶颈链路上其他 TCP 流的带宽（TCP 会礼让，UDP 不会），极端情况下造成拥塞崩溃。所以 IETF 的 RFC 8085 要求 UDP 应用自行实现拥塞控制或至少限速；QUIC 内置了与 TCP 等价的拥塞控制；KCP 在关闭拥塞控制时也应该配合应用层限速。</p></details>
+</section>
+
+<div class="part-head" data-toc="第三部分 · 连接管理">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　连接管理：握手与挥手</h1>
+  <p>面试出现频率最高的两道题。不仅要背出流程，更要讲清每一步"为什么"，以及每一步出了问题会怎样。</p>
+</div>
+
+<!-- ======================= CH5 ======================= -->
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>三次握手：建立一条连接需要什么</h1>
+    <p class="lead">握手的本质不是"打招呼"，而是让双方就各自的初始序号达成一致，并确认双向通路都是通的。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出三次握手的完整时序：每一步的标志位、seq、ack 以及双方状态变化</li>
+    <li>说清 ISN 为什么要随机，以及"为什么是三次而不是两次或四次"的三个理由</li>
+    <li>理解内核中的半连接队列与全连接队列，以及它们满了之后的行为</li>
+    <li>讲清 SYN Flood 攻击原理和 SYN Cookie 等防御手段</li>
+    <li>逐一分析握手中每个报文丢失、端口未监听、队列溢出等异常</li>
+  </ul></div>
+
+  <h2>5.1 握手要完成的四件事</h2>
+  <ol>
+    <li><strong>确认双方的收发能力</strong>：客户端能发、服务器能收；服务器能发、客户端能收。</li>
+    <li><strong>同步双方的初始序号（ISN）</strong>：TCP 是全双工的，两个方向各有一套序号，<em>双方都要把自己的 ISN 告诉对方，并得到对方的确认</em>。这是最核心的一件事，SYN 就是 Synchronize Sequence Numbers 的缩写。</li>
+    <li><strong>协商连接参数</strong>：MSS、窗口扩大因子、是否支持 SACK 和时间戳。这些选项只能出现在 SYN 报文中。</li>
+    <li><strong>分配连接资源</strong>：双方各自建立 TCB（传输控制块）、收发缓冲区。</li>
+  </ol>
+
+  <h2>5.2 逐步拆解</h2>
+  <figure>
+  <svg viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
+    <text x="190" y="22" text-anchor="middle" class="b">客户端</text>
+    <text x="670" y="22" text-anchor="middle" class="b">服务器</text>
+    <line x1="190" y1="32" x2="190" y2="400" stroke="#9CA3AF"/>
+    <line x1="670" y1="32" x2="670" y2="400" stroke="#9CA3AF"/>
+    <!-- states client -->
+    <g class="sm b">
+      <rect x="40" y="40" width="130" height="26" rx="6" fill="#F3F4F6" stroke="#6B7280"/><text x="105" y="58" text-anchor="middle">CLOSED</text>
+      <rect x="40" y="86" width="130" height="26" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="105" y="104" text-anchor="middle" style="fill:#15803D">SYN_SENT</text>
+      <rect x="40" y="222" width="130" height="26" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="105" y="240" text-anchor="middle" style="fill:#B45309">ESTABLISHED</text>
+      <rect x="690" y="40" width="130" height="26" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="755" y="58" text-anchor="middle" style="fill:#2F5BD3">LISTEN</text>
+      <rect x="690" y="140" width="130" height="26" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="755" y="158" text-anchor="middle" style="fill:#2F5BD3">SYN_RCVD</text>
+      <rect x="690" y="300" width="130" height="26" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="755" y="318" text-anchor="middle" style="fill:#B45309">ESTABLISHED</text>
+    </g>
+    <text x="105" y="128" text-anchor="middle" class="xs">connect() 阻塞中</text>
+    <text x="105" y="264" text-anchor="middle" class="xs">connect() 返回</text>
+    <text x="755" y="182" text-anchor="middle" class="xs">放入半连接队列</text>
+    <text x="755" y="342" text-anchor="middle" class="xs">移入全连接队列</text>
+    <text x="755" y="358" text-anchor="middle" class="xs">等待 accept() 取走</text>
+    <!-- 1 -->
+    <line x1="190" y1="100" x2="668" y2="150" stroke="#15803D" stroke-width="2" marker-end="url(#ag)"/>
+    <rect x="300" y="88" width="250" height="38" rx="6" fill="#fff" stroke="#9AD3AE"/>
+    <text x="425" y="104" text-anchor="middle" class="sm b" style="fill:#15803D">① SYN=1　seq = x</text>
+    <text x="425" y="119" text-anchor="middle" class="xs">选项：MSS=1460 · WS=7 · SACK_PERM · TS</text>
+    <!-- 2 -->
+    <line x1="670" y1="160" x2="192" y2="232" stroke="#2F5BD3" stroke-width="2" marker-end="url(#ab)"/>
+    <rect x="290" y="168" width="270" height="38" rx="6" fill="#fff" stroke="#93A9E8"/>
+    <text x="425" y="184" text-anchor="middle" class="sm b" style="fill:#2F5BD3">② SYN=1, ACK=1　seq = y, ack = x + 1</text>
+    <text x="425" y="199" text-anchor="middle" class="xs">服务器自己的 SYN + 对客户端 SYN 的确认（合并发送）</text>
+    <!-- 3 -->
+    <line x1="190" y1="240" x2="668" y2="310" stroke="#B45309" stroke-width="2" marker-end="url(#ao)"/>
+    <rect x="290" y="250" width="270" height="38" rx="6" fill="#fff" stroke="#F3DDA8"/>
+    <text x="425" y="266" text-anchor="middle" class="sm b" style="fill:#B45309">③ ACK=1　seq = x + 1, ack = y + 1</text>
+    <text x="425" y="281" text-anchor="middle" class="xs">可以携带应用数据（前两次不可以，TFO 除外）</text>
+    <text x="430" y="392" text-anchor="middle" class="xs">x、y 是双方各自随机生成的初始序号 ISN；SYN 消耗 1 个序号，所以确认号是 ISN + 1</text>
+  </svg>
+  <figcaption><b>图 5-1</b> 三次握手：两个 SYN 各自同步一个方向的序号，两个 ACK 各自确认对方的 SYN，中间两者合并成一个报文</figcaption>
+  </figure>
+
+  <div class="tbl"><table>
+    <tr><th>步骤</th><th>方向</th><th>标志位</th><th>seq / ack</th><th>状态变化</th><th>这一步证明了什么</th></tr>
+    <tr><td>①</td><td>C → S</td><td>SYN</td><td>seq = x</td><td>C：CLOSED → SYN_SENT<br>S（收到后）：LISTEN → SYN_RCVD</td><td>服务器知道：客户端能发、自己能收</td></tr>
+    <tr><td>②</td><td>S → C</td><td>SYN + ACK</td><td>seq = y，ack = x+1</td><td>C（收到后）：SYN_SENT → ESTABLISHED</td><td>客户端知道：双方都能收发；自己的 ISN 已被确认</td></tr>
+    <tr><td>③</td><td>C → S</td><td>ACK</td><td>seq = x+1，ack = y+1</td><td>S（收到后）：SYN_RCVD → ESTABLISHED</td><td>服务器知道：客户端能收；自己的 ISN 已被确认</td></tr>
+  </table></div>
+
+  <div class="term"><div class="bar">tcpdump 中的一次握手（典型输出，地址与序号为示例）</div><pre>10:00:00.000 IP 10.0.0.1.52344 &gt; 10.0.0.2.443: Flags [<span class="hl">S</span>],  seq <span class="hl">1705322911</span>, win 64240, options [mss 1460,sackOK,TS val 1 ecr 0,nop,wscale 7], length 0
+10:00:00.030 IP 10.0.0.2.443 &gt; 10.0.0.1.52344: Flags [<span class="hl">S.</span>], seq <span class="ok">3891201650</span>, ack <span class="hl">1705322912</span>, win 65160, options [mss 1460,sackOK,TS val 9 ecr 1,nop,wscale 7], length 0
+10:00:00.060 IP 10.0.0.1.52344 &gt; 10.0.0.2.443: Flags [<span class="hl">.</span>],  ack <span class="ok">3891201651</span>, win 502, length 0</pre></div>
+  <p class="xs" style="font-size:13px;color:#6B7280">tcpdump 中 <code>S</code> 表示 SYN，<code>.</code> 表示 ACK，<code>S.</code> 即 SYN+ACK；第三行的 ack 默认显示为相对值时会是 1。win 502 是窗口扩大前的原始值，实际窗口 = 502 × 2⁷ = 64256 字节。</p>
+
+  <div class="co warn"><span class="h">⚠️ 易错点</span>
+  <p>① <strong>ack 不是"收到的序号"，而是"期望的下一个序号"</strong>，所以是 x+1 而不是 x。<br>
+  ② <strong>SYN 不携带数据，却消耗一个序号</strong>（FIN 也一样）；纯 ACK 不消耗序号，所以第三次握手后客户端发的第一个数据段 seq 仍是 x+1。<br>
+  ③ 服务端的 <code>accept()</code> <strong>并不参与握手</strong>：握手完全由内核完成，accept 只是从全连接队列里取出一个已完成握手的连接。即使应用从不调用 accept，客户端的 connect 也能成功返回。<br>
+  ④ "SYN_RCVD"在一些资料里写作 "SYN_RECV"（Linux <code>ss</code> 的显示），两者是同一个状态。</p></div>
+
+  <h2>5.3 ISN 为什么要随机</h2>
+  <p>如果每条连接的 ISN 都从 0 开始，会有两个问题：</p>
+  <ul>
+    <li><strong>与旧连接的报文混淆</strong>：同一个四元组的连接关闭后又马上重建，旧连接在网络中滞留的报文可能恰好落在新连接的序号窗口里，被当成新数据接收。</li>
+    <li><strong>序号预测攻击</strong>：攻击者如果能猜到 ISN，就能伪造源地址完成握手、向连接中注入数据（1994 年著名的 Mitnick 攻击就是利用了当时可预测的 ISN）。</li>
+  </ul>
+  <p>RFC 6528 推荐的生成方式是 <code>ISN = M + F(本地IP, 本地端口, 远端IP, 远端端口, 密钥)</code>：M 是一个大约每 4 微秒加 1 的计时器（32 位约 4.55 小时回绕一次），F 是带密钥的哈希函数。这样<strong>同一四元组的 ISN 随时间单调递增</strong>（避免和旧连接重叠），而<strong>外人无法预测</strong>（因为有密钥）。Linux 的 <code>secure_tcp_seq()</code> 就是按这个思路实现的。</p>
+
+  <h2>5.4 为什么是三次，而不是两次或四次</h2>
+  <div class="co ana"><span class="h">📞 先看类比：打电话</span><p>A："喂，听得到吗？"（A 确认自己能说）<br>B："听得到，你听得到我吗？"（B 确认自己能听、也能说）<br>A："听得到。"（B 这才确认 A 能听）<br>少了第三句，B 无法知道自己的声音 A 是否听见了。但类比只能解释"双向确认"，面试真正要的是下面三条技术理由。</p></div>
+
+  <h3>理由一（RFC 793 给出的首要原因）：阻止历史连接</h3>
+  <p>网络可能把一个很久以前发出的 SYN 延迟送达。例如客户端先发了 SYN(seq=90)，迟迟没回应就放弃了（或者客户端重启了），接着又发了新的 SYN(seq=100)。如果旧 SYN 先到：</p>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="20" text-anchor="middle" class="b" style="fill:#15803D">三次握手：客户端有机会"否决"</text>
+    <text x="645" y="20" text-anchor="middle" class="b" style="fill:#B91C1C">假如只有两次握手</text>
+    <line x1="430" y1="8" x2="430" y2="322" stroke="#E5E7EB"/>
+    <text x="80" y="44" text-anchor="middle" class="sm b">客户端</text><text x="350" y="44" text-anchor="middle" class="sm b">服务器</text>
+    <line x1="80" y1="52" x2="80" y2="310" stroke="#9CA3AF"/><line x1="350" y1="52" x2="350" y2="310" stroke="#9CA3AF"/>
+    <line x1="80" y1="62" x2="348" y2="110" stroke="#9CA3AF" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#a)"/>
+    <text x="130" y="66" class="xs">旧 SYN seq=90（滞留很久）</text>
+    <line x1="80" y1="96" x2="348" y2="190" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="86" y="92" class="xs" style="fill:#15803D">新 SYN seq=100</text>
+    <line x1="350" y1="118" x2="82" y2="150" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="300" y="118" class="xs" style="fill:#2F5BD3">SYN+ACK ack=91</text>
+    <text x="90" y="166" class="xs" style="fill:#B91C1C">期望 101，却收到 91 → 是历史连接！</text>
+    <line x1="80" y1="176" x2="348" y2="208" stroke="#B91C1C" stroke-width="1.6" marker-end="url(#ar)"/>
+    <text x="120" y="196" class="xs" style="fill:#B91C1C">RST seq=91</text>
+    <text x="356" y="214" class="xs" style="fill:#B91C1C">释放半连接</text>
+    <line x1="350" y1="226" x2="82" y2="258" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="270" y="226" class="xs" style="fill:#2F5BD3">SYN+ACK ack=101</text>
+    <line x1="80" y1="266" x2="348" y2="296" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="110" y="292" class="xs" style="fill:#15803D">ACK → 正确的连接建立</text>
+
+    <text x="510" y="44" text-anchor="middle" class="sm b">客户端</text><text x="780" y="44" text-anchor="middle" class="sm b">服务器</text>
+    <line x1="510" y1="52" x2="510" y2="310" stroke="#9CA3AF"/><line x1="780" y1="52" x2="780" y2="310" stroke="#9CA3AF"/>
+    <line x1="510" y1="62" x2="778" y2="110" stroke="#9CA3AF" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#a)"/>
+    <text x="560" y="66" class="xs">旧 SYN seq=90</text>
+    <rect x="786" y="100" width="70" height="40" rx="6" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="821" y="116" text-anchor="middle" class="xs" style="fill:#B91C1C">直接进入</text><text x="821" y="132" text-anchor="middle" class="xs" style="fill:#B91C1C">ESTABLISHED</text>
+    <line x1="780" y1="118" x2="512" y2="150" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="700" y="118" class="xs" style="fill:#2F5BD3">SYN+ACK ack=91</text>
+    <text x="520" y="176" class="xs" style="fill:#B91C1C">客户端发 RST，但服务器已经</text>
+    <text x="520" y="192" class="xs" style="fill:#B91C1C">分配了资源，甚至可能已经</text>
+    <text x="520" y="208" class="xs" style="fill:#B91C1C">开始向客户端发送数据</text>
+    <text x="645" y="250" text-anchor="middle" class="xs">服务器在收到 SYN 的那一刻就认为连接已建立，</text>
+    <text x="645" y="266" text-anchor="middle" class="xs">没有给客户端任何"这不是我要的连接"的否决机会</text>
+  </svg>
+  <figcaption><b>图 5-2</b> 历史连接问题：三次握手让发起方在第三步确认"这是不是我当前想要的连接"</figcaption>
+  </figure>
+  <p>关键在于：<strong>只有发起方（客户端）才知道哪个 SYN 是"当前有效"的</strong>。三次握手把"最终拍板"的权力留给了客户端：服务器回 SYN+ACK 之后先不建立连接，由客户端根据确认号判断，是当前连接就回 ACK，是历史连接就回 RST。</p>
+
+  <h3>理由二：可靠地同步双方的初始序号</h3>
+  <p>双方都有自己的 ISN，<strong>每个 ISN 都需要"告知 + 确认"一来一回</strong>，理论上需要 4 个报文：C 发 SYN(x)、S 确认 x、S 发 SYN(y)、C 确认 y。中间两个都是服务器发给客户端的，可以合并成一个 SYN+ACK，所以是 3 个。两次握手只能保证客户端的 ISN 被确认，服务器的 ISN 发出去后不知道对方有没有收到。</p>
+
+  <h3>理由三：避免重复连接浪费资源</h3>
+  <p>如果只有两次握手，客户端因为超时重传了多个 SYN，服务器每收到一个 SYN 就建立一条连接、分配一次资源，而客户端只会使用其中一条，其余全部成为空占资源的"僵尸连接"。</p>
+
+  <h3>为什么不是四次？</h3>
+  <p>四次也能工作（同时打开时其实就是四个报文），只是没必要：服务器的"确认"和"自己的 SYN"可以放在同一个报文里发出，合并后三次已经足以完成全部目标。<strong>三次是满足可靠同步的最少次数</strong>。</p>
+
+  <div class="co tip"><span class="h">✅ 面试答法：为什么是三次握手？</span>
+  <p>三次握手的目的是同步双方的初始序号并确认双向通路。三次是最少次数：① 主要原因是<strong>防止历史连接</strong>，旧的 SYN 到达服务器后，客户端可以在第三步通过 RST 否决，两次握手做不到；② 双方的 ISN 都需要被对方确认，两次只能确认客户端的；③ 两次握手下，重传的重复 SYN 会让服务器建立多条无用连接。不需要四次，因为服务器的 ACK 和 SYN 可以合并在一个报文里。</p></div>
+
+  <h2>5.5 内核视角：半连接队列与全连接队列</h2>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="110" height="60" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="75" y="46" text-anchor="middle" class="b sm">客户端们</text><text x="75" y="64" text-anchor="middle" class="xs">connect()</text>
+    <rect x="200" y="20" width="460" height="230" rx="14" fill="#FBFAF7" stroke="#9CA3AF"/>
+    <text x="430" y="42" text-anchor="middle" class="b">服务器内核 · 一个 LISTEN socket</text>
+    <rect x="220" y="62" width="200" height="120" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="320" y="82" text-anchor="middle" class="b sm" style="fill:#2F5BD3">半连接队列（SYN 队列）</text>
+    <g class="xs">
+      <rect x="236" y="92" width="168" height="18" rx="3" fill="#fff" stroke="#93A9E8"/><text x="244" y="105">SYN_RCVD · 1.1.1.1:5001</text>
+      <rect x="236" y="114" width="168" height="18" rx="3" fill="#fff" stroke="#93A9E8"/><text x="244" y="127">SYN_RCVD · 2.2.2.2:6002</text>
+      <rect x="236" y="136" width="168" height="18" rx="3" fill="#fff" stroke="#93A9E8"/><text x="244" y="149">……</text>
+    </g>
+    <text x="320" y="174" text-anchor="middle" class="xs">上限 ≈ tcp_max_syn_backlog</text>
+    <rect x="440" y="62" width="200" height="120" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="540" y="82" text-anchor="middle" class="b sm" style="fill:#B45309">全连接队列（accept 队列）</text>
+    <g class="xs">
+      <rect x="456" y="92" width="168" height="18" rx="3" fill="#fff" stroke="#F3DDA8"/><text x="464" y="105">ESTABLISHED · 3.3.3.3:7003</text>
+      <rect x="456" y="114" width="168" height="18" rx="3" fill="#fff" stroke="#F3DDA8"/><text x="464" y="127">ESTABLISHED · 4.4.4.4:8004</text>
+    </g>
+    <text x="540" y="164" text-anchor="middle" class="xs">上限 = min(backlog, somaxconn)</text>
+    <line x1="132" y1="50" x2="218" y2="100" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/><text x="150" y="98" class="xs" style="fill:#15803D">① SYN</text>
+    <line x1="422" y1="120" x2="438" y2="120" stroke="#B45309" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="430" y="200" text-anchor="middle" class="xs" style="fill:#B45309">③ 收到第三次握手的 ACK：从半连接队列移入全连接队列</text>
+    <rect x="700" y="90" width="140" height="60" rx="10" fill="#F3EEFE" stroke="#6D28D9"/><text x="770" y="116" text-anchor="middle" class="b sm" style="fill:#6D28D9">应用进程</text><text x="770" y="134" text-anchor="middle" class="xs">accept() 取走一个</text>
+    <line x1="642" y1="120" x2="698" y2="120" stroke="#6D28D9" stroke-width="1.6" marker-end="url(#ap)"/>
+    <text x="430" y="236" text-anchor="middle" class="xs">② SYN+ACK 由内核在把请求放入半连接队列时发出</text>
+    <text x="430" y="280" text-anchor="middle" class="xs">应用 accept 太慢 → 全连接队列满；SYN 太多（或 SYN Flood）→ 半连接队列满</text>
+  </svg>
+  <figcaption><b>图 5-3</b> Linux 中一个监听 socket 维护两个队列：握手进行中的放在半连接队列，握手完成的放在全连接队列等 accept</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>队列满了</th><th>Linux 的行为</th><th>如何观察 / 调整</th></tr>
+    <tr><td>半连接队列满</td><td>默认开启 SYN Cookie（<code>tcp_syncookies=1</code>）时改用 Cookie 继续服务；否则丢弃新的 SYN</td><td><code>netstat -s | grep "SYNs to LISTEN"</code>；调大 <code>tcp_max_syn_backlog</code></td></tr>
+    <tr><td>全连接队列满</td><td><code>tcp_abort_on_overflow=0</code>（默认）：<strong>丢弃第三次握手的 ACK</strong>，服务器停留在 SYN_RCVD 并重传 SYN+ACK，期望应用稍后腾出空间；<code>=1</code>：直接回 RST</td><td><code>ss -lnt</code> 中监听 socket 的 Recv-Q（当前积压）/ Send-Q（队列上限）；<code>netstat -s | grep overflowed</code>；调大 <code>listen</code> 的 backlog 和 <code>net.core.somaxconn</code>（Linux 5.4 起默认 4096，之前为 128）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 易错点：客户端 connect 成功了，服务端却"没有这条连接"</span><p>全连接队列满且 <code>tcp_abort_on_overflow=0</code> 时，客户端收到 SYN+ACK 就进入了 ESTABLISHED，connect 返回成功，开始发送请求；而服务端把第三次握手的 ACK 丢了，连接还在半连接队列里。客户端的请求数据会被服务端丢弃或者等待，表现为"连接成功但请求超时"。线上排查"偶发连接超时"时，监听 socket 的 Recv-Q 是第一个要看的指标。</p></div>
+
+  <h2>5.6 SYN Flood 攻击与防御</h2>
+  <h3>原理</h3>
+  <p>攻击者伪造大量不存在的源 IP 发送 SYN。服务器为每个 SYN 在半连接队列中分配一个条目并回复 SYN+ACK，但这些 SYN+ACK 发往不存在的地址，永远收不到第三次握手的 ACK。每个半连接要等 SYN+ACK 重传若干次（Linux 默认 <code>tcp_synack_retries=5</code>，总计约 63 秒）才会被清理。只要攻击者发送 SYN 的速度超过清理速度，半连接队列很快就会被占满，<strong>正常用户的 SYN 被丢弃，服务不可用</strong>。它的厉害之处在于：攻击者几乎没有成本（不需要维持任何状态），却能耗尽服务器的资源——这是"<strong>状态不对称</strong>"导致的。</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="20" text-anchor="middle" class="b" style="fill:#B91C1C">SYN Flood：半连接队列被打满</text>
+    <text x="645" y="20" text-anchor="middle" class="b" style="fill:#15803D">SYN Cookie：收到 SYN 时不存状态</text>
+    <line x1="430" y1="8" x2="430" y2="292" stroke="#E5E7EB"/>
+    <rect x="20" y="40" width="110" height="90" rx="10" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="75" y="70" text-anchor="middle" class="b sm" style="fill:#B91C1C">攻击者</text>
+    <text x="75" y="90" text-anchor="middle" class="xs">伪造源 IP</text><text x="75" y="106" text-anchor="middle" class="xs">每秒数十万 SYN</text>
+    <g stroke="#B91C1C" stroke-width="1.2"><line x1="132" y1="60" x2="248" y2="70" marker-end="url(#ar)"/><line x1="132" y1="80" x2="248" y2="90" marker-end="url(#ar)"/><line x1="132" y1="100" x2="248" y2="110" marker-end="url(#ar)"/></g>
+    <rect x="250" y="40" width="160" height="150" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="330" y="60" text-anchor="middle" class="b sm" style="fill:#2F5BD3">半连接队列</text>
+    <g><rect x="264" y="70" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/><rect x="264" y="88" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/><rect x="264" y="106" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/><rect x="264" y="124" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/><rect x="264" y="142" width="132" height="14" fill="#FDEEEE" stroke="#E5A5A5"/></g>
+    <text x="330" y="178" text-anchor="middle" class="xs" style="fill:#B91C1C">全是假连接，已满</text>
+    <rect x="20" y="200" width="110" height="50" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="75" y="230" text-anchor="middle" class="sm b" style="fill:#15803D">正常用户</text>
+    <line x1="132" y1="224" x2="246" y2="180" stroke="#15803D" stroke-width="1.4" marker-end="url(#ag)"/>
+    <text x="250" y="226" class="xs" style="fill:#B91C1C">SYN 被丢弃 → connect 超时</text>
+    <text x="215" y="280" text-anchor="middle" class="xs">SYN+ACK 发往伪造地址，永远等不到 ACK，每个条目要占约 1 分钟</text>
+
+    <g class="xs">
+      <text x="450" y="52" class="b" style="fill:#15803D">① 收到 SYN：</text><text x="450" y="70">不进半连接队列，把关键信息"编码"进 ISN 后直接回 SYN+ACK：</text>
+    </g>
+    <g class="mono">
+      <rect x="450" y="80" width="56" height="26" fill="#FEF6E4" stroke="#B45309"/><text x="478" y="98" text-anchor="middle">t 5位</text>
+      <rect x="506" y="80" width="56" height="26" fill="#F3EEFE" stroke="#6D28D9"/><text x="534" y="98" text-anchor="middle">MSS 3位</text>
+      <rect x="562" y="80" width="270" height="26" fill="#EAF0FD" stroke="#2F5BD3"/><text x="697" y="98" text-anchor="middle">hash(四元组, t, 密钥) 24 位</text>
+    </g>
+    <g class="xs">
+      <text x="450" y="124">t：粗粒度时间计数（约 64 秒一格），用于判断 Cookie 是否过期</text>
+      <text x="450" y="140">MSS：只能取少数几个预设值（经典设计 3 位 / 8 个，Linux 现用 4 个）</text>
+      <text x="450" y="168" class="b" style="fill:#15803D">② 收到第三次握手的 ACK：</text>
+      <text x="450" y="186">取出 ack − 1 就是当初发出的 ISN，重新计算 hash 校验；</text>
+      <text x="450" y="202">通过则直接创建连接放入全连接队列，否则丢弃</text>
+      <text x="450" y="230" class="b" style="fill:#B45309">代价：</text>
+      <text x="450" y="248">· 无法保存窗口扩大、SACK 等选项（开启时间戳时可借用 TS 字段编码一部分）</text>
+      <text x="450" y="264">· 服务器不保存状态，就无法重传 SYN+ACK</text>
+      <text x="450" y="280">· 所以 Linux 只在半连接队列溢出时才启用 Cookie</text>
+    </g>
+  </svg>
+  <figcaption><b>图 5-4</b> 左：SYN Flood 利用"攻击者无状态、服务器有状态"的不对称性；右：SYN Cookie 把状态编码进 ISN，让服务器在握手完成前也不存状态</figcaption>
+  </figure>
+
+  <h3>防御手段</h3>
+  <div class="tbl"><table>
+    <tr><th>手段</th><th>做法</th><th>作用</th></tr>
+    <tr><td><strong>SYN Cookie</strong></td><td><code>net.ipv4.tcp_syncookies = 1</code>（Linux 默认）</td><td>根治"半连接队列被打满"，代价见上图</td></tr>
+    <tr><td>增大半连接队列</td><td>调大 <code>tcp_max_syn_backlog</code>，同时调大 <code>somaxconn</code> 与 backlog</td><td>提高承受上限</td></tr>
+    <tr><td>减少 SYN+ACK 重传次数</td><td>调小 <code>tcp_synack_retries</code>（如 2）</td><td>半连接更快被清理，代价是正常的弱网用户更容易握手失败</td></tr>
+    <tr><td>SYN Proxy / 防火墙</td><td>由前置设备（高防、负载均衡、iptables SYNPROXY）代替服务器完成握手，验证通过后再与后端建连</td><td>把攻击挡在服务器之外</td></tr>
+    <tr><td>流量清洗与限速</td><td>运营商 / 云厂商的 DDoS 清洗；按源地址限速</td><td>应对超大流量攻击</td></tr>
+  </table></div>
+  <div class="co ver"><span class="h">🎮 延伸：这件事对可靠 UDP 有什么启示</span><p>UDP 服务器没有半连接队列，看上去不怕 SYN Flood，但自己实现的"连接握手"如果在收到第一个包时就分配会话资源，就会重蹈覆辙；如果对一个很小的请求回复很大的应答，还会被利用来做<strong>反射放大攻击</strong>。QUIC 的应对方式值得借鉴：服务器在验证客户端地址之前，发送的数据量不得超过收到的 <strong>3 倍</strong>，并且可以发送 <strong>Retry 令牌</strong>（本质就是 SYN Cookie 的思想）要求客户端证明自己真的拥有这个地址（第 10 章）。</p></div>
+
+  <h2>5.7 握手过程中的异常情况</h2>
+  <div class="tbl"><table>
+    <tr><th>异常</th><th>客户端表现</th><th>服务器表现</th><th>最终结果</th></tr>
+    <tr><td><strong>① SYN 丢失</strong></td><td>停留在 SYN_SENT；按 1、2、4、8、16、32 s 指数退避重传 SYN，默认 <code>tcp_syn_retries=6</code></td><td>毫不知情</td><td>重传全部失败（共约 127 s）后 connect 返回 <code>ETIMEDOUT</code></td></tr>
+    <tr><td><strong>② SYN+ACK 丢失</strong></td><td>以为 SYN 丢了，<strong>重传 SYN</strong></td><td>停留在 SYN_RCVD，<strong>重传 SYN+ACK</strong>（默认 <code>tcp_synack_retries=5</code>）</td><td>双方都在重传，任何一个成功即可继续；都失败则客户端超时、服务器清理半连接</td></tr>
+    <tr><td><strong>③ ACK 丢失</strong></td><td>已进入 ESTABLISHED，connect 已返回</td><td>停留在 SYN_RCVD，重传 SYN+ACK；客户端收到后会再回 ACK</td><td>若客户端此时发送数据，<strong>数据段本身带有 ACK 标志和正确的确认号，服务器收到后同样会进入 ESTABLISHED</strong>；若客户端一直不发数据且服务器重传耗尽，服务器删除半连接，客户端之后发数据会收到 RST</td></tr>
+    <tr><td>端口无人监听</td><td>收到 RST → <code>ECONNREFUSED</code></td><td>内核直接回 RST</td><td>连接失败（Windows 会重试 SYN，见下方实测）</td></tr>
+    <tr><td>主机不可达 / 被防火墙丢弃</td><td>收不到任何回应，同"SYN 丢失"；若收到 ICMP 不可达则返回 <code>EHOSTUNREACH</code></td><td>—</td><td>超时或立即失败</td></tr>
+    <tr><td>全连接队列满</td><td>connect 成功，但请求无响应</td><td>丢弃第三次 ACK，重传 SYN+ACK</td><td>见 5.5 节</td></tr>
+    <tr><td>已建立的连接又收到一个 SYN（如客户端重启后恰好用了相同端口）</td><td>收到一个"挑战 ACK"，发现确认号不对，回 RST</td><td>按 RFC 5961 回复<strong>挑战 ACK</strong>（而不是直接重置，防止伪造 SYN 攻击）</td><td>旧连接被 RST 清理，客户端重试后建立新连接</td></tr>
+    <tr><td>同时打开（双方同时向对方发 SYN）</td><td colspan="2">双方都 SYN_SENT → 收到对方 SYN → SYN_RCVD → 发 SYN+ACK → 收到后 ESTABLISHED</td><td>4 个报文建立一条连接（P2P 打洞时可能出现）</td></tr>
+  </table></div>
+
+  <div class="co net"><span class="h">🧪 实测证据（d1 · E3）：connect 到没人监听的端口</span>
+  <div class="term"><div class="bar">d1_tcp_udp_behaviors.exe · E3</div><pre>== E3 TCP connect 到没人监听的端口 ==
+  connect 返回 -1，WSAGetLastError=<span class="hl">10061</span>（10061=WSAECONNREFUSED，对端回了 RST），耗时 <span class="hl">2048 ms</span></pre></div>
+  <p>同一台机器的回环地址，RTT 不到 0.1 ms，可 connect 却花了整整 2 秒才失败。这是 Windows 的特有行为：收到 RST 后它不会立即放弃，而是认为"对方可能刚好在重启"，再重试几次 SYN。Linux 收到 RST 会立即返回 <code>ECONNREFUSED</code>（通常不到 1 ms）。所以在 Windows 上做"端口是否开放"的探测或者"服务未启动时快速失败重连"，不要指望 connect 很快失败，应改用非阻塞 connect + 自己控制超时。</p></div>
+
+  <h2>5.8 握手优化：TCP Fast Open</h2>
+  <p>普通握手中，客户端最早要在第三步才能发送数据，HTTP 请求至少要等 1 个 RTT。<strong>TCP Fast Open（TFO，RFC 7413）</strong>允许在 SYN 里就携带数据：</p>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="20" text-anchor="middle" class="b">首次连接：获取 Cookie</text>
+    <text x="645" y="20" text-anchor="middle" class="b" style="fill:#15803D">之后的连接：SYN 携带数据（省 1 RTT）</text>
+    <line x1="430" y1="8" x2="430" y2="252" stroke="#E5E7EB"/>
+    <text x="80" y="44" text-anchor="middle" class="sm b">客户端</text><text x="350" y="44" text-anchor="middle" class="sm b">服务器</text>
+    <line x1="80" y1="52" x2="80" y2="240" stroke="#9CA3AF"/><line x1="350" y1="52" x2="350" y2="240" stroke="#9CA3AF"/>
+    <line x1="80" y1="64" x2="348" y2="94" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/><text x="120" y="68" class="xs">SYN + 请求 Cookie</text>
+    <line x1="350" y1="104" x2="82" y2="134" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/><text x="220" y="140" class="xs" style="fill:#2F5BD3">SYN+ACK + Cookie</text>
+    <line x1="80" y1="148" x2="348" y2="178" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/><text x="120" y="158" class="xs">ACK + HTTP 请求</text>
+    <line x1="350" y1="188" x2="82" y2="218" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/><text x="220" y="224" class="xs">HTTP 响应（第 2 个 RTT）</text>
+
+    <text x="510" y="44" text-anchor="middle" class="sm b">客户端</text><text x="780" y="44" text-anchor="middle" class="sm b">服务器</text>
+    <line x1="510" y1="52" x2="510" y2="240" stroke="#9CA3AF"/><line x1="780" y1="52" x2="780" y2="240" stroke="#9CA3AF"/>
+    <line x1="510" y1="64" x2="778" y2="94" stroke="#15803D" stroke-width="1.8" marker-end="url(#ag)"/><text x="530" y="68" class="xs" style="fill:#15803D">SYN + Cookie + HTTP 请求</text>
+    <text x="786" y="104" class="xs" style="fill:#15803D">验证 Cookie，</text><text x="786" y="118" class="xs" style="fill:#15803D">立即交给应用</text>
+    <line x1="780" y1="108" x2="512" y2="138" stroke="#2F5BD3" stroke-width="1.8" marker-end="url(#ab)"/><text x="600" y="146" class="xs" style="fill:#2F5BD3">SYN+ACK + HTTP 响应</text>
+    <line x1="510" y1="160" x2="778" y2="190" stroke="#4B5563" stroke-width="1.5" marker-end="url(#a)"/><text x="560" y="170" class="xs">ACK</text>
+    <text x="645" y="232" text-anchor="middle" class="xs">第 1 个 RTT 结束时就拿到了响应</text>
+  </svg>
+  <figcaption><b>图 5-5</b> TCP Fast Open：首次连接拿到服务器签发的 Cookie，之后 SYN 即可携带数据</figcaption>
+  </figure>
+  <p>TFO 的局限：① SYN 中的数据可能被<strong>重放</strong>（攻击者截获后重发），所以只适合幂等请求；② 不少中间设备会丢弃带数据的 SYN 或去掉未知选项；③ 需要客户端和服务器双方都支持（Linux 用 <code>net.ipv4.tcp_fastopen</code> 开启）。实际部署并不广泛，"省握手 RTT"这个目标后来主要由 TLS 1.3 的 0-RTT 和 QUIC 实现。</p>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>三次握手：<strong>SYN(seq=x) → SYN+ACK(seq=y, ack=x+1) → ACK(ack=y+1)</strong>；状态 C：SYN_SENT → ESTABLISHED，S：LISTEN → SYN_RCVD → ESTABLISHED。</li>
+    <li>SYN 不带数据但占 1 个序号；第三次握手可以携带数据；accept 不参与握手。</li>
+    <li>ISN 随机且随时间递增：防止与旧连接混淆、防止序号预测攻击（RFC 6528）。</li>
+    <li>为什么三次：<strong>防历史连接</strong>（首要）、同步双方 ISN、避免重复连接；ACK 与 SYN 合并所以不需要四次。</li>
+    <li>半连接队列（tcp_max_syn_backlog）/ 全连接队列（min(backlog, somaxconn)）；全连接队列满默认丢第三次 ACK。</li>
+    <li>SYN Flood 利用状态不对称耗尽半连接队列；SYN Cookie 把状态编码进 ISN；另有调参、SYN Proxy、清洗。</li>
+    <li>异常：SYN 丢 → 客户端退避重传；SYN+ACK 丢 → 双方都重传；ACK 丢 → 服务端重传，客户端的数据段可代替 ACK。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：第三次握手的 ACK 丢了，客户端紧接着发送了数据，会发生什么？</summary>
+  <p>客户端发送的数据段同样带 ACK 标志、ack = y+1。服务器在 SYN_RCVD 状态收到它，确认号正确，于是直接进入 ESTABLISHED 并接收数据（相当于第三次握手的 ACK "搭了数据的便车"）。所以第三次 ACK 丢失通常不会造成影响。只有在客户端一直不发数据、而服务器的 SYN+ACK 重传全部失败时，服务器才会删除这个半连接，客户端之后再发数据会收到 RST。</p></details>
+  <details class="quiz"><summary>思考题 2：服务器 listen(fd, 1024)，但 net.core.somaxconn = 128，全连接队列多大？大量短连接突发时会怎样？</summary>
+  <p>全连接队列上限取两者较小值 128。突发时如果应用 accept 不够快，队列溢出，默认会丢弃第三次握手的 ACK，表现为客户端连接成功但请求超时、服务器重传 SYN+ACK、客户端出现 1 秒以上的延迟。排查：<code>ss -lnt</code> 看 Recv-Q 是否接近 Send-Q，<code>netstat -s | grep overflowed</code> 看溢出计数。解决：调大 somaxconn 和 backlog，提高 accept 效率（多线程 / SO_REUSEPORT 多个监听 socket）。</p></details>
+  <details class="quiz"><summary>思考题 3：为什么 SYN Cookie 默认只在半连接队列满时才启用，而不是一直开着？</summary>
+  <p>因为 SYN Cookie 有代价：服务器不保存状态，就不能重传丢失的 SYN+ACK；MSS 只能取少数几个预设值之一；窗口扩大、SACK 等选项只有在开启时间戳时才能部分编码保存，否则会丢失，影响高带宽链路的性能。正常情况下用完整的半连接队列能获得最好的连接质量，只有在被攻击（队列溢出）时才退而求其次。</p></details>
+  <details class="quiz"><summary>思考题 4：客户端 connect 一个公网服务器，30 秒都没有返回，可能是什么原因？</summary>
+  <p>说明客户端一直处于 SYN_SENT，在指数退避重传 SYN，从未收到任何回应（收到 RST 会立即失败）。可能原因：① 服务器或中间防火墙静默丢弃了 SYN（安全组未放行端口最常见）；② 路由不可达但 ICMP 被过滤；③ 服务器半连接队列满且没开 SYN Cookie；④ 服务器的 SYN+ACK 在回程被丢弃（例如非对称路由被防火墙拦截）。排查可在两端抓包对照，或用 <code>tcptraceroute</code> 看 SYN 走到了哪一跳。</p></details>
+</section>
+
+<!-- ======================= CH6 ======================= -->
+<section class="chapter" id="ch6">
+  <div class="ch-head">
+    <div class="no">CHAPTER 06</div>
+    <h1>四次挥手：一条连接如何体面地结束</h1>
+    <p class="lead">常被口误为"四次握手"。它之所以是四次，是因为 TCP 是全双工的：两个方向要各自说一次"我说完了"。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出四次挥手的时序与双方状态，理解"半关闭"</li>
+    <li>说清为什么是四次、什么时候会变成三次</li>
+    <li>彻底讲透 TIME_WAIT：为什么存在、为什么是 2MSL、过多怎么办</li>
+    <li>会排查 CLOSE_WAIT 堆积、FIN_WAIT_2 悬挂；理解 RST、close 与 shutdown、Keepalive 与心跳</li>
+    <li>用实测输出佐证状态变化，用交互实验回放各种握手 / 挥手异常</li>
+  </ul></div>
+
+  <h2>6.1 逐步拆解</h2>
+  <p>假设客户端先调用 <code>close()</code>（谁先关闭谁就是<strong>主动关闭方</strong>，服务器也可以是主动方）。客户端已发送的最后一个字节序号为 u−1，服务器为 v−1：</p>
+  <figure>
+  <svg viewBox="0 0 860 470" xmlns="http://www.w3.org/2000/svg">
+    <text x="190" y="22" text-anchor="middle" class="b">客户端（主动关闭）</text>
+    <text x="670" y="22" text-anchor="middle" class="b">服务器（被动关闭）</text>
+    <line x1="190" y1="32" x2="190" y2="450" stroke="#9CA3AF"/>
+    <line x1="670" y1="32" x2="670" y2="450" stroke="#9CA3AF"/>
+    <g class="sm b" text-anchor="middle">
+      <rect x="40" y="40" width="130" height="26" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="105" y="58" style="fill:#B45309">ESTABLISHED</text>
+      <rect x="40" y="80" width="130" height="26" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="105" y="98" style="fill:#15803D">FIN_WAIT_1</text>
+      <rect x="40" y="168" width="130" height="26" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="105" y="186" style="fill:#15803D">FIN_WAIT_2</text>
+      <rect x="40" y="334" width="130" height="26" rx="6" fill="#FDEEEE" stroke="#B91C1C"/><text x="105" y="352" style="fill:#B91C1C">TIME_WAIT</text>
+      <rect x="40" y="420" width="130" height="26" rx="13" fill="#F3F4F6" stroke="#4B5563"/><text x="105" y="438">CLOSED</text>
+      <rect x="690" y="40" width="130" height="26" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="755" y="58" style="fill:#B45309">ESTABLISHED</text>
+      <rect x="690" y="126" width="130" height="26" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="755" y="144" style="fill:#2F5BD3">CLOSE_WAIT</text>
+      <rect x="690" y="268" width="130" height="26" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="755" y="286" style="fill:#2F5BD3">LAST_ACK</text>
+      <rect x="690" y="372" width="130" height="26" rx="13" fill="#F3F4F6" stroke="#4B5563"/><text x="755" y="390">CLOSED</text>
+    </g>
+    <text x="105" y="122" text-anchor="middle" class="xs">close() / shutdown(WR)</text>
+    <text x="105" y="210" text-anchor="middle" class="xs">还能接收数据（半关闭）</text>
+    <text x="105" y="376" text-anchor="middle" class="xs">等待 2MSL</text>
+    <text x="755" y="168" text-anchor="middle" class="xs">read() 返回 0（读到 EOF）</text>
+    <text x="755" y="184" text-anchor="middle" class="xs">仍可以继续发送数据</text>
+    <text x="755" y="310" text-anchor="middle" class="xs">应用调用 close()</text>
+    <!-- 1 FIN -->
+    <line x1="190" y1="94" x2="668" y2="134" stroke="#15803D" stroke-width="2" marker-end="url(#ag)"/>
+    <rect x="320" y="84" width="210" height="24" rx="6" fill="#fff" stroke="#9AD3AE"/>
+    <text x="425" y="101" text-anchor="middle" class="sm b" style="fill:#15803D">① FIN=1, ACK=1　seq = u</text>
+    <!-- 2 ACK -->
+    <line x1="670" y1="140" x2="192" y2="180" stroke="#2F5BD3" stroke-width="2" marker-end="url(#ab)"/>
+    <rect x="320" y="146" width="210" height="24" rx="6" fill="#fff" stroke="#93A9E8"/>
+    <text x="425" y="163" text-anchor="middle" class="sm b" style="fill:#2F5BD3">② ACK=1　ack = u + 1</text>
+    <!-- data -->
+    <line x1="670" y1="210" x2="192" y2="240" stroke="#6B7280" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#a)"/>
+    <text x="425" y="218" text-anchor="middle" class="xs">（可选）服务器继续发送剩余数据，客户端照常接收并确认</text>
+    <!-- 3 FIN -->
+    <line x1="670" y1="282" x2="192" y2="342" stroke="#2F5BD3" stroke-width="2" marker-end="url(#ab)"/>
+    <rect x="300" y="276" width="250" height="24" rx="6" fill="#fff" stroke="#93A9E8"/>
+    <text x="425" y="293" text-anchor="middle" class="sm b" style="fill:#2F5BD3">③ FIN=1, ACK=1　seq = w, ack = u + 1</text>
+    <!-- 4 ACK -->
+    <line x1="190" y1="348" x2="668" y2="384" stroke="#B91C1C" stroke-width="2" marker-end="url(#ar)"/>
+    <rect x="300" y="350" width="250" height="24" rx="6" fill="#fff" stroke="#F5C7C7"/>
+    <text x="425" y="367" text-anchor="middle" class="sm b" style="fill:#B91C1C">④ ACK=1　seq = u + 1, ack = w + 1</text>
+    <text x="430" y="466" text-anchor="middle" class="xs">w 是服务器当前序号（若半关闭期间又发了数据，w 会大于 v）；FIN 和 SYN 一样消耗 1 个序号，所以确认号要 +1</text>
+  </svg>
+  <figcaption><b>图 6-1</b> 四次挥手：①② 关闭"客户端 → 服务器"方向，③④ 关闭"服务器 → 客户端"方向；①② 与 ③④ 之间是半关闭状态</figcaption>
+  </figure>
+
+  <div class="tbl"><table>
+    <tr><th>步骤</th><th>方向</th><th>报文</th><th>发送后 / 收到后的状态</th><th>含义</th></tr>
+    <tr><td>①</td><td>C → S</td><td>FIN, seq=u</td><td>C：ESTABLISHED → FIN_WAIT_1<br>S：ESTABLISHED → CLOSE_WAIT（收到后）</td><td>"我没有数据要发了"</td></tr>
+    <tr><td>②</td><td>S → C</td><td>ACK, ack=u+1</td><td>C：FIN_WAIT_1 → FIN_WAIT_2（收到后）</td><td>"知道了"——由内核自动回复，不需要应用参与</td></tr>
+    <tr><td>③</td><td>S → C</td><td>FIN, seq=w</td><td>S：CLOSE_WAIT → LAST_ACK<br>C：FIN_WAIT_2 → TIME_WAIT（收到后）</td><td>服务器应用调用 close 后才发出："我也说完了"</td></tr>
+    <tr><td>④</td><td>C → S</td><td>ACK, ack=w+1</td><td>S：LAST_ACK → CLOSED（收到后）<br>C：TIME_WAIT 等待 2MSL → CLOSED</td><td>"知道了，再见"</td></tr>
+  </table></div>
+
+  <div class="co net"><span class="h">🧪 实测证据（d1 · E4 / E5）：用系统连接表看四次挥手</span>
+  <p>程序在本机建立一条回环连接，在每一步之后调用 <code>GetTcpTable</code>（相当于 <code>netstat -an</code>）打印双方状态：</p>
+  <div class="term"><div class="bar">d1_tcp_udp_behaviors.exe · E4 / E5</div><pre>== E4/E5 四次挥手的状态变化 + 半关闭 ==
+  [① 三次握手完成，accept 返回后]
+    服务端监听 127.0.0.1:40031 -> 127.0.0.1:0      LISTEN
+    服务端  127.0.0.1:40031 -> 127.0.0.1:53735  <span class="ok">ESTABLISHED</span>
+    客户端  127.0.0.1:53735 -> 127.0.0.1:40031  <span class="ok">ESTABLISHED</span>
+  [② 客户端 shutdown(SD_SEND) 发出 FIN，服务端内核自动回 ACK 之后]
+    服务端监听 127.0.0.1:40031 -> 127.0.0.1:0      LISTEN
+    服务端  127.0.0.1:40031 -> 127.0.0.1:53735  <span class="hl">CLOSE_WAIT</span>
+    客户端  127.0.0.1:53735 -> 127.0.0.1:40031  <span class="hl">FIN_WAIT_2</span>
+  服务端 recv 返回 0（0 = 读到 FIN，对方不会再发数据了）
+  客户端在 FIN_WAIT_2 中仍收到 21 字节: "server-still-can-send"  &lt;- 这就是"半关闭"
+  客户端 recv 返回 0（读到服务端 FIN）
+  [③ 服务端 closesocket 发 FIN、客户端回最后一个 ACK 之后]
+    服务端监听 127.0.0.1:40031 -> 127.0.0.1:0      LISTEN
+    客户端  127.0.0.1:53735 -> 127.0.0.1:40031  <span class="bad">TIME_WAIT</span></pre></div>
+  <p>三个结论都被验证了：① 收到 FIN 的一方立刻进入 CLOSE_WAIT（内核自动回了 ACK，应用还什么都没做）；② 主动方在 FIN_WAIT_2 中<strong>仍然可以接收数据</strong>；③ 最后只有主动关闭方留下 TIME_WAIT，被动方的连接条目直接消失了。</p></div>
+
+  <h2>6.2 为什么是四次？什么时候会是三次？</h2>
+  <p>建立连接时，服务器的 SYN 和 ACK 可以合并，是因为服务器收到 SYN 时"没有什么需要等待的"，可以立刻发出自己的 SYN。关闭时则不同：<strong>收到对方 FIN 只说明对方不再发数据，自己可能还有数据没发完</strong>。所以 ACK（内核立即回）和 FIN（等应用处理完、调用 close 时才发）通常分两次发出，中间就是半关闭阶段。</p>
+  <div class="co deep"><span class="h">🔬 抓包时常看到的"三次挥手"</span><p>如果被动方收到 FIN 时恰好没有待发数据，且应用很快就调用了 close（例如 HTTP 服务器读到 EOF 后立即关闭），由于<strong>延迟确认</strong>的存在，内核还没来得及发出单独的 ACK，FIN 就已经要发了，于是 ACK 和 FIN 合并成一个 <code>FIN+ACK</code> 报文，挥手就变成了 3 个报文。这完全合法，并不违反协议——"四次"是逻辑上的四个动作，不是必须的四个报文。</p></div>
+  <div class="co tip"><span class="h">✅ 面试答法：为什么挥手要四次？</span><p>因为 TCP 是全双工的，两个方向需要分别关闭。主动方发 FIN 只表示它不再发送数据，但还能接收；被动方收到 FIN 后先由内核回 ACK，此时它可能还有数据要发，必须等应用发完并调用 close 才能发出自己的 FIN，所以 ACK 和 FIN 一般不能合并，总共四次。如果被动方此时没有数据要发，且启用了延迟确认，ACK 和 FIN 可以合并，就会变成三次。</p></div>
+
+  <h2>6.3 TIME_WAIT：面试最爱问的状态</h2>
+  <h3>为什么需要 TIME_WAIT</h3>
+  <figure>
+  <svg viewBox="0 0 860 310" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="20" text-anchor="middle" class="b">原因一：保证最后的 ACK 能被对方收到</text>
+    <text x="645" y="20" text-anchor="middle" class="b">原因二：让旧连接的报文在网络中消失</text>
+    <line x1="430" y1="8" x2="430" y2="302" stroke="#E5E7EB"/>
+    <text x="80" y="44" text-anchor="middle" class="sm b">主动方</text><text x="350" y="44" text-anchor="middle" class="sm b">被动方</text>
+    <line x1="80" y1="52" x2="80" y2="290" stroke="#9CA3AF"/><line x1="350" y1="52" x2="350" y2="290" stroke="#9CA3AF"/>
+    <line x1="350" y1="60" x2="82" y2="90" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/><text x="230" y="66" class="xs" style="fill:#2F5BD3">FIN</text>
+    <text x="10" y="104" class="xs" style="fill:#B91C1C">TIME_WAIT</text>
+    <line x1="80" y1="98" x2="210" y2="118" stroke="#B91C1C" stroke-width="1.6"/><text x="212" y="124" class="b" style="fill:#B91C1C">✕</text>
+    <text x="100" y="122" class="xs">ACK 丢失</text>
+    <text x="356" y="104" class="xs" style="fill:#2F5BD3">LAST_ACK</text>
+    <text x="356" y="120" class="xs" style="fill:#2F5BD3">超时</text>
+    <line x1="350" y1="150" x2="82" y2="180" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/><text x="230" y="156" class="xs" style="fill:#2F5BD3">重传 FIN</text>
+    <line x1="80" y1="190" x2="348" y2="220" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/><text x="100" y="214" class="xs" style="fill:#15803D">还在 TIME_WAIT：重发 ACK，重置 2MSL 计时</text>
+    <text x="356" y="236" class="xs">CLOSED ✔</text>
+    <text x="215" y="266" text-anchor="middle" class="xs" style="fill:#B91C1C">如果没有 TIME_WAIT，主动方早已 CLOSED，会对重传的 FIN 回 RST，</text>
+    <text x="215" y="282" text-anchor="middle" class="xs" style="fill:#B91C1C">被动方的 close 以"连接被重置"的错误结束，而不是正常关闭</text>
+
+    <g class="xs">
+      <rect x="450" y="40" width="390" height="60" rx="8" fill="#F3F4F6" stroke="#9CA3AF"/>
+      <text x="645" y="60" text-anchor="middle" class="b">旧连接 A：1.1.1.1:5000 ⇄ 2.2.2.2:80</text>
+      <text x="645" y="78" text-anchor="middle">某个数据段 seq=3000 在路由器里绕了远路，迟迟未到</text>
+      <text x="645" y="94" text-anchor="middle">连接 A 已关闭</text>
+      <rect x="450" y="120" width="390" height="60" rx="8" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="645" y="140" text-anchor="middle" class="b" style="fill:#15803D">新连接 B：完全相同的四元组</text>
+      <text x="645" y="158" text-anchor="middle">如果 A 关闭后马上就能建立 B，</text>
+      <text x="645" y="174" text-anchor="middle">迟到的 seq=3000 可能恰好落在 B 的接收窗口内</text>
+      <rect x="450" y="200" width="390" height="40" rx="8" fill="#FDEEEE" stroke="#B91C1C"/>
+      <text x="645" y="224" text-anchor="middle" style="fill:#B91C1C">→ 被当成 B 的数据交给应用：数据静默损坏</text>
+      <text x="645" y="266" text-anchor="middle">TIME_WAIT 占住这个四元组 2MSL，</text>
+      <text x="645" y="282" text-anchor="middle">保证双向所有旧报文都已超过最大生存时间而被丢弃</text>
+    </g>
+  </svg>
+  <figcaption><b>图 6-2</b> TIME_WAIT 存在的两个原因：可靠地终止连接、防止旧报文污染新连接</figcaption>
+  </figure>
+
+  <h3>为什么是 2MSL</h3>
+  <p><strong>MSL（Maximum Segment Lifetime）</strong>是报文在网络中的最大生存时间。等待 2MSL 可以覆盖最坏情况：最后的 ACK 在路上最多走 1 个 MSL 后丢失，对方超时重传的 FIN 最多再走 1 个 MSL 到达——<strong>一来一回</strong>。同时，2MSL 也足以让两个方向上旧连接的所有报文都在网络中消亡。</p>
+  <div class="tbl"><table>
+    <tr><th>系统</th><th>TIME_WAIT 时长</th><th>说明</th></tr>
+    <tr><td>RFC 793</td><td>2MSL = 4 分钟</td><td>MSL 建议 2 分钟（工程上普遍认为过长）</td></tr>
+    <tr><td>Linux</td><td><strong>60 秒</strong>，写死在内核宏 <code>TCP_TIMEWAIT_LEN</code></td><td>不能通过 sysctl 修改；<code>tcp_fin_timeout</code> 控制的是 FIN_WAIT_2，不是 TIME_WAIT（常见误解）</td></tr>
+    <tr><td>Windows</td><td>默认 120 秒左右（老版本 240 秒）</td><td>注册表 <code>TcpTimedWaitDelay</code> 可调</td></tr>
+  </table></div>
+
+  <h3>TIME_WAIT 过多有什么危害</h3>
+  <p>TIME_WAIT 在<strong>主动关闭方</strong>产生。每个 TIME_WAIT 只占很少的内存（Linux 有专门的轻量结构），真正的问题是它<strong>占用四元组</strong>：</p>
+  <ul>
+    <li><strong>客户端（或作为客户端的代理 / 网关）</strong>：频繁对同一个 <code>服务器IP:端口</code> 发起短连接并主动关闭，本地临时端口（约 2.8 万个）会被 TIME_WAIT 占满，新的 connect 报错 <code>EADDRNOTAVAIL</code>（端口耗尽）。按 60 秒计，每秒超过约 470 个新连接就会耗尽。</li>
+    <li><strong>服务器</strong>：服务端作为主动关闭方（如 HTTP 短连接由服务器关闭）时也会积累大量 TIME_WAIT，但由于对端 IP 和端口各不相同，一般不会耗尽什么，主要是统计数字吓人；监控和表项数量（<code>tcp_max_tw_buckets</code>）需要关注。</li>
+  </ul>
+  <h3>怎么优化</h3>
+  <div class="tbl"><table>
+    <tr><th>方法</th><th>原理</th><th>注意事项</th></tr>
+    <tr><td><strong>长连接 / 连接池</strong>（首选）</td><td>HTTP Keep-Alive、数据库连接池，不再频繁建连关连</td><td>从根源上消除问题</td></tr>
+    <tr><td><code>net.ipv4.tcp_tw_reuse = 1</code></td><td>允许<strong>新发起的连接</strong>复用处于 TIME_WAIT 超过 1 秒的四元组，靠时间戳判断旧报文</td><td>只对客户端（connect 方）有效；需开启 <code>tcp_timestamps</code>；较新内核默认值为 2（仅对回环地址生效）</td></tr>
+    <tr><td><del>tcp_tw_recycle</del></td><td>快速回收 TIME_WAIT</td><td>在 NAT 后的多个客户端时间戳不一致时会导致连接失败，<strong>Linux 4.12 已删除</strong>，面试时要指出它的坑</td></tr>
+    <tr><td>扩大临时端口范围</td><td><code>ip_local_port_range</code> 调成 <code>1024 65535</code></td><td>缓解而非根治</td></tr>
+    <tr><td>让客户端主动关闭</td><td>TIME_WAIT 落在分散的客户端上</td><td>需要协议配合（如 HTTP 的 Connection: close 由谁发起）</td></tr>
+    <tr><td><code>SO_LINGER</code> {on, 0}</td><td>close 时直接发 RST，不进入 TIME_WAIT</td><td><strong>危险</strong>：未发送的数据被丢弃，对端收到"连接被重置"；只在明确知道后果时使用</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 易错点：SO_REUSEADDR 和 TIME_WAIT 是什么关系？</span><p>服务器进程重启时 <code>bind(:8080)</code> 报 "Address already in use"，往往是因为旧进程的连接还有 TIME_WAIT 占着 8080。设置 <code>SO_REUSEADDR</code> 后，即使有 TIME_WAIT 连接，也允许监听 socket 绑定该端口（Linux 语义）。所以<strong>服务器的监听 socket 几乎都应该设置 SO_REUSEADDR</strong>。它解决的是"重启 bind 失败"，和"客户端端口耗尽"是两个不同的问题。另外注意 Windows 上 SO_REUSEADDR 的语义不同（允许抢占端口），应使用 <code>SO_EXCLUSIVEADDRUSE</code> 保护服务端口。</p></div>
+
+  <h2>6.4 CLOSE_WAIT 与 FIN_WAIT_2：两种"卡住"</h2>
+  <div class="cards">
+    <div class="card"><div class="t" style="color:#2F5BD3">大量 CLOSE_WAIT：几乎一定是你的 bug</div><p>CLOSE_WAIT 表示"对方已经关了，我的应用还没 close"。内核不会替应用关闭，所以如果代码在读到 EOF（<code>recv</code> 返回 0）后忘了 close，或者异常分支漏掉了 close，或者连接池没有检测并回收被对端关闭的连接，CLOSE_WAIT 就会一直堆积，直到耗尽文件描述符。<br><strong>排查</strong>：<code>ss -tanp state close-wait</code> 找到进程和对端，再检查对应代码路径。</p></div>
+    <div class="card"><div class="t" style="color:#15803D">FIN_WAIT_2 悬挂：等对方的 FIN</div><p>主动方发完 FIN 收到 ACK 后，要等对方发 FIN。如果对方迟迟不关（正好处于 CLOSE_WAIT 的 bug 状态），主动方就挂在 FIN_WAIT_2。<br>如果主动方是用 <code>close()</code> 关闭的（连接已成为孤儿），Linux 最多等 <code>tcp_fin_timeout</code>（默认 60 秒）后直接回收；如果是用 <code>shutdown(SHUT_WR)</code> 关闭的，应用还能读，内核会<strong>一直等</strong>。</p></div>
+  </div>
+
+  <h2>6.5 挥手过程中的异常</h2>
+  <div class="tbl"><table>
+    <tr><th>异常</th><th>谁会察觉</th><th>处理</th></tr>
+    <tr><td>① FIN 丢失</td><td>主动方收不到 ACK</td><td>主动方在 FIN_WAIT_1 超时重传 FIN；孤儿连接的重传次数由 <code>tcp_orphan_retries</code> 控制，耗尽后直接关闭</td></tr>
+    <tr><td>② ACK 丢失</td><td>主动方收不到 ACK</td><td>主动方重传 FIN，被动方（已在 CLOSE_WAIT）再次回 ACK；若被动方的 FIN 先到，主动方从 FIN_WAIT_1 收到 FIN+ACK 也能直接进入 TIME_WAIT</td></tr>
+    <tr><td>③ 被动方的 FIN 丢失</td><td>被动方收不到 ACK</td><td>被动方在 LAST_ACK 重传 FIN；主动方仍在 FIN_WAIT_2 等待（孤儿连接最多等 tcp_fin_timeout）</td></tr>
+    <tr><td>④ 最后的 ACK 丢失</td><td>被动方收不到 ACK</td><td>被动方重传 FIN；主动方在 TIME_WAIT 中重发 ACK 并<strong>重置 2MSL 计时器</strong>（图 6-2 左）</td></tr>
+    <tr><td>同时关闭</td><td>双方同时发 FIN</td><td>双方：FIN_WAIT_1 → 收到对方 FIN → <strong>CLOSING</strong> → 收到 ACK → TIME_WAIT。双方都会有 TIME_WAIT</td></tr>
+    <tr><td>进程崩溃 / 被 kill</td><td>—</td><td>进程退出时内核会关闭它所有的 fd，<strong>照常发送 FIN</strong>，对端看到的是正常关闭（若接收缓冲区有未读数据则发 RST）</td></tr>
+    <tr><td>主机断电 / 网线被拔</td><td>对端完全不知道</td><td>没有任何报文发出，对端连接会一直保持 ESTABLISHED（"半打开"连接），直到它发送数据超时，或者 Keepalive / 应用心跳探测失败</td></tr>
+    <tr><td>close 时接收缓冲区还有未读数据</td><td>对端收到 RST</td><td>Linux 会直接发 RST 而不是 FIN（RFC 2525 建议的行为），提示对方"你发的数据我没读到"</td></tr>
+  </table></div>
+
+  <h2>6.6 RST：不体面但有时必要的结束方式</h2>
+  <p>RST（Reset）表示"立即终止连接，不用再回复"。它不需要确认，收到 RST 的一方立即释放连接，并把<strong>未发送的数据全部丢弃</strong>，应用的下一次读写会得到 <code>ECONNRESET</code>（"Connection reset by peer"）；发 RST 的一方也<strong>不会进入 TIME_WAIT</strong>。常见触发场景：</p>
+  <ul>
+    <li>SYN 发往无人监听的端口（第 5 章 E3 实测）；</li>
+    <li>收到不属于任何连接的报文（例如服务器重启后，客户端仍用旧连接发数据）；</li>
+    <li>设置了 <code>SO_LINGER {1, 0}</code> 后调用 close（下方实测）；</li>
+    <li>close 时接收缓冲区有未读数据；</li>
+    <li>防火墙、负载均衡主动掐断连接（"连接被重置"在跨境网络中很常见）。</li>
+  </ul>
+  <div class="co net"><span class="h">🧪 实测证据（d1 · E6）：SO_LINGER{1,0} 直接发 RST</span>
+  <div class="term"><div class="bar">d1_tcp_udp_behaviors.exe · E6</div><pre>== E6 SO_LINGER{1,0}：用 RST 代替四次挥手 ==
+  服务端 recv 返回 -1，WSAGetLastError=<span class="bad">10054</span>（10054=WSAECONNRESET）
+  [RST 之后（注意：客户端没有 TIME_WAIT）]
+    服务端监听 127.0.0.1:40041 -> 127.0.0.1:0      LISTEN</pre></div>
+  <p>对比 E4 的结果：正常挥手后主动方留下了 TIME_WAIT；用 RST 关闭后双方的连接条目都立即消失，但对端得到的是"连接被重置"的错误，而不是表示正常结束的 recv 返回 0。</p></div>
+
+  <h3>close() 与 shutdown() 的区别</h3>
+  <div class="tbl"><table>
+    <tr><th></th><th><code>close(fd)</code></th><th><code>shutdown(fd, SHUT_WR)</code></th></tr>
+    <tr><td>作用对象</td><td>文件描述符：引用计数减 1，<strong>减到 0 才真正关闭连接</strong>（fork 后父子进程共享 socket 时要注意）</td><td>直接作用于连接，不管有多少个 fd 引用</td></tr>
+    <tr><td>方向</td><td>同时关闭读和写</td><td>可以只关写（发 FIN）、只关读、或都关</td></tr>
+    <tr><td>之后还能读吗</td><td>不能（连接成为孤儿）</td><td>SHUT_WR 后仍然可以读，用于"半关闭"</td></tr>
+    <tr><td>典型用途</td><td>普通关闭</td><td>"我发完了，但还要等你的回复"：例如客户端上传完文件后 shutdown 写端，再读取服务器的结果</td></tr>
+  </table></div>
+
+  <h2>6.7 保活：Keepalive 与应用层心跳</h2>
+  <p>"主机断电"那一行说明：TCP 本身<strong>无法及时发现对端消失</strong>。TCP 提供了 Keepalive 机制，但默认参数非常保守：</p>
+  <div class="tbl"><table>
+    <tr><th>参数（Linux）</th><th>默认值</th><th>含义</th></tr>
+    <tr><td><code>tcp_keepalive_time</code></td><td>7200 秒</td><td>连接空闲 2 小时后才开始探测</td></tr>
+    <tr><td><code>tcp_keepalive_intvl</code></td><td>75 秒</td><td>探测间隔</td></tr>
+    <tr><td><code>tcp_keepalive_probes</code></td><td>9 次</td><td>连续失败多少次判定断开</td></tr>
+  </table></div>
+  <p>默认要 2 小时 11 分钟才能发现死连接，且 Keepalive 需要每个 socket 用 <code>SO_KEEPALIVE</code> 显式开启（可以用 <code>TCP_KEEPIDLE</code> 等选项为单个连接缩短时间）。更重要的是，Keepalive 只能证明<strong>对端内核还活着</strong>，证明不了对端应用没有卡死。</p>
+  <div class="co ver"><span class="h">🎮 游戏开发视角：为什么游戏都用应用层心跳</span><p>游戏需要在几秒内发现玩家掉线（以便托管 AI 接管、通知队友、判定逃跑），而且要知道的是"客户端逻辑是否还在运行"。所以几乎所有游戏都在应用层每隔 1～5 秒发一个心跳包，服务器若连续 N 个周期没有收到任何包就判定断线。心跳还能顺便测量 RTT、给 NAT 映射保活（UDP 尤其需要）。对于基于 UDP 的可靠协议，这就是它的"连接管理"的一部分（第 8 章）。</p></div>
+
+  <h2>6.8 交互实验：握手与挥手场景回放</h2>
+  <p>选择一个场景，逐步回放报文和双方状态的变化。红色虚线 ✕ 表示报文丢失。建议先把每个场景的结果在心里推一遍，再点击验证。</p>
+  <div class="lab" id="lab-hs">
+    <div class="t">🧪 交互实验 1 · TCP 连接管理场景回放</div>
+    <div class="row">
+      <label>场景：<select id="hs-sc" style="font:inherit;font-size:13.5px;padding:3px 6px;border:1px solid #E5E7EB;border-radius:6px"></select></label>
+      <button class="st-btn" id="hs-prev">◀ 上一步</button>
+      <button class="st-btn" id="hs-next">下一步 ▶</button>
+      <button class="st-btn" id="hs-all">全部展开</button>
+      <button class="st-btn" id="hs-reset">↺ 重置</button>
+    </div>
+    <svg id="hs-svg" viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block;background:#FBFAF7;border:1px solid #E5E7EB;border-radius:10px"></svg>
+    <div class="out" id="hs-log" style="margin-top:10px">选择场景后点击"下一步"。</div>
+  </div><!--/lab-->
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>四次挥手：<strong>FIN → ACK →（半关闭，可继续发数据）→ FIN → ACK</strong>；主动方 FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → CLOSED，被动方 CLOSE_WAIT → LAST_ACK → CLOSED（已实测）。</li>
+    <li>四次是因为全双工、两个方向分别关闭；被动方无数据可发且有延迟确认时会合并成三次。</li>
+    <li>TIME_WAIT 在<strong>主动关闭方</strong>，持续 2MSL（Linux 固定 60 s）：保证最后的 ACK 送达、让旧报文消亡。</li>
+    <li>TIME_WAIT 过多 → 客户端端口耗尽；优先用长连接，其次 tcp_tw_reuse；tcp_tw_recycle 已删除；SO_LINGER 0 有丢数据风险。</li>
+    <li>CLOSE_WAIT 堆积 = 应用没 close（bug）；FIN_WAIT_2 孤儿连接由 tcp_fin_timeout 回收。</li>
+    <li>RST 立即终止、丢弃数据、不进 TIME_WAIT；close 按引用计数关闭两个方向，shutdown 可单向半关闭。</li>
+    <li>TCP Keepalive 默认 2 小时才探测，游戏等场景用应用层心跳。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：服务器上用 netstat 看到大量 TIME_WAIT，说明了什么？要不要处理？</summary>
+  <p>说明这台服务器是大量连接的主动关闭方，常见于 HTTP 短连接（服务器响应完主动关闭）或服务器作为客户端去调用下游（数据库、其他服务）且使用短连接。如果是前者，TIME_WAIT 只占少量内存，四元组也不冲突，一般不影响服务，可以通过开启 Keep-Alive 减少；如果是后者，要警惕本地端口耗尽，应改用连接池，或开启 tcp_tw_reuse。不建议用 SO_LINGER 0 粗暴消灭 TIME_WAIT。</p></details>
+  <details class="quiz"><summary>思考题 2：线上服务出现几千个 CLOSE_WAIT，并且还在增长，你怎么排查？</summary>
+  <p>CLOSE_WAIT 表示对端已关闭而本端应用没有调用 close。① 用 <code>ss -tanp state close-wait</code> 找到所属进程和对端地址，确认是和哪个下游 / 客户端的连接；② 检查对应代码：读到 EOF（返回 0）后是否 close，异常、超时分支是否 close，连接池是否在借出前检测连接可用、归还时是否处理已关闭的连接；③ 检查是否有线程阻塞导致处理不过来（例如 accept 后一直没处理）；④ 修复前可以临时重启进程释放 fd。CLOSE_WAIT 不会因为内核超时自动消失。</p></details>
+  <details class="quiz"><summary>思考题 3：为什么 TIME_WAIT 放在主动关闭方，而不是被动关闭方？</summary>
+  <p>因为发出"最后一个 ACK"的是主动关闭方：只有它需要确保这个 ACK 送达（对方没收到会重传 FIN，自己要能再回 ACK），也只有它在发出最后一个报文后需要等旧报文消亡。被动方在收到最后的 ACK 时就已确认双方都关闭完毕，没有不确定性，可以直接进入 CLOSED。</p></details>
+  <details class="quiz"><summary>思考题 4：客户端进程被 kill -9 和客户端机器断电，服务器看到的现象有什么不同？</summary>
+  <p>kill -9 时进程虽然没有机会执行清理代码，但内核会关闭它的所有 socket，正常发送 FIN（若有未读数据则发 RST），服务器很快就会读到 EOF 或 ECONNRESET。机器断电时没有任何报文发出，服务器上的连接仍然是 ESTABLISHED：如果服务器不发数据，它永远不会知道；如果发数据，会经历一段 RTO 重传（Linux 默认 <code>tcp_retries2=15</code>，约十几分钟）后才报错。所以需要 Keepalive 或应用层心跳。</p></details>
+</section>
+
+<div class="part-head" data-toc="第四部分 · 可靠 UDP">
+  <div class="no">PART FOUR</div>
+  <h1>第四部分　可靠 UDP：在用户态重新组合可靠性</h1>
+  <p>TCP 已经把可靠传输做到了极致，为什么还有人要在 UDP 上重造一遍？因为 TCP 给出的是"一种"可靠性，而实时应用需要的是"可以挑选的"可靠性。</p>
+</div>
+
+<!-- ======================= CH7 ======================= -->
+<section class="chapter" id="ch7">
+  <div class="ch-head">
+    <div class="no">CHAPTER 07</div>
+    <h1>为什么要在 UDP 上造轮子</h1>
+    <p class="lead">先把 TCP 在实时场景下的痛点逐条列出来，再画出"可靠性光谱"，最后给出一个可靠 UDP 协议的整体架构。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说出 TCP 用于实时场景的六个痛点，并能和前几章的机制对应起来</li>
+    <li>理解"可靠性光谱"：可靠 / 不可靠 × 有序 / 无序 / 只取最新，并能给游戏数据分类</li>
+    <li>画出可靠 UDP 协议的分层架构，知道每一层要解决什么</li>
+    <li>认清自研可靠 UDP 的代价与风险</li>
+  </ul></div>
+
+  <h2>7.1 TCP 在实时场景下的六个痛点</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>痛点</th><th>来自哪个机制</th><th>实时场景下的后果</th><th>能在 TCP 内解决吗</th></tr>
+    <tr><td>1</td><td><strong>队头阻塞</strong></td><td>按序可靠交付（第 3、4 章）</td><td>一个包丢了，后面所有新数据都要等它</td><td class="no">不能，这是 TCP 语义本身</td></tr>
+    <tr><td>2</td><td><strong>重传慢</strong></td><td>RTO 下限 200 ms、指数退避；快速重传需要 3 个重复 ACK</td><td>小流量时凑不够 3 个重复 ACK，只能等 RTO；连续丢包时等待时间翻倍增长</td><td class="mid">部分（Linux 可按路由调 rto_min，有 TLP/RACK，但不能每个连接随意改）</td></tr>
+    <tr><td>3</td><td><strong>拥塞控制误判</strong></td><td>丢包即拥塞（Reno / CUBIC）</td><td>无线随机丢包导致窗口被压缩，数据在发送缓冲排队，延迟越积越大</td><td class="mid">部分（可换 BBR，但不能关掉）</td></tr>
+    <tr><td>4</td><td><strong>延迟确认 + Nagle</strong></td><td>减少小包的优化（第 3 章）</td><td>额外 40～200 ms</td><td class="yes">能（TCP_NODELAY、TCP_QUICKACK）</td></tr>
+    <tr><td>5</td><td><strong>握手与换网</strong></td><td>三次握手 + TLS；连接绑定四元组</td><td>首包 2～3 RTT；Wi-Fi 切 4G 时 IP 变化，连接直接断开，要重新握手</td><td class="no">基本不能（TFO 部署受限；MPTCP 不普及）</td></tr>
+    <tr><td>6</td><td><strong>一视同仁 + 难以迭代</strong></td><td>实现在内核；中间设备僵化</td><td>不能对不同消息选择不同的可靠性 / 优先级；新算法要等操作系统升级</td><td class="no">不能</td></tr>
+  </table></div>
+
+  <div class="co ana"><span class="h">📦 场景案例：一次 300 ms 的"卡顿"是怎么来的</span>
+  <p>手游玩家在地铁里，网络 RTT 80 ms、丢包率 5%。游戏每 66 ms 发一个操作包（15 Hz），用 TCP 承载。某个包丢了：<br>
+  ① 后面每 66 ms 才有一个新包，要凑够 3 个重复 ACK 需要约 200 ms，往往还没凑够 RTO 先到了；<br>
+  ② 于是等到 RTO（≥ 200 ms，弱网下 RTTVAR 大，RTO 常常 300 ms 以上）才重传；<br>
+  ③ 这期间到达的所有新操作都被队头阻塞挡在内核缓冲区里；<br>
+  ④ 重传成功后，积压的操作一起交付，角色表现为"卡住 → 瞬移"。如果重传的包又丢了，RTO 翻倍，卡顿就变成 600 ms 以上。<br>
+  而同样的网络，用 UDP + 应用层可靠，可以做到"后面的包不等前面"（痛点 1）、"被跳过 2 次就重传"（痛点 2）、"每个包都冗余携带最近 3 帧操作"（干脆不需要重传），把卡顿压到一个 RTT 甚至零。</p></div>
+
+  <h2>7.2 可靠性光谱：不是所有数据都需要 TCP 那样的可靠</h2>
+  <p>把"可靠性"拆开，至少有两个独立的维度：<strong>是否保证送达</strong>，以及<strong>是否保证顺序</strong>。顺序这一维还有一个很实用的中间态：<strong>只要最新</strong>（sequenced，旧的晚到就直接丢）。组合起来就是一张光谱：</p>
+  <figure>
+  <svg viewBox="0 0 860 384" xmlns="http://www.w3.org/2000/svg">
+    <line x1="140" y1="40" x2="140" y2="330" stroke="#4B5563"/><line x1="140" y1="330" x2="840" y2="330" stroke="#4B5563"/>
+    <text x="490" y="374" text-anchor="middle" class="b sm">顺序保证（从弱到强） →</text>
+    <text x="40" y="190" text-anchor="middle" class="b sm" transform="rotate(-90 40 190)">送达保证 →</text>
+    <g class="sm b" text-anchor="middle"><text x="260" y="350">无序</text><text x="490" y="350">只要最新（Sequenced）</text><text x="720" y="350">严格有序</text></g>
+    <g class="sm b" text-anchor="end"><text x="132" y="110">可靠</text><text x="132" y="260">不可靠</text></g>
+    <!-- cells -->
+    <rect x="150" y="50" width="220" height="125" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="260" y="74" text-anchor="middle" class="b" style="fill:#C2410C">可靠 · 无序</text>
+    <text x="260" y="96" text-anchor="middle" class="xs">每条都必须送达，但彼此独立</text>
+    <text x="260" y="122" text-anchor="middle" class="sm">🎮 购买道具、拾取物品</text>
+    <text x="260" y="142" text-anchor="middle" class="sm">🎮 独立的技能命中事件</text>
+    <text x="260" y="164" text-anchor="middle" class="xs" style="fill:#C2410C">不被别的丢包阻塞</text>
+    <rect x="380" y="50" width="220" height="125" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="490" y="74" text-anchor="middle" class="b" style="fill:#B45309">可靠 · 只要最新</text>
+    <text x="490" y="96" text-anchor="middle" class="xs">最新值一定送达，中间值可跳过</text>
+    <text x="490" y="122" text-anchor="middle" class="sm">🎮 UE 属性复制（血量、等级）</text>
+    <text x="490" y="142" text-anchor="middle" class="sm">📱 配置、状态的最终一致</text>
+    <text x="490" y="164" text-anchor="middle" class="xs" style="fill:#B45309">重传时发的是"当前值"而非旧包</text>
+    <rect x="610" y="50" width="220" height="125" rx="10" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+    <text x="720" y="74" text-anchor="middle" class="b" style="fill:#15803D">可靠 · 有序（= TCP 语义）</text>
+    <text x="720" y="96" text-anchor="middle" class="xs">全部送达且按发送顺序交付</text>
+    <text x="720" y="122" text-anchor="middle" class="sm">🎮 帧同步的输入流、聊天</text>
+    <text x="720" y="142" text-anchor="middle" class="sm">🌐 网页、文件、RPC</text>
+    <text x="720" y="164" text-anchor="middle" class="xs" style="fill:#15803D">代价：队头阻塞</text>
+
+    <rect x="150" y="195" width="220" height="125" rx="10" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="260" y="219" text-anchor="middle" class="b">不可靠 · 无序（= 裸 UDP）</text>
+    <text x="260" y="241" text-anchor="middle" class="xs">发了就不管</text>
+    <text x="260" y="267" text-anchor="middle" class="sm">🎮 特效、音效触发、表情</text>
+    <text x="260" y="287" text-anchor="middle" class="sm">📡 遥测、日志打点</text>
+    <text x="260" y="309" text-anchor="middle" class="xs">零额外开销</text>
+    <rect x="380" y="195" width="220" height="125" rx="10" fill="#F3EEFE" stroke="#6D28D9" stroke-width="2"/>
+    <text x="490" y="219" text-anchor="middle" class="b" style="fill:#6D28D9">不可靠 · 只要最新</text>
+    <text x="490" y="241" text-anchor="middle" class="xs">丢了不重传，迟到的旧包直接丢弃</text>
+    <text x="490" y="267" text-anchor="middle" class="sm">🎮 位置 / 朝向 / 动画状态同步</text>
+    <text x="490" y="287" text-anchor="middle" class="sm">🎙️ 语音帧（配合 FEC、插值）</text>
+    <text x="490" y="309" text-anchor="middle" class="xs" style="fill:#6D28D9">实时游戏中数据量最大的一类</text>
+    <rect x="610" y="195" width="220" height="125" rx="10" fill="#fff" stroke="#9CA3AF" stroke-dasharray="5 3"/>
+    <text x="720" y="219" text-anchor="middle" class="b" style="fill:#6B7280">不可靠 · 严格有序</text>
+    <text x="720" y="245" text-anchor="middle" class="xs">要等前面的包，却不保证前面的包会来</text>
+    <text x="720" y="265" text-anchor="middle" class="xs">→ 可能永远等下去</text>
+    <text x="720" y="291" text-anchor="middle" class="sm" style="fill:#6B7280">基本没有实际用途</text>
+  </svg>
+  <figcaption><b>图 7-1</b> 可靠性光谱：TCP 只提供右上角一格，实时应用的大部分数据其实落在其他格子里</figcaption>
+  </figure>
+  <p>这张图在业界有很直接的对应：老牌游戏网络库 <strong>RakNet</strong> 的 <code>PacketReliability</code> 枚举就是 <code>UNRELIABLE</code>、<code>UNRELIABLE_SEQUENCED</code>、<code>RELIABLE</code>、<code>RELIABLE_ORDERED</code>、<code>RELIABLE_SEQUENCED</code>；<strong>ENet</strong> 提供可靠 / 不可靠 / 不可靠有序（sequenced）三种包，并用多个通道（channel）隔离顺序；<strong>Unreal Engine</strong> 里 Reliable RPC 在同一 Actor 通道内有序可靠，Unreliable RPC 发了就不管，<strong>属性复制</strong>则是"不可靠发送 + 丢包后重新发送当前最新值"，正好是"可靠 · 只要最新"这一格。</p>
+
+  <div class="co tip"><span class="h">✅ 面试答法：为什么游戏要用可靠 UDP 而不是 TCP？</span>
+  <p>核心是"可靠性可选"。游戏数据分为不同类别：位置等状态只要最新值，丢了不需要重传；技能、交易等事件必须送达但不一定需要和其他消息保持顺序；帧同步的输入需要可靠有序。TCP 只能对所有数据提供可靠有序的字节流，一个丢包会通过队头阻塞拖累所有数据，加上 RTO 下限高、指数退避、拥塞控制把随机丢包当拥塞，弱网下延迟抖动很大。在 UDP 上自己实现，可以按消息类型分通道、选择不同可靠级别，并且激进地调整重传策略（如 KCP 的 RTO×1.5、快速重传阈值 2），用一些带宽换取更低更稳定的延迟。</p></div>
+
+  <h2>7.3 一个可靠 UDP 协议的整体架构</h2>
+  <figure>
+  <svg viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
+    <rect x="160" y="14" width="540" height="40" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="430" y="39" text-anchor="middle" class="b" style="fill:#2F5BD3">应用：Send(msg, 通道/可靠级别, 优先级)　·　OnMessage(msg)</text>
+    <rect x="160" y="64" width="540" height="44" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="430" y="83" text-anchor="middle" class="b" style="fill:#C2410C">① 通道与调度层</text>
+    <text x="430" y="99" text-anchor="middle" class="xs">按可靠级别分通道（互不阻塞）；按优先级与带宽预算决定本次发什么；合并小消息进一个包</text>
+    <rect x="160" y="118" width="540" height="44" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="430" y="137" text-anchor="middle" class="b" style="fill:#B45309">② 分片与重组</text>
+    <text x="430" y="153" text-anchor="middle" class="xs">大于 MTU 的消息切成片（消息 ID + 片序号 + 总片数），接收端收齐后重组</text>
+    <rect x="160" y="172" width="540" height="62" rx="10" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+    <text x="430" y="191" text-anchor="middle" class="b" style="fill:#15803D">③ 可靠传输层（第 8 章主体）</text>
+    <text x="430" y="207" text-anchor="middle" class="xs">序号 · 确认（UNA + 选择确认 / 位图）· RTT 估计与 RTO · 超时重传 · 快速重传</text>
+    <text x="430" y="223" text-anchor="middle" class="xs">发送窗口 / 接收窗口 · 乱序缓存 · 去重 · 按序交付</text>
+    <rect x="160" y="244" width="540" height="44" rx="10" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="430" y="263" text-anchor="middle" class="b" style="fill:#6D28D9">④ 拥塞控制 / 限速 + FEC（可选）</text>
+    <text x="430" y="279" text-anchor="middle" class="xs">令牌桶 / AIMD / BBR 类算法；Pacing 平滑发送；前向纠错用冗余换重传</text>
+    <rect x="160" y="298" width="540" height="44" rx="10" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="430" y="317" text-anchor="middle" class="b">⑤ 安全层</text>
+    <text x="430" y="333" text-anchor="middle" class="xs">AEAD 加密认证（DTLS / 自定义 AES-GCM、ChaCha20-Poly1305）；防重放；防篡改</text>
+    <rect x="160" y="352" width="540" height="40" rx="10" fill="#fff" stroke="#4B5563"/>
+    <text x="430" y="377" text-anchor="middle" class="b">UDP socket（sendto / recvfrom，批量收发 sendmmsg / recvmmsg）</text>
+
+    <rect x="720" y="64" width="130" height="328" rx="10" fill="#EAF0FD" stroke="#2F5BD3" stroke-dasharray="5 3"/>
+    <text x="785" y="88" text-anchor="middle" class="b sm" style="fill:#2F5BD3">⑥ 连接管理</text>
+    <g class="xs" text-anchor="middle">
+      <text x="785" y="116">握手（带 Cookie</text><text x="785" y="132">防伪造与放大）</text>
+      <text x="785" y="160">会话 ID（conv）</text><text x="785" y="176">而非四元组识别</text><text x="785" y="192">→ 支持 NAT 换端口</text>
+      <text x="785" y="220">心跳 / RTT 测量</text><text x="785" y="236">NAT 保活</text>
+      <text x="785" y="264">超时断线判定</text>
+      <text x="785" y="292">优雅关闭</text>
+      <text x="785" y="320">重连与会话恢复</text>
+    </g>
+    <rect x="10" y="64" width="130" height="328" rx="10" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="5 3"/>
+    <text x="75" y="56" text-anchor="middle" class="b sm" style="fill:#B91C1C">对应本书位置</text>
+    <g class="xs" text-anchor="middle">
+      <text x="75" y="90">① 7.2 节 / 第 11 章</text>
+      <text x="75" y="144">② 8.11 节</text>
+      <text x="75" y="198">③ 8.1～8.8 节</text>
+      <text x="75" y="214">KCP 见第 9 章</text>
+      <text x="75" y="266">④ 8.9～8.10 节</text>
+      <text x="75" y="320">⑤ 8.11 节 / QUIC</text>
+      <text x="75" y="374">⑥ 8.11 节</text>
+    </g>
+  </svg>
+  <figcaption><b>图 7-2</b> 可靠 UDP 的分层架构：KCP 只实现了第 ③ 层（加一点 ②），QUIC 则实现了全部六层</figcaption>
+  </figure>
+  <p>这张图同时回答了"KCP 和 QUIC 有什么区别"这个常见问题：<strong>KCP 是一个纯 ARQ 算法库</strong>，只负责第 ③ 层，连接、加密、FEC 都要使用者自己补；<strong>QUIC 是一个完整的传输协议</strong>，从流复用到加密到连接迁移全都标准化了，可以直接替代 TCP + TLS。</p>
+
+  <h2>7.4 代价与风险：不要为了"用 UDP"而用 UDP</h2>
+  <div class="cards">
+    <div class="card"><div class="t">复杂度与正确性</div><p>可靠传输的边界情况极多：序号回绕、重传歧义、窗口死锁、ACK 风暴、分片丢失、重连时的状态残留……TCP 用了四十年打磨，自研协议的 bug 往往在线上弱网环境才暴露。</p></div>
+    <div class="card"><div class="t">网络环境的敌意</div><p>部分运营商对 UDP 做 QoS 限速，部分企业 / 校园网直接封禁 UDP，一些公共 Wi-Fi 的 NAT 对 UDP 映射超时极短。<strong>必须准备 TCP 兜底通道</strong>并做自动降级。</p></div>
+    <div class="card"><div class="t">CPU 开销</div><p>用户态协议栈没有 TCP 的硬件卸载（TSO/GRO），每个包都要系统调用、加解密、定时器管理。服务器端单机承载量可能明显低于 TCP，需要批量收发、多线程分片等优化。</p></div>
+    <div class="card"><div class="t">网络公平性</div><p>"关掉拥塞控制"在一个玩家的手机上很好，在一个网吧几十台机器同时这么做时就会互相挤爆出口带宽。至少要有发送速率上限，以及在 RTT 明显上升时主动降级。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>TCP 的实时痛点：<strong>队头阻塞、重传慢（RTO 下限 + 退避）、拥塞误判、Nagle/延迟确认、握手与换网断连、一视同仁且难迭代</strong>。</li>
+    <li>可靠性光谱 = {可靠, 不可靠} × {无序, 只要最新, 有序}；游戏数据大多落在"不可靠 · 只要最新"和"可靠 · 无序"。</li>
+    <li>RakNet / ENet / UE 的可靠性分级与光谱一一对应；UE 属性复制属于"可靠 · 只要最新"。</li>
+    <li>可靠 UDP 六层：通道调度、分片、可靠传输、拥塞 / FEC、安全、连接管理。KCP 只做可靠传输层，QUIC 做全部。</li>
+    <li>代价：复杂度、UDP 被限速 / 封禁（需 TCP 兜底）、CPU 开销、公平性。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：为什么"不可靠 · 严格有序"基本没有用途？</summary>
+  <p>严格有序意味着第 n 个包没到时，第 n+1 个包必须等待；而不可靠意味着第 n 个包可能永远不会再来（没有重传）。两者组合的结果就是接收方可能无限期等待，或者只能设置一个超时后放弃第 n 个包继续往下交付——这时它实际上退化成了"只要最新 / 允许跳号"的语义。所以实际协议里提供的都是"sequenced（丢弃过期的）"而不是"ordered（等待缺失的）"。</p></details>
+  <details class="quiz"><summary>思考题 2：一个 MOBA 游戏中，以下数据分别应该放在可靠性光谱的哪一格？英雄位置、技能释放指令、击杀公告、小地图信号、商店购买、结算数据。</summary>
+  <p>英雄位置：不可靠 · 只要最新。技能释放指令：在状态同步架构下是可靠事件（可靠 · 无序或与同一英雄的其他指令有序）；在帧同步架构下属于输入流的一部分，可靠有序。击杀公告：可靠 · 无序（丢了玩家会错过信息，但不必和别的消息排序；也可以设计成不可靠，由状态推导）。小地图信号：不可靠或可靠无序均可，看产品要求。商店购买：可靠（并且要服务器确认结果）。结算数据：可靠，且通常走 TCP/HTTP 等更稳妥的通道。</p></details>
+  <details class="quiz"><summary>思考题 3：既然 QUIC 已经标准化了，为什么很多游戏还是用 KCP 或自研协议？</summary>
+  <p>① QUIC 的流仍然是"可靠有序"的语义（虽然流之间没有队头阻塞），对"不可靠 · 只要最新"的状态数据支持有限（需要 RFC 9221 的 DATAGRAM 扩展）；② QUIC 强制 TLS 1.3 加密和较复杂的握手，客户端和服务器的 CPU、包体开销较大；③ QUIC 的拥塞控制和重传策略遵循 RFC 9002，偏向公平和吞吐，而游戏更想要激进的低延迟策略；④ KCP 代码量小、可以嵌入任意引擎和平台、参数可调，且游戏已有成熟的连接和加密方案。当然，随着 QUIC 库的成熟（以及 DATAGRAM 扩展），也有游戏开始采用。</p></details>
+</section>
+
+<!-- ======================= CH8 ======================= -->
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>亲手实现可靠 UDP：机制逐个拆解</h1>
+    <p class="lead">序号、确认、重传、窗口、乱序、去重、拥塞、纠错、分片、连接——把第 3 章的 TCP 机制在用户态重新实现一遍，并且每一处都想清楚"能不能做得不一样"。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能设计一个可靠 UDP 的报文头，并说明每个字段的用途</li>
+    <li>掌握序号回绕比较、三种确认方式（逐包 ACK、UNA、ACK 位图）</li>
+    <li>掌握 RTT 测量、RTO 计算、退避策略与快速重传的实现细节</li>
+    <li>对比停等、回退 N 步、选择重传三种 ARQ，会算信道利用率</li>
+    <li>会写接收端的环形缓冲（乱序重排 + 去重）和发送端的定时驱动循环</li>
+    <li>理解拥塞避免、FEC、冗余发送、分片、连接管理与安全在可靠 UDP 中的做法</li>
+    <li>能用仿真数据解释"为什么选择重传 + 快速重传 + 温和退避"在丢包网络下最好</li>
+  </ul></div>
+
+  <h2>8.1 报文设计</h2>
+  <p>先设计一个教学用的报文头。它和 KCP 的头部（第 9 章）非常接近，只多了一个"通道"字段和一个 ACK 位图：</p>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <g class="xs"><text x="110" y="20">0</text><text x="262" y="20">8</text><text x="418" y="20">16</text><text x="574" y="20">24</text><text x="736" y="20">31</text></g>
+    <line x1="110" y1="26" x2="750" y2="26" stroke="#D1D5DB"/>
+    <rect x="110" y="30" width="640" height="36" fill="#EAF0FD" stroke="#2F5BD3"/><text x="430" y="53" text-anchor="middle" class="b">conv 会话 ID（32）：标识"哪条连接"，取代四元组</text>
+    <rect x="110" y="66" width="160" height="36" fill="#FFF4EC" stroke="#C2410C"/><text x="190" y="89" text-anchor="middle" class="b sm">cmd（8）</text>
+    <rect x="270" y="66" width="160" height="36" fill="#FFF4EC" stroke="#C2410C"/><text x="350" y="89" text-anchor="middle" class="b sm">chan 通道（8）</text>
+    <rect x="430" y="66" width="320" height="36" fill="#F3EEFE" stroke="#6D28D9"/><text x="590" y="89" text-anchor="middle" class="b sm">wnd 接收窗口剩余（16）</text>
+    <rect x="110" y="102" width="640" height="36" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="125" text-anchor="middle" class="b">sn 本包序号（32）</text>
+    <rect x="110" y="138" width="640" height="36" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="161" text-anchor="middle" class="b">una 累计确认：小于 una 的包我全收到了（32）</text>
+    <rect x="110" y="174" width="640" height="36" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="197" text-anchor="middle" class="b">ack_bits 选择确认位图：una+1 ～ una+32 中哪些已收到（32）</text>
+    <rect x="110" y="210" width="640" height="36" fill="#FEF6E4" stroke="#B45309"/><text x="430" y="233" text-anchor="middle" class="b">ts 发送时间戳（32）：对方在 ACK 中原样回显，用于测 RTT</text>
+    <rect x="110" y="246" width="320" height="36" fill="#F3F4F6" stroke="#6B7280"/><text x="270" y="269" text-anchor="middle" class="b sm">len 负载长度（16）</text>
+    <rect x="430" y="246" width="320" height="36" fill="#F3F4F6" stroke="#6B7280"/><text x="590" y="269" text-anchor="middle" class="b sm">frg 剩余分片数（8）+ 保留（8）</text>
+    <text x="430" y="306" text-anchor="middle" class="xs">共 28 字节；每个数据包都捎带 una 和 ack_bits，所以 ACK 不必单独成包（双向都有流量时）</text>
+    <text x="430" y="322" text-anchor="middle" class="xs">cmd：DATA / ACK / PING / PONG / CONNECT / ACCEPT / CLOSE / WND_PROBE</text>
+  </svg>
+  <figcaption><b>图 8-1</b> 教学版可靠 UDP 报文头：每个字段都对应 TCP 头部的一个"同行"</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>字段</th><th>对应 TCP 的</th><th>为什么这样设计</th></tr>
+    <tr><td>conv</td><td>四元组</td><td>移动网络下 NAT 可能更换客户端的公网端口（NAT 重绑定），用会话 ID 识别连接就不会因此断线；还可以在一个 UDP 端口上复用很多会话</td></tr>
+    <tr><td>sn</td><td>seq</td><td><strong>按包编号</strong>而不是按字节编号：UDP 本身就保留消息边界，按包编号更简单，确认与重传也以包为单位</td></tr>
+    <tr><td>una</td><td>ack</td><td>累计确认，语义和 TCP 的 ack 一样："下一个期望的包"</td></tr>
+    <tr><td>ack_bits</td><td>SACK 选项</td><td>定长 32 位，比 TCP 的 SACK 块更紧凑，每个包都能带</td></tr>
+    <tr><td>ts</td><td>时间戳选项</td><td>接收方在 ACK 里回显发送时间，发送方 <code>now − ts</code> 就是 RTT，<strong>重传的包也能正确采样</strong>（解决 Karn 问题）</td></tr>
+    <tr><td>wnd</td><td>窗口</td><td>流量控制</td></tr>
+    <tr><td>chan</td><td>（无）</td><td>不同通道有独立的序号空间和可靠级别，互不阻塞</td></tr>
+    <tr><td>frg</td><td>（无，TCP 是字节流）</td><td>大消息分片：还剩几片，为 0 表示最后一片</td></tr>
+  </table></div>
+
+  <h2>8.2 序列号：回绕与比较</h2>
+  <p>序号字段总有上限：32 位约 43 亿，16 位只有 65536。游戏每秒 60 个包，16 位序号 18 分钟就会回绕。回绕后 <code>5 &lt; 65530</code> 这样的直接比较就错了。正确做法是<strong>序列号算术（RFC 1982）</strong>：把差值解释成有符号数。</p>
+<div class="code"><div class="bar"><span>回绕安全的序号比较（TCP 内核中的 before()/after() 也是这么写的）</span><button>复制</button></div><pre data-lang="cpp">// a 是否&quot;在 b 之后&quot;：差值按有符号数解释，只要两者相距不超过序号空间的一半就是对的
+inline bool SeqAfter(uint32_t a, uint32_t b)  { return int32_t(a - b) &gt; 0; }
+inline bool SeqBefore(uint32_t a, uint32_t b) { return int32_t(a - b) &lt; 0; }
+inline int32_t SeqDiff(uint32_t a, uint32_t b) { return int32_t(a - b); }
+
+// 16 位序号同理（Glenn Fiedler 的游戏网络协议就用 16 位以节省包头）
+inline bool Seq16After(uint16_t a, uint16_t b) { return int16_t(uint16_t(a - b)) &gt; 0; }
+
+// 例：Seq16After(5, 65530) == true，因为 (uint16_t)(5 - 65530) = 11 &gt; 0</pre></div>
+  <div class="co warn"><span class="h">⚠️ 易错点：窗口必须小于序号空间的一半</span><p>如果在途的包跨度超过序号空间的一半，<code>SeqAfter</code> 就无法分辨"新包"和"很旧的包"。所以发送窗口必须远小于 2<sup>31</sup>（32 位）或 2<sup>15</sup>（16 位）。TCP 在高速网络中序号回绕更快（10 Gbps 下 32 位字节序号只要 3.4 秒），所以要靠时间戳选项做 PAWS 保护。</p></div>
+
+  <h2>8.3 确认：三种方式及其组合</h2>
+  <div class="tbl"><table>
+    <tr><th>方式</th><th>做法</th><th>优点</th><th>缺点</th><th>代表</th></tr>
+    <tr><td>逐包 ACK</td><td>每收到一个包，回一条 <code>ACK(sn, ts)</code>，可以把多条合并进一个包</td><td>信息最精确，每条都能测 RTT</td><td>ACK 本身丢了就丢了这条信息；ACK 量大</td><td>KCP 的 ACK 列表</td></tr>
+    <tr><td>累计确认 UNA</td><td>只告诉对方"una 之前的全收到了"</td><td>一个数字就能确认很多包，对 ACK 丢失不敏感（下一个 ACK 包含了上一个的信息）</td><td>无法表达"una 之后收到了哪些"，会导致不必要的重传</td><td>TCP 的 ack、KCP 的 una</td></tr>
+    <tr><td>ACK 位图</td><td>una（或最新收到的 sn）+ 后续 32 个包的接收位图</td><td><strong>高度冗余</strong>：同一个包的确认信息会在连续 32 个 ACK 里重复出现，ACK 丢几个也无所谓</td><td>只能覆盖 32（或 64）个包的范围</td><td>Glenn Fiedler《Reliability over UDP》、很多游戏引擎</td></tr>
+  </table></div>
+  <figure>
+  <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="26" class="b">接收方状态：100 之前都收到了；101 没到；102、103、105、108 已到（乱序）</text>
+    <g class="mono">
+      <rect x="20" y="44" width="60" height="34" rx="4" fill="#E5E7EB" stroke="#9CA3AF"/><text x="50" y="66" text-anchor="middle">…99</text>
+      <rect x="84" y="44" width="50" height="34" rx="4" fill="#FEF6E4" stroke="#B45309" stroke-width="2"/><text x="109" y="66" text-anchor="middle">100</text>
+    </g>
+        <g class="mono" text-anchor="middle">
+      <rect x="150" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="170" y="66">101</text>
+      <rect x="194" y="44" width="40" height="34" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="214" y="66">102</text>
+      <rect x="238" y="44" width="40" height="34" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="258" y="66">103</text>
+      <rect x="282" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="302" y="66">104</text>
+      <rect x="326" y="44" width="40" height="34" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="346" y="66">105</text>
+      <rect x="370" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="390" y="66">106</text>
+      <rect x="414" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="434" y="66">107</text>
+      <rect x="458" y="44" width="40" height="34" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="478" y="66">108</text>
+      <rect x="502" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="522" y="66">…</text>
+    </g>
+    <text x="570" y="58" class="xs">绿 = 已收到</text><text x="570" y="74" class="xs">红 = 未收到</text>
+    <text x="20" y="130" class="sm"><tspan class="b">回给发送方的 ACK：</tspan>una = <tspan class="b" style="fill:#B91C1C">101</tspan>（100 及之前全收到），ack_bits 第 i 位表示 una+1+i 是否收到：</text>
+    <g class="mono" text-anchor="middle">
+      <text x="200" y="160">位：</text>
+      <text x="250" y="160" style="fill:#15803D">1</text><text x="285" y="160" style="fill:#15803D">1</text><text x="320" y="160">0</text><text x="355" y="160" style="fill:#15803D">1</text><text x="390" y="160">0</text><text x="425" y="160">0</text><text x="460" y="160" style="fill:#15803D">1</text><text x="500" y="160">0 …</text>
+      <text x="200" y="182">对应：</text>
+      <text x="250" y="182">102</text><text x="285" y="182">103</text><text x="320" y="182">104</text><text x="355" y="182">105</text><text x="390" y="182">106</text><text x="425" y="182">107</text><text x="460" y="182">108</text><text x="500" y="182">109</text>
+    </g>
+    <text x="560" y="164" class="xs">发送方据此：102、103、105、108 不必重传；</text>
+    <text x="560" y="180" class="xs">101 已被后面 4 个包"跳过"→ 触发快速重传</text>
+  </svg>
+  <figcaption><b>图 8-2</b> UNA + ACK 位图：一个定长字段同时表达累计确认和选择确认</figcaption>
+  </figure>
+  <div class="co ver"><span class="h">🎮 游戏开发视角：ACK 捎带与"ACK 也会丢"</span><p>游戏双向都在持续发包（客户端发输入，服务器发状态），所以确认信息<strong>捎带在每个数据包的头部</strong>里，几乎没有单独的 ACK 包。由于每个包都带"最近 32 个包的接收情况"，即使一半的包都丢了，发送方仍然能收到足够的确认信息。这比 TCP 的"一个 ACK 丢了就只能等下一个"要健壮得多。</p></div>
+
+  <h2>8.4 超时重传：RTT、RTO 与退避</h2>
+  <h3>测量 RTT</h3>
+  <p>发送时在包头写入当前时间 <code>ts</code>，接收方在确认中原样回显，发送方收到后 <code>rtt = now − ts</code>。因为回显的是<strong>那一次发送</strong>的时间戳，重传的包也能被正确采样，不存在重传歧义。计算 RTO 时直接套用 RFC 6298 的公式（第 3 章），差别在于各个参数可以自由调整：</p>
+  <div class="tbl"><table>
+    <tr><th>参数</th><th>TCP（Linux）</th><th>可靠 UDP 常见取值</th><th>考虑</th></tr>
+    <tr><td>RTO 下限</td><td>200 ms</td><td>30～100 ms（KCP 极速模式 30 ms）</td><td>越小重传越快，但 RTT 抖动大时会产生伪重传</td></tr>
+    <tr><td>超时后退避</td><td>× 2（指数）</td><td>× 1.5（KCP）、固定不退避、或设上限（如不超过 4×SRTT）</td><td>退避是为了在严重拥塞时让网络喘口气；实时应用更怕等</td></tr>
+    <tr><td>定时器粒度</td><td>每连接一个重传定时器</td><td>每个包各自记录 <code>resend_at</code>，由一个固定周期的 update 统一检查</td><td>按包定时更灵活；update 周期（KCP 的 interval，常设 10 ms）决定了时延精度</td></tr>
+    <tr><td>快速重传阈值</td><td>3 个重复 ACK</td><td>被后续包"跳过" 2 次（KCP resend=2）</td><td>越小越快，但对乱序越敏感</td></tr>
+  </table></div>
+
+  <h3>快速重传：用"跳过次数"代替"重复 ACK"</h3>
+  <p>有了逐包确认或 ACK 位图，就不需要靠重复 ACK 去猜了：每当发送方得知某个比 X 更大的包已被收到，就给 X 的 <code>fastack</code> 计数加一；计数达到阈值就立即重传 X。图 8-2 中的 101 已经被 102、103、105、108 跳过了 4 次。</p>
+  <div class="co deep"><span class="h">🔬 实现细节：别对刚重传的包重复计数</span><p>如果 X 刚被重传过，那些在重传<em>之前</em>就已经发出的更大的包，它们的确认会继续"跳过" X，导致 X 被反复快速重传。严谨的做法是：只有<strong>发送时间晚于 X 最近一次发送</strong>的包被确认，才算一次有效跳过（这就是 Linux RACK 算法的思想）。KCP 选择了更简单的做法：照常计数，但用 <code>fastlimit</code>（默认 5）限制一个包最多被快速重传几次——宁可多发一点，也不要等。本书的仿真程序两种都实现了。</p></div>
+
+  <h2>8.5 三种 ARQ 策略</h2>
+  <p>ARQ（Automatic Repeat reQuest，自动重传请求）是"确认 + 超时重传"这一类机制的统称。按照<strong>一次允许多少个未确认的包</strong>和<strong>出错时重传哪些包</strong>，分为三种：</p>
+  <figure>
+  <svg viewBox="0 0 860 340" xmlns="http://www.w3.org/2000/svg">
+    <text x="140" y="20" text-anchor="middle" class="b">停等 ARQ（窗口 = 1）</text>
+    <text x="430" y="20" text-anchor="middle" class="b">回退 N 步 GBN（窗口 = 4）</text>
+    <text x="720" y="20" text-anchor="middle" class="b">选择重传 SR（窗口 = 4）</text>
+    <line x1="285" y1="8" x2="285" y2="332" stroke="#E5E7EB"/><line x1="575" y1="8" x2="575" y2="332" stroke="#E5E7EB"/>
+    <!-- SW -->
+    <line x1="50" y1="34" x2="50" y2="320" stroke="#9CA3AF"/><line x1="230" y1="34" x2="230" y2="320" stroke="#9CA3AF"/>
+    <g stroke-width="1.4">
+      <line x1="50" y1="44" x2="228" y2="64" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="230" y1="68" x2="52" y2="88" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="50" y1="94" x2="140" y2="104" stroke="#B91C1C"/>
+      <line x1="50" y1="200" x2="228" y2="220" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="230" y1="224" x2="52" y2="244" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="50" y1="250" x2="228" y2="270" stroke="#4B5563" marker-end="url(#a)"/>
+    </g>
+    <text x="142" y="110" class="b" style="fill:#B91C1C">✕</text>
+    <g class="xs"><text x="60" y="44">1</text><text x="150" y="86">ACK1</text><text x="60" y="94">2</text><text x="60" y="150" style="fill:#B91C1C">超时</text><text x="60" y="198" style="fill:#2F5BD3">重传 2</text><text x="150" y="242">ACK2</text><text x="60" y="250">3</text></g>
+    <text x="140" y="300" text-anchor="middle" class="xs">任何时刻最多 1 个包在途</text>
+    <text x="140" y="316" text-anchor="middle" class="xs">简单，但信道大部分时间空闲</text>
+    <!-- GBN -->
+    <line x1="330" y1="34" x2="330" y2="320" stroke="#9CA3AF"/><line x1="530" y1="34" x2="530" y2="320" stroke="#9CA3AF"/>
+    <g stroke-width="1.3">
+      <line x1="330" y1="44" x2="528" y2="62" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="330" y1="54" x2="430" y2="63" stroke="#B91C1C"/>
+      <line x1="330" y1="64" x2="528" y2="82" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="330" y1="74" x2="528" y2="92" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="530" y1="66" x2="332" y2="100" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="530" y1="86" x2="332" y2="120" stroke="#C2410C" marker-end="url(#ao)"/>
+      <line x1="530" y1="96" x2="332" y2="130" stroke="#C2410C" marker-end="url(#ao)"/>
+      <line x1="330" y1="190" x2="528" y2="208" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="330" y1="200" x2="528" y2="218" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="330" y1="210" x2="528" y2="228" stroke="#2F5BD3" marker-end="url(#ab)"/>
+    </g>
+    <text x="432" y="70" class="b" style="fill:#B91C1C">✕</text>
+    <g class="xs"><text x="300" y="48">1</text><text x="300" y="58" style="fill:#B91C1C">2</text><text x="300" y="68">3</text><text x="300" y="78">4</text>
+      <text x="536" y="84" style="fill:#C2410C">丢弃 3</text><text x="536" y="98" style="fill:#C2410C">丢弃 4</text>
+      <text x="340" y="148" style="fill:#C2410C">ACK1 ACK1 ACK1</text>
+      <text x="340" y="172" style="fill:#B91C1C">2 超时 → 从 2 开始全部重发</text>
+      <text x="290" y="204" style="fill:#2F5BD3">2 3 4</text></g>
+    <text x="430" y="300" text-anchor="middle" class="xs">接收方只收按序的包，乱序全丢</text>
+    <text x="430" y="316" text-anchor="middle" class="xs">接收端简单，但丢一个要重发一窗</text>
+    <!-- SR -->
+    <line x1="620" y1="34" x2="620" y2="320" stroke="#9CA3AF"/><line x1="820" y1="34" x2="820" y2="320" stroke="#9CA3AF"/>
+    <g stroke-width="1.3">
+      <line x1="620" y1="44" x2="818" y2="62" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="620" y1="54" x2="720" y2="63" stroke="#B91C1C"/>
+      <line x1="620" y1="64" x2="818" y2="82" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="620" y1="74" x2="818" y2="92" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="820" y1="66" x2="622" y2="100" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="820" y1="86" x2="622" y2="120" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="820" y1="96" x2="622" y2="130" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="620" y1="140" x2="818" y2="158" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="820" y1="162" x2="622" y2="196" stroke="#15803D" marker-end="url(#ag)"/>
+    </g>
+    <text x="722" y="70" class="b" style="fill:#B91C1C">✕</text>
+    <g class="xs"><text x="590" y="48">1</text><text x="590" y="58" style="fill:#B91C1C">2</text><text x="590" y="68">3</text><text x="590" y="78">4</text>
+      <text x="826" y="84" style="fill:#15803D">缓存</text><text x="826" y="98" style="fill:#15803D">缓存</text>
+      <text x="632" y="106" style="fill:#15803D">ACK1</text><text x="632" y="126" style="fill:#15803D">SACK3</text><text x="680" y="136" style="fill:#15803D">SACK4</text>
+      <text x="580" y="144" style="fill:#2F5BD3">只重传 2</text>
+      <text x="632" y="214" style="fill:#15803D">UNA=5（2 补上后 3、4 一起交付）</text></g>
+    <text x="720" y="300" text-anchor="middle" class="xs">接收方缓存乱序包，只重传缺的</text>
+    <text x="720" y="316" text-anchor="middle" class="xs">最高效，但两端都要维护缓冲</text>
+  </svg>
+  <figcaption><b>图 8-3</b> 三种 ARQ：停等每次一个；GBN 出错后"回退"到丢失点全部重发；SR 只重发真正丢失的包</figcaption>
+  </figure>
+  <h3>信道利用率</h3>
+  <p>设发送一个包需要 T（发送时延 = 包长 / 带宽），往返时延 RTT，窗口 W 个包，无丢包时的利用率：</p>
+<div class="code"><div class="bar"><span>滑动窗口的信道利用率</span><button>复制</button></div><pre data-lang="text">U = min(1,  W × T / (T + RTT))
+
+停等（W=1）：T = 1 ms（1200 字节 @ ~10 Mbps），RTT = 60 ms  →  U = 1 / 61 ≈ 1.6%
+滑动窗口 W=64：                                         →  U = min(1, 64 / 61) = 100%
+跑满带宽所需的最小窗口 W ≥ (T + RTT) / T ≈ RTT / T = 带宽时延积（以包为单位）</pre></div>
+  <p>这就是为什么第 3 章说"窗口要至少等于 BDP"。三种 ARQ 的完整对比：</p>
+  <div class="tbl"><table>
+    <tr><th></th><th>停等</th><th>回退 N 步（GBN）</th><th>选择重传（SR）</th></tr>
+    <tr><td>发送窗口</td><td>1</td><td>N</td><td>N</td></tr>
+    <tr><td>接收窗口</td><td>1</td><td>1（只收按序包）</td><td>N（缓存乱序包）</td></tr>
+    <tr><td>确认方式</td><td>逐包</td><td>累计确认</td><td>逐包 / 选择确认（+ 累计）</td></tr>
+    <tr><td>出错时重传</td><td>当前包</td><td>从丢失包开始的整个窗口</td><td>只重传丢失的包</td></tr>
+    <tr><td>序号空间要求</td><td>≥ 2</td><td>≥ N + 1</td><td><strong>≥ 2N</strong>（否则新旧包混淆）</td></tr>
+    <tr><td>适用</td><td>低速 / 简单链路</td><td>低误码率链路</td><td>高时延、有丢包的链路（TCP+SACK、KCP、QUIC 都属于此类）</td></tr>
+  </table></div>
+
+  <h2>8.6 滑动窗口与流量控制</h2>
+  <p>发送端维护三个窗口取最小值：<code>可发送数 = min(本地发送窗口, 对端通告的接收窗口 wnd, 拥塞窗口 cwnd) − 在途包数</code>。接收端在每个包头里填写 <code>wnd = 接收缓冲区剩余槽位</code>。</p>
+  <ul>
+    <li><strong>窗口为 0 时</strong>：和 TCP 一样会有"窗口更新包丢了导致双方死等"的风险。KCP 的做法是发送方定时发送 <code>WASK</code>（询问窗口）命令，接收方回 <code>WINS</code>（告知窗口）——相当于 TCP 的零窗口探测。</li>
+    <li><strong>接收窗口要比发送窗口大</strong>：KCP 默认发送窗口 32、接收窗口 128。因为接收方还要容纳乱序到达的包，接收窗口太小时，乱序包会因为"超出窗口"被丢弃，然后被重传。</li>
+  </ul>
+
+  <h2>8.7 乱序处理与去重：接收端环形缓冲</h2>
+  <figure>
+  <svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="24" class="b">接收窗口 = 8 个槽位，下标 = sn % 8；rcv_nxt = 101（下一个要交付的包）</text>
+    <g class="mono" text-anchor="middle">
+      <rect x="60" y="44" width="90" height="56" rx="6" fill="#FDEEEE" stroke="#B91C1C" stroke-width="2"/><text x="105" y="66">槽 5</text><text x="105" y="88" style="fill:#B91C1C">101 空</text>
+      <rect x="154" y="44" width="90" height="56" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="199" y="66">槽 6</text><text x="199" y="88" style="fill:#15803D">102 ✓</text>
+      <rect x="248" y="44" width="90" height="56" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="293" y="66">槽 7</text><text x="293" y="88" style="fill:#15803D">103 ✓</text>
+      <rect x="342" y="44" width="90" height="56" rx="6" fill="#fff" stroke="#9CA3AF"/><text x="387" y="66">槽 0</text><text x="387" y="88">104 空</text>
+      <rect x="436" y="44" width="90" height="56" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="481" y="66">槽 1</text><text x="481" y="88" style="fill:#15803D">105 ✓</text>
+      <rect x="530" y="44" width="90" height="56" rx="6" fill="#fff" stroke="#9CA3AF"/><text x="575" y="66">槽 2</text><text x="575" y="88">106 空</text>
+      <rect x="624" y="44" width="90" height="56" rx="6" fill="#fff" stroke="#9CA3AF"/><text x="669" y="66">槽 3</text><text x="669" y="88">107 空</text>
+      <rect x="718" y="44" width="90" height="56" rx="6" fill="#fff" stroke="#9CA3AF"/><text x="763" y="66">槽 4</text><text x="763" y="88">108 空</text>
+    </g>
+    <text x="105" y="120" text-anchor="middle" class="xs" style="fill:#B91C1C">↑ rcv_nxt</text>
+    <text x="763" y="120" text-anchor="middle" class="xs">↑ rcv_nxt + 窗口 − 1</text>
+    <g class="sm">
+      <text x="40" y="152">• 收到 <tspan class="b">sn &lt; 101</tspan> 或 <tspan class="b">槽位已占用</tspan> → 重复包：<tspan style="fill:#B91C1C">丢弃，但仍要回 ACK</tspan>（对方没收到上次的确认才会重发）</text>
+      <text x="40" y="176">• 收到 <tspan class="b">sn ≥ 109</tspan> → 超出窗口：丢弃（对方之后会重传），不回 ACK 或只回 una</text>
+      <text x="40" y="200">• 收到 <tspan class="b">101</tspan> → 放入槽 5，然后从 rcv_nxt 开始把连续的 101、102、103 依次交付应用，rcv_nxt 变为 104</text>
+      <text x="40" y="224">• "可靠 · 无序"通道：收到即交付，但同样用这个位图记录"已收过哪些"来去重</text>
+    </g>
+  </svg>
+  <figcaption><b>图 8-4</b> 接收端用环形缓冲同时完成三件事：乱序暂存、按序交付、重复检测</figcaption>
+  </figure>
+<div class="code"><div class="bar"><span>接收端：乱序重排 + 去重 + 按序交付（可靠有序通道）</span><button>复制</button></div><pre data-lang="cpp">struct Receiver {
+    static constexpr uint32_t kWnd = 128;
+    uint32_t rcvNxt = 0;                                   // 下一个期望交付的 sn
+    std::array&lt;std::optional&lt;std::string&gt;, kWnd&gt; slots;    // 环形缓冲，下标 sn % kWnd
+    std::vector&lt;uint32_t&gt; ackList;                         // 待回复的确认
+
+    void OnData(uint32_t sn, std::string payload, auto&amp;&amp; deliver) {
+        ackList.push_back(sn);                             // ① 不管新旧，先记下要确认（重复包也要确认）
+        if (SeqBefore(sn, rcvNxt)) return;                 // ② 已经交付过的旧包：去重
+        if (SeqDiff(sn, rcvNxt) &gt;= int32_t(kWnd)) return;  // ③ 超出接收窗口：丢弃，等对方重传
+        auto&amp; slot = slots[sn % kWnd];
+        if (slot) return;                                  // ④ 窗口内的重复包：去重
+        slot = std::move(payload);                         // ⑤ 乱序暂存
+        while (slots[rcvNxt % kWnd]) {                     // ⑥ 从 rcvNxt 起把连续的包按序交付
+            deliver(std::move(*slots[rcvNxt % kWnd]));
+            slots[rcvNxt % kWnd].reset();
+            ++rcvNxt;
+        }
+    }
+    uint16_t Wnd() const { /* 剩余空槽数，填进包头的 wnd */ return uint16_t(kWnd - CountUsed()); }
+    uint32_t Una() const { return rcvNxt; }
+    uint32_t AckBits() const {                             // una+1 .. una+32 的接收位图
+        uint32_t bits = 0;
+        for (uint32_t i = 1; i &lt;= 32 &amp;&amp; i &lt; kWnd; ++i) if (slots[(rcvNxt + i) % kWnd]) bits |= 1u &lt;&lt; (i - 1);
+        return bits;
+    }
+    uint32_t CountUsed() const { uint32_t n = 0; for (auto&amp; s : slots) n += s.has_value(); return n; }
+};</pre></div>
+
+  <h2>8.8 发送端：定时驱动的主循环</h2>
+  <p>可靠 UDP 通常由一个固定周期（例如每 10 ms）调用的 <code>Update(now)</code> 驱动：检查超时、处理快速重传、在窗口允许时发送新数据、把 ACK 和数据合并成包发出去。</p>
+<div class="code"><div class="bar"><span>发送端：超时重传 + 快速重传 + 窗口发送（选择重传）</span><button>复制</button></div><pre data-lang="cpp">struct Segment { uint32_t sn; uint32_t ts; uint32_t resendAt; uint32_t rto; int xmit = 0; int fastack = 0; std::string data; };
+
+struct Sender {
+    std::deque&lt;std::string&gt; sendQueue;         // 应用提交、尚未进入窗口的消息
+    std::map&lt;uint32_t, Segment&gt; sendBuf;       // 已发送未确认（按 sn 有序）
+    uint32_t sndNxt = 0, sndUna = 0, rmtWnd = 128, sndWnd = 64;
+    RttEstimator rtt;                          // SRTT / RTTVAR / RTO（RFC 6298）
+    int fastResend = 2; double backoff = 1.5;  // KCP 极速模式的取值
+
+    void OnAck(uint32_t una, uint32_t ackBits, uint32_t echoTs, uint32_t now) {
+        rtt.Sample(now - echoTs);                                  // 时间戳回显：重传包也能采样
+        for (auto it = sendBuf.begin(); it != sendBuf.end() &amp;&amp; SeqBefore(it-&gt;first, una);) it = sendBuf.erase(it);
+        uint32_t maxAcked = una - 1;
+        for (int i = 0; i &lt; 32; ++i) if (ackBits &gt;&gt; i &amp; 1) { sendBuf.erase(una + 1 + i); maxAcked = una + 1 + i; }
+        for (auto&amp; [sn, seg] : sendBuf) if (SeqBefore(sn, maxAcked)) seg.fastack++;   // 被更大的包&quot;跳过&quot;
+        sndUna = sendBuf.empty() ? sndNxt : sendBuf.begin()-&gt;first;
+    }
+
+    void Update(uint32_t now, auto&amp;&amp; output) {
+        for (auto&amp; [sn, seg] : sendBuf) {
+            bool timeout = int32_t(now - seg.resendAt) &gt;= 0;
+            bool fast = fastResend &gt; 0 &amp;&amp; seg.fastack &gt;= fastResend;
+            if (!timeout &amp;&amp; !fast) continue;
+            if (timeout) seg.rto = std::min&lt;uint32_t&gt;(uint32_t(seg.rto * backoff), 10000);   // 温和退避
+            seg.xmit++; seg.fastack = 0; seg.ts = now; seg.resendAt = now + seg.rto;
+            output(seg);                                                                     // 只重传这一个
+        }
+        uint32_t cwnd = std::min(sndWnd, rmtWnd);                                            // (+ 拥塞窗口)
+        while (!sendQueue.empty() &amp;&amp; SeqDiff(sndNxt, sndUna) &lt; int32_t(cwnd)) {
+            Segment seg{sndNxt++, now, now + rtt.Rto(), rtt.Rto(), 1, 0, std::move(sendQueue.front())};
+            sendQueue.pop_front();
+            output(seg);
+            sendBuf.emplace(seg.sn, std::move(seg));
+        }
+    }
+};</pre></div>
+
+  <h2>8.9 拥塞避免：关掉它之前要想清楚</h2>
+  <p>可靠 UDP 的拥塞控制有三种常见取舍：</p>
+  <div class="tbl"><table>
+    <tr><th>策略</th><th>做法</th><th>适用</th></tr>
+    <tr><td>照搬 TCP</td><td>在用户态实现慢启动 / AIMD，或 CUBIC、BBR（QUIC 就是这样）</td><td>大流量传输（文件、视频），需要与其他流公平共享</td></tr>
+    <tr><td>关闭拥塞窗口 + 限速</td><td>KCP <code>nc=1</code>，再用令牌桶限制最大发送速率；发送窗口仍受接收窗口限制</td><td>游戏：流量小（几 KB/s～几十 KB/s）而稳定，远低于瓶颈带宽，丢包多为随机丢包</td></tr>
+    <tr><td>基于时延的降级</td><td>监测 RTT 相对基线的上升（排队在加剧）或丢包率突增，主动降低快照频率 / 精度</td><td>游戏、实时音视频（WebRTC 的 GCC 算法就是基于时延梯度）</td></tr>
+  </table></div>
+<div class="code"><div class="bar"><span>令牌桶限速：允许短时突发，长期速率不超过 rate</span><button>复制</button></div><pre data-lang="cpp">struct TokenBucket {
+    double rate, burst, tokens, last;            // rate：字节/秒；burst：桶容量
+    bool TrySend(size_t bytes, double nowSec) {
+        tokens = std::min(burst, tokens + (nowSec - last) * rate);
+        last = nowSec;
+        if (tokens &lt; bytes) return false;        // 令牌不够：本轮先不发（留在队列里）
+        tokens -= bytes;
+        return true;
+    }
+};</pre></div>
+
+  <h2>8.10 用带宽换延迟：冗余发送与 FEC</h2>
+  <p>重传至少要付出一个 RTT 的代价。如果能<strong>预先多发一些数据</strong>，让接收方在部分丢包时自己恢复出原文，就可以完全不等重传。</p>
+  <div class="cards">
+    <div class="card"><div class="t">冗余发送（游戏最常用）</div><p>每个包除了本帧的输入，还捎带最近 k 帧的输入。只要连续 k+1 个包没有全丢，接收方就能拿到每一帧。独立丢包率为 p 时，残余丢失率约为 p<sup>k+1</sup>：p=10%、k=3 时只有万分之一。输入数据很小（几字节到几十字节），冗余几乎不增加带宽。</p></div>
+    <div class="card"><div class="t">FEC 前向纠错</div><p>每 n 个数据包额外生成 m 个校验包，收到任意 n 个就能恢复全部。最简单的是异或（m=1）；Reed-Solomon 码可以任意配置 (n, m)。实时音视频（WebRTC 的 FlexFEC / ULPFEC）、kcp-go、加速器广泛使用。</p></div>
+  </div>
+  <figure>
+  <svg viewBox="0 0 860 170" xmlns="http://www.w3.org/2000/svg">
+    <g class="mono" text-anchor="middle">
+      <rect x="40" y="30" width="110" height="40" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="95" y="55">A = 1011</text>
+      <rect x="170" y="30" width="110" height="40" rx="6" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="4 3"/><text x="225" y="55" style="fill:#B91C1C">B = 0110 ✕</text>
+      <rect x="300" y="30" width="110" height="40" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="355" y="55">C = 1100</text>
+      <rect x="430" y="30" width="140" height="40" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="500" y="55">P = A⊕B⊕C = 0001</text>
+    </g>
+    <text x="305" y="20" text-anchor="middle" class="xs">发送方：每 3 个数据包附带 1 个异或校验包（多 33% 带宽）</text>
+    <line x1="590" y1="50" x2="640" y2="50" stroke="#15803D" stroke-width="1.8" marker-end="url(#ag)"/>
+    <rect x="650" y="30" width="190" height="40" rx="6" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="745" y="55" text-anchor="middle" class="mono" style="fill:#15803D">B = A⊕C⊕P = 0110</text>
+    <text x="430" y="104" text-anchor="middle" class="sm">接收方收到 A、C、P，B 丢失：不需要等重传，直接异或恢复。任意一个丢失都能恢复，但同一组丢两个就不行。</text>
+    <text x="430" y="130" text-anchor="middle" class="xs">FEC 的代价是固定的带宽开销（无论是否丢包都要发），收益是零 RTT 恢复；</text>
+    <text x="430" y="148" text-anchor="middle" class="xs">它对随机丢包很有效，对连续的突发丢包（burst loss）效果差，需要交织（interleaving）或更强的编码</text>
+  </svg>
+  <figcaption><b>图 8-5</b> 最简单的 FEC：异或校验包可以恢复同组中任意一个丢失的包</figcaption>
+  </figure>
+
+  <h2>8.11 分片、连接管理与安全</h2>
+  <h3>分片与重组</h3>
+  <p>大于 MTU 的消息在发送端切片，每片独立编号（占用连续的 sn），并在 <code>frg</code> 字段中标注"后面还有几片"。接收端按序收到 <code>frg = 0</code> 的那一片时，把前面连续的片拼接成完整消息交给应用。KCP 正是这样做的：在消息模式下，<code>ikcp_recv</code> 只有在一条消息的所有分片都到齐后才返回。</p>
+  <h3>连接管理</h3>
+  <ul>
+    <li><strong>握手</strong>：客户端发 CONNECT；服务器<strong>不分配会话资源</strong>，回一个带 Cookie（如 HMAC(客户端地址, 时间, 密钥)）的 CHALLENGE；客户端带着 Cookie 再发一次，服务器校验通过才分配 conv 和会话。这同时防住了"伪造源地址耗尽会话"（SYN Flood 的 UDP 版）和"反射放大"。服务器的第一次回复不应该比客户端的请求大。</li>
+    <li><strong>会话识别</strong>：用 conv 而不是四元组查找会话；收到同一 conv 但源地址变了的包（NAT 重绑定），验证后更新地址。</li>
+    <li><strong>心跳与断线</strong>：没有数据时定期发 PING（顺便测 RTT、保活 NAT 映射）；N 秒内没有收到对方任何包就判定断线。</li>
+    <li><strong>关闭</strong>：发 CLOSE 并重复几次（它也可能丢），对方收到后释放资源；最终仍以超时兜底。</li>
+  </ul>
+  <h3>安全</h3>
+  <p>UDP 包很容易伪造和篡改。面向公网的可靠 UDP 至少需要：<strong>认证加密</strong>（AES-GCM / ChaCha20-Poly1305，或直接用 DTLS），包含序号的 nonce 防<strong>重放</strong>，握手阶段的<strong>密钥协商</strong>（如 ECDH）。KCP 不提供任何安全能力，kcp-go 提供了多种对称加密可选；QUIC 则强制 TLS 1.3。</p>
+
+  <h2>8.12 实测：仿真对比各种 ARQ 策略</h2>
+  <p>配套程序 <code>d2_rudp_sim</code> 用虚拟时钟仿真：链路 1 包/ms、RTT ≈ 60 ms、双向独立丢包 5%、1% 的包"绕路"制造轻微乱序，传输 2000 个包。各方案的协议逻辑与本章代码同构。</p>
+  <div class="co net"><span class="h">🧪 实测证据（d2 · 实验 A）：批量传输 2000 个包</span>
+  <div class="term"><div class="bar">d2_rudp_sim.exe · 实验 A（固定随机种子，可复现）</div><pre>实验 A：批量传输 2000 个包 | 链路 1 包/ms | RTT≈60ms | 双向丢包 5% | 理论下限≈2060ms
+方案                                   完成(ms) 发送次数 重传占比
+A1 停等 ARQ（窗口=1）                  <span class="bad">171807</span>     2207     9.4%
+A2 回退N步 GBN（窗口64）              <span class="bad"> 36407</span>    <span class="bad">10036    80.1%</span>
+A3 选择重传 SR（窗口64，仅超时重传）       7820     2164     7.6%
+A4 SR + 快速重传（阈值3）              <span class="ok">  4000</span>     2184     8.4%
+T  类TCP：A4+SACK+延迟ACK+RTO×2+Reno     <span class="hl"> 35563</span>     2129     6.1%
+T' 类TCP，但关闭拥塞控制              <span class="ok">  4046</span>     2197     9.0%
+K  类KCP极速：快重传2+立即ACK+RTO×1.5    <span class="ok">  3609</span>     <span class="hl">2844    29.7%</span></pre></div>
+  <p>逐行解读：</p>
+  <ul>
+    <li><strong>A1 停等</strong>：每个包至少等 1 个 RTT，2000 × 61 ms ≈ 122 s，再加上丢包后的超时等待，171 s。和 8.5 节"利用率 1.6%"的计算吻合。</li>
+    <li><strong>A2 GBN</strong>：窗口 64 本应很快，但每丢一个包就要把后面整窗重发一遍，<strong>80% 的发送是重传</strong>，反而只比停等好 4.7 倍。</li>
+    <li><strong>A3 → A4</strong>：同样是选择重传，加上快速重传后耗时减半——绝大多数丢包在约 1 个 RTT 内就被发现，不必等 200 ms 的 RTO。</li>
+    <li><strong>T vs T'</strong>：两者唯一的区别是 Reno 拥塞控制。5% 的随机丢包让 Reno 不停地减半窗口，耗时多了近 9 倍。<em>（再次提醒：这里的"类 TCP"缺少现代 Linux 的 TLP / RACK / PRR / CUBIC 等优化，绝对值偏悲观，但"随机丢包被误判为拥塞"的方向是真实的。）</em></li>
+    <li><strong>K 类 KCP</strong>：最快，但重传占比 29.7%，是 A4 的 3.5 倍——更激进的快速重传阈值和 KCP 式计数带来了大量"其实没丢"的重传。这就是 KCP 官方描述的"<strong>以 10%～20% 的带宽浪费换取更低的延迟</strong>"，这里因为仿真丢包率较高，浪费得更多。</li>
+  </ul></div>
+
+  <h3>交互实验：自己调参数</h3>
+  <p>下面的仿真器与 d2 同构（为了在浏览器里秒出结果，只传 200 个包、去掉了延迟确认和拥塞控制）。拖动丢包率、窗口和 RTT，观察各协议的变化；方格颜色表示每个包被发送的次数（绿 1 次、黄 2 次、橙 3 次、红 4 次以上）。</p>
+  <div class="lab" id="lab-arq">
+    <div class="t">🧪 交互实验 2 · ARQ 协议仿真器</div>
+    <div class="row">
+      <label>协议：<select id="arq-mode" style="font:inherit;font-size:13.5px;padding:3px 6px;border:1px solid #E5E7EB;border-radius:6px">
+        <option value="sw">停等 ARQ</option><option value="gbn">回退 N 步 GBN</option><option value="sr">选择重传 SR</option><option value="srf" selected>SR + 快速重传(3)</option><option value="kcp">类 KCP 极速模式</option></select></label>
+      <label>丢包率 <input type="range" id="arq-loss" min="0" max="30" value="5"> <b id="arq-loss-v"></b></label>
+    </div>
+    <div class="row">
+      <label>窗口 <input type="range" id="arq-wnd" min="1" max="64" value="32"> <b id="arq-wnd-v"></b></label>
+      <label>RTT <input type="range" id="arq-rtt" min="20" max="300" step="10" value="60"> <b id="arq-rtt-v"></b></label>
+      <label>随机种子 <input type="number" id="arq-seed" value="7" min="1" max="99"></label>
+      <button class="st-btn" id="arq-run">换一组随机数</button>
+    </div>
+    <div id="arq-grid" style="margin:8px 0;line-height:0"></div>
+    <div class="out" id="arq-out"></div>
+  </div><!--/lab-->
+  <p>建议做这几个小实验：① 丢包率调到 0，比较停等和 SR 的耗时，体会窗口的作用；② 窗口调到 1，五种协议几乎一样，说明它们的差别全部来自"窗口内的丢包怎么处理"；③ 丢包率调到 20%，看 GBN 的红色方格；④ RTT 调到 300 ms，看快速重传相对于超时重传的优势如何放大。</p>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>报文头：conv（会话 ID）、sn、una、ack_bits、ts、wnd、chan、frg；<strong>按包编号</strong>，ACK 捎带在数据包里。</li>
+    <li>序号比较用 <code>int32_t(a - b) &gt; 0</code>；窗口必须小于序号空间的一半（SR 要求序号空间 ≥ 2N）。</li>
+    <li>确认 = UNA（累计，抗 ACK 丢失）+ 逐包 ACK 或位图（选择确认，避免多余重传）。</li>
+    <li>时间戳回显测 RTT，避免重传歧义；RTO 下限、退避倍数、快速重传阈值都可以按业务调。</li>
+    <li>停等利用率 ≈ T/(T+RTT)；GBN 丢一个重发一窗；<strong>SR 只重发丢失的包</strong>，是现代协议的共同选择。</li>
+    <li>接收端环形缓冲：乱序暂存、按序交付、重复检测（重复包也要回 ACK）。</li>
+    <li>拥塞：照搬 TCP / 关窗 + 令牌桶限速 / 基于时延降级；冗余发送与 FEC 用带宽换零 RTT 恢复。</li>
+    <li>连接管理：Cookie 握手防伪造与放大、conv 识别会话、心跳、超时断线；公网必须加密认证。</li>
+    <li>仿真：SR + 快速重传比 SR 快一倍；GBN 80% 都是重传；随机丢包下 Reno 慢近 9 倍；类 KCP 最快但多花约 30% 带宽。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：为什么选择重传要求序号空间至少是窗口的 2 倍？</summary>
+  <p>设窗口为 N。接收方收完一整窗 0～N−1 并发出确认后，接收窗口移动到 N～2N−1。如果这些确认全部丢失，发送方会重传 0～N−1。若序号空间只有 N（序号模 N），重传的旧包 0 和新窗口期望的包 N 编号相同，接收方会把旧包当成新包接收。序号空间 ≥ 2N 时，新旧窗口的序号不重叠，才能区分。</p></details>
+  <details class="quiz"><summary>思考题 2：为什么接收方收到重复包时还要回 ACK？</summary>
+  <p>发送方重传一个包，说明它没有收到这个包的确认——要么数据包丢了，要么 ACK 丢了。如果是 ACK 丢了，接收方其实已经收到过数据，若此时对重复包不回 ACK，发送方会一直重传下去。所以去重只是"不重复交付给应用"，确认必须照发。</p></details>
+  <details class="quiz"><summary>思考题 3：帧同步游戏中，"每个包冗余携带最近 3 帧输入"和"用 KCP 可靠传输每帧输入"相比，各有什么优缺点？</summary>
+  <p>冗余发送：不需要等待重传，单包丢失对时延零影响；独立丢包下残余丢失率约 p⁴，非常低；输入数据很小，冗余开销可以忽略。缺点是不能保证 100% 送达（连续 4 个包全丢时缺帧），所以通常还要配合"缺帧时通过可靠通道请求补发"。KCP：保证每帧都送达且有序，但丢包时至少等一次重传（约 1 个 RTT），时延抖动更大。实际工程中常两者结合：冗余发送解决绝大部分丢包，可靠通道兜底。</p></details>
+  <details class="quiz"><summary>思考题 4：如果你的可靠 UDP 只用 UNA 而不用任何选择确认，会退化成哪种 ARQ？</summary>
+  <p>发送方只知道"una 之前都收到了"，不知道 una 之后哪些已收到。如果接收端会缓存乱序包，发送方在超时时只重传 una 那一个包（下一个 ACK 的 una 会跳到更后面），效果接近选择重传但发现丢包很慢（只能靠超时、每 RTT 修一个洞）；如果发送方超时后把 una 之后的全部重发，就退化成了回退 N 步。这正是 TCP 早期没有 SACK 时的困境。</p></details>
+</section>
+
+<!-- ======================= CH9 ======================= -->
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>KCP：以带宽换延迟的 ARQ 协议</h1>
+    <p class="lead">一千多行 C 代码、一个头文件、零系统调用。它的全部秘密就在"对 TCP 的六处修改"里。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说出 KCP 的定位（纯算法、无 IO、无连接管理）与设计目标</li>
+    <li>画出 KCP 的四个队列和数据流，背出 24 字节报文头</li>
+    <li>逐条说清 KCP 相对 TCP 的改动：RTO 不翻倍、选择重传、快速重传、非延迟 ACK、UNA+ACK、非退让流控</li>
+    <li>会写 KCP 的接入代码，理解 <code>ikcp_nodelay</code> 等参数的含义与调优</li>
+    <li>能用仿真数据解释 KCP 的"带宽换延迟"，并知道在工程中 KCP 之外还要补什么</li>
+  </ul></div>
+
+  <h2>9.1 KCP 是什么</h2>
+  <p>KCP 是由林伟（skywind3000）开源的一个快速可靠传输协议，项目 README 中对它的描述是：<strong>能以比 TCP 浪费 10%～20% 带宽的代价，换取平均延迟降低 30%～40%、最大延迟降低三倍的传输效果</strong>。它在手游、实时音视频、网络加速器等领域被广泛使用，也衍生出 kcp-go、KCP-Net 等多语言实现。</p>
+  <div class="cards">
+    <div class="card"><div class="t">纯算法实现</div><p>KCP 不负责收发 UDP，使用者通过回调函数 <code>output</code> 告诉它"怎么把一个包发出去"，收到包后调用 <code>ikcp_input</code> 喂给它。连时钟都由外部传入，内部没有任何系统调用——所以能嵌入任何引擎、平台和 IO 模型。</p></div>
+    <div class="card"><div class="t">只做 ARQ</div><p>对应图 7-2 中的第 ③ 层（外加消息分片）：序号、确认、重传、窗口、拥塞控制。<strong>不包含</strong>连接建立、会话管理、心跳、加密、FEC，这些都要使用者自己补。</p></div>
+    <div class="card"><div class="t">流速优先，而非流量优先</div><p>TCP 的设计目标是充分利用带宽（每秒传多少 KB）；KCP 的目标是降低单个包从发出到交付的时间（一个包花多少毫秒）。两者的取舍方向不同。</p></div>
+  </div>
+
+  <h2>9.2 架构：四个队列与时钟驱动</h2>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="820" height="290" rx="14" fill="#FBFAF7" stroke="#9CA3AF"/>
+    <text x="430" y="42" text-anchor="middle" class="b">ikcpcb（一个 KCP 对象 = 一个会话的一端）</text>
+    <!-- send path -->
+    <rect x="40" y="60" width="110" height="40" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="95" y="78" text-anchor="middle" class="sm b">ikcp_send()</text><text x="95" y="93" text-anchor="middle" class="xs">应用发送</text>
+    <rect x="190" y="60" width="150" height="40" rx="8" fill="#fff" stroke="#2F5BD3"/><text x="265" y="78" text-anchor="middle" class="sm b" style="fill:#2F5BD3">snd_queue</text><text x="265" y="93" text-anchor="middle" class="xs">已分片，等待进入窗口</text>
+    <rect x="380" y="60" width="170" height="40" rx="8" fill="#fff" stroke="#C2410C" stroke-width="2"/><text x="465" y="78" text-anchor="middle" class="sm b" style="fill:#C2410C">snd_buf</text><text x="465" y="93" text-anchor="middle" class="xs">已发送未确认（含重传计时）</text>
+    <rect x="590" y="60" width="110" height="40" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="645" y="78" text-anchor="middle" class="sm b" style="fill:#6D28D9">output 回调</text><text x="645" y="93" text-anchor="middle" class="xs">用户实现 sendto</text>
+    <rect x="730" y="60" width="90" height="100" rx="8" fill="#F3F4F6" stroke="#4B5563"/><text x="775" y="106" text-anchor="middle" class="b">UDP</text><text x="775" y="124" text-anchor="middle" class="xs">网络</text>
+    <line x1="150" y1="80" x2="188" y2="80" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <line x1="340" y1="80" x2="378" y2="80" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <line x1="550" y1="80" x2="588" y2="80" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <line x1="700" y1="80" x2="728" y2="80" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="359" y="118" text-anchor="middle" class="xs">窗口允许时移入</text>
+    <text x="465" y="118" text-anchor="middle" class="xs">flush 时检查超时 / 快速重传</text>
+    <!-- recv path -->
+    <rect x="590" y="200" width="110" height="40" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="645" y="218" text-anchor="middle" class="sm b" style="fill:#6D28D9">ikcp_input()</text><text x="645" y="233" text-anchor="middle" class="xs">用户收到 UDP 后调用</text>
+    <rect x="380" y="200" width="170" height="40" rx="8" fill="#fff" stroke="#15803D" stroke-width="2"/><text x="465" y="218" text-anchor="middle" class="sm b" style="fill:#15803D">rcv_buf</text><text x="465" y="233" text-anchor="middle" class="xs">乱序暂存（按 sn 排序）</text>
+    <rect x="190" y="200" width="150" height="40" rx="8" fill="#fff" stroke="#15803D"/><text x="265" y="218" text-anchor="middle" class="sm b" style="fill:#15803D">rcv_queue</text><text x="265" y="233" text-anchor="middle" class="xs">已按序，等待应用读取</text>
+    <rect x="40" y="200" width="110" height="40" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="95" y="218" text-anchor="middle" class="sm b">ikcp_recv()</text><text x="95" y="233" text-anchor="middle" class="xs">分片收齐才返回</text>
+    <line x1="728" y1="140" x2="702" y2="214" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <line x1="590" y1="220" x2="552" y2="220" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <line x1="380" y1="220" x2="342" y2="220" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <line x1="190" y1="220" x2="152" y2="220" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="359" y="258" text-anchor="middle" class="xs">sn == rcv_nxt 时移入</text>
+    <line x1="590" y1="208" x2="552" y2="96" stroke="#B45309" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#ao)"/>
+    <text x="586" y="160" text-anchor="end" class="xs" style="fill:#B45309">ACK / UNA：从 snd_buf 删除</text>
+    <rect x="40" y="270" width="660" height="30" rx="8" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="370" y="290" text-anchor="middle" class="sm"><tspan class="b" style="fill:#B45309">ikcp_update(kcp, now)</tspan>：每 interval 毫秒调用一次 → ikcp_flush：发送 ACK 列表、窗口探测、新数据、重传</text>
+  </svg>
+  <figcaption><b>图 9-1</b> KCP 的四个队列：发送侧 snd_queue → snd_buf，接收侧 rcv_buf → rcv_queue；一切发送都在 update / flush 中完成</figcaption>
+  </figure>
+
+  <h3>24 字节报文头</h3>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <g class="xs"><text x="110" y="20">0</text><text x="262" y="20">8</text><text x="418" y="20">16</text><text x="736" y="20">31</text></g>
+    <line x1="110" y1="26" x2="750" y2="26" stroke="#D1D5DB"/>
+    <rect x="110" y="30" width="640" height="32" fill="#EAF0FD" stroke="#2F5BD3"/><text x="430" y="51" text-anchor="middle" class="b">conv 会话编号（32）：通信双方必须相同</text>
+    <rect x="110" y="62" width="160" height="32" fill="#FFF4EC" stroke="#C2410C"/><text x="190" y="83" text-anchor="middle" class="b sm">cmd（8）</text>
+    <rect x="270" y="62" width="160" height="32" fill="#FEF6E4" stroke="#B45309"/><text x="350" y="83" text-anchor="middle" class="b sm">frg 分片（8）</text>
+    <rect x="430" y="62" width="320" height="32" fill="#F3EEFE" stroke="#6D28D9"/><text x="590" y="83" text-anchor="middle" class="b sm">wnd 剩余接收窗口（16）</text>
+    <rect x="110" y="94" width="640" height="32" fill="#FEF6E4" stroke="#B45309"/><text x="430" y="115" text-anchor="middle" class="b">ts 时间戳（32）</text>
+    <rect x="110" y="126" width="640" height="32" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="147" text-anchor="middle" class="b">sn 序号（32）</text>
+    <rect x="110" y="158" width="640" height="32" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="179" text-anchor="middle" class="b">una 此前的包全部收到（32）</text>
+    <rect x="110" y="190" width="640" height="26" fill="#F3F4F6" stroke="#6B7280"/><text x="430" y="208" text-anchor="middle" class="b sm">len 数据长度（32），之后是数据</text>
+    <g class="xs"><text x="770" y="80">PUSH=81 数据</text><text x="770" y="96">ACK=82 确认</text><text x="770" y="112">WASK=83 问窗口</text><text x="770" y="128">WINS=84 告窗口</text></g>
+  </svg>
+  <figcaption><b>图 9-2</b> KCP 报文头（IKCP_OVERHEAD = 24 字节）。多个 KCP 段可以拼进同一个 UDP 包；ACK 段的 sn 是被确认的包序号、ts 是原包的时间戳</figcaption>
+  </figure>
+
+  <h2>9.3 KCP 对 TCP 的六处改动</h2>
+  <p>KCP 的 README 用"vs TCP"的方式列出了它的关键设计，每一条都和前面讲过的 TCP 机制一一对应：</p>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>TCP 的做法</th><th>KCP 的做法</th><th>效果 / 代价</th></tr>
+    <tr><td>1</td><td><strong>RTO 翻倍</strong>：连续超时 3 次，等待时间变成 RTO × 8</td><td>nodelay 模式下每次超时 <strong>RTO × 1.5</strong>；RTO 下限从 100 ms 降为 30 ms</td><td>连续丢包时等待时间增长慢得多（见图 9-3）；代价是严重拥塞时退让不足</td></tr>
+    <tr><td>2</td><td>（早期 / 无 SACK）丢包后可能重传丢失点之后的所有数据</td><td><strong>选择性重传</strong>：只重传真正丢失的包</td><td>减少无效重传</td></tr>
+    <tr><td>3</td><td>3 个重复 ACK 触发快速重传</td><td><strong>被跳过 resend 次即重传</strong>（极速模式 resend=2）：发送 1～5，收到 ACK 1、3、4 时，2 已被跳过 2 次，立即重传</td><td>更早修复丢包；代价是轻微乱序也会触发重传</td></tr>
+    <tr><td>4</td><td><strong>延迟确认</strong>（最多数百毫秒）</td><td>ACK 不刻意延迟，在下一次 flush（≤ interval，极速模式 10 ms）时发出</td><td>RTT 测量更准、重传更及时；代价是 ACK 包更多</td></tr>
+    <tr><td>5</td><td>只有 UNA（累计确认），SACK 是可选扩展</td><td><strong>UNA + 逐包 ACK</strong>：每个包都带 una，同时有单独的 ACK 段</td><td>ACK 丢失时 UNA 兜底，逐包 ACK 保证精确</td></tr>
+    <tr><td>6</td><td>公平退让：发送窗口受拥塞窗口约束，丢包即减窗</td><td><strong>非退让流控</strong>（nc=1）：发送窗口只由发送缓冲和对端接收窗口决定，跳过慢启动和丢包退让</td><td>小流量实时数据不会因随机丢包降速；代价是失去对网络的"礼让"</td></tr>
+  </table></div>
+
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm b">同一个包连续超时 k 次，从第一次发送到第 k+1 次发送一共要等多久（初始 RTO = 100 ms）</text>
+    <line x1="80" y1="250" x2="830" y2="250" stroke="#4B5563"/><line x1="80" y1="250" x2="80" y2="40" stroke="#4B5563"/>
+    <g class="xs" text-anchor="end"><text x="74" y="254">0</text><text x="74" y="186">1 s</text><text x="74" y="122">2 s</text><text x="74" y="58">3 s</text></g>
+    <g stroke="#E5E7EB"><line x1="80" y1="186" x2="830" y2="186"/><line x1="80" y1="122" x2="830" y2="122"/><line x1="80" y1="58" x2="830" y2="58"/></g>
+    <!-- scale: 1s = 64px. TCP cumulative: 100,300,700,1500,3100 ; KCP: 100,250,475,813,1319 -->
+    <g>
+      <rect x="110" y="243.6" width="50" height="6.4" fill="#2F5BD3"/><rect x="162" y="243.6" width="50" height="6.4" fill="#C2410C"/>
+      <rect x="250" y="230.8" width="50" height="19.2" fill="#2F5BD3"/><rect x="302" y="234" width="50" height="16" fill="#C2410C"/>
+      <rect x="390" y="205.2" width="50" height="44.8" fill="#2F5BD3"/><rect x="442" y="219.6" width="50" height="30.4" fill="#C2410C"/>
+      <rect x="530" y="154" width="50" height="96" fill="#2F5BD3"/><rect x="582" y="198" width="50" height="52" fill="#C2410C"/>
+      <rect x="670" y="51.6" width="50" height="198.4" fill="#2F5BD3"/><rect x="722" y="165.6" width="50" height="84.4" fill="#C2410C"/>
+    </g>
+    <g class="xs" text-anchor="middle">
+      <text x="135" y="238">0.1</text><text x="187" y="238">0.1</text>
+      <text x="275" y="225">0.3</text><text x="327" y="228">0.25</text>
+      <text x="415" y="200">0.7</text><text x="467" y="214">0.48</text>
+      <text x="555" y="148">1.5</text><text x="607" y="192">0.81</text>
+      <text x="695" y="46">3.1 s</text><text x="747" y="160">1.32 s</text>
+    </g>
+    <g class="sm" text-anchor="middle"><text x="161" y="270">k=1</text><text x="301" y="270">k=2</text><text x="441" y="270">k=3</text><text x="581" y="270">k=4</text><text x="721" y="270">k=5</text></g>
+    <rect x="110" y="56" width="14" height="12" fill="#2F5BD3"/><text x="130" y="67" class="xs">TCP：RTO × 2</text>
+    <rect x="110" y="76" width="14" height="12" fill="#C2410C"/><text x="130" y="87" class="xs">KCP nodelay：RTO × 1.5</text>
+    <text x="430" y="292" text-anchor="middle" class="xs">TCP 实际的 RTO 下限是 200 ms，差距还要再翻一倍；KCP 极速模式的下限是 30 ms</text>
+  </svg>
+  <figcaption><b>图 9-3</b> 指数退避的累计等待：连续 5 次超时后，×2 要等 3.1 s，×1.5 只要 1.32 s</figcaption>
+  </figure>
+
+  <h2>9.4 接入代码</h2>
+<div class="code"><div class="bar"><span>KCP 接入骨架（客户端，单会话；省略错误处理）</span><button>复制</button></div><pre data-lang="cpp">#include &quot;ikcp.h&quot;
+
+static int UdpOutput(const char* buf, int len, ikcpcb* kcp, void* user) {
+    auto* s = static_cast&lt;Session*&gt;(user);
+    return sendto(s-&gt;sock, buf, len, 0, (sockaddr*)&amp;s-&gt;peer, sizeof s-&gt;peer);   // KCP 只管&quot;要发什么&quot;
+}
+
+void Init(Session* s, uint32_t conv) {
+    s-&gt;kcp = ikcp_create(conv, s);           // conv 双方必须一致（通常由服务器在登录时分配）
+    s-&gt;kcp-&gt;output = UdpOutput;
+    ikcp_nodelay(s-&gt;kcp, 1, 10, 2, 1);       // 极速模式：nodelay=1, interval=10ms, resend=2, nc=1
+    ikcp_wndsize(s-&gt;kcp, 128, 128);          // 发送 / 接收窗口（默认 32 / 128）
+    ikcp_setmtu(s-&gt;kcp, 1200);               // 默认 1400；移动网络建议更保守
+    s-&gt;kcp-&gt;rx_minrto = 10;                  // 可选：进一步降低 RTO 下限
+}
+
+void Tick(Session* s, uint32_t nowMs) {      // 游戏主循环里每帧调用
+    char buf[1500];
+    for (int n; (n = recvfrom(s-&gt;sock, buf, sizeof buf, 0, nullptr, nullptr)) &gt; 0;)
+        ikcp_input(s-&gt;kcp, buf, n);          // ① 把收到的 UDP 包喂给 KCP（非阻塞 socket）
+    ikcp_update(s-&gt;kcp, nowMs);              // ② 驱动时钟：发 ACK、发新数据、检查重传
+    for (int n; (n = ikcp_recv(s-&gt;kcp, buf, sizeof buf)) &gt; 0;)
+        OnMessage(buf, n);                   // ③ 取出按序、完整的消息
+}
+
+void Send(Session* s, const void* msg, int len) {
+    ikcp_send(s-&gt;kcp, (const char*)msg, len);   // 放入 snd_queue，下一次 update/flush 时才真正发出
+    // 想更低延迟：ikcp_flush(s-&gt;kcp) 立即发送（会多一些小包）
+}</pre></div>
+  <div class="co deep"><span class="h">🔬 ikcp_check：服务器上省 CPU 的关键</span><p>服务器上可能有上万个 KCP 会话，每 10 ms 对每个会话调用一次 <code>ikcp_update</code> 很浪费。<code>ikcp_check(kcp, now)</code> 返回"下一次真正需要调用 update 的时刻"（最近的重传时间或下一个 interval），服务器可以把会话按这个时间放进定时器堆或时间轮，只在需要时调度；收到包或有新消息要发时再立即调度一次。</p></div>
+
+  <h2>9.5 参数详解与调优</h2>
+  <div class="tbl"><table>
+    <tr><th>参数</th><th>默认</th><th>极速模式推荐</th><th>含义与调优</th></tr>
+    <tr><td><code>nodelay</code></td><td>0</td><td>1</td><td>开启后：RTO 下限 30 ms（<code>IKCP_RTO_NDL</code>），超时退避 ×1.5。否则下限 100 ms、退避约 ×2</td></tr>
+    <tr><td><code>interval</code></td><td>100 ms</td><td>10～20 ms</td><td>内部 flush 的周期，决定 ACK 和重传的时间精度；越小延迟越低、CPU 越高</td></tr>
+    <tr><td><code>resend</code></td><td>0（关闭）</td><td>2</td><td>快速重传阈值。设得太小（1）时对乱序过于敏感</td></tr>
+    <tr><td><code>nc</code></td><td>0</td><td>1</td><td>1 = 关闭拥塞控制（非退让流控）。<strong>需要配合应用层限速</strong></td></tr>
+    <tr><td><code>sndwnd / rcvwnd</code></td><td>32 / 128</td><td>按带宽时延积估算</td><td>窗口太小会限速（每 RTT 最多发 sndwnd 个包）；rcvwnd 应 ≥ sndwnd，且大于最大分片数</td></tr>
+    <tr><td><code>mtu</code></td><td>1400</td><td>1200～1400</td><td>单个 UDP 包的最大长度（含 24 字节头），超过会被分片</td></tr>
+    <tr><td><code>rx_minrto</code></td><td>100 / 30</td><td>10～30</td><td>RTO 下限；局域网或 RTT 稳定时可以调低</td></tr>
+    <tr><td><code>fastlimit</code></td><td>5</td><td>—</td><td>一个包最多被快速重传几次，超过后只能等超时</td></tr>
+    <tr><td><code>dead_link</code></td><td>20</td><td>—</td><td>一个包被重传这么多次仍未确认，<code>kcp-&gt;state</code> 置为 −1，可用于判定断线</td></tr>
+    <tr><td><code>stream</code></td><td>0</td><td>按需</td><td>1 = 流模式：像 TCP 一样不保留消息边界，可以把小消息合并进一个段，减少开销</td></tr>
+  </table></div>
+  <p>README 给出的两组典型配置：普通模式 <code>ikcp_nodelay(kcp, 0, 40, 0, 0)</code>，极速模式 <code>ikcp_nodelay(kcp, 1, 10, 2, 1)</code>。</p>
+
+  <h2>9.6 实测：100 Hz 实时消息流下的时延</h2>
+  <p>批量传输看的是"多久传完"，实时应用更关心"每条消息花了多少毫秒"。<code>d2</code> 的实验 B 模拟一个每 10 ms 产生一条消息（100 Hz，接近游戏的输入 / 状态发送频率）的流，持续 10 秒，测量每条消息从产生到<strong>按序交付</strong>给应用的时延。</p>
+  <div class="co net"><span class="h">🧪 实测证据（d2 · 实验 B）：时延分布</span>
+  <div class="term"><div class="bar">d2_rudp_sim.exe · 实验 B（RTT≈60ms，单向基础时延 30 ms）</div><pre>丢包 方案                                   平均ms    P99ms 最大ms 发送 丢失
+   0% T  类TCP：A4+SACK+延迟ACK+RTO×2+Reno     31.0       33       39   1000      0
+   0% T' 类TCP，但关闭拥塞控制            31.0       33       39   1000      0
+   0% K  类KCP极速：快重传2+立即ACK+RTO×1.5     31.0       31       40   1011      0
+   0% R  冗余发送k=3（不可靠）            31.0       33       40   1000      0
+   5% T  类TCP：A4+SACK+延迟ACK+RTO×2+Reno   <span class="bad">5085.4    10430    10676</span>   1052      0
+   5% T' 类TCP，但关闭拥塞控制            60.7      <span class="hl">185</span>      215   1077      0
+   5% K  类KCP极速：快重传2+立即ACK+RTO×1.5     <span class="ok">42.9       95</span>      167   1249      0
+   5% R  冗余发送k=3（不可靠）            31.6       41       51   1000      1
+  10% T' 类TCP，但关闭拥塞控制            73.8      <span class="hl">213</span>      225   1133      0
+  10% K  类KCP极速：快重传2+立即ACK+RTO×1.5     <span class="ok">53.4      123</span>      173   1474      0
+  20% T' 类TCP，但关闭拥塞控制           150.0      <span class="hl">513</span>      603   1393      0
+  20% K  类KCP极速：快重传2+立即ACK+RTO×1.5     <span class="ok">72.9      163</span>      183   1907      0
+  （完整输出见 demos/d2_rudp_sim.out.txt；T 在 10%、20% 丢包下时延达数十秒，R 的结果在第 11 章讨论）</pre></div></div>
+
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm b">P99 时延（ms）：100 Hz 消息流，RTT ≈ 60 ms</text>
+    <line x1="80" y1="250" x2="830" y2="250" stroke="#4B5563"/><line x1="80" y1="250" x2="80" y2="40" stroke="#4B5563"/>
+    <!-- scale: 600ms = 200px -> 1ms = 0.3333px -->
+    <g class="xs" text-anchor="end"><text x="74" y="254">0</text><text x="74" y="187">200</text><text x="74" y="120">400</text><text x="74" y="54">600</text></g>
+    <g stroke="#E5E7EB"><line x1="80" y1="183.3" x2="830" y2="183.3"/><line x1="80" y1="116.7" x2="830" y2="116.7"/><line x1="80" y1="50" x2="830" y2="50"/></g>
+    <!-- groups at 5%,10%,20%: T (capped), T', K, R -->
+    <g>
+      <rect x="120" y="42" width="40" height="208" fill="#9CA3AF"/><rect x="164" y="188.3" width="40" height="61.7" fill="#2F5BD3"/><rect x="208" y="218.3" width="40" height="31.7" fill="#C2410C"/><rect x="252" y="236.3" width="40" height="13.7" fill="#6D28D9"/>
+      <rect x="370" y="42" width="40" height="208" fill="#9CA3AF"/><rect x="414" y="179" width="40" height="71" fill="#2F5BD3"/><rect x="458" y="209" width="40" height="41" fill="#C2410C"/><rect x="502" y="236.3" width="40" height="13.7" fill="#6D28D9"/>
+      <rect x="620" y="42" width="40" height="208" fill="#9CA3AF"/><rect x="664" y="79" width="40" height="171" fill="#2F5BD3"/><rect x="708" y="195.7" width="40" height="54.3" fill="#C2410C"/><rect x="752" y="233" width="40" height="17" fill="#6D28D9"/>
+    </g>
+    <g class="xs" text-anchor="middle">
+      <text x="140" y="38">10.4 s</text><text x="184" y="183">185</text><text x="228" y="213">95</text><text x="272" y="231">41</text>
+      <text x="390" y="38">32.6 s</text><text x="434" y="174">213</text><text x="478" y="204">123</text><text x="522" y="231">41</text>
+      <text x="640" y="38">&gt;500 s</text><text x="684" y="74">513</text><text x="728" y="190">163</text><text x="772" y="228">51</text>
+    </g>
+    <g class="sm b" text-anchor="middle"><text x="206" y="270">丢包 5%</text><text x="456" y="270">丢包 10%</text><text x="706" y="270">丢包 20%</text></g>
+    <g class="xs">
+      <rect x="110" y="282" width="12" height="10" fill="#9CA3AF"/><text x="126" y="291">T 类 TCP（超出坐标，截断显示）</text>
+      <rect x="320" y="282" width="12" height="10" fill="#2F5BD3"/><text x="336" y="291">T' 关闭拥塞控制</text>
+      <rect x="460" y="282" width="12" height="10" fill="#C2410C"/><text x="476" y="291">K 类 KCP</text>
+      <rect x="570" y="282" width="12" height="10" fill="#6D28D9"/><text x="586" y="291">R 冗余发送 k=3（不可靠，见第 11 章）</text>
+    </g>
+  </svg>
+  <figcaption><b>图 9-4</b> 实验 B 的 P99 时延：拥塞控制是 T 崩溃的主因；在去掉拥塞控制之后，KCP 的激进重传仍把 P99 再压低 40%～70%</figcaption>
+  </figure>
+  <p>从这组数据可以读出三个层次的结论：</p>
+  <ol>
+    <li><strong>T → T'</strong>：随机丢包下，基于丢包的拥塞控制把发送速率压到了应用速率（100 条/秒）以下，消息在发送队列里越堆越多，时延滚雪球般增长到十几秒。这对应 Mathis 公式：Reno 的吞吐上限约为 <code>MSS / RTT × 1.22 / √p</code>，RTT 60 ms、p = 5% 时约 91 包/秒，恰好低于 100 Hz。<em>真实 Linux 有更多优化，不会这么极端，但"随机丢包被误判为拥塞"的问题确实存在。</em></li>
+    <li><strong>T' → K</strong>：同样没有拥塞控制，KCP 式参数（快重传 2、RTO 下限 30 ms、×1.5 退避、立即 ACK）把 P99 从 185/213/513 ms 压到 95/123/163 ms。</li>
+    <li><strong>代价</strong>：K 的发送次数是 1249/1474/1907，比 T' 多 16%～37%——这就是 KCP 所说的"带宽浪费"。而在 0% 丢包时它也多发了 11 个包（轻微乱序触发的伪快速重传）。</li>
+  </ol>
+
+  <h2>9.7 工程实践：KCP 之外还要补什么</h2>
+  <div class="tbl"><table>
+    <tr><th>KCP 不提供的</th><th>常见做法</th></tr>
+    <tr><td>连接建立与 conv 分配</td><td>先用 TCP / HTTP 登录拿到 conv 和密钥，再切到 UDP；或者自己实现带 Cookie 的 UDP 握手</td></tr>
+    <tr><td>会话识别</td><td>服务器用 conv 查会话（<code>ikcp_getconv</code> 可以从包头取出 conv），不依赖源地址，可支持 NAT 换端口</td></tr>
+    <tr><td>心跳与断线</td><td>应用层心跳；监控 <code>kcp-&gt;state == -1</code>（dead_link）；N 秒无包判定断线</td></tr>
+    <tr><td>加密与防篡改</td><td>在 output / input 处加一层 AEAD 加密；kcp-go 内置了多种加密</td></tr>
+    <tr><td>FEC</td><td>kcp-go 内置 Reed-Solomon FEC；或自己实现异或 FEC</td></tr>
+    <tr><td>不可靠消息</td><td>KCP 只有可靠有序一种语义；状态同步等不可靠数据<strong>绕过 KCP 直接走 UDP</strong>，在同一个 socket 上用首字节区分</td></tr>
+    <tr><td>TCP 兜底</td><td>UDP 不通时自动降级到 TCP（KCP over TCP 没有意义，直接用 TCP 传消息即可）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 易错点：KCP 不是"更快的 TCP"</span><p>KCP 降低的是<strong>丢包场景下的时延和抖动</strong>，代价是更多的带宽和 CPU。在不丢包的网络上，KCP 和 TCP 的时延几乎一样（实验 B 的 0% 行）；在大文件下载这类追求吞吐的场景，关闭拥塞控制的 KCP 可能挤占带宽、造成更多丢包，反而得不偿失。<strong>用 KCP 之前先确认：你的问题是"延迟抖动"而不是"带宽不够"。</strong></p></div>
+
+  <div class="co tip"><span class="h">✅ 面试答法：KCP 为什么比 TCP 快？</span>
+  <p>KCP 是一个运行在 UDP 之上的 ARQ 协议，"快"指的是丢包时延迟更低。它对 TCP 做了几处改动：① 超时重传时 RTO 只乘 1.5 而不是翻倍，RTO 下限也更低；② 选择性重传，只重传丢失的包；③ 快速重传阈值可配（比如被跳过 2 次就重传），不必等 3 个重复 ACK；④ ACK 不做延迟；⑤ 同时使用 UNA 和逐包 ACK；⑥ 可以关闭拥塞控制，避免随机丢包导致降速。代价是 10%～20% 甚至更多的额外带宽，以及需要自己处理连接管理、加密和不可靠消息。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>KCP：纯算法 ARQ 库，无 IO、无系统调用；只做可靠传输层，不含连接、加密、FEC。</li>
+    <li>四个队列：snd_queue → snd_buf → output；input → rcv_buf → rcv_queue；由 <code>ikcp_update</code> 时钟驱动。</li>
+    <li>24 字节头：conv、cmd（PUSH/ACK/WASK/WINS）、frg、wnd、ts、sn、una、len。</li>
+    <li>六处改动：<strong>RTO×1.5、选择重传、快速重传（resend）、非延迟 ACK、UNA+ACK、非退让流控（nc）</strong>。</li>
+    <li>极速模式 <code>ikcp_nodelay(kcp, 1, 10, 2, 1)</code>；窗口默认 32/128，MTU 1400，RTO 下限 100/30 ms。</li>
+    <li>仿真：随机丢包下拥塞控制是 TCP 时延崩溃的主因；KCP 在此基础上把 P99 再降 40%～70%，多花 16%～37% 带宽。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：KCP 关闭拥塞控制后，会不会把网络挤爆？应该怎么做？</summary>
+  <p>有可能。nc=1 后发送窗口只受 sndwnd 和对端 rcvwnd 限制，如果应用持续提交超过链路容量的数据，KCP 会把整个窗口塞进网络，造成排队和丢包，丢包又引发更多重传，形成恶性循环。做法：① 只在小流量实时数据（游戏、信令）上关闭拥塞控制；② 合理设置 sndwnd（≈ 期望速率 × RTT / 包长）；③ 应用层令牌桶限速；④ 监控 RTT 和重传率，异常时降低发送频率或数据精度；⑤ 大流量数据（资源下载）走 TCP / HTTP。</p></details>
+  <details class="quiz"><summary>思考题 2：KCP 的 interval 设为 100 ms 和 10 ms，对延迟有什么影响？</summary>
+  <p>KCP 所有的发送（包括 ACK）都在 flush 中完成，flush 每 interval 执行一次。interval = 100 ms 时，ACK 最多被延迟 100 ms，重传检查的精度也是 100 ms，RTT 测量会偏大，实际延迟明显变差；10 ms 时这些延迟都降到 10 ms 以内，代价是 CPU 占用增加、小包更多。也可以在 ikcp_send / ikcp_input 后主动调用 ikcp_flush 来降低延迟。</p></details>
+  <details class="quiz"><summary>思考题 3：为什么 KCP 的接收窗口默认比发送窗口大（128 vs 32）？</summary>
+  <p>接收窗口需要容纳乱序到达、等待前面缺失包的数据。如果接收窗口和发送窗口一样大甚至更小，丢包后后续到达的包可能因超出接收窗口被丢弃，引发额外的重传。另外，一条大消息被分成多个分片时，所有分片都要能放进接收窗口，ikcp_recv 才能把整条消息取出，所以 KCP 要求 rcvwnd 不小于最大分片数（源码注释中的 must >= max fragment size）。</p></details>
+</section>
+
+<!-- ======================= CH10 ======================= -->
+<section class="chapter" id="ch10">
+  <div class="ch-head">
+    <div class="no">CHAPTER 10</div>
+    <h1>QUIC：把 TCP + TLS 搬到用户态重写一遍</h1>
+    <p class="lead">KCP 是一个 ARQ 算法，QUIC 是一个完整的、标准化的、加密的传输协议，也是 HTTP/3 的底座。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清 QUIC 的分层位置和它要解决的四个问题</li>
+    <li>理解 1-RTT / 0-RTT 握手、连接 ID 与连接迁移</li>
+    <li>理解 QUIC 的流为什么没有队头阻塞，以及"包号与流偏移分离"如何消除重传歧义</li>
+    <li>掌握 QUIC 的 ACK 帧、丢包检测（包阈值 / 时间阈值 / PTO）、两级流量控制、可插拔拥塞控制</li>
+    <li>知道 QUIC 的安全设计（抗放大、Retry、头部保护）与部署代价</li>
+  </ul></div>
+
+  <h2>10.1 背景与定位</h2>
+  <p>QUIC 最早由 Google 于 2012 年前后提出并在 Chrome 中部署（后称 gQUIC），之后由 IETF 标准化：<strong>RFC 9000（传输协议）、RFC 9001（与 TLS 1.3 的结合）、RFC 9002（丢包检测与拥塞控制）</strong>于 2021 年发布，基于 QUIC 的 <strong>HTTP/3（RFC 9114）</strong>于 2022 年发布。它要解决的正是第 4、7 章列出的 TCP 痛点：</p>
+  <div class="cards">
+    <div class="card"><div class="t">① 握手太慢</div><p>TCP 握手 1 RTT + TLS 1～2 RTT → QUIC 把传输握手和加密握手合并为 1 RTT，恢复连接时 0 RTT。</p></div>
+    <div class="card"><div class="t">② 队头阻塞</div><p>HTTP/2 的多个流共享一个 TCP 字节流 → QUIC 原生支持多个独立的流，丢包只影响所在的流。</p></div>
+    <div class="card"><div class="t">③ 换网断连</div><p>TCP 连接绑定四元组 → QUIC 用连接 ID 标识连接，IP / 端口变了连接仍在。</p></div>
+    <div class="card"><div class="t">④ 协议僵化</div><p>TCP 在内核里、头部明文、被中间设备"看懂"并干预 → QUIC 在用户态实现，几乎所有头部字段都加密，可以快速迭代。</p></div>
+  </div>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="22" text-anchor="middle" class="b">HTTP/2 协议栈</text>
+    <text x="645" y="22" text-anchor="middle" class="b" style="fill:#2F5BD3">HTTP/3 协议栈</text>
+    <g class="b sm" text-anchor="middle">
+      <rect x="90" y="36" width="250" height="38" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="215" y="60">HTTP/2（流、HPACK）</text>
+      <rect x="90" y="78" width="250" height="38" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="215" y="102">TLS 1.2 / 1.3</text>
+      <rect x="90" y="120" width="250" height="38" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="215" y="144">TCP（内核）</text>
+      <rect x="90" y="162" width="250" height="38" rx="6" fill="#F3F4F6" stroke="#6B7280"/><text x="215" y="186">IP</text>
+      <rect x="520" y="36" width="250" height="38" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="645" y="60">HTTP/3（QPACK）</text>
+      <rect x="520" y="78" width="250" height="80" rx="6" fill="#FFF4EC" stroke="#C2410C" stroke-width="2"/><text x="645" y="104" style="fill:#C2410C">QUIC（用户态）</text>
+      <text x="645" y="124" class="xs" style="font-weight:400">流复用 · 可靠传输 · 拥塞控制</text>
+      <text x="645" y="140" class="xs" style="font-weight:400">内置 TLS 1.3 · 连接迁移</text>
+      <rect x="520" y="162" width="250" height="38" rx="6" fill="#F3EEFE" stroke="#6D28D9"/><text x="645" y="186">UDP</text>
+      <rect x="520" y="204" width="250" height="30" rx="6" fill="#F3F4F6" stroke="#6B7280"/><text x="645" y="224">IP</text>
+    </g>
+    <line x1="350" y1="120" x2="510" y2="120" stroke="#9CA3AF" stroke-dasharray="4 3"/>
+    <text x="430" y="112" text-anchor="middle" class="xs">TLS + TCP 的职责</text>
+    <text x="430" y="138" text-anchor="middle" class="xs">合并进 QUIC</text>
+  </svg>
+  <figcaption><b>图 10-1</b> QUIC 把 TCP 的可靠传输、TLS 的加密和 HTTP/2 的流复用合并成一层，运行在 UDP 之上</figcaption>
+  </figure>
+
+  <h2>10.2 握手：1-RTT 与 0-RTT</h2>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm b">客户端发出第一个应用请求之前，需要等待几个 RTT</text>
+    <g class="sm b" text-anchor="end"><text x="200" y="62">TCP + TLS 1.2</text><text x="200" y="112">TCP + TLS 1.3</text><text x="200" y="162">QUIC 首次连接</text><text x="200" y="212">QUIC 恢复（0-RTT）</text></g>
+    <!-- 1 RTT = 180px -->
+    <rect x="210" y="44" width="180" height="28" fill="#EAF7EF" stroke="#15803D"/><text x="300" y="63" text-anchor="middle" class="xs">TCP 握手</text>
+    <rect x="390" y="44" width="360" height="28" fill="#FEF6E4" stroke="#B45309"/><text x="570" y="63" text-anchor="middle" class="xs">TLS 1.2 握手（2 RTT）</text>
+    <text x="760" y="63" class="sm b" style="fill:#B91C1C">3 RTT</text>
+    <rect x="210" y="94" width="180" height="28" fill="#EAF7EF" stroke="#15803D"/><text x="300" y="113" text-anchor="middle" class="xs">TCP 握手</text>
+    <rect x="390" y="94" width="180" height="28" fill="#FEF6E4" stroke="#B45309"/><text x="480" y="113" text-anchor="middle" class="xs">TLS 1.3（1 RTT）</text>
+    <text x="580" y="113" class="sm b" style="fill:#B45309">2 RTT</text>
+    <rect x="210" y="144" width="180" height="28" fill="#FFF4EC" stroke="#C2410C"/><text x="300" y="163" text-anchor="middle" class="xs">QUIC 握手（传输 + 加密合一）</text>
+    <text x="400" y="163" class="sm b" style="fill:#2F5BD3">1 RTT</text>
+    <rect x="210" y="194" width="8" height="28" fill="#2F5BD3"/>
+    <text x="228" y="213" class="sm b" style="fill:#15803D">0 RTT：第一个包就携带加密的 HTTP 请求</text>
+    <line x1="210" y1="236" x2="750" y2="236" stroke="#4B5563"/>
+    <g class="xs" text-anchor="middle"><text x="210" y="252">0</text><text x="390" y="252">1 RTT</text><text x="570" y="252">2 RTT</text><text x="750" y="252">3 RTT</text></g>
+  </svg>
+  <figcaption><b>图 10-2</b> 建连开销对比：冷启动 QUIC 比 TCP+TLS1.3 少 1 个 RTT；恢复连接时可以 0-RTT</figcaption>
+  </figure>
+  <ul>
+    <li><strong>1-RTT</strong>：客户端的第一个包（Initial）就包含 TLS 1.3 的 ClientHello 和 QUIC 的传输参数（初始流控窗口、最大流数量等），服务器一次回复就完成密钥协商，客户端随即可以发送应用数据。传输握手和加密握手共用同一个往返。</li>
+    <li><strong>0-RTT</strong>：客户端曾经连过这台服务器，保存了会话票据（session ticket），再次连接时可以用它派生的密钥直接加密应用数据，和 Initial 一起发出。</li>
+  </ul>
+  <div class="co warn"><span class="h">⚠️ 易错点：0-RTT 数据可以被重放</span><p>0-RTT 数据在服务器回复之前就发出了，不具备前向安全性，而且攻击者截获后可以原样重放给服务器。所以 0-RTT 只能用于<strong>幂等请求</strong>（如 GET），服务器端通常也会限制 0-RTT 能做的操作。这和 TCP Fast Open 面临的问题本质相同。</p></div>
+
+  <h2>10.3 连接 ID 与连接迁移</h2>
+  <figure>
+  <svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="40" width="150" height="60" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/><text x="95" y="66" text-anchor="middle" class="b sm">手机 · Wi-Fi</text><text x="95" y="86" text-anchor="middle" class="xs mono">192.168.1.5:50000</text>
+    <rect x="20" y="150" width="150" height="60" rx="10" fill="#EAF7EF" stroke="#15803D"/><text x="95" y="176" text-anchor="middle" class="b sm">手机 · 4G</text><text x="95" y="196" text-anchor="middle" class="xs mono">10.20.30.40:61234</text>
+    <line x1="95" y1="102" x2="95" y2="148" stroke="#C2410C" stroke-width="1.8" stroke-dasharray="5 3" marker-end="url(#ao)"/>
+    <text x="105" y="130" class="xs" style="fill:#C2410C">走出 Wi-Fi 范围</text>
+    <rect x="660" y="90" width="180" height="70" rx="10" fill="#FFF4EC" stroke="#C2410C"/><text x="750" y="118" text-anchor="middle" class="b sm">服务器</text><text x="750" y="140" text-anchor="middle" class="xs">按连接 ID 查找连接</text>
+    <line x1="172" y1="70" x2="658" y2="110" stroke="#2F5BD3" stroke-width="1.6" marker-end="url(#ab)"/>
+    <text x="400" y="78" text-anchor="middle" class="xs" style="fill:#2F5BD3">QUIC 包：目标连接 ID = C1</text>
+    <line x1="172" y1="180" x2="658" y2="140" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    <text x="400" y="182" text-anchor="middle" class="xs" style="fill:#15803D">QUIC 包：目标连接 ID = C2（同一连接的另一个 ID）</text>
+    <text x="400" y="200" text-anchor="middle" class="xs" style="fill:#15803D">服务器发 PATH_CHALLENGE 验证新路径，流和拥塞状态全部保留</text>
+    <text x="430" y="232" text-anchor="middle" class="xs">TCP：四元组变了 = 连接断了，所有请求失败、重新握手。QUIC：连接继续，用户感知不到</text>
+  </svg>
+  <figcaption><b>图 10-3</b> 连接迁移：QUIC 连接由连接 ID 标识，换网后用新的连接 ID 继续通信（换 ID 是为了防止旁观者把新旧路径关联起来）</figcaption>
+  </figure>
+  <p>这和第 8 章自研协议用 <code>conv</code> 识别会话是同一个思想。QUIC 做得更完整：双方可以通过 <code>NEW_CONNECTION_ID</code> 帧提前交换多个连接 ID，迁移时换用新 ID 以保护隐私；切换到新路径时必须先用 <code>PATH_CHALLENGE / PATH_RESPONSE</code> 验证对方确实在新地址上（防止被利用来攻击第三方），并重新评估这条路径的 RTT 和拥塞窗口。</p>
+
+  <h2>10.4 流：没有队头阻塞的多路复用</h2>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="20" text-anchor="middle" class="b">HTTP/2 over TCP</text>
+    <text x="645" y="20" text-anchor="middle" class="b" style="fill:#2F5BD3">HTTP/3 over QUIC</text>
+    <line x1="430" y1="8" x2="430" y2="210" stroke="#E5E7EB"/>
+    <g class="mono" text-anchor="middle">
+      <rect x="30" y="40" width="50" height="28" fill="#EAF0FD" stroke="#2F5BD3"/><text x="55" y="59">A1</text>
+      <rect x="84" y="40" width="50" height="28" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="4 3"/><text x="109" y="59" style="fill:#B91C1C">B1✕</text>
+      <rect x="138" y="40" width="50" height="28" fill="#F3EEFE" stroke="#6D28D9"/><text x="163" y="59">C1</text>
+      <rect x="192" y="40" width="50" height="28" fill="#EAF0FD" stroke="#2F5BD3"/><text x="217" y="59">A2</text>
+      <rect x="246" y="40" width="50" height="28" fill="#F3EEFE" stroke="#6D28D9"/><text x="271" y="59">C2</text>
+      <rect x="300" y="40" width="50" height="28" fill="#EAF7EF" stroke="#15803D"/><text x="325" y="59">B2</text>
+    </g>
+    <text x="215" y="90" text-anchor="middle" class="xs">TCP 只看到一条字节流：B1 所在的段丢失 = 整条流在此处断开</text>
+    <rect x="30" y="104" width="370" height="100" rx="8" fill="#FDEEEE" stroke="#F5C7C7"/>
+    <text x="215" y="128" text-anchor="middle" class="sm" style="fill:#B91C1C">流 A：A2 已到达，但被阻塞 ✕</text>
+    <text x="215" y="152" text-anchor="middle" class="sm" style="fill:#B91C1C">流 B：等待 B1 重传</text>
+    <text x="215" y="176" text-anchor="middle" class="sm" style="fill:#B91C1C">流 C：C1、C2 已到达，但被阻塞 ✕</text>
+    <text x="215" y="196" text-anchor="middle" class="xs">三个流全部等待一次重传</text>
+    <g class="mono" text-anchor="middle">
+      <rect x="460" y="40" width="50" height="28" fill="#EAF0FD" stroke="#2F5BD3"/><text x="485" y="59">A1</text>
+      <rect x="514" y="40" width="50" height="28" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="4 3"/><text x="539" y="59" style="fill:#B91C1C">B1✕</text>
+      <rect x="568" y="40" width="50" height="28" fill="#F3EEFE" stroke="#6D28D9"/><text x="593" y="59">C1</text>
+      <rect x="622" y="40" width="50" height="28" fill="#EAF0FD" stroke="#2F5BD3"/><text x="647" y="59">A2</text>
+      <rect x="676" y="40" width="50" height="28" fill="#F3EEFE" stroke="#6D28D9"/><text x="701" y="59">C2</text>
+      <rect x="730" y="40" width="50" height="28" fill="#EAF7EF" stroke="#15803D"/><text x="755" y="59">B2</text>
+    </g>
+    <text x="645" y="90" text-anchor="middle" class="xs">QUIC 知道每个帧属于哪个流、在流中的偏移量</text>
+    <rect x="460" y="104" width="370" height="100" rx="8" fill="#EAF7EF" stroke="#BFE6CC"/>
+    <text x="645" y="128" text-anchor="middle" class="sm" style="fill:#15803D">流 A：A1、A2 立即交付 ✔</text>
+    <text x="645" y="152" text-anchor="middle" class="sm" style="fill:#B91C1C">流 B：只有它等待 B1 重传</text>
+    <text x="645" y="176" text-anchor="middle" class="sm" style="fill:#15803D">流 C：C1、C2 立即交付 ✔</text>
+    <text x="645" y="196" text-anchor="middle" class="xs">每个流独立排序，互不影响</text>
+    <text x="430" y="236" text-anchor="middle" class="xs">注意：单个流内部仍然是可靠有序的字节流，B2 仍要等 B1——QUIC 消除的是"流与流之间"的队头阻塞</text>
+  </svg>
+  <figcaption><b>图 10-4</b> 同样丢了一个包：TCP 让三个流一起等，QUIC 只让受影响的流等</figcaption>
+  </figure>
+  <p>QUIC 的流用 62 位的流 ID 标识，最低两位表示由哪一方发起、是双向还是单向。HTTP/3 中每个请求 / 响应占用一个双向流。流的开销很小，开新流不需要握手，这让 HTTP/3 可以随意并发请求。</p>
+
+  <h2>10.5 可靠性设计：包号与流偏移分离</h2>
+  <p>这是 QUIC 相对 TCP 最精巧的设计之一。TCP 用同一个序号同时表示"这是哪个包"和"这是字节流的哪个位置"，所以重传的段和原段序号相同，ACK 到达时分不清确认的是哪一次发送（第 3 章的重传歧义）。QUIC 把两者拆开：</p>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm">
+      <rect x="40" y="30" width="220" height="70" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="150" y="52" text-anchor="middle" class="b" style="fill:#2F5BD3">包号 PN = 7</text>
+      <text x="150" y="74" text-anchor="middle" class="mono">STREAM(id=4, off=1000, len=500)</text>
+      <text x="150" y="92" text-anchor="middle" class="xs">首次发送</text>
+      <text x="300" y="70" class="b" style="fill:#B91C1C">✕ 丢失</text>
+      <rect x="400" y="30" width="220" height="70" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="510" y="52" text-anchor="middle" class="b" style="fill:#2F5BD3">包号 PN = 12（新包号！）</text>
+      <text x="510" y="74" text-anchor="middle" class="mono">STREAM(id=4, off=1000, len=500)</text>
+      <text x="510" y="92" text-anchor="middle" class="xs">重传：同样的帧，放进一个全新的包</text>
+      <line x1="262" y1="65" x2="398" y2="65" stroke="#C2410C" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ao)"/>
+      <rect x="660" y="30" width="170" height="70" rx="8" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="745" y="52" text-anchor="middle" class="b" style="fill:#15803D">ACK 帧</text>
+      <text x="745" y="74" text-anchor="middle" class="mono">Largest=12, Delay=2ms</text>
+      <text x="745" y="92" text-anchor="middle" class="xs">明确是对 PN 12 的确认</text>
+      <line x1="622" y1="65" x2="658" y2="65" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/>
+    </g>
+    <g class="xs">
+      <text x="40" y="130">• <tspan class="b">包号</tspan>（Packet Number）：每发一个包加 1，<tspan class="b">永不重复</tspan>，只用于确认、丢包检测和 RTT 测量 → 不存在重传歧义，每个 ACK 都能采样 RTT</text>
+      <text x="40" y="150">• <tspan class="b">流偏移</tspan>（Stream Offset）：帧中的数据在所属流中的字节位置，用于接收端重组 → 重传的数据可以放进任何新包，甚至和别的帧拼在一起</text>
+      <text x="40" y="170">• QUIC 重传的是"<tspan class="b">帧中承载的信息</tspan>"而不是"包"：丢失的 ACK 帧不重传（会发新的），丢失的 MAX_DATA 帧重传时发送<tspan class="b">最新值</tspan>，而不是旧值</text>
+      <text x="40" y="190">• ACK 帧最多可以携带很多个 ACK Range（远多于 TCP SACK 的 3～4 个块），还带有 ACK Delay 字段（接收方故意延迟了多久才确认），RTT 估计更准确</text>
+      <text x="40" y="210">• 三个包号空间：Initial、Handshake、1-RTT（应用数据）各自独立编号与确认</text>
+    </g>
+  </svg>
+  <figcaption><b>图 10-5</b> 包号只增不减、与流偏移分离：重传 = 把丢失的帧放进新包号的包里</figcaption>
+  </figure>
+
+  <h3>丢包检测（RFC 9002）</h3>
+  <div class="tbl"><table>
+    <tr><th>机制</th><th>规则</th><th>对应 TCP 的</th></tr>
+    <tr><td>包阈值</td><td>某个包之后又有 <strong>3 个</strong>更大包号的包被确认（kPacketThreshold = 3），判定它丢失</td><td>3 个重复 ACK</td></tr>
+    <tr><td>时间阈值</td><td>某个包发出后超过 <strong>9/8 × max(SRTT, 最新 RTT)</strong> 仍未被确认，而它之后发送的包已被确认，判定丢失</td><td>RACK（RFC 8985）</td></tr>
+    <tr><td>PTO 探测超时</td><td>一段时间（SRTT + max(4×RTTVAR, 1ms) + max_ack_delay）内收不到任何确认时，<strong>发送 1～2 个探测包</strong>，而不是直接判定丢失</td><td>RTO + TLP；但 PTO 触发时<strong>不会把拥塞窗口降到 1</strong>，只有持续拥塞时才大幅降窗</td></tr>
+  </table></div>
+
+  <h2>10.6 流量控制与拥塞控制</h2>
+  <ul>
+    <li><strong>两级流量控制</strong>：每个流有自己的接收上限（<code>MAX_STREAM_DATA</code>），整个连接还有一个总上限（<code>MAX_DATA</code>）；另外用 <code>MAX_STREAMS</code> 限制对方能同时打开多少个流。这样一个"慢流"不会吃光整个连接的缓冲。</li>
+    <li><strong>可插拔拥塞控制</strong>：RFC 9002 给出了一个类似 NewReno 的参考算法，但实现可以自由替换为 CUBIC、BBR 等。因为在用户态，<strong>升级拥塞算法只需要更新应用</strong>，不需要等操作系统——这正是 Google 能在 QUIC 上快速迭代 BBR 的原因。</li>
+    <li><strong>Pacing</strong>：推荐按速率平滑发包，而不是一次性把整个窗口突发出去，减少路由器队列压力。</li>
+  </ul>
+
+  <h2>10.7 安全设计</h2>
+  <div class="cards">
+    <div class="card"><div class="t">几乎全部加密</div><p>除了少量必要字段（标志位、连接 ID），QUIC 头部和所有帧都被加密；连包号也用"头部保护"加密了。中间设备看不到、也就改不了 QUIC 的内部字段——这是对抗协议僵化的主动设计。</p></div>
+    <div class="card"><div class="t">抗放大攻击</div><p>在验证客户端地址之前，服务器发送的数据<strong>不得超过收到数据的 3 倍</strong>；客户端的 Initial 包必须填充到至少 <strong>1200 字节</strong>，既保证了路径 MTU，也让放大倍数可控。</p></div>
+    <div class="card"><div class="t">Retry 令牌</div><p>服务器可以先回一个 Retry 包，要求客户端带着令牌重新发送 Initial，证明自己真的拥有这个源地址——这就是 SYN Cookie 思想在 QUIC 中的体现（第 5 章）。</p></div>
+  </div>
+
+  <h2>10.8 代价与现状</h2>
+  <ul>
+    <li><strong>CPU 开销</strong>：用户态协议栈、每包加解密、缺少成熟的硬件卸载，服务器 CPU 消耗通常高于 TCP + TLS。业界通过 UDP GSO / GRO、<code>sendmmsg</code>、内核旁路等手段优化。</li>
+    <li><strong>UDP 被限制</strong>：部分企业网络封禁 UDP 443，部分运营商对 UDP 限速。浏览器会通过 <code>Alt-Svc</code> 头部发现服务器支持 HTTP/3，并在 QUIC 失败时<strong>自动回退到 TCP</strong>。</li>
+    <li><strong>实现复杂</strong>：一个完整的 QUIC 实现动辄数万行代码。主流开源实现有 Chromium QUIC、Cloudflare quiche、Microsoft MsQuic、ngtcp2、quic-go、LiteSpeed lsquic 等。</li>
+    <li><strong>扩展</strong>：RFC 9221 定义了 <strong>DATAGRAM 帧</strong>，在 QUIC 连接中发送不可靠、不重传的数据（共享加密和拥塞控制），使 QUIC 也能承载"不可靠 · 只要最新"类的实时数据（WebTransport 就基于此）。</li>
+  </ul>
+
+  <h2>10.9 QUIC vs TCP vs KCP</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>TCP (+TLS)</th><th>KCP</th><th>QUIC</th></tr>
+    <tr><td>定位</td><td>内核传输协议</td><td>用户态 ARQ 算法库</td><td>用户态完整传输协议（IETF 标准）</td></tr>
+    <tr><td>建连</td><td>1 RTT + TLS 1～2 RTT</td><td>无（自行实现）</td><td>1 RTT，恢复时 0 RTT</td></tr>
+    <tr><td>连接标识</td><td>四元组</td><td>conv</td><td>连接 ID，支持迁移</td></tr>
+    <tr><td>多路复用</td><td>无（单字节流）</td><td>无（单消息流，需多个 KCP 对象）</td><td>原生多流，流间无队头阻塞</td></tr>
+    <tr><td>序号</td><td>字节序号，重传序号不变</td><td>包序号，重传 sn 不变（靠 ts 测 RTT）</td><td>包号永增 + 流偏移</td></tr>
+    <tr><td>确认</td><td>累计 ACK + SACK（3～4 块）</td><td>UNA + 逐包 ACK</td><td>ACK 帧（多 Range + ACK Delay）</td></tr>
+    <tr><td>重传策略</td><td>RTO×2，3 dup ACK，RACK/TLP</td><td>RTO×1.5，跳过 N 次快重传</td><td>包阈值 3 / 时间阈值 9/8 RTT / PTO</td></tr>
+    <tr><td>拥塞控制</td><td>CUBIC / BBR（内核）</td><td>类 Reno，可关闭</td><td>可插拔（NewReno / CUBIC / BBR）</td></tr>
+    <tr><td>加密</td><td>TLS（可选，头部明文）</td><td>无</td><td>强制 TLS 1.3，头部也加密</td></tr>
+    <tr><td>不可靠数据</td><td>不支持</td><td>不支持（需绕过 KCP 发裸 UDP）</td><td>DATAGRAM 扩展</td></tr>
+    <tr><td>典型场景</td><td>几乎所有可靠传输</td><td>游戏、加速器、实时信令</td><td>HTTP/3、移动 App、WebTransport</td></tr>
+  </table></div>
+
+  <div class="co tip"><span class="h">✅ 面试答法：QUIC 相比 TCP 有哪些改进？</span>
+  <p>① <strong>握手更快</strong>：传输和 TLS 1.3 握手合并，首次 1 RTT，恢复连接 0 RTT；② <strong>无队头阻塞</strong>：原生多流，每个流独立排序，一个丢包只影响所在的流；③ <strong>连接迁移</strong>：用连接 ID 而不是四元组标识连接，切换网络不断线；④ <strong>更好的丢包恢复</strong>：包号单调递增、与流偏移分离，消除重传歧义，ACK 帧可以携带大量范围和 ACK 延迟；⑤ <strong>用户态实现</strong>：拥塞控制可插拔、迭代快，且头部加密防止中间设备僵化；⑥ 内置抗放大和地址验证。代价是 CPU 开销更高，以及部分网络对 UDP 的限制需要回退 TCP。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>QUIC：RFC 9000/9001/9002（2021），HTTP/3 RFC 9114（2022）；= 可靠传输 + TLS 1.3 + 流复用，跑在 UDP 上。</li>
+    <li>握手 1-RTT，恢复 0-RTT（0-RTT 数据可被重放，只用于幂等请求）。</li>
+    <li>连接 ID 标识连接 → 连接迁移；迁移需 PATH_CHALLENGE 验证，换用新 ID 保护隐私。</li>
+    <li>多流复用：流间无队头阻塞，流内仍有序。</li>
+    <li><strong>包号永增、与流偏移分离</strong> → 无重传歧义；重传的是帧不是包；丢包检测：包阈值 3、时间阈值 9/8 RTT、PTO。</li>
+    <li>两级流控（MAX_STREAM_DATA / MAX_DATA）；拥塞控制可插拔；抗放大 3 倍、Initial ≥ 1200 字节、Retry 令牌。</li>
+    <li>代价：CPU 高、UDP 可能被封需回退 TCP、实现复杂；DATAGRAM 扩展支持不可靠数据。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：HTTP/3 一定比 HTTP/2 快吗？</summary>
+  <p>不一定。在低丢包、低 RTT 的有线网络中，两者差别很小，HTTP/3 甚至可能因为 CPU 开销更高、UDP 未被优化而略慢。HTTP/3 的优势集中在：高 RTT（握手少）、有丢包（无流间队头阻塞、恢复更快）、频繁切换网络（连接迁移）的移动场景。此外如果网络限制 UDP，浏览器会回退到 HTTP/2。</p></details>
+  <details class="quiz"><summary>思考题 2：为什么说 QUIC 的"包号永不重复"解决了 TCP 的重传歧义？KCP 是怎么解决的？</summary>
+  <p>TCP 重传段与原段序号相同，ACK 到来时无法判断确认的是哪一次发送，RTT 采样只能放弃（Karn 算法）或依赖时间戳选项。QUIC 每次发送都使用新的包号，ACK 确认的是具体包号，因此一定能对应到唯一一次发送，可以精确测量 RTT 并判断丢包。KCP 的重传仍然使用相同的 sn，但每次发送都更新 ts，接收方在 ACK 中回显 ts，发送方用 now − ts 计算 RTT，同样避免了歧义。</p></details>
+  <details class="quiz"><summary>思考题 3：QUIC 运行在用户态，那它还能利用内核的拥塞控制吗？这对公平性有什么影响？</summary>
+  <p>不能直接使用内核 TCP 的拥塞控制，QUIC 在用户态自己实现拥塞控制（RFC 9002 要求必须实现，不能不做）。这使得每个应用可以选择不同的算法，迭代更快；但也意味着公平性依赖于实现者的自律——如果某个实现采用过于激进的算法，会挤占同一瓶颈上其他 TCP 流的带宽。IETF 通过标准中的拥塞控制要求和互操作测试来约束这一点。</p></details>
+</section>
+
+<div class="part-head" data-toc="第五部分 · 实战与面试">
+  <div class="no">PART FIVE</div>
+  <h1>第五部分　实战与面试：把知识串成网</h1>
+  <p>把前面所有机制放回真实场景：一个 MOBA 游戏的网络层怎么设计？视频会议为什么不怕丢包？然后用一张横向对照表把 TCP、KCP、QUIC 串起来，最后是面试题库与速记卡。</p>
+</div>
+
+<!-- ======================= CH11 ======================= -->
+<section class="chapter" id="ch11">
+  <div class="ch-head">
+    <div class="no">CHAPTER 11</div>
+    <h1>场景选型与游戏网络实战</h1>
+    <p class="lead">同一个问题，在 TCP、KCP、QUIC、游戏引擎里各有各的答案。看懂这些答案之间的对应关系，知识才算连成了网。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>掌握主流传输方案的能力对比，能为具体业务选型</li>
+    <li>能设计一个帧同步 MOBA 的网络层，并用仿真数据论证"冗余发送 + 可靠兜底"</li>
+    <li>理解状态同步、实时音视频、网页加载三类场景的传输策略</li>
+    <li>知道如何做弱网测试，以及用哪些指标衡量传输质量</li>
+    <li>用一张横向对照表把全书的机制串起来</li>
+  </ul></div>
+
+  <h2>11.1 方案全景</h2>
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>可靠性模式</th><th>多路 / 通道</th><th>拥塞控制</th><th>加密</th><th>连接管理</th><th>典型使用</th></tr>
+    <tr><td>TCP</td><td>可靠有序</td><td>无</td><td>有（内核）</td><td>需 TLS</td><td>有</td><td>绝大多数业务、回合制游戏</td></tr>
+    <tr><td>裸 UDP</td><td>不可靠</td><td>应用自定</td><td>无</td><td>无</td><td>无</td><td>DNS、遥测、状态广播</td></tr>
+    <tr><td>KCP</td><td>可靠有序</td><td>无（多会话需多个对象）</td><td>可关闭</td><td>无</td><td>无</td><td>实时游戏可靠通道、加速器</td></tr>
+    <tr><td>ENet</td><td>可靠 / 不可靠 / 不可靠有序（sequenced）</td><td>多通道</td><td>带宽节流</td><td>无</td><td>有</td><td>独立游戏、中小型联机游戏</td></tr>
+    <tr><td>WebRTC DataChannel</td><td>可配：有序 / 无序，可靠 / 部分可靠（最大重传次数或最大生存时间）</td><td>多流</td><td>有</td><td>DTLS</td><td>有（ICE 打洞）</td><td>浏览器 P2P 数据、云游戏输入</td></tr>
+    <tr><td>QUIC</td><td>流：可靠有序；DATAGRAM：不可靠</td><td>多流</td><td>有（可插拔）</td><td>TLS 1.3 强制</td><td>有 + 连接迁移</td><td>HTTP/3、移动 App</td></tr>
+    <tr><td>游戏引擎网络层（如 UE IpNetDriver）</td><td>可靠 RPC / 不可靠 RPC / 属性复制（只要最新）</td><td>按 Actor 通道</td><td>按带宽预算与优先级调度</td><td>可选</td><td>有</td><td>引擎内置的多人游戏</td></tr>
+  </table></div>
+  <p>WebRTC DataChannel 的"部分可靠"值得一提：它允许指定"最多重传 N 次"或"超过 T 毫秒就放弃"，正好落在第 7 章可靠性光谱的中间地带，非常适合"晚到一点可以接受、太晚就没用了"的数据。</p>
+
+  <h2>11.2 实战一：帧同步 MOBA 的网络层设计</h2>
+  <p>帧同步（Lockstep）的核心思想是：服务器不计算游戏逻辑，只负责收集所有玩家每个逻辑帧的操作并转发；每个客户端用相同的初始状态、相同的操作序列、确定性的逻辑，独立算出一致的结果。它对网络的要求是：<strong>每一帧的操作必须送达且按帧序执行</strong>（可靠有序），但又必须<strong>低延迟、低抖动</strong>，否则所有玩家都会卡。</p>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="30" width="200" height="330" rx="12" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="120" y="54" text-anchor="middle" class="b" style="fill:#2F5BD3">客户端</text>
+    <g class="xs">
+      <rect x="36" y="68" width="168" height="44" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="86" text-anchor="middle" class="b sm">输入采集</text><text x="120" y="102" text-anchor="middle">每个逻辑帧打包本帧操作</text>
+      <rect x="36" y="122" width="168" height="56" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="140" text-anchor="middle" class="b sm">上行冗余</text><text x="120" y="156" text-anchor="middle">每包携带所有"未被确认"的</text><text x="120" y="170" text-anchor="middle">操作帧（通常 1～4 帧）</text>
+      <rect x="36" y="188" width="168" height="56" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="206" text-anchor="middle" class="b sm">帧缓冲（抖动缓冲）</text><text x="120" y="222" text-anchor="middle">缓存 1～3 帧再执行，</text><text x="120" y="236" text-anchor="middle">吸收网络抖动</text>
+      <rect x="36" y="254" width="168" height="44" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="272" text-anchor="middle" class="b sm">缺帧检测</text><text x="120" y="288" text-anchor="middle">收到 N+2 却没有 N → 请求补帧</text>
+      <rect x="36" y="308" width="168" height="40" rx="6" fill="#fff" stroke="#93A9E8"/><text x="120" y="326" text-anchor="middle" class="b sm">确定性逻辑 + 表现插值</text><text x="120" y="340" text-anchor="middle">定点数 / 固定随机种子</text>
+    </g>
+    <rect x="320" y="30" width="220" height="330" rx="12" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="430" y="54" text-anchor="middle" class="b" style="fill:#C2410C">战斗服务器（帧转发）</text>
+    <g class="xs">
+      <rect x="336" y="68" width="188" height="56" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="86" text-anchor="middle" class="b sm">按固定节奏推进帧号</text><text x="430" y="102" text-anchor="middle">例如每秒 15 个逻辑帧（≈66 ms）</text><text x="430" y="116" text-anchor="middle">不等慢玩家：迟到的输入并入下一帧</text>
+      <rect x="336" y="134" width="188" height="56" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="152" text-anchor="middle" class="b sm">下行冗余广播</text><text x="430" y="168" text-anchor="middle">每包携带最近 k 帧的帧包</text><text x="430" y="182" text-anchor="middle">（或所有该客户端未确认的帧）</text>
+      <rect x="336" y="200" width="188" height="44" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="218" text-anchor="middle" class="b sm">ACK 位图 / 帧确认</text><text x="430" y="234" text-anchor="middle">知道每个客户端收到了哪些帧</text>
+      <rect x="336" y="254" width="188" height="44" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="272" text-anchor="middle" class="b sm">补帧（可靠通道）</text><text x="430" y="288" text-anchor="middle">响应客户端的缺帧请求</text>
+      <rect x="336" y="308" width="188" height="40" rx="6" fill="#fff" stroke="#E8A27A"/><text x="430" y="326" text-anchor="middle" class="b sm">全量帧存档</text><text x="430" y="340" text-anchor="middle">断线重连 / 观战 / 回放</text>
+    </g>
+    <line x1="222" y1="150" x2="318" y2="150" stroke="#2F5BD3" stroke-width="1.8" marker-end="url(#ab)"/><text x="270" y="142" text-anchor="middle" class="xs" style="fill:#2F5BD3">UDP 上行</text>
+    <line x1="318" y1="166" x2="222" y2="216" stroke="#C2410C" stroke-width="1.8" marker-end="url(#ao)"/><text x="270" y="206" text-anchor="middle" class="xs" style="fill:#C2410C">UDP 下行</text>
+    <line x1="222" y1="276" x2="318" y2="276" stroke="#15803D" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ag)"/><text x="270" y="268" text-anchor="middle" class="xs" style="fill:#15803D">KCP 可靠通道</text>
+    <rect x="620" y="30" width="220" height="150" rx="12" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="730" y="54" text-anchor="middle" class="b" style="fill:#15803D">为什么这样设计</text>
+    <g class="xs">
+      <text x="636" y="78">• 操作数据很小，冗余几乎不增加带宽</text>
+      <text x="636" y="98">• 冗余让 99.9% 的丢包"零 RTT"恢复</text>
+      <text x="636" y="118">• 剩下极少数连续丢包交给可靠通道</text>
+      <text x="636" y="138">• 帧缓冲用少量固定延迟换平滑</text>
+      <text x="636" y="158">• 服务器不等人：一人卡不拖累全场</text>
+    </g>
+    <rect x="620" y="196" width="220" height="164" rx="12" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="730" y="220" text-anchor="middle" class="b">其他通道</text>
+    <g class="xs">
+      <text x="636" y="244">• 登录、匹配、商城：TCP / HTTPS</text>
+      <text x="636" y="264">• 聊天、结算：TCP 或可靠通道</text>
+      <text x="636" y="284">• 重连拉取历史帧：TCP / HTTP 批量下载</text>
+      <text x="636" y="304">• 心跳：每 1～2 s，兼测 RTT、保活 NAT</text>
+      <text x="636" y="324">• UDP 不通：整局自动降级 TCP</text>
+      <text x="636" y="344">• 全部数据：AEAD 加密 + 防重放</text>
+    </g>
+  </svg>
+  <figcaption><b>图 11-1</b> 一个典型的帧同步网络层：UDP 冗余发送承担主要流量，可靠通道兜底，其他业务走 TCP</figcaption>
+  </figure>
+
+  <div class="co net"><span class="h">🧪 实测证据（d2 · 实验 B 中的 R 行）：冗余发送的效果</span>
+  <div class="term"><div class="bar">d2_rudp_sim.exe · 实验 B 摘录（100 Hz 消息流，RTT≈60 ms）</div><pre>丢包 方案                                   平均ms    P99ms 最大ms 发送 丢失
+   5% K  类KCP极速：快重传2+立即ACK+RTO×1.5     42.9       95      167   1249      0
+   5% R  冗余发送k=3（不可靠）            <span class="ok">31.6       41       51</span>   <span class="ok">1000</span>      <span class="hl">1</span>
+  10% K  类KCP极速：快重传2+立即ACK+RTO×1.5     53.4      123      173   1474      0
+  10% R  冗余发送k=3（不可靠）            <span class="ok">32.0       41       61</span>   <span class="ok">1000</span>      <span class="hl">0</span>
+  20% K  类KCP极速：快重传2+立即ACK+RTO×1.5     72.9      163      183   1907      0
+  20% R  冗余发送k=3（不可靠）            <span class="ok">33.3       51       61</span>   <span class="ok">1000</span>      <span class="hl">1</span></pre></div>
+  <p>R 方案的每个包携带本条和前 3 条消息（共 4 条）。它的 P99 只比单程时延 30 ms 多 10～20 ms，<strong>在 20% 丢包下依然稳定</strong>，而且发送次数恒为 1000（只是每个包大一点）。代价是它不保证送达：理论残余丢失率约为 p⁴，20% 丢包时约 0.16%，1000 条中丢了 1 条，与理论吻合。这就是为什么图 11-1 用"冗余为主、可靠通道兜底"：冗余处理掉绝大部分丢包，极少数漏网之鱼由 KCP 补发。</p></div>
+
+  <div class="co ver"><span class="h">🎮 游戏开发视角：几个容易忽略的细节</span>
+  <p>① <strong>上行冗余的终止条件</strong>：客户端持续冗余发送某帧输入，直到服务器的包头 ACK 表明已收到——这就是第 8 章 UNA + ACK 位图的直接应用。<br>
+  ② <strong>帧缓冲的大小要自适应</strong>：根据实测抖动动态调整缓冲帧数，网络好时减少输入延迟，网络差时增加平滑度。<br>
+  ③ <strong>包要小</strong>：控制在 MTU 以内，避免 IP 分片（第 1 章）；10 个玩家 × 若干字节的操作，一个帧包通常只有几十到一两百字节。<br>
+  ④ <strong>不要让一个慢玩家拖住所有人</strong>：服务器按固定节奏推进帧号，没收到某玩家的输入就当作"无操作"，这和 TCP 的"必须等"截然不同。</p></div>
+
+  <h2>11.3 实战二：状态同步</h2>
+  <p>状态同步（如 UE 的 Actor 复制）由服务器计算权威状态，按需把属性变化发给客户端。它的传输策略可以对照可靠性光谱来理解：</p>
+  <div class="tbl"><table>
+    <tr><th>数据</th><th>可靠性</th><th>机制</th></tr>
+    <tr><td>属性复制（位置、血量……）</td><td>可靠 · 只要最新</td><td>不可靠发送；检测到包丢失时，<strong>不重传旧包</strong>，而是把相关属性标记为"脏"，在下一次复制时发送<strong>当前值</strong></td></tr>
+    <tr><td>Reliable RPC（开火、技能、交互）</td><td>可靠有序（同一 Actor 通道内）</td><td>丢失后重传；过多的可靠 RPC 积压会导致通道溢出、连接被断开，所以要节制使用</td></tr>
+    <tr><td>Unreliable RPC（特效、音效）</td><td>不可靠</td><td>发了就不管；带宽紧张时可能被丢弃</td></tr>
+    <tr><td>移动同步</td><td>不可靠 + 客户端预测 / 服务器校正</td><td>客户端先本地执行移动，服务器验证后纠正；输入用不可靠 RPC 高频发送，并冗余携带最近的移动</td></tr>
+  </table></div>
+  <p>另外，状态同步还要做<strong>相关性裁剪</strong>（只同步玩家附近 / 视野内的对象）和<strong>优先级与带宽预算</strong>（每帧按优先级在预算内挑选要发送的对象），本质上是第 7 章架构图中"通道与调度层"的工作。</p>
+
+  <h2>11.4 实战三：实时音视频（WebRTC）</h2>
+  <div class="cards">
+    <div class="card"><div class="t">RTP / RTCP over UDP</div><p>RTP 携带媒体数据（序号 + 时间戳），RTCP 反馈接收质量（丢包率、抖动、RTT）。全部通过 SRTP / DTLS 加密。</p></div>
+    <div class="card"><div class="t">NACK：有条件的重传</div><p>接收方发现缺包时发 NACK 请求重传，但只有在"重传的包能在播放截止前到达"时才有意义——RTT 大时就放弃，改靠 FEC 或丢帧。</p></div>
+    <div class="card"><div class="t">FEC + 抖动缓冲</div><p>FlexFEC / ULPFEC 用冗余包恢复丢包；抖动缓冲（jitter buffer）动态调整缓冲时长，平滑到达时间的波动。</p></div>
+    <div class="card"><div class="t">基于时延的拥塞控制</div><p>GCC（Google Congestion Control）监测包到达间隔的变化趋势，在队列开始积压时就降低码率，而不是等到丢包。码率调整直接作用于编码器。</p></div>
+  </div>
+  <p>对比游戏和音视频会发现一个共同规律：<strong>越是实时的场景，越倾向于"用带宽和画质换时延"</strong>——FEC、冗余发送、主动降码率、降低快照频率，都是这个思路。</p>
+
+  <h2>11.5 实战四：网页加载</h2>
+  <div class="tbl"><table>
+    <tr><th>优化</th><th>省掉了什么</th><th>对应章节</th></tr>
+    <tr><td>DNS 预解析（<code>dns-prefetch</code>）</td><td>DNS 查询的 RTT</td><td>第 1 章</td></tr>
+    <tr><td>预连接（<code>preconnect</code>）、HTTP Keep-Alive、连接池</td><td>TCP 握手 + TLS 握手；也避免了 TIME_WAIT 堆积</td><td>第 5、6 章</td></tr>
+    <tr><td>TLS 1.3 + 会话恢复</td><td>TLS 握手从 2 RTT 降到 1 RTT / 0 RTT</td><td>第 10 章</td></tr>
+    <tr><td>HTTP/2 多路复用</td><td>应用层队头阻塞、多连接的开销</td><td>第 4 章</td></tr>
+    <tr><td>HTTP/3（通过 Alt-Svc 升级）</td><td>传输层队头阻塞；弱网下的握手和恢复时间；换网断连</td><td>第 10 章</td></tr>
+    <tr><td>CDN 就近接入</td><td>物理 RTT</td><td>第 1 章</td></tr>
+    <tr><td>服务端 BBR、增大初始窗口</td><td>慢启动阶段的 RTT 数</td><td>第 3 章</td></tr>
+  </table></div>
+
+  <h2>11.6 弱网测试与质量指标</h2>
+  <div class="cards">
+    <div class="card"><div class="t">模拟工具</div><p>Windows：<strong>clumsy</strong>（可注入延迟、丢包、乱序、重复）；Linux：<code>tc qdisc add dev eth0 root netem delay 100ms 20ms loss 5%</code>；macOS / iOS：Network Link Conditioner；移动端还要实测地铁、电梯、弱信号场景。</p></div>
+    <div class="card"><div class="t">关键指标</div><p>RTT 均值与 P99、<strong>抖动</strong>（RTT 的波动）、丢包率（上下行分别统计）、<strong>重传占比</strong>、消息端到端时延的 P99 / 最大值、卡顿次数（例如帧缓冲被打空的次数）、断线率与重连耗时。</p></div>
+    <div class="card"><div class="t">经验法则</div><p>只看平均值会骗人：实验 B 中 T' 的平均时延只有 61 ms，但 P99 是 185 ms。玩家感知到的"卡"几乎都来自尾部时延，所以优化目标应该写成 P99 / P999。</p></div>
+  </div>
+
+  <h2>11.7 横向对照：一个问题，多种答案</h2>
+  <p>最后，用一张表把全书串起来。每一行是一个传输层问题，每一列是不同协议给出的答案。面试时如果能从一个点出发，横向联想到其他协议的同类设计，就是"有体系"的表现。</p>
+  <div class="tbl"><table>
+    <tr><th>问题</th><th>TCP</th><th>KCP / 自研 RUDP</th><th>QUIC</th><th>游戏引擎 / 音视频</th></tr>
+    <tr><td>如何标识一条连接</td><td>四元组</td><td>conv 会话 ID</td><td>连接 ID（可迁移）</td><td>会话 ID / 玩家 ID</td></tr>
+    <tr><td>如何防伪造握手</td><td>随机 ISN、SYN Cookie</td><td>Cookie 握手（自行实现）</td><td>Retry 令牌、3 倍抗放大</td><td>先 TCP 登录拿票据</td></tr>
+    <tr><td>如何编号</td><td>字节序号</td><td>包序号 sn</td><td>包号（永增）+ 流偏移</td><td>包序号（常为 16 位）</td></tr>
+    <tr><td>如何确认</td><td>累计 ACK + SACK</td><td>UNA + 逐包 ACK / 位图</td><td>ACK 帧（多 Range）</td><td>包头捎带 ACK 位图</td></tr>
+    <tr><td>如何测 RTT</td><td>时间戳选项 / Karn</td><td>ts 回显</td><td>包号唯一 + ACK Delay</td><td>心跳 / 包头时间戳</td></tr>
+    <tr><td>如何发现丢包</td><td>RTO、3 dup ACK、RACK、TLP</td><td>RTO×1.5、跳过 N 次</td><td>包阈值 3、时间阈值 9/8、PTO</td><td>位图空洞、NACK</td></tr>
+    <tr><td>丢了怎么办</td><td>重传原数据</td><td>重传原包</td><td>把帧放进新包重传</td><td>发送最新状态 / FEC / 冗余 / 放弃</td></tr>
+    <tr><td>队头阻塞</td><td>有（整条连接）</td><td>有（单个 KCP 对象）</td><td>只在单个流内</td><td>分通道、不可靠数据不排队</td></tr>
+    <tr><td>流量控制</td><td>rwnd、零窗口探测</td><td>wnd、WASK / WINS</td><td>MAX_STREAM_DATA / MAX_DATA</td><td>带宽预算</td></tr>
+    <tr><td>拥塞控制</td><td>CUBIC / BBR</td><td>可关闭（nc=1）+ 限速</td><td>可插拔</td><td>基于时延（GCC）/ 降频降精度</td></tr>
+    <tr><td>旧报文 / 序号回绕</td><td>TIME_WAIT、PAWS</td><td>序号算术、窗口 &lt; 空间一半</td><td>包号 62 位，实际不回绕</td><td>序号算术</td></tr>
+    <tr><td>如何发现对端消失</td><td>Keepalive（默认 2 h）</td><td>心跳、dead_link</td><td>空闲超时、PING 帧</td><td>应用心跳（秒级）</td></tr>
+    <tr><td>如何关闭</td><td>四次挥手 / RST</td><td>CLOSE 命令 + 超时</td><td>CONNECTION_CLOSE 帧 + 空闲超时</td><td>业务层退出协议</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>选型先看数据的可靠性需求，再看是否需要多路复用、加密、连接迁移、浏览器兼容。</li>
+    <li>帧同步：UDP 冗余发送为主（仿真中 20% 丢包 P99 仍只有 51 ms），可靠通道兜底，帧缓冲吸收抖动，TCP 处理非实时业务与降级。</li>
+    <li>状态同步：属性复制"只发最新值"、Reliable RPC 节制使用、相关性与优先级调度。</li>
+    <li>音视频：NACK 有条件重传 + FEC + 抖动缓冲 + 基于时延的拥塞控制。</li>
+    <li>网页：减少 RTT 个数是主线（预连接、长连接、TLS 1.3、HTTP/3、CDN）。</li>
+    <li>弱网测试看 P99 和抖动，不要只看平均值。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：帧同步中，如果某个玩家网络特别差，服务器应该等他吗？</summary>
+  <p>不应该。如果服务器等最慢的玩家（严格锁步），所有人都会被拖慢，体验极差。现代帧同步服务器按固定节奏推进帧号，迟到的输入被放入下一帧（或丢弃），该玩家看到的是自己的操作稍有延迟；他的客户端如果落后太多，会进入"追帧"模式快速执行积压的帧。网络长时间不可用时，服务器可以让 AI 托管该玩家。</p></details>
+  <details class="quiz"><summary>思考题 2：为什么说"只看平均时延会骗人"？请用本书的仿真数据说明。</summary>
+  <p>实验 B 中 5% 丢包时，T'（关闭拥塞控制的类 TCP）平均时延 60.7 ms，看起来只比无丢包时多 30 ms；但 P99 是 185 ms、最大 215 ms，意味着每 100 条消息里就有 1 条要等 6 倍的单程时延。游戏中这 1% 正好对应玩家感知到的"卡了一下"。KCP 把平均值从 60.7 降到 42.9（降 29%），P99 从 185 降到 95（降 49%），尾部的改善远比平均值明显——这也是 KCP 官方说"最大延迟降低三倍"比"平均延迟降低 30%～40%"更有意义的原因。</p></details>
+  <details class="quiz"><summary>思考题 3：设计一个手游的网络层，UDP 被运营商封了怎么办？</summary>
+  <p>① 登录时（走 TCP/HTTPS）由服务器下发 UDP 地址与会话票据；② 客户端先尝试 UDP 握手，若在限定时间（如 1～2 秒）内失败，或运行中连续一段时间收不到 UDP 包，则切换到 TCP 通道；③ 业务层对两种通道使用统一的消息接口（TCP 上直接传输应用消息，开 TCP_NODELAY，不再套 KCP）；④ 记录降级比例，作为网络质量监控指标；⑤ 可选：对 UDP 流量做端口随机化、伪装等对抗策略（需评估合规性）。</p></details>
+</section>
+
+<!-- ======================= CH12 ======================= -->
+<section class="chapter" id="ch12">
+  <div class="ch-head">
+    <div class="no">CHAPTER 12</div>
+    <h1>面试题库：40 道高频题</h1>
+    <p class="lead">先自己口述一遍，再展开答案对照。每题末尾的【→】标出了对应章节，答不上来就回去重读。</p>
+  </div>
+  <div class="goals"><div class="t">使用方法</div><ul>
+    <li>按"基础 → TCP 机制 → 握手 → 挥手 → 可靠 UDP → 场景设计"的顺序，难度递增</li>
+    <li>标 ★ 的是出现频率最高的题，至少要能完整说出 2 分钟</li>
+    <li>答题结构推荐"<strong>结论 → 原因 → 细节 / 数字 → 延伸</strong>"，延伸部分最能体现知识体系</li>
+  </ul></div>
+
+  <h2>12.1 基础（8 题）</h2>
+  <details class="quiz"><summary>1. ★ TCP 和 UDP 的区别？</summary><p>连接（面向连接 / 无连接）、可靠性（可靠 / 尽力交付）、有序性、数据单位（字节流 / 数据报，粘包问题）、头部（20～60 / 8 字节）、流量与拥塞控制（有 / 无）、通信模式（一对一 / 支持广播多播）、开销与时延。实时性差异的根源是 TCP 按序可靠交付导致的队头阻塞。【→ 第 4 章】</p></details>
+  <details class="quiz"><summary>2. UDP 头部有哪些字段？最大能发多大的数据报？</summary><p>源端口、目的端口、长度、校验和，各 16 位共 8 字节。长度字段最大 65535，减去 8 字节 UDP 头和 20 字节 IPv4 头，最大负载 65507 字节。但实际应控制在 MTU 以内（≤ 1472，常取 1200～1400）避免分片。【→ 第 2 章】</p></details>
+  <details class="quiz"><summary>3. 校验和为什么要加伪首部？</summary><p>伪首部包含源 / 目的 IP、协议号和长度，不发送、只参与计算，用于检测"数据报被送到了错误的主机或协议"——仅校验 UDP/TCP 报文本身发现不了 IP 头部出错导致的误投递。【→ 第 2 章】</p></details>
+  <details class="quiz"><summary>4. 什么是 MTU 和 MSS？为什么要避免 IP 分片？</summary><p>MTU 是链路层能承载的最大数据长度（以太网 1500）；MSS 是 TCP 段能携带的最大数据长度（MTU − IP 头 − TCP 头 = 1460），在 SYN 中协商。IP 分片后任何一片丢失整个包都要作废，重组耗资源，且常被防火墙丢弃。TCP 靠 MSS + PMTUD 避免，UDP 要靠应用控制包长。【→ 第 1 章】</p></details>
+  <details class="quiz"><summary>5. 一台服务器最多能支持多少个 TCP 连接？</summary><p>不受 65535 限制。连接由四元组标识，服务器端口固定时，理论上限是客户端 IP 数 × 端口数。实际受限于文件描述符上限、内存（每连接几 KB 到几十 KB）、CPU 和 I/O 模型。客户端连同一个服务器地址时，才受本地临时端口数量限制。【→ 第 1 章】</p></details>
+  <details class="quiz"><summary>6. 同一个端口能同时被 TCP 和 UDP 使用吗？</summary><p>可以，两者是独立的端口空间，内核先按 IP 头的协议号区分 TCP/UDP。DNS 就同时使用 TCP 53 和 UDP 53。【→ 第 4 章】</p></details>
+  <details class="quiz"><summary>7. DNS 为什么用 UDP？什么时候用 TCP？</summary><p>查询应答小、一问一答，UDP 省去握手 RTT，服务器无需维护连接。应答被截断（TC 位）、区域传送、DNS over TLS 时用 TCP。【→ 第 1 章思考题】</p></details>
+  <details class="quiz"><summary>8. UDP 调用 connect() 有什么作用？</summary><p>不发送任何报文，只在内核记录默认对端：之后可用 send/recv，只接收该对端的数据，并能收到 ICMP 错误（如 ECONNREFUSED）。【→ 第 2 章】</p></details>
+
+  <h2>12.2 TCP 机制（10 题）</h2>
+  <details class="quiz"><summary>9. ★ TCP 如何保证可靠传输？</summary><p>校验和（检错）、序号（排序、去重）、确认 + 重传（超时重传、快速重传、SACK）、滑动窗口流量控制、拥塞控制、连接管理（握手 / 挥手）。按"网络问题 → 机制"的对应关系答最清晰。【→ 第 3 章】</p></details>
+  <details class="quiz"><summary>10. ★ 什么是粘包 / 拆包？怎么解决？</summary><p>TCP 是字节流，不保留应用写入的边界，接收方一次读到的可能是多条消息的拼接或半条消息。发生在发送端（Nagle 合并）或接收端（缓冲区累积）。解决：应用层分帧——定长、分隔符、长度前缀（最常用）。UDP 不存在粘包。【→ 第 3 章，d1 · E1 实测】</p></details>
+  <details class="quiz"><summary>11. RTO 是怎么计算的？Karn 算法是什么？</summary><p>RFC 6298：SRTT = 7/8 SRTT + 1/8 R；RTTVAR = 3/4 RTTVAR + 1/4 |SRTT − R|；RTO = SRTT + 4·RTTVAR，下限 1 s（Linux 200 ms），超时后指数退避。Karn 算法：重传过的段不参与 RTT 采样，因为无法区分 ACK 对应哪一次发送。时间戳选项可以解决这个歧义。【→ 第 3 章】</p></details>
+  <details class="quiz"><summary>12. ★ 快速重传是什么？为什么是 3 个重复 ACK？</summary><p>收到 3 个重复 ACK 就认为对应段丢失，不等 RTO 立即重传。阈值 3 是"尽早发现丢包"与"不把轻微乱序误判为丢包"的折中。现代 Linux 还有 RACK（基于时间判断）和 TLP（尾部丢包探测）。【→ 第 3 章】</p></details>
+  <details class="quiz"><summary>13. ★ 滑动窗口和流量控制是怎么工作的？零窗口怎么办？</summary><p>发送方维护 [SND.UNA, SND.UNA+SND.WND) 的窗口，窗口内可以连续发送而不等确认；接收方在 ACK 中通告剩余接收缓冲 rwnd。rwnd = 0 时发送方暂停，并用坚持定时器周期性发零窗口探测，防止窗口更新报文丢失导致死锁。【→ 第 3 章】</p></details>
+  <details class="quiz"><summary>14. ★ 拥塞控制有哪几个阶段？</summary><p>慢启动（cwnd 每 RTT 翻倍，直到 ssthresh）、拥塞避免（每 RTT +1）、快速重传 + 快速恢复（3 dup ACK：ssthresh = cwnd/2，cwnd = ssthresh，进入拥塞避免）、超时（ssthresh = cwnd/2，cwnd = 1，重新慢启动）。发送窗口 = min(rwnd, cwnd)。【→ 第 3 章】</p></details>
+  <details class="quiz"><summary>15. 流量控制和拥塞控制的区别？</summary><p>流量控制保护接收方，由接收方显式通告 rwnd，点对点；拥塞控制保护网络，由发送方根据丢包 / 时延推测 cwnd，关注全局。两者共同决定发送窗口。【→ 第 3 章】</p></details>
+  <details class="quiz"><summary>16. CUBIC 和 BBR 有什么区别？</summary><p>CUBIC 是 Linux 默认算法，仍以丢包为拥塞信号，cwnd 按距上次丢包时间的三次函数增长，与 RTT 无关。BBR 不依赖丢包，测量瓶颈带宽和最小 RTT，按 BDP 控制在途数据、按带宽 pacing，在随机丢包链路上吞吐更好，且不会塞满路由器缓冲。【→ 第 3 章】</p></details>
+  <details class="quiz"><summary>17. Nagle 算法和延迟确认是什么？为什么游戏要关闭 Nagle？</summary><p>Nagle：有未确认数据时，小数据先攒着，收到 ACK 或攒满 MSS 再发。延迟确认：收到数据后等一段时间（40～200 ms）再回 ACK，希望捎带或合并。两者叠加会让小请求多等几十～几百毫秒。游戏消息小且要求实时，必须 TCP_NODELAY。【→ 第 3 章】</p></details>
+  <details class="quiz"><summary>18. TCP 头部有哪些标志位？各自含义？</summary><p>URG（紧急指针有效）、ACK（确认号有效）、PSH（尽快交付）、RST（重置连接）、SYN（同步序号，建连）、FIN（数据发送完毕，关闭）；另有 ECE、CWR 用于 ECN 显式拥塞通知。【→ 第 3 章】</p></details>
+
+  <h2>12.3 三次握手（8 题）</h2>
+  <details class="quiz"><summary>19. ★ 描述三次握手的过程和状态变化。</summary><p>① C 发 SYN(seq=x)，C：CLOSED → SYN_SENT；S 收到后 LISTEN → SYN_RCVD。② S 回 SYN+ACK(seq=y, ack=x+1)，C 收到后 → ESTABLISHED。③ C 回 ACK(ack=y+1)，S 收到后 → ESTABLISHED。SYN 占 1 个序号；第三次握手可携带数据。【→ 第 5 章】</p></details>
+  <details class="quiz"><summary>20. ★ 为什么是三次握手，不是两次或四次？</summary><p>① 防止历史连接（首要原因）：旧 SYN 到达后，客户端可在第三步用 RST 否决，两次握手时服务器会直接建立无效连接；② 同步双方 ISN，每个 ISN 都需要被确认，两次只能确认客户端的；③ 避免重复 SYN 建立多条无用连接。服务器的 ACK 和 SYN 可合并，所以不需要四次。【→ 第 5 章】</p></details>
+  <details class="quiz"><summary>21. ISN 为什么要随机？</summary><p>防止旧连接的延迟报文落入新连接的序号窗口；防止序号预测攻击（伪造连接、注入数据）。RFC 6528：ISN = 计时器 M + Hash(四元组, 密钥)，随时间递增且不可预测。【→ 第 5 章】</p></details>
+  <details class="quiz"><summary>22. ★ 什么是半连接队列和全连接队列？满了会怎样？</summary><p>半连接队列存放 SYN_RCVD 的连接（上限约 tcp_max_syn_backlog），全连接队列存放已完成握手、等待 accept 的连接（上限 min(backlog, somaxconn)）。半连接队列满时启用 SYN Cookie 或丢弃 SYN；全连接队列满且 tcp_abort_on_overflow=0 时丢弃第三次 ACK，服务器重传 SYN+ACK，客户端表现为"连接成功但请求超时"。可用 ss -lnt 观察。【→ 第 5 章】</p></details>
+  <details class="quiz"><summary>23. ★ SYN Flood 是什么？怎么防？</summary><p>伪造源 IP 大量发送 SYN，服务器为每个 SYN 分配半连接并重传 SYN+ACK，却永远等不到 ACK，半连接队列被占满，正常用户无法建连。防御：SYN Cookie（把状态编码进 ISN，握手完成前不存状态）、增大半连接队列、减少 tcp_synack_retries、SYN Proxy / 防火墙、流量清洗。【→ 第 5 章】</p></details>
+  <details class="quiz"><summary>24. 第三次握手的 ACK 丢了会怎样？</summary><p>客户端已 ESTABLISHED，服务器仍在 SYN_RCVD 并重传 SYN+ACK。客户端若发送数据，数据段带有 ACK 和正确确认号，服务器收到后直接进入 ESTABLISHED。若客户端不发数据且服务器重传耗尽，服务器删除半连接，之后客户端发数据会收到 RST。【→ 第 5 章，交互实验 1】</p></details>
+  <details class="quiz"><summary>25. 第一次、第二次握手的报文丢了分别会怎样？</summary><p>SYN 丢失：客户端在 SYN_SENT 指数退避重传（1、2、4… s，tcp_syn_retries=6，约 127 s 后 ETIMEDOUT）。SYN+ACK 丢失：客户端重传 SYN，服务器重传 SYN+ACK（tcp_synack_retries=5），任一成功即可。【→ 第 5 章】</p></details>
+  <details class="quiz"><summary>26. connect 到一个没人监听的端口会怎样？</summary><p>对端内核回 RST，connect 返回 ECONNREFUSED。Linux 立即失败；Windows 会重试 SYN，本书实测回环地址也要约 2 秒才失败。若是防火墙静默丢弃，则表现为 SYN 超时。【→ 第 5 章，d1 · E3 实测】</p></details>
+
+  <h2>12.4 四次挥手（7 题）</h2>
+  <details class="quiz"><summary>27. ★ 描述四次挥手的过程和状态变化。</summary><p>① 主动方发 FIN，→ FIN_WAIT_1；被动方收到 → CLOSE_WAIT。② 被动方内核回 ACK，主动方 → FIN_WAIT_2（半关闭，仍可接收）。③ 被动方应用 close，发 FIN，→ LAST_ACK；主动方收到 → TIME_WAIT。④ 主动方回 ACK，被动方 → CLOSED；主动方等 2MSL 后 CLOSED。【→ 第 6 章，d1 · E4 实测】</p></details>
+  <details class="quiz"><summary>28. ★ 为什么挥手需要四次？什么时候是三次？</summary><p>TCP 全双工，两个方向分别关闭；被动方收到 FIN 时可能还有数据要发，ACK（内核立即回）和 FIN（应用 close 时发）通常分开。被动方无数据可发且有延迟确认时，ACK 与 FIN 合并为三次。【→ 第 6 章】</p></details>
+  <details class="quiz"><summary>29. ★ TIME_WAIT 为什么存在？为什么是 2MSL？</summary><p>① 保证最后的 ACK 送达：若丢失，被动方重传 FIN，主动方还能重发 ACK（否则只能回 RST）；② 让旧连接的报文在网络中消亡，不污染相同四元组的新连接。2MSL 覆盖"ACK 最多走 1 MSL + 重传 FIN 最多走 1 MSL"。Linux 固定 60 秒。【→ 第 6 章】</p></details>
+  <details class="quiz"><summary>30. ★ TIME_WAIT 过多有什么危害？怎么解决？</summary><p>主动关闭方产生。客户端（或代理调用下游）会耗尽本地临时端口，connect 报 EADDRNOTAVAIL。解决：长连接 / 连接池（首选）、tcp_tw_reuse（客户端、需时间戳）、扩大端口范围、让客户端主动关闭；tcp_tw_recycle 在 NAT 下有问题且已在 Linux 4.12 删除；SO_LINGER 0 会丢数据，慎用。【→ 第 6 章】</p></details>
+  <details class="quiz"><summary>31. 大量 CLOSE_WAIT 说明什么？</summary><p>对端已关闭而本端应用没有调用 close，几乎都是代码 bug（读到 EOF 未关闭、异常分支漏关、连接池未回收）。用 ss -tanp state close-wait 定位进程和对端，再检查代码。CLOSE_WAIT 不会自动超时消失。【→ 第 6 章】</p></details>
+  <details class="quiz"><summary>32. close 和 shutdown 的区别？SO_LINGER 有什么用？</summary><p>close 减少 fd 引用计数，为 0 时关闭读写两个方向；shutdown 直接作用于连接，可只关写（发 FIN 但仍可读，半关闭）。SO_LINGER {1, 0} 让 close 直接发 RST，不进 TIME_WAIT，但会丢弃未发送数据，对端得到 ECONNRESET。【→ 第 6 章，d1 · E5 / E6 实测】</p></details>
+  <details class="quiz"><summary>33. 对端机器突然断电，本端能发现吗？</summary><p>不能立即发现，连接仍是 ESTABLISHED。本端发数据时会经历多次 RTO 重传（tcp_retries2，十几分钟）后报错；不发数据就只能靠 Keepalive（默认空闲 2 小时才探测）或应用层心跳。进程崩溃则不同，内核会正常发 FIN / RST。【→ 第 6 章】</p></details>
+
+  <h2>12.5 可靠 UDP（5 题）</h2>
+  <details class="quiz"><summary>34. ★ 如何基于 UDP 实现可靠传输？</summary><p>报文头加会话 ID、序号、累计确认 UNA、选择确认（位图或逐包 ACK）、时间戳、窗口；发送端缓存未确认包，按 RTO 超时重传、被跳过 N 次快速重传；接收端用环形缓冲乱序暂存、去重、按序交付，重复包也要回 ACK；滑动窗口做流量控制；拥塞控制或限速；大消息分片重组；连接管理（Cookie 握手、心跳、超时断线）；加密认证。可以按需对不同消息提供不同可靠级别。【→ 第 8 章】</p></details>
+  <details class="quiz"><summary>35. ★ KCP 为什么比 TCP 快？代价是什么？</summary><p>RTO ×1.5 而非 ×2，RTO 下限更低；选择性重传；快速重传阈值可配（跳过 2 次即重传）；不延迟 ACK；UNA + 逐包 ACK；可关闭拥塞控制。代价：多消耗 10%～20% 甚至更多带宽，无连接管理 / 加密 / 不可靠消息，需要自己补。不丢包时与 TCP 时延相当。【→ 第 9 章，d2 实测】</p></details>
+  <details class="quiz"><summary>36. 停等、回退 N 步、选择重传的区别？</summary><p>停等：窗口 1，利用率 ≈ T/(T+RTT)。GBN：发送窗口 N，接收方只收按序包，丢包后从丢失点重发整窗。SR：发送和接收窗口都为 N，接收方缓存乱序包，只重传丢失的包，序号空间需 ≥ 2N。本书仿真中 GBN 80% 的发送是重传。【→ 第 8 章】</p></details>
+  <details class="quiz"><summary>37. ★ QUIC 相比 TCP 有哪些改进？</summary><p>握手与 TLS 1.3 合并（1-RTT / 0-RTT）；多流无流间队头阻塞；连接 ID 支持连接迁移；包号永增与流偏移分离，消除重传歧义；ACK 帧多 Range + ACK Delay；用户态实现、拥塞控制可插拔；头部加密防僵化；抗放大与 Retry。代价是 CPU 高、UDP 可能被封。【→ 第 10 章】</p></details>
+  <details class="quiz"><summary>38. 序号回绕怎么处理？</summary><p>使用序列号算术：<code>int32_t(a - b) &gt; 0</code> 表示 a 在 b 之后（16 位同理），前提是窗口远小于序号空间的一半。TCP 在高速网络下还要依靠时间戳选项的 PAWS 机制；QUIC 包号 62 位，实际上不会回绕。【→ 第 8 章】</p></details>
+
+  <h2>12.6 场景设计（2 题）</h2>
+  <details class="quiz"><summary>39. ★ 如果让你设计一个 MOBA 游戏的网络同步方案，传输层怎么选？</summary><p>先给数据分类：输入流（帧同步，可靠有序）、状态（只要最新）、事件（可靠）、非实时业务（登录、商城、结算）。战斗用 UDP：输入和帧包冗余发送最近若干帧，配合 ACK 位图停止冗余；缺帧通过 KCP 可靠通道补发；客户端帧缓冲吸收抖动；服务器按固定节奏推进不等慢玩家。非实时业务走 TCP/HTTPS。心跳秒级断线检测，UDP 不通时整体降级 TCP。全部加密防作弊。用弱网工具验证 P99 时延。【→ 第 11 章】</p></details>
+  <details class="quiz"><summary>40. 视频会议为什么不用 TCP？它怎么应对丢包？</summary><p>端到端时延预算只有 200～300 ms，TCP 的重传等待和队头阻塞会造成卡顿，迟到的帧没有意义。WebRTC 用 RTP over UDP：NACK 有条件重传（来得及才重传）、FEC 冗余恢复、抖动缓冲、丢帧与插值，以及基于时延的拥塞控制（GCC）动态调整码率。【→ 第 4、11 章】</p></details>
+</section>
+
+<!-- ======================= APPENDIX ======================= -->
+<section class="chapter" id="appx">
+  <div class="ch-head">
+    <div class="no">APPENDIX</div>
+    <h1>速记卡：考前 10 分钟</h1>
+    <p class="lead">关键数字、默认参数、状态与口述模板。打印出来贴在桌上。</p>
+  </div>
+
+  <h2>A.1 关键数字</h2>
+  <div class="cards">
+    <div class="card"><div class="t">头部与长度</div><p>UDP 头 8 字节；TCP 头 20～60 字节；IPv4 头 20 字节；KCP 头 24 字节<br>以太网 MTU 1500；TCP MSS 1460；UDP 安全负载 ≤ 1472（实践 1200～1400）；QUIC Initial ≥ 1200<br>UDP 最大负载 65507；TCP 窗口字段 16 位，窗口扩大最多左移 14 位</p></div>
+    <div class="card"><div class="t">TCP 定时器（Linux 默认）</div><p>初始 RTO 1 s；RTO 下限 200 ms；超时 ×2 退避<br>tcp_syn_retries = 6（约 127 s）；tcp_synack_retries = 5（约 63 s）<br>TIME_WAIT 60 s（TCP_TIMEWAIT_LEN，不可调）；tcp_fin_timeout 60 s（FIN_WAIT_2）<br>Keepalive：7200 s 空闲 / 75 s 间隔 / 9 次</p></div>
+    <div class="card"><div class="t">TCP 其他</div><p>快速重传：3 个重复 ACK；初始拥塞窗口 10 MSS<br>延迟确认：Linux 约 40 ms 起，Windows 默认 200 ms<br>somaxconn 默认 4096（Linux 5.4+，此前 128）<br>临时端口 32768～60999；tcp_tw_recycle 已在 4.12 删除</p></div>
+    <div class="card"><div class="t">KCP</div><p>极速模式 <code>ikcp_nodelay(kcp, 1, 10, 2, 1)</code>；普通 <code>(0, 40, 0, 0)</code><br>窗口默认 32 / 128；MTU 1400；RTO 下限 100（nodelay 30）ms；超时 ×1.5<br>fastlimit 5；dead_link 20；命令 PUSH 81 / ACK 82 / WASK 83 / WINS 84</p></div>
+    <div class="card"><div class="t">QUIC</div><p>RFC 9000 / 9001 / 9002（2021）；HTTP/3 RFC 9114（2022）；DATAGRAM RFC 9221<br>1-RTT 握手，0-RTT 恢复；包阈值 3；时间阈值 9/8 RTT；抗放大 3 倍<br>流 ID 62 位；两级流控 MAX_STREAM_DATA / MAX_DATA</p></div>
+    <div class="card"><div class="t">本书实测</div><p>Windows connect 空端口约 2048 ms 才失败（E3）<br>UDP 发空端口：sendto 成功、recvfrom 报 10054（E2）<br>仿真 5% 丢包批量传输：SR+快重传 4.0 s，GBN 36 s，停等 172 s，类 KCP 3.6 s（重传占比 30%）</p></div>
+  </div>
+
+  <h2>A.2 状态速查</h2>
+  <div class="tbl"><table>
+    <tr><th>状态</th><th>谁会处于</th><th>在等什么</th><th>大量出现说明</th></tr>
+    <tr><td>LISTEN</td><td>服务器</td><td>SYN</td><td>—</td></tr>
+    <tr><td>SYN_SENT</td><td>客户端</td><td>SYN+ACK</td><td>对端不可达 / 被防火墙丢弃</td></tr>
+    <tr><td>SYN_RCVD</td><td>服务器</td><td>第三次 ACK</td><td>SYN Flood，或全连接队列满</td></tr>
+    <tr><td>ESTABLISHED</td><td>双方</td><td>—</td><td>（可能有对端已消失的半打开连接）</td></tr>
+    <tr><td>FIN_WAIT_1</td><td>主动关闭方</td><td>对 FIN 的 ACK</td><td>网络差 / 对端不回应</td></tr>
+    <tr><td>FIN_WAIT_2</td><td>主动关闭方</td><td>对方的 FIN</td><td>对端应用迟迟不 close</td></tr>
+    <tr><td>CLOSE_WAIT</td><td>被动关闭方</td><td>本端应用 close</td><td><strong>本端代码 bug</strong></td></tr>
+    <tr><td>LAST_ACK</td><td>被动关闭方</td><td>最后的 ACK</td><td>网络差</td></tr>
+    <tr><td>CLOSING</td><td>双方（同时关闭）</td><td>对 FIN 的 ACK</td><td>少见</td></tr>
+    <tr><td>TIME_WAIT</td><td>主动关闭方</td><td>2MSL 超时</td><td>短连接多；客户端侧警惕端口耗尽</td></tr>
+  </table></div>
+
+  <h2>A.3 三个口述模板（各约 1 分钟）</h2>
+  <div class="ans">
+    <div class="q">三次握手</div>
+    <p>"客户端发 SYN，带上随机的初始序号 x，进入 SYN_SENT；服务器收到后进入 SYN_RCVD，回复 SYN+ACK，带自己的序号 y 和确认号 x+1；客户端收到后进入 ESTABLISHED，再回 ACK，确认号 y+1，服务器收到后也进入 ESTABLISHED。三次是最少的次数：主要是为了防止历史连接——旧的 SYN 到达时，客户端能在第三步用 RST 拒绝；同时双方的初始序号都需要被确认；还能避免重复 SYN 建立无用连接。服务器的 ACK 和 SYN 合并了，所以不用四次。另外，内核里有半连接和全连接两个队列，SYN Flood 攻击的就是半连接队列，可以用 SYN Cookie 防御。"</p>
+    <div class="q">四次挥手</div>
+    <p>"主动方发 FIN 进入 FIN_WAIT_1；被动方内核回 ACK，进入 CLOSE_WAIT，主动方收到后进入 FIN_WAIT_2，这时是半关闭，被动方还能继续发数据；被动方应用调用 close 后发 FIN，进入 LAST_ACK；主动方收到后回 ACK 进入 TIME_WAIT，等 2MSL 后关闭，被动方收到 ACK 就关闭。之所以四次，是因为 TCP 全双工，两个方向要分别关闭，被动方的 ACK 和 FIN 之间可能还有数据要发；如果没有数据并且有延迟确认，也可能合并成三次。"</p>
+    <div class="q">TIME_WAIT</div>
+    <p>"TIME_WAIT 出现在主动关闭方，持续 2MSL，Linux 是固定的 60 秒。它有两个作用：一是保证最后一个 ACK 能到达，如果丢了，对方会重传 FIN，主动方还能重新回 ACK，否则只能回 RST；二是让这个连接在网络中残留的旧报文全部过期，避免被相同四元组的新连接误收。2MSL 就是一个来回的最长时间。TIME_WAIT 太多时，客户端会耗尽本地端口，最好的办法是用长连接或连接池，其次可以开 tcp_tw_reuse；tcp_tw_recycle 在 NAT 环境下有问题，已经从内核删除了。"</p>
+  </div>
+
+  <h2>A.4 一句话串起全书</h2>
+  <div class="co ana"><span class="h">🧭 回到起点</span><p>IP 只尽力而为；UDP 把选择权留给应用；TCP 用序号、确认、重传、窗口、拥塞控制和连接管理把网络包装成可靠有序的字节流，并为此付出了握手延迟和队头阻塞的代价；三次握手同步序号、四次挥手分别关闭两个方向、TIME_WAIT 收尾；而 KCP、QUIC 和游戏引擎的网络层，则是在用户态把同一套机制按自己的需求重新组合——<strong>可靠性不是一个开关，而是一组可以挑选、可以调参的机制，每一个都有代价。</strong></p></div>
+</section>
+
 <div class="foot">计算机网络 · TCP / UDP 与可靠传输 · 案例在 Windows 11 + MSVC 14.44 实测 · 可用浏览器「打印 → 另存为 PDF」导出纸质版</div>
 </div></main>
 
@@ -1263,6 +3375,213 @@ void OnBytes(std::vector&lt;uint8_t&gt;&amp; buf, auto&amp;&amp; onMessage) {
     });
   });
   toc.addEventListener("click",e=>{if(e.target.tagName==="A") document.getElementById("side").classList.remove("show");});
+})();
+
+/* ---------- 实验 1：TCP 连接管理场景回放 ---------- */
+(function(){
+  const $ = id => document.getElementById(id);
+  if(!$("hs-svg")) return;
+  const SC = [
+    {name:"① 正常三次握手", c0:"CLOSED", s0:"LISTEN", steps:[
+      {d:"c", t:"SYN  seq=x", c:"SYN_SENT", s:"SYN_RCVD", n:"客户端 connect() 发出 SYN；服务器收到后进入 SYN_RCVD，请求放入半连接队列，内核立即回 SYN+ACK。"},
+      {d:"s", t:"SYN+ACK  seq=y  ack=x+1", c:"ESTABLISHED", n:"服务器的 SYN 与对 x 的确认合并发送。客户端收到后进入 ESTABLISHED，connect() 返回。"},
+      {d:"c", t:"ACK  seq=x+1  ack=y+1", s:"ESTABLISHED", n:"服务器收到第三次握手，连接移入全连接队列，等待 accept() 取走。"}]},
+    {name:"② 第一次握手 SYN 丢失", c0:"CLOSED", s0:"LISTEN", steps:[
+      {d:"c", t:"SYN  seq=x", lost:1, c:"SYN_SENT", n:"SYN 在网络中丢失，服务器毫不知情，仍在 LISTEN。"},
+      {d:"w", t:"⏱ 客户端等待 RTO（首次 1 s，之后 2、4、8…… s）", n:"客户端在 SYN_SENT 中等待重传定时器。Linux 默认最多重传 tcp_syn_retries=6 次，总计约 127 s 后 connect 返回 ETIMEDOUT。"},
+      {d:"c", t:"SYN  seq=x（重传，序号不变）", s:"SYN_RCVD", n:"重传的 SYN 到达服务器。"},
+      {d:"s", t:"SYN+ACK  seq=y  ack=x+1", c:"ESTABLISHED", n:"握手继续。"},
+      {d:"c", t:"ACK  ack=y+1", s:"ESTABLISHED", n:"握手完成，代价是多等了 1 秒——这就是弱网下\"打开网页卡 1 秒\"的常见原因。"}]},
+    {name:"③ 第二次握手 SYN+ACK 丢失", c0:"CLOSED", s0:"LISTEN", steps:[
+      {d:"c", t:"SYN  seq=x", c:"SYN_SENT", s:"SYN_RCVD", n:"服务器正常收到 SYN。"},
+      {d:"s", t:"SYN+ACK  seq=y  ack=x+1", lost:1, n:"SYN+ACK 丢失：客户端以为自己的 SYN 丢了；服务器以为自己的 SYN+ACK 丢了。"},
+      {d:"w", t:"⏱ 双方的重传定时器都在走", n:"客户端在 SYN_SENT 准备重传 SYN；服务器在 SYN_RCVD 准备重传 SYN+ACK（tcp_synack_retries=5）。"},
+      {d:"b", t:"SYN（客户端重传）", t2:"SYN+ACK（服务器重传）", c:"ESTABLISHED", n:"谁先到都行：客户端收到 SYN+ACK 即进入 ESTABLISHED；服务器收到重复 SYN 会再回一次 SYN+ACK，客户端对重复的 SYN+ACK 再回 ACK 即可。"},
+      {d:"c", t:"ACK  ack=y+1", s:"ESTABLISHED", n:"握手完成。"}]},
+    {name:"④ 第三次握手 ACK 丢失，随后客户端发数据", c0:"CLOSED", s0:"LISTEN", steps:[
+      {d:"c", t:"SYN  seq=x", c:"SYN_SENT", s:"SYN_RCVD", n:"正常。"},
+      {d:"s", t:"SYN+ACK  seq=y  ack=x+1", c:"ESTABLISHED", n:"客户端进入 ESTABLISHED。"},
+      {d:"c", t:"ACK  ack=y+1", lost:1, n:"第三次握手丢失：客户端已认为连接建立，服务器仍在 SYN_RCVD。"},
+      {d:"c", t:"数据  seq=x+1  ack=y+1  len=100", s:"ESTABLISHED", n:"数据段同样带 ACK 标志和正确的确认号，服务器据此完成握手并接收数据——第三次 ACK 丢了通常没有影响。"},
+      {d:"s", t:"ACK  ack=x+101", n:"一切正常。若客户端一直不发数据，服务器会重传 SYN+ACK，客户端收到后再回 ACK。"}]},
+    {name:"⑤ 连接一个没人监听的端口", c0:"CLOSED", s0:"（无监听）", steps:[
+      {d:"c", t:"SYN  seq=x", c:"SYN_SENT", n:"目标端口没有 LISTEN socket。"},
+      {d:"s", t:"RST+ACK  ack=x+1", c:"CLOSED", n:"内核直接回 RST，connect() 返回 ECONNREFUSED。Linux 立即失败；Windows 会再重试几次 SYN，d1 实测耗时约 2 秒。"}]},
+    {name:"⑥ 正常四次挥手（含半关闭）", c0:"ESTABLISHED", s0:"ESTABLISHED", steps:[
+      {d:"c", t:"FIN  seq=u", c:"FIN_WAIT_1", s:"CLOSE_WAIT", n:"客户端 close() 发出 FIN。服务器收到后进入 CLOSE_WAIT，它的 read() 将返回 0。"},
+      {d:"s", t:"ACK  ack=u+1", c:"FIN_WAIT_2", n:"由服务器内核自动回复，不需要应用参与。"},
+      {d:"s", t:"数据  seq=v  len=200（半关闭期间）", n:"服务器仍可以发送剩余数据，客户端照常接收并确认（d1 · E5 实测）。"},
+      {d:"s", t:"FIN  seq=w  ack=u+1", s:"LAST_ACK", c:"TIME_WAIT", n:"服务器应用调用 close() 后才发出 FIN。客户端收到后进入 TIME_WAIT。"},
+      {d:"c", t:"ACK  ack=w+1", s:"CLOSED", n:"服务器收到最后的 ACK，立即 CLOSED。"},
+      {d:"w", t:"⏱ 客户端等待 2MSL（Linux 固定 60 s）", c:"CLOSED", n:"TIME_WAIT 结束后，这个四元组才能被复用。"}]},
+    {name:"⑦ 三次挥手（ACK 与 FIN 合并）", c0:"ESTABLISHED", s0:"ESTABLISHED", steps:[
+      {d:"c", t:"FIN  seq=u", c:"FIN_WAIT_1", s:"CLOSE_WAIT", n:"服务器正好没有数据要发，应用读到 EOF 后马上 close()。"},
+      {d:"s", t:"FIN+ACK  seq=w  ack=u+1", s:"LAST_ACK", c:"TIME_WAIT", n:"延迟确认的 ACK 还没发出，FIN 也要发了，于是合并。客户端在 FIN_WAIT_1 收到 FIN+ACK，跳过 FIN_WAIT_2 直接进入 TIME_WAIT。"},
+      {d:"c", t:"ACK  ack=w+1", s:"CLOSED", n:"只用了 3 个报文。"},
+      {d:"w", t:"⏱ 2MSL", c:"CLOSED", n:"结束。"}]},
+    {name:"⑧ 最后一个 ACK 丢失", c0:"ESTABLISHED", s0:"ESTABLISHED", steps:[
+      {d:"c", t:"FIN  seq=u", c:"FIN_WAIT_1", s:"CLOSE_WAIT", n:"正常。"},
+      {d:"s", t:"ACK  ack=u+1", c:"FIN_WAIT_2", n:"正常。"},
+      {d:"s", t:"FIN  seq=w", s:"LAST_ACK", c:"TIME_WAIT", n:"正常。"},
+      {d:"c", t:"ACK  ack=w+1", lost:1, n:"最后的 ACK 丢失，服务器仍在 LAST_ACK。"},
+      {d:"w", t:"⏱ 服务器的重传定时器超时", n:"服务器以为自己的 FIN 丢了。"},
+      {d:"s", t:"FIN  seq=w（重传）", n:"客户端还在 TIME_WAIT，能认出这是同一条连接的 FIN，于是重发 ACK 并重置 2MSL 计时器。若客户端已经 CLOSED，只能回 RST，服务器会以错误结束。"},
+      {d:"c", t:"ACK  ack=w+1（重发）", s:"CLOSED", n:"服务器正常关闭。"},
+      {d:"w", t:"⏱ 重新计时的 2MSL", c:"CLOSED", n:"这就是 TIME_WAIT 存在的第一个理由。"}]},
+    {name:"⑨ 同时关闭", c0:"ESTABLISHED", s0:"ESTABLISHED", steps:[
+      {d:"b", t:"FIN  seq=u", t2:"FIN  seq=w", c:"CLOSING", s:"CLOSING", n:"双方几乎同时 close()，都进入 FIN_WAIT_1，随后各自收到的是对方的 FIN 而不是 ACK，于是进入 CLOSING。"},
+      {d:"b", t:"ACK  ack=w+1", t2:"ACK  ack=u+1", c:"TIME_WAIT", s:"TIME_WAIT", n:"收到对自己 FIN 的确认后，双方都进入 TIME_WAIT——这是唯一一种两端都有 TIME_WAIT 的情况。"},
+      {d:"w", t:"⏱ 2MSL", c:"CLOSED", s:"CLOSED", n:"结束。"}]},
+    {name:"⑩ SO_LINGER{1,0}：用 RST 关闭", c0:"ESTABLISHED", s0:"ESTABLISHED", steps:[
+      {d:"c", t:"RST  seq=u", c:"CLOSED", s:"CLOSED", n:"不经过挥手：双方立即释放连接，未发送的数据被丢弃，服务器下一次 recv 得到 ECONNRESET，客户端也不进入 TIME_WAIT（与 d1 · E6 实测一致）。"}]}
+  ];
+  const NS = "http://www.w3.org/2000/svg";
+  const CX = 170, SX = 690;
+  const col = s => /ESTAB/.test(s) ? "#B45309" : /TIME_WAIT/.test(s) ? "#B91C1C" : /CLOSED|无监听/.test(s) ? "#4B5563" : /CLOSING/.test(s) ? "#6D28D9" : "#2F5BD3";
+  function el(tag, a, txt){ const e = document.createElementNS(NS, tag); for(const k in a) e.setAttribute(k, a[k]); if(txt!==undefined) e.textContent = txt; return e; }
+  function label(svg, x, y, txt, color){
+    const w = Math.max(40, [...txt].reduce((s,ch)=>s+(ch.charCodeAt(0)>255?12.5:7), 0) + 12);
+    svg.appendChild(el("rect", {x:x-w/2, y:y-13, width:w, height:18, rx:4, fill:"#fff", stroke:color, "stroke-width":0.8, opacity:0.95}));
+    svg.appendChild(el("text", {x:x, y:y, "text-anchor":"middle", "font-size":12, "font-weight":700, fill:color, "font-family":"Consolas, 'Microsoft YaHei', sans-serif"}, txt));
+  }
+  function arrow(svg, fromC, y, txt, lost, lx){
+    const x1 = fromC ? CX : SX, x2 = fromC ? SX : CX, color = lost ? "#B91C1C" : (fromC ? "#15803D" : "#2F5BD3");
+    if(lost){
+      const mx = x1 + (x2 - x1) * 0.55, my = y + 30 * 0.55;
+      svg.appendChild(el("line", {x1:x1, y1:y, x2:mx, y2:my, stroke:color, "stroke-width":1.8, "stroke-dasharray":"6 4"}));
+      svg.appendChild(el("text", {x:mx, y:my+6, "text-anchor":"middle", "font-size":18, "font-weight":700, fill:color}, "✕"));
+    } else {
+      svg.appendChild(el("line", {x1:x1, y1:y, x2:x2 + (fromC ? -2 : 2), y2:y+30, stroke:color, "stroke-width":1.8, "marker-end": fromC ? "url(#ag)" : "url(#ab)"}));
+    }
+    label(svg, lx !== undefined ? lx : (CX+SX)/2, y + 12, txt, color);
+  }
+  let cur = 0, k = 0;
+  function render(){
+    const sc = SC[cur], svg = $("hs-svg"), n = sc.steps.length;
+    const H = 80 + n * 46;
+    svg.setAttribute("viewBox", "0 0 860 " + H);
+    while(svg.firstChild) svg.removeChild(svg.firstChild);
+    svg.appendChild(el("text", {x:CX, y:24, "text-anchor":"middle", "font-size":14, "font-weight":700, fill:"#1F2937"}, "客户端"));
+    svg.appendChild(el("text", {x:SX, y:24, "text-anchor":"middle", "font-size":14, "font-weight":700, fill:"#1F2937"}, "服务器"));
+    svg.appendChild(el("line", {x1:CX, y1:34, x2:CX, y2:H-8, stroke:"#9CA3AF"}));
+    svg.appendChild(el("line", {x1:SX, y1:34, x2:SX, y2:H-8, stroke:"#9CA3AF"}));
+    const st = (x, y, s, left) => svg.appendChild(el("text", {x:x, y:y, "text-anchor": left ? "end" : "start", "font-size":12.5, "font-weight":700, fill:col(s), "font-family":"Consolas, monospace"}, s));
+    st(CX-10, 52, sc.c0, true); st(SX+10, 52, sc.s0, false);
+    const log = [];
+    for(let i = 0; i < k; i++){
+      const s = sc.steps[i], y = 66 + i * 46;
+      if(s.d === "c") arrow(svg, true, y, s.t, s.lost);
+      else if(s.d === "s") arrow(svg, false, y, s.t, s.lost);
+      else if(s.d === "b"){ arrow(svg, true, y, s.t, false, CX + 150); arrow(svg, false, y, s.t2, false, SX - 150); }
+      else {
+        svg.appendChild(el("rect", {x:CX+20, y:y+4, width:SX-CX-40, height:24, rx:6, fill:"#FEF6E4", stroke:"#F3DDA8"}));
+        svg.appendChild(el("text", {x:(CX+SX)/2, y:y+21, "text-anchor":"middle", "font-size":12.5, fill:"#B45309"}, s.t));
+      }
+      if(s.c) st(CX-10, y+34, s.c, true);
+      if(s.s) st(SX+10, y+34, s.s, false);
+      log.push((i === k-1 ? "▶ " : "  ") + "第 " + (i+1) + " 步：" + (s.n || ""));
+    }
+    $("hs-log").textContent = log.length ? log.join("\n") : "共 " + n + " 步，点击\"下一步\"开始。";
+    $("hs-prev").disabled = k <= 0; $("hs-next").disabled = k >= n;
+  }
+  const sel = $("hs-sc");
+  SC.forEach((s, i) => { const o = document.createElement("option"); o.value = i; o.textContent = s.name; sel.appendChild(o); });
+  sel.onchange = () => { cur = +sel.value; k = 0; render(); };
+  $("hs-next").onclick = () => { if(k < SC[cur].steps.length) k++; render(); };
+  $("hs-prev").onclick = () => { if(k > 0) k--; render(); };
+  $("hs-all").onclick = () => { k = SC[cur].steps.length; render(); };
+  $("hs-reset").onclick = () => { k = 0; render(); };
+  k = SC[0].steps.length; render();
+})();
+
+/* ---------- 实验 2：ARQ 协议仿真器（与 demos/d2_rudp_sim.cpp 同构的简化版） ---------- */
+(function(){
+  const $ = id => document.getElementById(id);
+  if(!$("arq-run")) return;
+  function rng(seed){ return function(){ seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  const MODES = {
+    sw:  {name:"停等 ARQ", w:1, conn:true, gbn:true, fast:0, minRto:200, back:2},
+    gbn: {name:"回退 N 步 GBN", conn:true, gbn:true, fast:0, minRto:200, back:2},
+    sr:  {name:"选择重传 SR", conn:false, gbn:false, fast:0, minRto:200, back:2},
+    srf: {name:"SR + 快速重传(3)", conn:false, gbn:false, fast:3, minRto:200, back:2},
+    kcp: {name:"类 KCP 极速模式", conn:false, gbn:false, fast:2, minRto:30, back:1.5, kcpFast:true}
+  };
+  function sim(key, N, loss, wnd, rtt, seed){
+    const m = MODES[key], W = m.w || wnd, R = rng(seed), half = rtt / 2, fifo = [0, 0];
+    const arrive = (d, now) => { let t = now + half + 0.5 * R(); if(R() < 0.01) return t + 10 * R(); t = Math.max(t, fifo[d] + 0.001); fifo[d] = t; return t; };
+    const segs = new Map(), xm = new Array(N).fill(0);
+    let next = 0, una = 0, srtt = 0, rttvar = 0, rto = 200, has = false, connRto = 200, connTimer = -1, sends = 0;
+    let rcvNxt = 0; const rbuf = new Set(); let toR = [], toS = [];
+    const sendData = (sn, now) => { sends++; xm[sn]++; if(R() >= loss) toR.push({t:arrive(0, now), sn}); };
+    const sendAck = (now, sns) => { if(R() >= loss) toS.push({t:arrive(1, now), una:rcvNxt, sns}); };
+    const sample = r => { if(!has){ srtt = r; rttvar = r/2; has = true; } else { rttvar = .75*rttvar + .25*Math.abs(srtt - r); srtt = .875*srtt + .125*r; } rto = Math.min(60000, Math.max(m.minRto, srtt + Math.max(1, 4*rttvar))); };
+    let budget = 0;
+    const xmit = (s, now) => { s.x++; s.last = now; s.fast = 0; s.need = false; s.at = now + s.rto; sendData(s.sn, now); budget--; };
+    const take = (q, now) => { const r = [], k = []; for(const p of q) (p.t <= now ? r : k).push(p); r.sort((a,b)=>a.t-b.t); return [r, k]; };
+    let now = 0;
+    for(; now < 300000; now++){
+      let r; [r, toR] = take(toR, now);
+      for(const p of r){
+        if(m.gbn){ if(p.sn === rcvNxt) rcvNxt++; sendAck(now, []); continue; }
+        if(p.sn >= rcvNxt) rbuf.add(p.sn);
+        while(rbuf.has(rcvNxt)){ rbuf.delete(rcvNxt); rcvNxt++; }
+        sendAck(now, [p.sn]);
+      }
+      if(rcvNxt >= N) break;
+      [r, toS] = take(toS, now);
+      for(const a of r){
+        const old = una; let maxAck = -1, maxSent = -1;
+        for(const [sn, s] of segs) if(sn < a.una && !s.acked){ s.acked = true; if(sn === a.una - 1 && s.x === 1) sample(now - s.last); }
+        for(const sn of a.sns){ const s = segs.get(sn); if(s){ if(!s.acked){ maxSent = Math.max(maxSent, s.last); s.acked = true; if(s.x === 1) sample(now - s.last); } maxAck = Math.max(maxAck, sn); } }
+        if(m.fast) for(const [sn, s] of segs) if(!s.acked && sn < maxAck && (m.kcpFast || maxSent > s.last)) s.fast++;
+        let lo = Infinity; for(const [sn, s] of segs){ if(s.acked) segs.delete(sn); else lo = Math.min(lo, sn); }
+        una = lo === Infinity ? next : lo;
+        if(m.conn && una > old){ connRto = rto; connTimer = segs.size ? now + connRto : -1; }
+      }
+      budget = 1;
+      if(m.fast) for(const [, s] of segs) if(!s.need && s.fast >= m.fast && (!m.kcpFast || s.x <= 5)) s.need = true;
+      if(m.conn){
+        if(connTimer >= 0 && now >= connTimer){ for(const [, s] of segs) s.need = true; connRto = Math.min(connRto * m.back, 60000); connTimer = now + connRto; }
+      } else {
+        for(const [, s] of segs) if(!s.need && now >= s.at){ s.rto = Math.min(s.rto * m.back, 60000); s.need = true; }
+      }
+      const keys = [...segs.keys()].sort((a,b)=>a-b);
+      for(const sn of keys){ if(budget <= 0) break; const s = segs.get(sn); if(s.need) xmit(s, now); }
+      while(budget > 0 && next < N && next < una + W){
+        const s = {sn:next, x:0, last:0, rto:rto, at:0, fast:0, acked:false, need:false};
+        segs.set(next, s); xmit(s, now);
+        if(m.conn && connTimer < 0){ connRto = rto; connTimer = now + connRto; }
+        next++;
+      }
+    }
+    return {done:now, sends, xm};
+  }
+  function grid(xm){
+    const box = $("arq-grid"); box.innerHTML = "";
+    xm.forEach((x, i) => {
+      const d = document.createElement("span");
+      const c = x <= 1 ? "#BBF7D0" : x === 2 ? "#FDE68A" : x === 3 ? "#FDBA74" : "#FCA5A5";
+      d.style.cssText = "display:inline-block;vertical-align:top;width:22px;height:18px;margin:1px;border-radius:3px;font:10px Consolas,monospace;line-height:18px;text-align:center;color:#374151;background:" + c;
+      d.title = "包 " + i + "：发送 " + x + " 次"; d.textContent = x > 1 ? x : "";
+      box.appendChild(d);
+    });
+  }
+  function run(){
+    const key = $("arq-mode").value, loss = +$("arq-loss").value / 100, wnd = +$("arq-wnd").value, rtt = +$("arq-rtt").value, N = 200, seed = +$("arq-seed").value;
+    $("arq-loss-v").textContent = $("arq-loss").value + "%"; $("arq-wnd-v").textContent = wnd; $("arq-rtt-v").textContent = rtt + " ms";
+    const r = sim(key, N, loss, wnd, rtt, seed);
+    grid(r.xm);
+    const W = MODES[key].w || wnd, rate = Math.min(1, W / (rtt + 1));      // 每 ms 最多发 rate 个包（链路 1 包/ms，窗口受限时更少）
+    const ideal = Math.ceil(N / rate) + rtt;
+    let s = MODES[key].name + "：传输 " + N + " 个包，耗时 " + r.done + " ms（同窗口无丢包的理想值约 " + ideal + " ms，慢 " + (r.done / ideal).toFixed(1) + " 倍）\n";
+    if (rate < 1) s += "提示：窗口 " + W + " < 带宽时延积 ≈ " + (rtt + 1) + " 个包，即使不丢包也跑不满链路\n";
+    s += "发送 " + r.sends + " 次，重传 " + (r.sends - N) + " 次，重传占比 " + (100 * (r.sends - N) / r.sends).toFixed(1) + "%\n\n同参数下各协议对比：\n";
+    for(const k in MODES){ const q = sim(k, N, loss, wnd, rtt, seed); s += (k === key ? "▶ " : "  ") + MODES[k].name.padEnd(14, "　") + "耗时 " + String(q.done).padStart(6) + " ms　发送 " + String(q.sends).padStart(4) + " 次　重传占比 " + (100 * (q.sends - N) / q.sends).toFixed(1).padStart(5) + "%\n"; }
+    $("arq-out").textContent = s;
+  }
+  ["arq-mode", "arq-loss", "arq-wnd", "arq-rtt", "arq-seed"].forEach(id => $(id).addEventListener("input", run));
+  $("arq-run").onclick = () => { $("arq-seed").value = (+$("arq-seed").value % 99) + 1; run(); };
+  run();
 })();
 
 </script>

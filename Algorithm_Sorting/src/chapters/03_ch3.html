@@ -1,0 +1,145 @@
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>插入排序与希尔排序</h1>
+    <p class="lead">插入排序是 O(n²) 里唯一会被工业代码天天调用的算法。希尔排序则说明，只要允许远距离移动，就能打破“相邻交换必然 n²”的限制。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>写出移位版插入排序，说清它为什么稳定、自适应、在线</li>
+    <li>理解“代价 = O(n + 逆序对)”，以及工业排序为什么都用它处理小区间</li>
+    <li>理解希尔排序的分组思想和增量序列对复杂度的影响</li>
+  </ul></div>
+
+  <h2>3.1 插入排序：像整理手里的扑克牌</h2>
+  <p>左边是已经排好的牌，每次从右边摸一张（key），从右往左和有序区比较：比 key 大的牌往右挪一格，直到遇到不大于 key 的牌，把 key 插到它后面。</p>
+  <!--trace {"rows":[
+    {"lab":"初始","a":[5,2,4,6,1,3],"s":"dk....","note":"有序区 [5]，摸起 key = 2"},
+    {"lab":"i = 1","a":[2,5,4,6,1,3],"s":"kx....","note":"5 > 2 后移，2 插到最前"},
+    {"lab":"i = 2","a":[2,4,5,6,1,3],"s":"dkx...","note":"key = 4：5 后移；2 ≤ 4，停"},
+    {"lab":"i = 3","a":[2,4,5,6,1,3],"s":"dddk..","note":"key = 6：5 ≤ 6，只比较 1 次就停"},
+    {"lab":"i = 4","a":[1,2,4,5,6,3],"s":"kxxxx.","note":"key = 1：四个元素依次后移"},
+    {"lab":"i = 5","a":[1,2,3,4,5,6],"s":"ddkxxx","note":"key = 3：6、5、4 后移；2 ≤ 3，停"}],
+    "names":{"d":"有序区","k":"刚插入的 key","x":"后移的元素"},
+    "cap":"<b>图 3-1</b>　插入排序：每个元素后移的次数，正好等于它和左边元素构成的逆序对数"} -->
+<!--code:text:插入排序 · 伪代码-->
+insertionSort(a, n):
+    for i = 1 to n-1:
+        key = a[i]
+        j = i - 1
+        while j >= 0 and a[j] > key:   // 严格大于才后移 → 相等元素不越过 → 稳定
+            a[j+1] = a[j]
+            j = j - 1
+        a[j+1] = key
+<!--/code-->
+<!--code:cpp:insertion_sort.h（移位版，比“相邻交换版”少 2/3 的赋值）-->
+template <class T, class Less = std::less<T>>
+void insertion_sort(T* a, int n, Less less = {}) {
+    for (int i = 1; i < n; ++i) {
+        T key = std::move(a[i]);
+        int j = i - 1;
+        while (j >= 0 && less(key, a[j])) {   // key < a[j] 才后移
+            a[j + 1] = std::move(a[j]);
+            --j;
+        }
+        a[j + 1] = std::move(key);
+    }
+}
+<!--/code-->
+
+  <h3>复杂度：O(n + I)</h3>
+  <p>每个元素后移的次数，等于它左边比它大的元素个数。把所有元素加起来，总移动次数恰好是逆序对数 I，比较次数在 I 到 I + n − 1 之间。所以：</p>
+  <div class="tbl"><table>
+    <tr><th>输入</th><th>逆序对 I</th><th>时间</th><th>实测 E2（n=1000）比较次数</th><th>实测 E3（n=20000）</th></tr>
+    <tr><td>已有序</td><td>0</td><td>O(n)</td><td>999</td><td>0.01 ms</td></tr>
+    <tr><td>近乎有序</td><td>O(n)</td><td>O(n)</td><td>—</td><td>0.57 ms</td></tr>
+    <tr><td>随机</td><td>≈ n²/4</td><td>O(n²)</td><td>242702</td><td>20.57 ms</td></tr>
+    <tr><td>逆序</td><td>n(n−1)/2</td><td>O(n²)</td><td>499500</td><td>40.00 ms</td></tr>
+  </table></div>
+  <p>它同时具备四个好性质：<strong>稳定</strong>、<strong>原地</strong>、<strong>自适应</strong>（越有序越快）、<strong>在线</strong>（数据一个个到达时可以边收边排）。</p>
+
+  <h2>3.2 为什么工业排序都离不开它</h2>
+  <ul>
+    <li><strong>小数组上常数最小</strong>：没有递归、没有额外内存、访存是连续的。16～32 个元素正好在一两条缓存行里。libstdc++ 的 <code>std::sort</code> 在区间 ≤ 16 时转插入排序，MSVC 的阈值是 32，TimSort 用二分插入排序把短段补齐到 minrun（32～64）。</li>
+    <li><strong>收尾快</strong>：快排把大区间切到“块内无序、块间有序”之后，整体只剩很少的逆序对，最后统一做一遍插入排序就是线性的。libstdc++ 的 <code>__final_insertion_sort</code> 就是这个思路。</li>
+    <li><strong>帧间增量</strong>：游戏里很多数据上一帧已经排好，这一帧只有少数元素变化，比如渲染物体的深度、碰撞检测的 AABB 端点。直接拿上一帧的顺序做插入排序几乎是 O(n)。</li>
+  </ul>
+  <div class="co ver"><span class="h">实测 E8：帧间增量重排（N=20000，上一帧已排好，本帧 2% 的 key 发生微小变化）</span>
+    <p>插入排序 <strong>0.005 ms</strong>，<code>std::sort</code> 0.062 ms，基数排序 0.094 ms。插入排序快了 12 倍以上，因为它几乎只是线性扫了一遍。</p>
+  </div>
+
+  <h3>两个经典优化</h3>
+  <p><strong>① 哨兵（无边界检查）</strong>：先把全局最小值换到 <code>a[0]</code>，内层循环就不用再判断 <code>j &gt;= 0</code>，因为 key 一定会在 <code>a[0]</code> 处停下。libstdc++ 的 <code>__unguarded_linear_insert</code> 就是这么做的。这个优化的前提是<strong>比较器满足严格弱序</strong>，否则 key 会越过 a[0] 继续往左走，读写数组外的内存（第 8 章 E7 会实测）。</p>
+  <p><strong>② 二分插入</strong>：在有序区里用二分查找插入位置，比较次数降到 O(n log n)，但移动次数仍然是 O(n²)。比较代价高（比如比较字符串）时有用。注意要用 <code>upper_bound</code>，才能保持稳定：</p>
+<!--code:cpp:二分插入排序-->
+template <class T, class Less = std::less<T>>
+void binary_insertion_sort(T* a, int n, Less less = {}) {
+    for (int i = 1; i < n; ++i) {
+        T* pos = std::upper_bound(a, a + i, a[i], less);   // 第一个 > key 的位置：相等的留在左边 → 稳定
+        T key = std::move(a[i]);
+        std::move_backward(pos, a + i, a + i + 1);           // [pos, i) 整体右移一格
+        *pos = std::move(key);
+    }
+}
+<!--/code-->
+
+  <h2>3.3 希尔排序：先远后近的插入排序</h2>
+  <p>插入排序慢在每次只能挪一格。希尔排序（Donald Shell，1959）的想法是：先取一个较大的步长 gap，把<strong>相距 gap 的元素看成一组</strong>，各组分别做插入排序，让大元素一步跳很远。然后逐渐缩小 gap，最后 gap = 1 时做一次普通插入排序。这时数组已经基本有序，最后一步代价很低。</p>
+  <!--trace {"rows":[
+    {"lab":"gap = 5","a":[8,9,1,7,2,3,5,4,6,0],"s":"k....k....","note":"相距 5 的元素为一组，共 5 组（标出第 1 组）"},
+    {"lab":"排序后","a":[3,5,1,6,0,8,9,4,7,2],"s":"xx.xxxx.xx","note":"各组内插入排序：8↔3、9↔5、7↔6、2↔0"},
+    {"lab":"gap = 2","a":[3,5,1,6,0,8,9,4,7,2],"s":"k.k.k.k.k.","note":"偶数位 [3,1,0,9,7] 一组，奇数位一组"},
+    {"lab":"排序后","a":[0,2,1,4,3,5,7,6,9,8],"s":"..........","note":"只剩 4 个逆序对：(2,1)(4,3)(7,6)(9,8)"},
+    {"lab":"gap = 1","a":[0,1,2,3,4,5,6,7,8,9],"s":"dddddddddd","note":"最后做一次普通插入排序，只要 4 次移动"}],
+    "names":{"k":"同一组","x":"本轮被移动"},
+    "cap":"<b>图 3-2</b>　希尔排序（gap = 5, 2, 1）：大步长先把元素送到大致的位置，最后一轮插入排序几乎不用移动"} -->
+<!--code:cpp:shell_sort.h（Ciura 增量序列）-->
+template <class T, class Less = std::less<T>>
+void shell_sort(T* a, int n, Less less = {}) {
+    std::vector<int> gaps = {1, 4, 10, 23, 57, 132, 301, 701, 1750};   // Ciura 2001，实验得到的
+    while (gaps.back() < n / 2) gaps.push_back(int(gaps.back() * 2.25)); // 更大的 n 按 ×2.25 外推
+    for (int g = int(gaps.size()) - 1; g >= 0; --g) {
+        const int gap = gaps[g];
+        for (int i = gap; i < n; ++i) {              // 所有组交替推进，不必一组一组地做
+            T key = std::move(a[i]);
+            int j = i;
+            while (j >= gap && less(key, a[j - gap])) {
+                a[j] = std::move(a[j - gap]);
+                j -= gap;
+            }
+            a[j] = std::move(key);
+        }
+    }
+}
+<!--/code-->
+  <h3>增量序列决定复杂度</h3>
+  <div class="tbl"><table>
+    <tr><th>序列</th><th>取值</th><th>最坏复杂度</th><th>备注</th></tr>
+    <tr><td>Shell 原始</td><td>n/2, n/4, …, 1</td><td>O(n²)</td><td>奇偶位置在 gap=1 之前从不比较，容易被构造出最坏输入</td></tr>
+    <tr><td>Hibbard</td><td>1, 3, 7, 15, …（2ᵏ−1）</td><td>O(n<sup>1.5</sup>)</td><td>相邻增量互质</td></tr>
+    <tr><td>Knuth</td><td>1, 4, 13, 40, …（(3ᵏ−1)/2）</td><td>O(n<sup>1.5</sup>)</td><td>好记，常被用作面试答案</td></tr>
+    <tr><td>Sedgewick</td><td>1, 5, 19, 41, 109, …</td><td>O(n<sup>4/3</sup>)</td><td>理论上较优</td></tr>
+    <tr><td>Ciura</td><td>1, 4, 10, 23, 57, 132, 301, 701</td><td>未知</td><td>实验得到的最佳序列，本书 demo 使用</td></tr>
+  </table></div>
+  <p>希尔排序<strong>不稳定</strong>（不同组之间会互相越过，E1 实测逆序对 2503），<strong>原地</strong>，平均复杂度目前没有精确的理论结果，实践中大约是 O(n<sup>1.25</sup>)～O(n<sup>1.3</sup>)。</p>
+  <div class="co ver"><span class="h">实测 E5：N = 100 万随机 int</span>
+    <p>希尔 87.67 ms，<code>std::sort</code> 51.38 ms，只慢了 1.7 倍，比堆排序（73.59 ms）也差不了多少。它代码短、无递归、无额外内存，所以在嵌入式环境里很常见，例如 uClibc 的 <code>qsort</code> 就是希尔排序。缺点是对近乎有序的数据不敏感：近乎有序时 62.86 ms，没比随机快多少。</p>
+  </div>
+
+  <h2>3.4 交互实验</h2>
+  <p>把数据切到“近乎有序”，对比插入排序和希尔排序的比较次数；再把规模拉到 48，看希尔的大步长怎样快速把“矮柱子”送到左边。</p>
+  <div class="lab sortlab" id="lab-is" data-algos="insertion,shell" data-n="20"></div><!--/lab-->
+
+  <div class="co warn"><span class="h">面试注意</span>
+    <ul>
+      <li>“插入排序最好 O(n)”是对的，而且<strong>不需要任何额外优化</strong>，这一点和冒泡不同。</li>
+      <li>二分插入只减少比较次数，<strong>移动次数仍是 O(n²)</strong>，整体还是 O(n²)。</li>
+      <li>被问“希尔排序为什么比插入快”，要说到点上：一次远距离移动可以<strong>消除多个逆序对</strong>，而相邻移动一次只能消除一个。</li>
+    </ul>
+  </div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>插入排序：代价 <strong>O(n + 逆序对)</strong>；稳定、原地、自适应、在线。</li>
+    <li>工业用途：快排的小区间收尾（阈值 16/32）、TimSort 的短段、帧间增量重排（E8：0.005 ms 对 0.062 ms）。</li>
+    <li>哨兵优化省掉了 <code>j &gt;= 0</code> 判断，前提是比较器满足严格弱序。</li>
+    <li>希尔：分组插入，增量序列决定复杂度（Knuth / Hibbard 为 O(n<sup>1.5</sup>)）；不稳定。</li>
+  </ul></div>
+</section>

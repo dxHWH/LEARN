@@ -1,0 +1,433 @@
+<!-- ======================= CH8 ======================= -->
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>亲手实现可靠 UDP：机制逐个拆解</h1>
+    <p class="lead">序号、确认、重传、窗口、乱序、去重、拥塞、纠错、分片、连接——把第 3 章的 TCP 机制在用户态重新实现一遍，并且每一处都想清楚"能不能做得不一样"。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能设计一个可靠 UDP 的报文头，并说明每个字段的用途</li>
+    <li>掌握序号回绕比较、三种确认方式（逐包 ACK、UNA、ACK 位图）</li>
+    <li>掌握 RTT 测量、RTO 计算、退避策略与快速重传的实现细节</li>
+    <li>对比停等、回退 N 步、选择重传三种 ARQ，会算信道利用率</li>
+    <li>会写接收端的环形缓冲（乱序重排 + 去重）和发送端的定时驱动循环</li>
+    <li>理解拥塞避免、FEC、冗余发送、分片、连接管理与安全在可靠 UDP 中的做法</li>
+    <li>能用仿真数据解释"为什么选择重传 + 快速重传 + 温和退避"在丢包网络下最好</li>
+  </ul></div>
+
+  <h2>8.1 报文设计</h2>
+  <p>先设计一个教学用的报文头。它和 KCP 的头部（第 9 章）非常接近，只多了一个"通道"字段和一个 ACK 位图：</p>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <g class="xs"><text x="110" y="20">0</text><text x="262" y="20">8</text><text x="418" y="20">16</text><text x="574" y="20">24</text><text x="736" y="20">31</text></g>
+    <line x1="110" y1="26" x2="750" y2="26" stroke="#D1D5DB"/>
+    <rect x="110" y="30" width="640" height="36" fill="#EAF0FD" stroke="#2F5BD3"/><text x="430" y="53" text-anchor="middle" class="b">conv 会话 ID（32）：标识"哪条连接"，取代四元组</text>
+    <rect x="110" y="66" width="160" height="36" fill="#FFF4EC" stroke="#C2410C"/><text x="190" y="89" text-anchor="middle" class="b sm">cmd（8）</text>
+    <rect x="270" y="66" width="160" height="36" fill="#FFF4EC" stroke="#C2410C"/><text x="350" y="89" text-anchor="middle" class="b sm">chan 通道（8）</text>
+    <rect x="430" y="66" width="320" height="36" fill="#F3EEFE" stroke="#6D28D9"/><text x="590" y="89" text-anchor="middle" class="b sm">wnd 接收窗口剩余（16）</text>
+    <rect x="110" y="102" width="640" height="36" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="125" text-anchor="middle" class="b">sn 本包序号（32）</text>
+    <rect x="110" y="138" width="640" height="36" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="161" text-anchor="middle" class="b">una 累计确认：小于 una 的包我全收到了（32）</text>
+    <rect x="110" y="174" width="640" height="36" fill="#EAF7EF" stroke="#15803D"/><text x="430" y="197" text-anchor="middle" class="b">ack_bits 选择确认位图：una+1 ～ una+32 中哪些已收到（32）</text>
+    <rect x="110" y="210" width="640" height="36" fill="#FEF6E4" stroke="#B45309"/><text x="430" y="233" text-anchor="middle" class="b">ts 发送时间戳（32）：对方在 ACK 中原样回显，用于测 RTT</text>
+    <rect x="110" y="246" width="320" height="36" fill="#F3F4F6" stroke="#6B7280"/><text x="270" y="269" text-anchor="middle" class="b sm">len 负载长度（16）</text>
+    <rect x="430" y="246" width="320" height="36" fill="#F3F4F6" stroke="#6B7280"/><text x="590" y="269" text-anchor="middle" class="b sm">frg 剩余分片数（8）+ 保留（8）</text>
+    <text x="430" y="306" text-anchor="middle" class="xs">共 28 字节；每个数据包都捎带 una 和 ack_bits，所以 ACK 不必单独成包（双向都有流量时）</text>
+    <text x="430" y="322" text-anchor="middle" class="xs">cmd：DATA / ACK / PING / PONG / CONNECT / ACCEPT / CLOSE / WND_PROBE</text>
+  </svg>
+  <figcaption><b>图 8-1</b> 教学版可靠 UDP 报文头：每个字段都对应 TCP 头部的一个"同行"</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>字段</th><th>对应 TCP 的</th><th>为什么这样设计</th></tr>
+    <tr><td>conv</td><td>四元组</td><td>移动网络下 NAT 可能更换客户端的公网端口（NAT 重绑定），用会话 ID 识别连接就不会因此断线；还可以在一个 UDP 端口上复用很多会话</td></tr>
+    <tr><td>sn</td><td>seq</td><td><strong>按包编号</strong>而不是按字节编号：UDP 本身就保留消息边界，按包编号更简单，确认与重传也以包为单位</td></tr>
+    <tr><td>una</td><td>ack</td><td>累计确认，语义和 TCP 的 ack 一样："下一个期望的包"</td></tr>
+    <tr><td>ack_bits</td><td>SACK 选项</td><td>定长 32 位，比 TCP 的 SACK 块更紧凑，每个包都能带</td></tr>
+    <tr><td>ts</td><td>时间戳选项</td><td>接收方在 ACK 里回显发送时间，发送方 <code>now − ts</code> 就是 RTT，<strong>重传的包也能正确采样</strong>（解决 Karn 问题）</td></tr>
+    <tr><td>wnd</td><td>窗口</td><td>流量控制</td></tr>
+    <tr><td>chan</td><td>（无）</td><td>不同通道有独立的序号空间和可靠级别，互不阻塞</td></tr>
+    <tr><td>frg</td><td>（无，TCP 是字节流）</td><td>大消息分片：还剩几片，为 0 表示最后一片</td></tr>
+  </table></div>
+
+  <h2>8.2 序列号：回绕与比较</h2>
+  <p>序号字段总有上限：32 位约 43 亿，16 位只有 65536。游戏每秒 60 个包，16 位序号 18 分钟就会回绕。回绕后 <code>5 &lt; 65530</code> 这样的直接比较就错了。正确做法是<strong>序列号算术（RFC 1982）</strong>：把差值解释成有符号数。</p>
+<!--code:cpp:回绕安全的序号比较（TCP 内核中的 before()/after() 也是这么写的）-->
+// a 是否"在 b 之后"：差值按有符号数解释，只要两者相距不超过序号空间的一半就是对的
+inline bool SeqAfter(uint32_t a, uint32_t b)  { return int32_t(a - b) > 0; }
+inline bool SeqBefore(uint32_t a, uint32_t b) { return int32_t(a - b) < 0; }
+inline int32_t SeqDiff(uint32_t a, uint32_t b) { return int32_t(a - b); }
+
+// 16 位序号同理（Glenn Fiedler 的游戏网络协议就用 16 位以节省包头）
+inline bool Seq16After(uint16_t a, uint16_t b) { return int16_t(uint16_t(a - b)) > 0; }
+
+// 例：Seq16After(5, 65530) == true，因为 (uint16_t)(5 - 65530) = 11 > 0
+<!--/code-->
+  <div class="co warn"><span class="h">⚠️ 易错点：窗口必须小于序号空间的一半</span><p>如果在途的包跨度超过序号空间的一半，<code>SeqAfter</code> 就无法分辨"新包"和"很旧的包"。所以发送窗口必须远小于 2<sup>31</sup>（32 位）或 2<sup>15</sup>（16 位）。TCP 在高速网络中序号回绕更快（10 Gbps 下 32 位字节序号只要 3.4 秒），所以要靠时间戳选项做 PAWS 保护。</p></div>
+
+  <h2>8.3 确认：三种方式及其组合</h2>
+  <div class="tbl"><table>
+    <tr><th>方式</th><th>做法</th><th>优点</th><th>缺点</th><th>代表</th></tr>
+    <tr><td>逐包 ACK</td><td>每收到一个包，回一条 <code>ACK(sn, ts)</code>，可以把多条合并进一个包</td><td>信息最精确，每条都能测 RTT</td><td>ACK 本身丢了就丢了这条信息；ACK 量大</td><td>KCP 的 ACK 列表</td></tr>
+    <tr><td>累计确认 UNA</td><td>只告诉对方"una 之前的全收到了"</td><td>一个数字就能确认很多包，对 ACK 丢失不敏感（下一个 ACK 包含了上一个的信息）</td><td>无法表达"una 之后收到了哪些"，会导致不必要的重传</td><td>TCP 的 ack、KCP 的 una</td></tr>
+    <tr><td>ACK 位图</td><td>una（或最新收到的 sn）+ 后续 32 个包的接收位图</td><td><strong>高度冗余</strong>：同一个包的确认信息会在连续 32 个 ACK 里重复出现，ACK 丢几个也无所谓</td><td>只能覆盖 32（或 64）个包的范围</td><td>Glenn Fiedler《Reliability over UDP》、很多游戏引擎</td></tr>
+  </table></div>
+  <figure>
+  <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="26" class="b">接收方状态：100 之前都收到了；101 没到；102、103、105、108 已到（乱序）</text>
+    <g class="mono">
+      <rect x="20" y="44" width="60" height="34" rx="4" fill="#E5E7EB" stroke="#9CA3AF"/><text x="50" y="66" text-anchor="middle">…99</text>
+      <rect x="84" y="44" width="50" height="34" rx="4" fill="#FEF6E4" stroke="#B45309" stroke-width="2"/><text x="109" y="66" text-anchor="middle">100</text>
+    </g>
+        <g class="mono" text-anchor="middle">
+      <rect x="150" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="170" y="66">101</text>
+      <rect x="194" y="44" width="40" height="34" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="214" y="66">102</text>
+      <rect x="238" y="44" width="40" height="34" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="258" y="66">103</text>
+      <rect x="282" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="302" y="66">104</text>
+      <rect x="326" y="44" width="40" height="34" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="346" y="66">105</text>
+      <rect x="370" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="390" y="66">106</text>
+      <rect x="414" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="434" y="66">107</text>
+      <rect x="458" y="44" width="40" height="34" rx="4" fill="#EAF7EF" stroke="#15803D"/><text x="478" y="66">108</text>
+      <rect x="502" y="44" width="40" height="34" rx="4" fill="#FDEEEE" stroke="#B91C1C"/><text x="522" y="66">…</text>
+    </g>
+    <text x="570" y="58" class="xs">绿 = 已收到</text><text x="570" y="74" class="xs">红 = 未收到</text>
+    <text x="20" y="130" class="sm"><tspan class="b">回给发送方的 ACK：</tspan>una = <tspan class="b" style="fill:#B91C1C">101</tspan>（100 及之前全收到），ack_bits 第 i 位表示 una+1+i 是否收到：</text>
+    <g class="mono" text-anchor="middle">
+      <text x="200" y="160">位：</text>
+      <text x="250" y="160" style="fill:#15803D">1</text><text x="285" y="160" style="fill:#15803D">1</text><text x="320" y="160">0</text><text x="355" y="160" style="fill:#15803D">1</text><text x="390" y="160">0</text><text x="425" y="160">0</text><text x="460" y="160" style="fill:#15803D">1</text><text x="500" y="160">0 …</text>
+      <text x="200" y="182">对应：</text>
+      <text x="250" y="182">102</text><text x="285" y="182">103</text><text x="320" y="182">104</text><text x="355" y="182">105</text><text x="390" y="182">106</text><text x="425" y="182">107</text><text x="460" y="182">108</text><text x="500" y="182">109</text>
+    </g>
+    <text x="560" y="164" class="xs">发送方据此：102、103、105、108 不必重传；</text>
+    <text x="560" y="180" class="xs">101 已被后面 4 个包"跳过"→ 触发快速重传</text>
+  </svg>
+  <figcaption><b>图 8-2</b> UNA + ACK 位图：一个定长字段同时表达累计确认和选择确认</figcaption>
+  </figure>
+  <div class="co ver"><span class="h">🎮 游戏开发视角：ACK 捎带与"ACK 也会丢"</span><p>游戏双向都在持续发包（客户端发输入，服务器发状态），所以确认信息<strong>捎带在每个数据包的头部</strong>里，几乎没有单独的 ACK 包。由于每个包都带"最近 32 个包的接收情况"，即使一半的包都丢了，发送方仍然能收到足够的确认信息。这比 TCP 的"一个 ACK 丢了就只能等下一个"要健壮得多。</p></div>
+
+  <h2>8.4 超时重传：RTT、RTO 与退避</h2>
+  <h3>测量 RTT</h3>
+  <p>发送时在包头写入当前时间 <code>ts</code>，接收方在确认中原样回显，发送方收到后 <code>rtt = now − ts</code>。因为回显的是<strong>那一次发送</strong>的时间戳，重传的包也能被正确采样，不存在重传歧义。计算 RTO 时直接套用 RFC 6298 的公式（第 3 章），差别在于各个参数可以自由调整：</p>
+  <div class="tbl"><table>
+    <tr><th>参数</th><th>TCP（Linux）</th><th>可靠 UDP 常见取值</th><th>考虑</th></tr>
+    <tr><td>RTO 下限</td><td>200 ms</td><td>30～100 ms（KCP 极速模式 30 ms）</td><td>越小重传越快，但 RTT 抖动大时会产生伪重传</td></tr>
+    <tr><td>超时后退避</td><td>× 2（指数）</td><td>× 1.5（KCP）、固定不退避、或设上限（如不超过 4×SRTT）</td><td>退避是为了在严重拥塞时让网络喘口气；实时应用更怕等</td></tr>
+    <tr><td>定时器粒度</td><td>每连接一个重传定时器</td><td>每个包各自记录 <code>resend_at</code>，由一个固定周期的 update 统一检查</td><td>按包定时更灵活；update 周期（KCP 的 interval，常设 10 ms）决定了时延精度</td></tr>
+    <tr><td>快速重传阈值</td><td>3 个重复 ACK</td><td>被后续包"跳过" 2 次（KCP resend=2）</td><td>越小越快，但对乱序越敏感</td></tr>
+  </table></div>
+
+  <h3>快速重传：用"跳过次数"代替"重复 ACK"</h3>
+  <p>有了逐包确认或 ACK 位图，就不需要靠重复 ACK 去猜了：每当发送方得知某个比 X 更大的包已被收到，就给 X 的 <code>fastack</code> 计数加一；计数达到阈值就立即重传 X。图 8-2 中的 101 已经被 102、103、105、108 跳过了 4 次。</p>
+  <div class="co deep"><span class="h">🔬 实现细节：别对刚重传的包重复计数</span><p>如果 X 刚被重传过，那些在重传<em>之前</em>就已经发出的更大的包，它们的确认会继续"跳过" X，导致 X 被反复快速重传。严谨的做法是：只有<strong>发送时间晚于 X 最近一次发送</strong>的包被确认，才算一次有效跳过（这就是 Linux RACK 算法的思想）。KCP 选择了更简单的做法：照常计数，但用 <code>fastlimit</code>（默认 5）限制一个包最多被快速重传几次——宁可多发一点，也不要等。本书的仿真程序两种都实现了。</p></div>
+
+  <h2>8.5 三种 ARQ 策略</h2>
+  <p>ARQ（Automatic Repeat reQuest，自动重传请求）是"确认 + 超时重传"这一类机制的统称。按照<strong>一次允许多少个未确认的包</strong>和<strong>出错时重传哪些包</strong>，分为三种：</p>
+  <figure>
+  <svg viewBox="0 0 860 340" xmlns="http://www.w3.org/2000/svg">
+    <text x="140" y="20" text-anchor="middle" class="b">停等 ARQ（窗口 = 1）</text>
+    <text x="430" y="20" text-anchor="middle" class="b">回退 N 步 GBN（窗口 = 4）</text>
+    <text x="720" y="20" text-anchor="middle" class="b">选择重传 SR（窗口 = 4）</text>
+    <line x1="285" y1="8" x2="285" y2="332" stroke="#E5E7EB"/><line x1="575" y1="8" x2="575" y2="332" stroke="#E5E7EB"/>
+    <!-- SW -->
+    <line x1="50" y1="34" x2="50" y2="320" stroke="#9CA3AF"/><line x1="230" y1="34" x2="230" y2="320" stroke="#9CA3AF"/>
+    <g stroke-width="1.4">
+      <line x1="50" y1="44" x2="228" y2="64" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="230" y1="68" x2="52" y2="88" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="50" y1="94" x2="140" y2="104" stroke="#B91C1C"/>
+      <line x1="50" y1="200" x2="228" y2="220" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="230" y1="224" x2="52" y2="244" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="50" y1="250" x2="228" y2="270" stroke="#4B5563" marker-end="url(#a)"/>
+    </g>
+    <text x="142" y="110" class="b" style="fill:#B91C1C">✕</text>
+    <g class="xs"><text x="60" y="44">1</text><text x="150" y="86">ACK1</text><text x="60" y="94">2</text><text x="60" y="150" style="fill:#B91C1C">超时</text><text x="60" y="198" style="fill:#2F5BD3">重传 2</text><text x="150" y="242">ACK2</text><text x="60" y="250">3</text></g>
+    <text x="140" y="300" text-anchor="middle" class="xs">任何时刻最多 1 个包在途</text>
+    <text x="140" y="316" text-anchor="middle" class="xs">简单，但信道大部分时间空闲</text>
+    <!-- GBN -->
+    <line x1="330" y1="34" x2="330" y2="320" stroke="#9CA3AF"/><line x1="530" y1="34" x2="530" y2="320" stroke="#9CA3AF"/>
+    <g stroke-width="1.3">
+      <line x1="330" y1="44" x2="528" y2="62" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="330" y1="54" x2="430" y2="63" stroke="#B91C1C"/>
+      <line x1="330" y1="64" x2="528" y2="82" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="330" y1="74" x2="528" y2="92" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="530" y1="66" x2="332" y2="100" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="530" y1="86" x2="332" y2="120" stroke="#C2410C" marker-end="url(#ao)"/>
+      <line x1="530" y1="96" x2="332" y2="130" stroke="#C2410C" marker-end="url(#ao)"/>
+      <line x1="330" y1="190" x2="528" y2="208" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="330" y1="200" x2="528" y2="218" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="330" y1="210" x2="528" y2="228" stroke="#2F5BD3" marker-end="url(#ab)"/>
+    </g>
+    <text x="432" y="70" class="b" style="fill:#B91C1C">✕</text>
+    <g class="xs"><text x="300" y="48">1</text><text x="300" y="58" style="fill:#B91C1C">2</text><text x="300" y="68">3</text><text x="300" y="78">4</text>
+      <text x="536" y="84" style="fill:#C2410C">丢弃 3</text><text x="536" y="98" style="fill:#C2410C">丢弃 4</text>
+      <text x="340" y="148" style="fill:#C2410C">ACK1 ACK1 ACK1</text>
+      <text x="340" y="172" style="fill:#B91C1C">2 超时 → 从 2 开始全部重发</text>
+      <text x="290" y="204" style="fill:#2F5BD3">2 3 4</text></g>
+    <text x="430" y="300" text-anchor="middle" class="xs">接收方只收按序的包，乱序全丢</text>
+    <text x="430" y="316" text-anchor="middle" class="xs">接收端简单，但丢一个要重发一窗</text>
+    <!-- SR -->
+    <line x1="620" y1="34" x2="620" y2="320" stroke="#9CA3AF"/><line x1="820" y1="34" x2="820" y2="320" stroke="#9CA3AF"/>
+    <g stroke-width="1.3">
+      <line x1="620" y1="44" x2="818" y2="62" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="620" y1="54" x2="720" y2="63" stroke="#B91C1C"/>
+      <line x1="620" y1="64" x2="818" y2="82" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="620" y1="74" x2="818" y2="92" stroke="#4B5563" marker-end="url(#a)"/>
+      <line x1="820" y1="66" x2="622" y2="100" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="820" y1="86" x2="622" y2="120" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="820" y1="96" x2="622" y2="130" stroke="#15803D" marker-end="url(#ag)"/>
+      <line x1="620" y1="140" x2="818" y2="158" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="820" y1="162" x2="622" y2="196" stroke="#15803D" marker-end="url(#ag)"/>
+    </g>
+    <text x="722" y="70" class="b" style="fill:#B91C1C">✕</text>
+    <g class="xs"><text x="590" y="48">1</text><text x="590" y="58" style="fill:#B91C1C">2</text><text x="590" y="68">3</text><text x="590" y="78">4</text>
+      <text x="826" y="84" style="fill:#15803D">缓存</text><text x="826" y="98" style="fill:#15803D">缓存</text>
+      <text x="632" y="106" style="fill:#15803D">ACK1</text><text x="632" y="126" style="fill:#15803D">SACK3</text><text x="680" y="136" style="fill:#15803D">SACK4</text>
+      <text x="580" y="144" style="fill:#2F5BD3">只重传 2</text>
+      <text x="632" y="214" style="fill:#15803D">UNA=5（2 补上后 3、4 一起交付）</text></g>
+    <text x="720" y="300" text-anchor="middle" class="xs">接收方缓存乱序包，只重传缺的</text>
+    <text x="720" y="316" text-anchor="middle" class="xs">最高效，但两端都要维护缓冲</text>
+  </svg>
+  <figcaption><b>图 8-3</b> 三种 ARQ：停等每次一个；GBN 出错后"回退"到丢失点全部重发；SR 只重发真正丢失的包</figcaption>
+  </figure>
+  <h3>信道利用率</h3>
+  <p>设发送一个包需要 T（发送时延 = 包长 / 带宽），往返时延 RTT，窗口 W 个包，无丢包时的利用率：</p>
+<!--code:text:滑动窗口的信道利用率-->
+U = min(1,  W × T / (T + RTT))
+
+停等（W=1）：T = 1 ms（1200 字节 @ ~10 Mbps），RTT = 60 ms  →  U = 1 / 61 ≈ 1.6%
+滑动窗口 W=64：                                         →  U = min(1, 64 / 61) = 100%
+跑满带宽所需的最小窗口 W ≥ (T + RTT) / T ≈ RTT / T = 带宽时延积（以包为单位）
+<!--/code-->
+  <p>这就是为什么第 3 章说"窗口要至少等于 BDP"。三种 ARQ 的完整对比：</p>
+  <div class="tbl"><table>
+    <tr><th></th><th>停等</th><th>回退 N 步（GBN）</th><th>选择重传（SR）</th></tr>
+    <tr><td>发送窗口</td><td>1</td><td>N</td><td>N</td></tr>
+    <tr><td>接收窗口</td><td>1</td><td>1（只收按序包）</td><td>N（缓存乱序包）</td></tr>
+    <tr><td>确认方式</td><td>逐包</td><td>累计确认</td><td>逐包 / 选择确认（+ 累计）</td></tr>
+    <tr><td>出错时重传</td><td>当前包</td><td>从丢失包开始的整个窗口</td><td>只重传丢失的包</td></tr>
+    <tr><td>序号空间要求</td><td>≥ 2</td><td>≥ N + 1</td><td><strong>≥ 2N</strong>（否则新旧包混淆）</td></tr>
+    <tr><td>适用</td><td>低速 / 简单链路</td><td>低误码率链路</td><td>高时延、有丢包的链路（TCP+SACK、KCP、QUIC 都属于此类）</td></tr>
+  </table></div>
+
+  <h2>8.6 滑动窗口与流量控制</h2>
+  <p>发送端维护三个窗口取最小值：<code>可发送数 = min(本地发送窗口, 对端通告的接收窗口 wnd, 拥塞窗口 cwnd) − 在途包数</code>。接收端在每个包头里填写 <code>wnd = 接收缓冲区剩余槽位</code>。</p>
+  <ul>
+    <li><strong>窗口为 0 时</strong>：和 TCP 一样会有"窗口更新包丢了导致双方死等"的风险。KCP 的做法是发送方定时发送 <code>WASK</code>（询问窗口）命令，接收方回 <code>WINS</code>（告知窗口）——相当于 TCP 的零窗口探测。</li>
+    <li><strong>接收窗口要比发送窗口大</strong>：KCP 默认发送窗口 32、接收窗口 128。因为接收方还要容纳乱序到达的包，接收窗口太小时，乱序包会因为"超出窗口"被丢弃，然后被重传。</li>
+  </ul>
+
+  <h2>8.7 乱序处理与去重：接收端环形缓冲</h2>
+  <figure>
+  <svg viewBox="0 0 860 240" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="24" class="b">接收窗口 = 8 个槽位，下标 = sn % 8；rcv_nxt = 101（下一个要交付的包）</text>
+    <g class="mono" text-anchor="middle">
+      <rect x="60" y="44" width="90" height="56" rx="6" fill="#FDEEEE" stroke="#B91C1C" stroke-width="2"/><text x="105" y="66">槽 5</text><text x="105" y="88" style="fill:#B91C1C">101 空</text>
+      <rect x="154" y="44" width="90" height="56" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="199" y="66">槽 6</text><text x="199" y="88" style="fill:#15803D">102 ✓</text>
+      <rect x="248" y="44" width="90" height="56" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="293" y="66">槽 7</text><text x="293" y="88" style="fill:#15803D">103 ✓</text>
+      <rect x="342" y="44" width="90" height="56" rx="6" fill="#fff" stroke="#9CA3AF"/><text x="387" y="66">槽 0</text><text x="387" y="88">104 空</text>
+      <rect x="436" y="44" width="90" height="56" rx="6" fill="#EAF7EF" stroke="#15803D"/><text x="481" y="66">槽 1</text><text x="481" y="88" style="fill:#15803D">105 ✓</text>
+      <rect x="530" y="44" width="90" height="56" rx="6" fill="#fff" stroke="#9CA3AF"/><text x="575" y="66">槽 2</text><text x="575" y="88">106 空</text>
+      <rect x="624" y="44" width="90" height="56" rx="6" fill="#fff" stroke="#9CA3AF"/><text x="669" y="66">槽 3</text><text x="669" y="88">107 空</text>
+      <rect x="718" y="44" width="90" height="56" rx="6" fill="#fff" stroke="#9CA3AF"/><text x="763" y="66">槽 4</text><text x="763" y="88">108 空</text>
+    </g>
+    <text x="105" y="120" text-anchor="middle" class="xs" style="fill:#B91C1C">↑ rcv_nxt</text>
+    <text x="763" y="120" text-anchor="middle" class="xs">↑ rcv_nxt + 窗口 − 1</text>
+    <g class="sm">
+      <text x="40" y="152">• 收到 <tspan class="b">sn &lt; 101</tspan> 或 <tspan class="b">槽位已占用</tspan> → 重复包：<tspan style="fill:#B91C1C">丢弃，但仍要回 ACK</tspan>（对方没收到上次的确认才会重发）</text>
+      <text x="40" y="176">• 收到 <tspan class="b">sn ≥ 109</tspan> → 超出窗口：丢弃（对方之后会重传），不回 ACK 或只回 una</text>
+      <text x="40" y="200">• 收到 <tspan class="b">101</tspan> → 放入槽 5，然后从 rcv_nxt 开始把连续的 101、102、103 依次交付应用，rcv_nxt 变为 104</text>
+      <text x="40" y="224">• "可靠 · 无序"通道：收到即交付，但同样用这个位图记录"已收过哪些"来去重</text>
+    </g>
+  </svg>
+  <figcaption><b>图 8-4</b> 接收端用环形缓冲同时完成三件事：乱序暂存、按序交付、重复检测</figcaption>
+  </figure>
+<!--code:cpp:接收端：乱序重排 + 去重 + 按序交付（可靠有序通道）-->
+struct Receiver {
+    static constexpr uint32_t kWnd = 128;
+    uint32_t rcvNxt = 0;                                   // 下一个期望交付的 sn
+    std::array<std::optional<std::string>, kWnd> slots;    // 环形缓冲，下标 sn % kWnd
+    std::vector<uint32_t> ackList;                         // 待回复的确认
+
+    void OnData(uint32_t sn, std::string payload, auto&& deliver) {
+        ackList.push_back(sn);                             // ① 不管新旧，先记下要确认（重复包也要确认）
+        if (SeqBefore(sn, rcvNxt)) return;                 // ② 已经交付过的旧包：去重
+        if (SeqDiff(sn, rcvNxt) >= int32_t(kWnd)) return;  // ③ 超出接收窗口：丢弃，等对方重传
+        auto& slot = slots[sn % kWnd];
+        if (slot) return;                                  // ④ 窗口内的重复包：去重
+        slot = std::move(payload);                         // ⑤ 乱序暂存
+        while (slots[rcvNxt % kWnd]) {                     // ⑥ 从 rcvNxt 起把连续的包按序交付
+            deliver(std::move(*slots[rcvNxt % kWnd]));
+            slots[rcvNxt % kWnd].reset();
+            ++rcvNxt;
+        }
+    }
+    uint16_t Wnd() const { /* 剩余空槽数，填进包头的 wnd */ return uint16_t(kWnd - CountUsed()); }
+    uint32_t Una() const { return rcvNxt; }
+    uint32_t AckBits() const {                             // una+1 .. una+32 的接收位图
+        uint32_t bits = 0;
+        for (uint32_t i = 1; i <= 32 && i < kWnd; ++i) if (slots[(rcvNxt + i) % kWnd]) bits |= 1u << (i - 1);
+        return bits;
+    }
+    uint32_t CountUsed() const { uint32_t n = 0; for (auto& s : slots) n += s.has_value(); return n; }
+};
+<!--/code-->
+
+  <h2>8.8 发送端：定时驱动的主循环</h2>
+  <p>可靠 UDP 通常由一个固定周期（例如每 10 ms）调用的 <code>Update(now)</code> 驱动：检查超时、处理快速重传、在窗口允许时发送新数据、把 ACK 和数据合并成包发出去。</p>
+<!--code:cpp:发送端：超时重传 + 快速重传 + 窗口发送（选择重传）-->
+struct Segment { uint32_t sn; uint32_t ts; uint32_t resendAt; uint32_t rto; int xmit = 0; int fastack = 0; std::string data; };
+
+struct Sender {
+    std::deque<std::string> sendQueue;         // 应用提交、尚未进入窗口的消息
+    std::map<uint32_t, Segment> sendBuf;       // 已发送未确认（按 sn 有序）
+    uint32_t sndNxt = 0, sndUna = 0, rmtWnd = 128, sndWnd = 64;
+    RttEstimator rtt;                          // SRTT / RTTVAR / RTO（RFC 6298）
+    int fastResend = 2; double backoff = 1.5;  // KCP 极速模式的取值
+
+    void OnAck(uint32_t una, uint32_t ackBits, uint32_t echoTs, uint32_t now) {
+        rtt.Sample(now - echoTs);                                  // 时间戳回显：重传包也能采样
+        for (auto it = sendBuf.begin(); it != sendBuf.end() && SeqBefore(it->first, una);) it = sendBuf.erase(it);
+        uint32_t maxAcked = una - 1;
+        for (int i = 0; i < 32; ++i) if (ackBits >> i & 1) { sendBuf.erase(una + 1 + i); maxAcked = una + 1 + i; }
+        for (auto& [sn, seg] : sendBuf) if (SeqBefore(sn, maxAcked)) seg.fastack++;   // 被更大的包"跳过"
+        sndUna = sendBuf.empty() ? sndNxt : sendBuf.begin()->first;
+    }
+
+    void Update(uint32_t now, auto&& output) {
+        for (auto& [sn, seg] : sendBuf) {
+            bool timeout = int32_t(now - seg.resendAt) >= 0;
+            bool fast = fastResend > 0 && seg.fastack >= fastResend;
+            if (!timeout && !fast) continue;
+            if (timeout) seg.rto = std::min<uint32_t>(uint32_t(seg.rto * backoff), 10000);   // 温和退避
+            seg.xmit++; seg.fastack = 0; seg.ts = now; seg.resendAt = now + seg.rto;
+            output(seg);                                                                     // 只重传这一个
+        }
+        uint32_t cwnd = std::min(sndWnd, rmtWnd);                                            // (+ 拥塞窗口)
+        while (!sendQueue.empty() && SeqDiff(sndNxt, sndUna) < int32_t(cwnd)) {
+            Segment seg{sndNxt++, now, now + rtt.Rto(), rtt.Rto(), 1, 0, std::move(sendQueue.front())};
+            sendQueue.pop_front();
+            output(seg);
+            sendBuf.emplace(seg.sn, std::move(seg));
+        }
+    }
+};
+<!--/code-->
+
+  <h2>8.9 拥塞避免：关掉它之前要想清楚</h2>
+  <p>可靠 UDP 的拥塞控制有三种常见取舍：</p>
+  <div class="tbl"><table>
+    <tr><th>策略</th><th>做法</th><th>适用</th></tr>
+    <tr><td>照搬 TCP</td><td>在用户态实现慢启动 / AIMD，或 CUBIC、BBR（QUIC 就是这样）</td><td>大流量传输（文件、视频），需要与其他流公平共享</td></tr>
+    <tr><td>关闭拥塞窗口 + 限速</td><td>KCP <code>nc=1</code>，再用令牌桶限制最大发送速率；发送窗口仍受接收窗口限制</td><td>游戏：流量小（几 KB/s～几十 KB/s）而稳定，远低于瓶颈带宽，丢包多为随机丢包</td></tr>
+    <tr><td>基于时延的降级</td><td>监测 RTT 相对基线的上升（排队在加剧）或丢包率突增，主动降低快照频率 / 精度</td><td>游戏、实时音视频（WebRTC 的 GCC 算法就是基于时延梯度）</td></tr>
+  </table></div>
+<!--code:cpp:令牌桶限速：允许短时突发，长期速率不超过 rate-->
+struct TokenBucket {
+    double rate, burst, tokens, last;            // rate：字节/秒；burst：桶容量
+    bool TrySend(size_t bytes, double nowSec) {
+        tokens = std::min(burst, tokens + (nowSec - last) * rate);
+        last = nowSec;
+        if (tokens < bytes) return false;        // 令牌不够：本轮先不发（留在队列里）
+        tokens -= bytes;
+        return true;
+    }
+};
+<!--/code-->
+
+  <h2>8.10 用带宽换延迟：冗余发送与 FEC</h2>
+  <p>重传至少要付出一个 RTT 的代价。如果能<strong>预先多发一些数据</strong>，让接收方在部分丢包时自己恢复出原文，就可以完全不等重传。</p>
+  <div class="cards">
+    <div class="card"><div class="t">冗余发送（游戏最常用）</div><p>每个包除了本帧的输入，还捎带最近 k 帧的输入。只要连续 k+1 个包没有全丢，接收方就能拿到每一帧。独立丢包率为 p 时，残余丢失率约为 p<sup>k+1</sup>：p=10%、k=3 时只有万分之一。输入数据很小（几字节到几十字节），冗余几乎不增加带宽。</p></div>
+    <div class="card"><div class="t">FEC 前向纠错</div><p>每 n 个数据包额外生成 m 个校验包，收到任意 n 个就能恢复全部。最简单的是异或（m=1）；Reed-Solomon 码可以任意配置 (n, m)。实时音视频（WebRTC 的 FlexFEC / ULPFEC）、kcp-go、加速器广泛使用。</p></div>
+  </div>
+  <figure>
+  <svg viewBox="0 0 860 170" xmlns="http://www.w3.org/2000/svg">
+    <g class="mono" text-anchor="middle">
+      <rect x="40" y="30" width="110" height="40" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="95" y="55">A = 1011</text>
+      <rect x="170" y="30" width="110" height="40" rx="6" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="4 3"/><text x="225" y="55" style="fill:#B91C1C">B = 0110 ✕</text>
+      <rect x="300" y="30" width="110" height="40" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="355" y="55">C = 1100</text>
+      <rect x="430" y="30" width="140" height="40" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="500" y="55">P = A⊕B⊕C = 0001</text>
+    </g>
+    <text x="305" y="20" text-anchor="middle" class="xs">发送方：每 3 个数据包附带 1 个异或校验包（多 33% 带宽）</text>
+    <line x1="590" y1="50" x2="640" y2="50" stroke="#15803D" stroke-width="1.8" marker-end="url(#ag)"/>
+    <rect x="650" y="30" width="190" height="40" rx="6" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="745" y="55" text-anchor="middle" class="mono" style="fill:#15803D">B = A⊕C⊕P = 0110</text>
+    <text x="430" y="104" text-anchor="middle" class="sm">接收方收到 A、C、P，B 丢失：不需要等重传，直接异或恢复。任意一个丢失都能恢复，但同一组丢两个就不行。</text>
+    <text x="430" y="130" text-anchor="middle" class="xs">FEC 的代价是固定的带宽开销（无论是否丢包都要发），收益是零 RTT 恢复；</text>
+    <text x="430" y="148" text-anchor="middle" class="xs">它对随机丢包很有效，对连续的突发丢包（burst loss）效果差，需要交织（interleaving）或更强的编码</text>
+  </svg>
+  <figcaption><b>图 8-5</b> 最简单的 FEC：异或校验包可以恢复同组中任意一个丢失的包</figcaption>
+  </figure>
+
+  <h2>8.11 分片、连接管理与安全</h2>
+  <h3>分片与重组</h3>
+  <p>大于 MTU 的消息在发送端切片，每片独立编号（占用连续的 sn），并在 <code>frg</code> 字段中标注"后面还有几片"。接收端按序收到 <code>frg = 0</code> 的那一片时，把前面连续的片拼接成完整消息交给应用。KCP 正是这样做的：在消息模式下，<code>ikcp_recv</code> 只有在一条消息的所有分片都到齐后才返回。</p>
+  <h3>连接管理</h3>
+  <ul>
+    <li><strong>握手</strong>：客户端发 CONNECT；服务器<strong>不分配会话资源</strong>，回一个带 Cookie（如 HMAC(客户端地址, 时间, 密钥)）的 CHALLENGE；客户端带着 Cookie 再发一次，服务器校验通过才分配 conv 和会话。这同时防住了"伪造源地址耗尽会话"（SYN Flood 的 UDP 版）和"反射放大"。服务器的第一次回复不应该比客户端的请求大。</li>
+    <li><strong>会话识别</strong>：用 conv 而不是四元组查找会话；收到同一 conv 但源地址变了的包（NAT 重绑定），验证后更新地址。</li>
+    <li><strong>心跳与断线</strong>：没有数据时定期发 PING（顺便测 RTT、保活 NAT 映射）；N 秒内没有收到对方任何包就判定断线。</li>
+    <li><strong>关闭</strong>：发 CLOSE 并重复几次（它也可能丢），对方收到后释放资源；最终仍以超时兜底。</li>
+  </ul>
+  <h3>安全</h3>
+  <p>UDP 包很容易伪造和篡改。面向公网的可靠 UDP 至少需要：<strong>认证加密</strong>（AES-GCM / ChaCha20-Poly1305，或直接用 DTLS），包含序号的 nonce 防<strong>重放</strong>，握手阶段的<strong>密钥协商</strong>（如 ECDH）。KCP 不提供任何安全能力，kcp-go 提供了多种对称加密可选；QUIC 则强制 TLS 1.3。</p>
+
+  <h2>8.12 实测：仿真对比各种 ARQ 策略</h2>
+  <p>配套程序 <code>d2_rudp_sim</code> 用虚拟时钟仿真：链路 1 包/ms、RTT ≈ 60 ms、双向独立丢包 5%、1% 的包"绕路"制造轻微乱序，传输 2000 个包。各方案的协议逻辑与本章代码同构。</p>
+  <div class="co net"><span class="h">🧪 实测证据（d2 · 实验 A）：批量传输 2000 个包</span>
+  <div class="term"><div class="bar">d2_rudp_sim.exe · 实验 A（固定随机种子，可复现）</div><pre>实验 A：批量传输 2000 个包 | 链路 1 包/ms | RTT≈60ms | 双向丢包 5% | 理论下限≈2060ms
+方案                                   完成(ms) 发送次数 重传占比
+A1 停等 ARQ（窗口=1）                  <span class="bad">171807</span>     2207     9.4%
+A2 回退N步 GBN（窗口64）              <span class="bad"> 36407</span>    <span class="bad">10036    80.1%</span>
+A3 选择重传 SR（窗口64，仅超时重传）       7820     2164     7.6%
+A4 SR + 快速重传（阈值3）              <span class="ok">  4000</span>     2184     8.4%
+T  类TCP：A4+SACK+延迟ACK+RTO×2+Reno     <span class="hl"> 35563</span>     2129     6.1%
+T' 类TCP，但关闭拥塞控制              <span class="ok">  4046</span>     2197     9.0%
+K  类KCP极速：快重传2+立即ACK+RTO×1.5    <span class="ok">  3609</span>     <span class="hl">2844    29.7%</span></pre></div>
+  <p>逐行解读：</p>
+  <ul>
+    <li><strong>A1 停等</strong>：每个包至少等 1 个 RTT，2000 × 61 ms ≈ 122 s，再加上丢包后的超时等待，171 s。和 8.5 节"利用率 1.6%"的计算吻合。</li>
+    <li><strong>A2 GBN</strong>：窗口 64 本应很快，但每丢一个包就要把后面整窗重发一遍，<strong>80% 的发送是重传</strong>，反而只比停等好 4.7 倍。</li>
+    <li><strong>A3 → A4</strong>：同样是选择重传，加上快速重传后耗时减半——绝大多数丢包在约 1 个 RTT 内就被发现，不必等 200 ms 的 RTO。</li>
+    <li><strong>T vs T'</strong>：两者唯一的区别是 Reno 拥塞控制。5% 的随机丢包让 Reno 不停地减半窗口，耗时多了近 9 倍。<em>（再次提醒：这里的"类 TCP"缺少现代 Linux 的 TLP / RACK / PRR / CUBIC 等优化，绝对值偏悲观，但"随机丢包被误判为拥塞"的方向是真实的。）</em></li>
+    <li><strong>K 类 KCP</strong>：最快，但重传占比 29.7%，是 A4 的 3.5 倍——更激进的快速重传阈值和 KCP 式计数带来了大量"其实没丢"的重传。这就是 KCP 官方描述的"<strong>以 10%～20% 的带宽浪费换取更低的延迟</strong>"，这里因为仿真丢包率较高，浪费得更多。</li>
+  </ul></div>
+
+  <h3>交互实验：自己调参数</h3>
+  <p>下面的仿真器与 d2 同构（为了在浏览器里秒出结果，只传 200 个包、去掉了延迟确认和拥塞控制）。拖动丢包率、窗口和 RTT，观察各协议的变化；方格颜色表示每个包被发送的次数（绿 1 次、黄 2 次、橙 3 次、红 4 次以上）。</p>
+  <div class="lab" id="lab-arq">
+    <div class="t">🧪 交互实验 2 · ARQ 协议仿真器</div>
+    <div class="row">
+      <label>协议：<select id="arq-mode" style="font:inherit;font-size:13.5px;padding:3px 6px;border:1px solid #E5E7EB;border-radius:6px">
+        <option value="sw">停等 ARQ</option><option value="gbn">回退 N 步 GBN</option><option value="sr">选择重传 SR</option><option value="srf" selected>SR + 快速重传(3)</option><option value="kcp">类 KCP 极速模式</option></select></label>
+      <label>丢包率 <input type="range" id="arq-loss" min="0" max="30" value="5"> <b id="arq-loss-v"></b></label>
+    </div>
+    <div class="row">
+      <label>窗口 <input type="range" id="arq-wnd" min="1" max="64" value="32"> <b id="arq-wnd-v"></b></label>
+      <label>RTT <input type="range" id="arq-rtt" min="20" max="300" step="10" value="60"> <b id="arq-rtt-v"></b></label>
+      <label>随机种子 <input type="number" id="arq-seed" value="7" min="1" max="99"></label>
+      <button class="st-btn" id="arq-run">换一组随机数</button>
+    </div>
+    <div id="arq-grid" style="margin:8px 0;line-height:0"></div>
+    <div class="out" id="arq-out"></div>
+  </div><!--/lab-->
+  <p>建议做这几个小实验：① 丢包率调到 0，比较停等和 SR 的耗时，体会窗口的作用；② 窗口调到 1，五种协议几乎一样，说明它们的差别全部来自"窗口内的丢包怎么处理"；③ 丢包率调到 20%，看 GBN 的红色方格；④ RTT 调到 300 ms，看快速重传相对于超时重传的优势如何放大。</p>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>报文头：conv（会话 ID）、sn、una、ack_bits、ts、wnd、chan、frg；<strong>按包编号</strong>，ACK 捎带在数据包里。</li>
+    <li>序号比较用 <code>int32_t(a - b) &gt; 0</code>；窗口必须小于序号空间的一半（SR 要求序号空间 ≥ 2N）。</li>
+    <li>确认 = UNA（累计，抗 ACK 丢失）+ 逐包 ACK 或位图（选择确认，避免多余重传）。</li>
+    <li>时间戳回显测 RTT，避免重传歧义；RTO 下限、退避倍数、快速重传阈值都可以按业务调。</li>
+    <li>停等利用率 ≈ T/(T+RTT)；GBN 丢一个重发一窗；<strong>SR 只重发丢失的包</strong>，是现代协议的共同选择。</li>
+    <li>接收端环形缓冲：乱序暂存、按序交付、重复检测（重复包也要回 ACK）。</li>
+    <li>拥塞：照搬 TCP / 关窗 + 令牌桶限速 / 基于时延降级；冗余发送与 FEC 用带宽换零 RTT 恢复。</li>
+    <li>连接管理：Cookie 握手防伪造与放大、conv 识别会话、心跳、超时断线；公网必须加密认证。</li>
+    <li>仿真：SR + 快速重传比 SR 快一倍；GBN 80% 都是重传；随机丢包下 Reno 慢近 9 倍；类 KCP 最快但多花约 30% 带宽。</li>
+  </ul></div>
+
+  <details class="quiz"><summary>思考题 1：为什么选择重传要求序号空间至少是窗口的 2 倍？</summary>
+  <p>设窗口为 N。接收方收完一整窗 0～N−1 并发出确认后，接收窗口移动到 N～2N−1。如果这些确认全部丢失，发送方会重传 0～N−1。若序号空间只有 N（序号模 N），重传的旧包 0 和新窗口期望的包 N 编号相同，接收方会把旧包当成新包接收。序号空间 ≥ 2N 时，新旧窗口的序号不重叠，才能区分。</p></details>
+  <details class="quiz"><summary>思考题 2：为什么接收方收到重复包时还要回 ACK？</summary>
+  <p>发送方重传一个包，说明它没有收到这个包的确认——要么数据包丢了，要么 ACK 丢了。如果是 ACK 丢了，接收方其实已经收到过数据，若此时对重复包不回 ACK，发送方会一直重传下去。所以去重只是"不重复交付给应用"，确认必须照发。</p></details>
+  <details class="quiz"><summary>思考题 3：帧同步游戏中，"每个包冗余携带最近 3 帧输入"和"用 KCP 可靠传输每帧输入"相比，各有什么优缺点？</summary>
+  <p>冗余发送：不需要等待重传，单包丢失对时延零影响；独立丢包下残余丢失率约 p⁴，非常低；输入数据很小，冗余开销可以忽略。缺点是不能保证 100% 送达（连续 4 个包全丢时缺帧），所以通常还要配合"缺帧时通过可靠通道请求补发"。KCP：保证每帧都送达且有序，但丢包时至少等一次重传（约 1 个 RTT），时延抖动更大。实际工程中常两者结合：冗余发送解决绝大部分丢包，可靠通道兜底。</p></details>
+  <details class="quiz"><summary>思考题 4：如果你的可靠 UDP 只用 UNA 而不用任何选择确认，会退化成哪种 ARQ？</summary>
+  <p>发送方只知道"una 之前都收到了"，不知道 una 之后哪些已收到。如果接收端会缓存乱序包，发送方在超时时只重传 una 那一个包（下一个 ACK 的 una 会跳到更后面），效果接近选择重传但发现丢包很慢（只能靠超时、每 RTT 修一个洞）；如果发送方超时后把 una 之后的全部重发，就退化成了回退 N 步。这正是 TCP 早期没有 SACK 时的困境。</p></details>
+</section>

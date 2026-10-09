@@ -1,0 +1,155 @@
+<div class="part-head" data-toc="第五部分 · 工业实现">
+  <div class="no">PART FIVE</div>
+  <h1>第五部分　工业实现：标准库里的排序</h1>
+  <p>面试中“说说 std::sort 的实现”几乎是必考题。知道它是 introsort 只是第一步，还要清楚阈值、兜底、比较器的约束，以及各种 STL 排序接口应该怎么选。</p>
+</div>
+
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>std::sort 家族与严格弱序</h1>
+    <p class="lead">std::sort 是快排、堆排、插排三者的组合；stable_sort 是带缓冲的归并；partial_sort 是堆；nth_element 是快速选择。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>讲清 introsort 的三段结构，以及 MSVC 和 libstdc++ 的具体参数</li>
+    <li>会根据需求在 sort / stable_sort / partial_sort / nth_element 之间选择</li>
+    <li>理解严格弱序的四条要求，知道违反它在实测中会发生什么</li>
+    <li>了解 pdqsort、TimSort 这些现代排序算法改进了什么</li>
+  </ul></div>
+
+  <h2>8.1 introsort：快排做主体，堆排兜底，插排收尾</h2>
+  <p>introsort（内省排序）由 David Musser 在 1997 年提出。它解决的问题是：快排平均最快，但最坏 O(n²)。办法是<strong>一边快排一边数递归深度</strong>，深度超过阈值，说明 pivot 一直选得不好，就对当前子区间改用堆排序。C++11 起，标准要求 <code>std::sort</code> 的复杂度为 O(n log n)（以前只要求平均），这实际上就要求实现采用 introsort 一类的做法。</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <rect x="300" y="14" width="260" height="36" rx="18" fill="#111827"/><text x="430" y="37" text-anchor="middle" class="b wt">std::sort(first, last)</text>
+    <line x1="430" y1="50" x2="430" y2="74" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="280" y="76" width="300" height="40" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="430" y="101" text-anchor="middle" class="sm">区间长度 &gt; 阈值（MSVC 32 / libstdc++ 16）？</text>
+    <line x1="430" y1="116" x2="430" y2="140" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/><text x="438" y="134" class="xs" style="fill:#15803D">是</text>
+    <rect x="280" y="142" width="300" height="40" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="430" y="167" text-anchor="middle" class="sm">剩余深度预算 &gt; 0？</text>
+    <line x1="430" y1="182" x2="430" y2="206" stroke="#15803D" stroke-width="1.6" marker-end="url(#ag)"/><text x="438" y="200" class="xs" style="fill:#15803D">是</text>
+    <rect x="250" y="208" width="360" height="52" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="430" y="229" text-anchor="middle" class="b sm" style="fill:#2F5BD3">快排分区：三数取中 / ninther 选 pivot</text>
+    <text x="430" y="248" text-anchor="middle" class="xs">预算递减；递归较短一侧，循环处理较长一侧</text>
+    <path d="M610,234 H700 V96 H584" fill="none" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/>
+    <text x="708" y="170" class="xs" style="fill:#2F5BD3">处理子区间</text>
+    <path d="M280,162 H202" fill="none" stroke="#B91C1C" stroke-width="1.6" marker-end="url(#ar)"/><text x="214" y="154" class="xs" style="fill:#B91C1C">否：退化</text>
+    <rect x="12" y="138" width="188" height="48" rx="8" fill="#FDEEEE" stroke="#B91C1C"/><text x="106" y="159" text-anchor="middle" class="b sm" style="fill:#B91C1C">堆排序</text><text x="106" y="177" text-anchor="middle" class="xs">make_heap + sort_heap</text>
+    <path d="M280,96 H202" fill="none" stroke="#B91C1C" stroke-width="1.6" marker-end="url(#ar)"/>
+    <text x="210" y="88" class="xs" style="fill:#B91C1C">否：小区间</text>
+    <rect x="12" y="72" width="188" height="48" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="106" y="93" text-anchor="middle" class="b sm" style="fill:#15803D">插入排序</text><text x="106" y="111" text-anchor="middle" class="xs">MSVC 就地 / GCC 末尾统一一遍</text>
+    <text x="430" y="290" text-anchor="middle" class="sm">深度预算：libstdc++ 为 2⌊log₂n⌋；MSVC 每次分区把预算乘 3/4（相当于允许约 1.5·log₂n 次划分）</text>
+  </svg>
+  <figcaption><b>图 8-1</b>　introsort 的控制流：三种算法各自负责一种情况</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>实现</th><th>小区间阈值</th><th>pivot</th><th>深度预算</th><th>插排时机</th></tr>
+    <tr><td>libstdc++（GCC）</td><td>16</td><td>三数取中（取 first+1、mid、last−1，放到 first）</td><td>2⌊log₂n⌋</td><td>递归时跳过 ≤ 16 的区间，最后对整个数组做一遍插入排序：前 16 个有边界检查，之后<strong>无边界检查</strong></td></tr>
+    <tr><td>MSVC STL</td><td>32（<code>_ISORT_MAX</code>）</td><td>区间 &gt; 40 用 ninther，否则三数取中</td><td>每次分区 <code>_Ideal = _Ideal/2 + _Ideal/4</code></td><td>每个小区间就地插入排序</td></tr>
+    <tr><td>libc++（LLVM）</td><td>按类型调整</td><td>三数 / 九数取中</td><td>较新版本加入了深度限制</td><td>对算术类型使用无分支的块分区（BlockQuicksort 思路）</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">深入一层：MSVC 分区返回的是一个“相等区间”</span>
+    <p>MSVC 的 <code>_Partition_by_median_guess_unchecked</code> 返回一对迭代器 <code>[mid_first, mid_last)</code>，表示所有等于 pivot 的元素已经聚到中间，下一步只需要递归两侧。这相当于内置了三路划分，所以 E5 里大量重复（16 种值）的数据，<code>std::sort</code> 只要 9.68 ms，比本书的 Hoare 工程版（16.29 ms）快很多。</p>
+  </div>
+  <div class="co ver"><span class="h">实测 E5：qsort 为什么比 std::sort 慢 66%</span>
+    <p>100 万个随机 int：<code>qsort</code> 85.29 ms，<code>std::sort</code> 51.38 ms。<code>qsort</code> 的比较器通过函数指针、以 <code>const void*</code> 参数调用，没法内联，每次比较都是一次间接调用；<code>std::sort</code> 的比较器是模板参数，lambda 会被直接内联成一条 <code>cmp</code> 指令。这也是“C++ 模板比 C 回调更快”的经典例证。</p>
+  </div>
+
+  <h2>8.2 STL 排序接口怎么选</h2>
+  <div class="tbl"><table>
+    <tr><th>接口</th><th>算法</th><th>复杂度</th><th>稳定</th><th>额外内存</th><th>典型用途</th></tr>
+    <tr><td><code>std::sort</code></td><td>introsort</td><td>O(n log n)</td><td class="no">✘</td><td>O(log n) 栈</td><td>默认选择</td></tr>
+    <tr><td><code>std::stable_sort</code></td><td>归并（缓冲不够时用原地归并）</td><td>有缓冲 O(n log n)，否则 O(n log² n)</td><td class="yes">✔</td><td><strong>尝试分配</strong> O(n)</td><td>UI 层级、多关键字</td></tr>
+    <tr><td><code>std::partial_sort</code></td><td>堆选择 + sort_heap</td><td>O(n log K)</td><td class="no">✘</td><td>O(1)</td><td>排行榜前 K 名</td></tr>
+    <tr><td><code>std::nth_element</code></td><td>introselect</td><td>平均 O(n)</td><td class="no">✘</td><td>O(1)</td><td>中位数、第 K 近的敌人</td></tr>
+    <tr><td><code>std::partition</code></td><td>单次分区</td><td>O(n)</td><td class="no">✘</td><td>O(1)</td><td>把存活单位挪到前面</td></tr>
+    <tr><td><code>std::list::sort</code></td><td>归并</td><td>O(n log n)</td><td class="yes">✔</td><td>O(1)</td><td>链表</td></tr>
+    <tr><td><code>std::ranges::sort</code></td><td>同 <code>std::sort</code></td><td>同上</td><td class="no">✘</td><td>同上</td><td>C++20，支持投影：<code>ranges::sort(v, {}, &amp;Hero::hp)</code></td></tr>
+  </table></div>
+  <p><code>std::sort(std::execution::par, ...)</code>（C++17）可以多线程排序。在游戏客户端里一般不这么用，引擎通常有自己的任务系统，更常见的做法是在 Job 里把数据分块排序再归并，或者干脆把排序放到 GPU 上。</p>
+
+  <h3>Top-K：为什么 partial_sort 比 nth_element 还快</h3>
+  <!--bars {"title":"实测 E9：100 万个积分取前 100 名","unit":"ms","items":[["全量 std::sort",58.61,"r"],["nth_element + sort 前 K",5.35,"o"],["大小为 K 的小顶堆（流式）",0.41,"g"],["std::partial_sort",0.22,"b"]],"labw":220,"cap":"<b>图 8-2</b>　K 远小于 n 时，堆方法几乎只是把数据扫描一遍"} -->
+  <p>直觉上 <code>nth_element</code> 是 O(n)，<code>partial_sort</code> 是 O(n log K)，前者应该更快。但实测反过来了，因为 K = 100 远小于 n：堆里装着当前前 100 名，绝大多数新元素都比堆顶小，<strong>只比较一次就被丢掉</strong>，只有极少数需要入堆调整。实际工作量接近 n 次比较。<code>nth_element</code> 则要做好几轮完整的分区，每轮都有大量交换。<strong>K 很小用堆，K 和 n 同量级用 nth_element</strong>。</p>
+
+  <h2>8.3 严格弱序：比较器必须遵守的契约</h2>
+  <p>标准要求比较器 <code>comp</code> 是<strong>严格弱序</strong>（strict weak ordering），即满足：</p>
+  <div class="tbl"><table>
+    <tr><th>性质</th><th>要求</th><th>写成 <code>&lt;=</code> 会怎样</th></tr>
+    <tr><td>非自反</td><td><code>comp(a, a)</code> 必须为 false</td><td><span class="no">违反</span>：<code>a &lt;= a</code> 为 true</td></tr>
+    <tr><td>非对称</td><td><code>comp(a, b)</code> 为 true，则 <code>comp(b, a)</code> 为 false</td><td><span class="no">违反</span>：a == b 时两个方向都为 true</td></tr>
+    <tr><td>传递</td><td><code>comp(a, b)</code> 且 <code>comp(b, c)</code>，则 <code>comp(a, c)</code></td><td>成立</td></tr>
+    <tr><td>不可比的传递性</td><td>a~b 且 b~c，则 a~c（~ 表示“谁也不小于谁”）</td><td>—</td></tr>
+  </table></div>
+  <p>违反这个契约是<strong>未定义行为</strong>。具体后果取决于实现，下面是实测结果：</p>
+  <div class="term"><div class="bar">E7 · 比较器写成 &lt;=（64 个全相等的元素，数组左边是别人的内存 [0,9,9,9,9,9,9,9]）</div><pre>(a) libstdc++ 式无哨兵插排 + <=：<span class="bad">越界读 336 次；排序后数组里出现了 7 个从未出现过的 9</span>
+    <span class="bad">左侧内存被改成 [0,5,5,5,5,5,5,5]</span>
+    同一段代码改用 < ：越界读 0 次，左侧内存未被改写
+(b) MSVC std::sort + <=（2000 个相等元素，Release）：比较 14635 次，访问哨兵区 0 次
+    同样数据用 < ：比较 4006 次
+    （MSVC Debug 版会通过 _DEBUG_LT_PRED 断言 "invalid comparator"）</pre></div>
+  <p>原理：libstdc++ 的收尾插入排序在前 16 个元素之后不检查边界，它假设“前 16 个里一定有一个不大于 key 的元素能挡住它”。用 <code>&lt;=</code> 时，相等也算“小于”，key 会一直往左走，越过数组开头，读到别人的内存；后移操作又把别人的数据挪了进来、把 5 写了出去。<strong>这就是“比较器写错导致崩溃，而且崩溃点离 sort 很远”的来源</strong>。MSVC 的实现在这个例子里没有越界，但比较次数多了 3.6 倍；Debug 版会直接断言。不同实现表现不同，正说明这是 UB，不能依赖。</p>
+
+  <h3>常见的比较器错误</h3>
+<!--code:cpp:比较器：错误写法与正确写法-->
+struct Hero { int rank; float winRate; int id; };
+
+// ✘ 1：用 <= 或 >=
+auto bad1 = [](const Hero& a, const Hero& b) { return a.rank <= b.rank; };
+
+// ✘ 2：多字段写成“或”：a=(1,9) b=(2,1) 时 bad2(a,b) 和 bad2(b,a) 都为 true
+auto bad2 = [](const Hero& a, const Hero& b) { return a.rank < b.rank || a.winRate < b.winRate; };
+
+// ✘ 3：浮点里有 NaN：NaN 与任何数比较都为 false，破坏了“不可比”的传递性
+// ✘ 4：比较器依赖会变化的外部状态（排序过程中修改了 winRate、读了随机数、读了实时时间）
+
+// ✔ 字典序：用 std::tie 最不容易写错
+auto good = [](const Hero& a, const Hero& b) {
+    return std::tie(a.rank, a.winRate, a.id) < std::tie(b.rank, b.winRate, b.id);
+};
+// ✔ 降序就交换 a、b，或者用 >：两者都是严格弱序
+auto desc = [](const Hero& a, const Hero& b) { return a.rank > b.rank; };
+// ✔ C++20：默认生成 <=>，直接 std::sort(v.begin(), v.end())
+// struct Hero { ...; auto operator<=>(const Hero&) const = default; };
+<!--/code-->
+  <div class="co net"><span class="h">游戏客户端视角：Lua 和 C# 里也有同样的坑</span>
+    <ul>
+      <li><strong>Lua <code>table.sort</code></strong>：快排实现，不稳定。比较函数写成 <code>a.lv &lt;= b.lv</code> 时会报 <code>invalid order function for sorting</code>，或者在数组边界外读到 nil 而报错；数据不同，有时报错有时不报，线上很难排查。</li>
+      <li><strong>C# <code>List&lt;T&gt;.Sort</code> / <code>Array.Sort</code></strong>（Unity 常用）：introsort，<strong>不稳定</strong>。比较器不一致时，.NET 可能抛出 “IComparer.Compare() method returns inconsistent results”。要稳定排序用 LINQ 的 <code>OrderBy</code>（稳定，但会分配内存）。</li>
+    </ul>
+  </div>
+
+  <h2>8.4 现代排序：pdqsort 和 TimSort</h2>
+  <div class="cards">
+    <div class="card"><div class="t">pdqsort（Orson Peters，2016）</div>
+      <p>Pattern-defeating quicksort，introsort 的改进版：</p>
+      <p>· 检测到分区很不平衡时，打乱几个元素来破坏对手构造的模式</p>
+      <p>· 分区时没有发生交换，就尝试有上限的插入排序，有序输入接近 O(n)</p>
+      <p>· 块分区（BlockQuicksort）：先把比较结果存进偏移数组，再批量交换，消除分支预测失败</p>
+      <p>Go 1.19 的 <code>sort</code>、Boost 的 <code>pdqsort</code> 都采用了它；Rust 的 <code>sort_unstable</code> 也长期基于 pdqsort。</p></div>
+    <div class="card"><div class="t">TimSort（Tim Peters，2002）</div>
+      <p>稳定的归并 + 插入混合排序，针对真实数据中常见的“有序段”：</p>
+      <p>· 扫描找出天然的升序段或降序段（降序段直接翻转），短段用二分插入补齐到 minrun（32～64）</p>
+      <p>· 用栈维护各段长度的不变式，决定何时合并</p>
+      <p>· galloping 模式：一边连续获胜时，用指数搜索成块拷贝</p>
+      <p>Python 的 <code>sorted</code>、Java 的对象数组排序、Android 都使用它。有序输入 O(n)，最坏 O(n log n)。</p></div>
+  </div>
+  <p>另外，Java 对基本类型数组用的是 Dual-Pivot Quicksort（Yaroslavskiy，2009）：用两个 pivot 把数组分成三段，减少了内存访问次数。</p>
+
+  <h2>8.5 交互实验：九种比较排序同场竞技</h2>
+  <p>选不同的数据分布，看柱状图里各算法的比较次数和写入次数；下方的对数坐标曲线显示比较次数随 N 增长的趋势：O(n²) 的线斜率明显更陡。试试“已有序”下的快排 Lomuto 和冒泡。</p>
+  <div class="lab racelab" id="lab-race"></div><!--/lab-->
+
+  <div class="co warn"><span class="h">面试注意</span>
+    <ul>
+      <li>回答“std::sort 是怎么实现的”，至少要说出：<strong>introsort；快排主体 + 三数取中；深度超过约 2 log n 转堆排；小区间（16/32）用插入排序；不稳定；C++11 起要求最坏 O(n log n)。</strong></li>
+      <li>被问“std::sort 需要随机访问迭代器吗”：需要。所以 <code>std::list</code> 不能用 <code>std::sort</code>，只能用成员函数 <code>list::sort</code>。</li>
+      <li><code>stable_sort</code> 会尝试分配 O(n) 的临时内存，在每帧都要执行的代码里要注意。</li>
+    </ul>
+  </div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>introsort = 快排 + 堆排兜底 + 插排收尾；阈值 libstdc++ 16 / MSVC 32；深度预算约 2 log₂n。</li>
+    <li>qsort 慢在比较器无法内联（E5：85 ms 对 51 ms）。</li>
+    <li>K 很小时 <code>partial_sort</code> / 堆最快（E9：0.22 ms），K 较大时用 <code>nth_element</code>。</li>
+    <li>严格弱序：非自反、非对称、传递、不可比传递；写成 <code>&lt;=</code> 是 UB，可能越界写（E7）。用 <code>std::tie</code> 写多字段比较。</li>
+  </ul></div>
+</section>

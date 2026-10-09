@@ -1,0 +1,2 @@
+sel_index 38.31 ms sorted=1
+sel_cache 105.60 ms sorted=1

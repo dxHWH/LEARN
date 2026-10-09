@@ -1,0 +1,182 @@
+<div class="part-head" data-toc="第二部分 · 几何阶段">
+  <div class="no">PART TWO</div>
+  <h1>第二部分　几何阶段：把三维世界压到屏幕上</h1>
+  <p>几何阶段处理的是顶点：把模型从它自己的坐标系一路变换到屏幕上，中间要过投影、裁剪、透视除法几道关。这一部分的关键词是"空间"和"w"。</p>
+</div>
+
+<section class="chapter" id="ch2">
+  <div class="ch-head">
+    <div class="no">CHAPTER 02</div>
+    <h1>坐标空间与变换</h1>
+    <p class="lead">一个顶点要换五次"身份证"：局部、世界、观察、裁剪、屏幕。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能画出 Model → View → Projection → 透视除法 → 视口变换 的完整链路，并说出每个空间的用途</li>
+    <li>理解齐次坐标为什么是 4 维、点和方向向量为什么一个 w=1 一个 w=0</li>
+    <li>能手推 LookAt 矩阵，能证明法线要用"模型矩阵的逆转置"</li>
+    <li>搞清行向量/列向量、行主序/列主序、左手/右手系这三对容易混淆的约定</li>
+  </ul></div>
+
+  <h2>2.1 五个空间，四次变换</h2>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <g>
+      <rect x="10" y="40" width="130" height="90" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+      <text x="75" y="64" text-anchor="middle" class="b">局部空间</text><text x="75" y="84" text-anchor="middle" class="xs">Object / Model</text>
+      <text x="75" y="104" text-anchor="middle" class="xs">建模软件里的坐标</text><text x="75" y="120" text-anchor="middle" class="xs">原点在模型脚下</text>
+    </g>
+    <line x1="140" y1="85" x2="178" y2="85" stroke="#C2410C" stroke-width="2" marker-end="url(#ao)"/><text x="159" y="76" text-anchor="middle" class="b sm" style="fill:#C2410C">M</text>
+    <g>
+      <rect x="180" y="40" width="130" height="90" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+      <text x="245" y="64" text-anchor="middle" class="b">世界空间</text><text x="245" y="84" text-anchor="middle" class="xs">World</text>
+      <text x="245" y="104" text-anchor="middle" class="xs">所有物体共用</text><text x="245" y="120" text-anchor="middle" class="xs">光照/物理常在这里算</text>
+    </g>
+    <line x1="310" y1="85" x2="348" y2="85" stroke="#B45309" stroke-width="2" marker-end="url(#a)"/><text x="329" y="76" text-anchor="middle" class="b sm" style="fill:#B45309">V</text>
+    <g>
+      <rect x="350" y="40" width="130" height="90" rx="10" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="415" y="64" text-anchor="middle" class="b">观察空间</text><text x="415" y="84" text-anchor="middle" class="xs">View / Eye / Camera</text>
+      <text x="415" y="104" text-anchor="middle" class="xs">相机在原点</text><text x="415" y="120" text-anchor="middle" class="xs">GL 习惯看向 -Z</text>
+    </g>
+    <line x1="480" y1="85" x2="518" y2="85" stroke="#15803D" stroke-width="2" marker-end="url(#ag)"/><text x="499" y="76" text-anchor="middle" class="b sm" style="fill:#15803D">P</text>
+    <g>
+      <rect x="520" y="40" width="130" height="90" rx="10" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="2"/>
+      <text x="585" y="64" text-anchor="middle" class="b">裁剪空间</text><text x="585" y="84" text-anchor="middle" class="xs">Clip（4D 齐次）</text>
+      <text x="585" y="104" text-anchor="middle" class="xs">VS 的输出就在这里</text><text x="585" y="120" text-anchor="middle" class="xs">−w ≤ x,y ≤ w</text>
+    </g>
+    <line x1="650" y1="85" x2="688" y2="85" stroke="#2F5BD3" stroke-width="2" marker-end="url(#ab)"/><text x="669" y="76" text-anchor="middle" class="b sm" style="fill:#2F5BD3">÷w</text>
+    <g>
+      <rect x="690" y="40" width="160" height="90" rx="10" fill="#F3EEFE" stroke="#6D28D9"/>
+      <text x="770" y="64" text-anchor="middle" class="b">NDC → 屏幕</text><text x="770" y="84" text-anchor="middle" class="xs">标准化设备坐标 [-1,1]</text>
+      <text x="770" y="104" text-anchor="middle" class="xs">视口变换 → 像素坐标</text><text x="770" y="120" text-anchor="middle" class="xs">深度 → [0,1]</text>
+    </g>
+    <!-- who does it -->
+    <rect x="10" y="160" width="640" height="34" rx="8" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="330" y="182" text-anchor="middle" class="sm">顶点着色器负责：clip = P · V · M · p_local（通常 CPU 预乘成一个 MVP 常量）</text>
+    <rect x="660" y="160" width="190" height="34" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="755" y="182" text-anchor="middle" class="sm">固定功能硬件负责</text>
+    <text x="430" y="226" text-anchor="middle" class="xs">注意：VS 输出的是"裁剪空间"而不是 NDC——除以 w 这一步由硬件在裁剪之后做（第 3 章解释为什么）</text>
+  </svg>
+  <figcaption><b>图 2-1</b>　坐标空间链路。M、V、P 是三个 4×4 矩阵，÷w 和视口变换是固定功能。</figcaption>
+  </figure>
+
+  <p>为什么要分这么多空间，而不是一步到位？因为<strong>每个空间都有它最方便做的事</strong>：</p>
+  <ul>
+    <li><strong>局部空间</strong>：美术建模、骨骼蒙皮都在这里定义，一份网格可以被摆放到场景里任意多次（实例化的前提）。</li>
+    <li><strong>世界空间</strong>：光源、碰撞、寻路都用它；光照计算常在这里做（也可以在观察空间做）。</li>
+    <li><strong>观察空间</strong>：相机固定在原点、看向固定方向，投影公式就变得很简单；深度就是 −z。</li>
+    <li><strong>裁剪空间</strong>：视锥体被变成一个"规整"的形状，判断"在不在视野里"只需要比较 <code>|x| ≤ w</code>。</li>
+    <li><strong>屏幕空间</strong>：光栅化在这里做，单位是像素。</li>
+  </ul>
+
+  <h2>2.2 齐次坐标：为什么用 4 个数表示 3D 点</h2>
+  <p>3×3 矩阵能表示旋转和缩放，但<strong>表示不了平移</strong>——因为平移不是线性变换（它把原点移走了）。给坐标加一个分量 w，就能把平移写进矩阵乘法里：</p>
+  <div class="fm">T · p = ⎡1 0 0 t<sub>x</sub>⎤ ⎡x⎤　 ⎡x + t<sub>x</sub>⎤<br>　　　　⎢0 1 0 t<sub>y</sub>⎥ ⎢y⎥ = ⎢y + t<sub>y</sub>⎥<br>　　　　⎢0 0 1 t<sub>z</sub>⎥ ⎢z⎥　 ⎢z + t<sub>z</sub>⎥<br>　　　　⎣0 0 0 1 ⎦ ⎣1⎦　 ⎣　1　⎦</div>
+  <p>这样做还有两个额外的好处：</p>
+  <div class="cards">
+    <div class="card"><div class="t">点 vs 方向</div><p>点写成 <code>(x,y,z,1)</code>，方向（法线、光照方向、速度）写成 <code>(x,y,z,0)</code>。平移项乘以 w=0 后消失——<strong>方向不应该被平移</strong>，齐次坐标自动保证了这一点。</p></div>
+    <div class="card"><div class="t">透视投影</div><p>透视的本质是"除以距离"，这不是线性运算。齐次坐标的约定是 <code>(x,y,z,w)</code> 表示 3D 点 <code>(x/w, y/w, z/w)</code>，于是投影矩阵只需要<strong>把距离放进 w</strong>，除法交给硬件。这是第 3 章的主角。</p></div>
+  </div>
+
+  <h2>2.3 模型矩阵：先缩放，再旋转，最后平移</h2>
+  <p>模型矩阵通常由 TRS 组合而成：<code>M = T · R · S</code>。在列向量约定下矩阵从右往左作用，所以顺序是<strong>先缩放 → 再旋转 → 最后平移</strong>。顺序不能换：如果先平移再旋转，物体会绕世界原点"公转"而不是绕自己的中心"自转"。</p>
+  <p>实测程序里 E1 用的模型矩阵是 <code>translate(0,0,-5) * rotY(30°)</code>，也就是"先绕自己的 Y 轴转 30°，再放到 z=-5 处"。</p>
+
+  <h2>2.4 观察矩阵：把相机搬到原点</h2>
+  <p>观察矩阵 V 是"相机在世界中的变换"的<strong>逆</strong>：相机往右移 1 米，等价于整个世界往左移 1 米。最常用的构造方式是 LookAt：给定相机位置 eye、目标点 at 和大致的上方向 up，先求出相机的三个正交基，再拼成旋转部分，平移部分是 −(基·eye)：</p>
+<!--code:cpp:soft_raster.cpp · lookAt（右手系，相机看向 -Z）-->
+static M4 lookAt(V3 eye, V3 at, V3 up) {
+    V3 f = nrm(at - eye);          // 前方（forward）
+    V3 s = nrm(cross(f, up));      // 右方（side）= f × up
+    V3 u = cross(s, f);            // 真正的上方，保证三者正交
+    M4 r = ident();
+    r.m[0][0] = s.x;  r.m[0][1] = s.y;  r.m[0][2] = s.z;  r.m[0][3] = -dot(s, eye);
+    r.m[1][0] = u.x;  r.m[1][1] = u.y;  r.m[1][2] = u.z;  r.m[1][3] = -dot(u, eye);
+    r.m[2][0] = -f.x; r.m[2][1] = -f.y; r.m[2][2] = -f.z; r.m[2][3] = dot(f, eye);  // 前方映射到 -Z
+    return r;
+}
+<!--/code-->
+  <p>为什么旋转部分可以直接"把基向量写成行"？因为相机的世界矩阵旋转部分是以 s、u、−f 为<em>列</em>的正交矩阵，正交矩阵的逆就是它的转置，转置后基向量就变成了<em>行</em>。这样省掉了一次通用矩阵求逆。</p>
+  <div class="co warn"><span class="h">⚠️ 面试易错：up 和视线平行</span>
+  <p>如果相机正好朝正上方或正下方看，<code>cross(f, up)</code> 的长度为 0，归一化得到 NaN，整个画面消失或闪烁。俯视角游戏（MOBA、RTS）的相机经常接近这个角度，工程上的做法是：检测到 |f·up| 接近 1 时换一个备用 up（例如 (0,0,1)），或者直接用欧拉角/四元数构造相机矩阵。</p></div>
+
+  <h2>2.5 法线为什么要用逆转置矩阵</h2>
+  <p>如果模型矩阵包含<strong>非均匀缩放</strong>（比如 x 方向拉长 2 倍），直接用 M 变换法线，法线就不再垂直于表面了：</p>
+  <figure>
+  <svg viewBox="0 0 860 230" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(40,20)">
+      <text x="110" y="10" text-anchor="middle" class="b sm">原始：斜面与法线垂直</text>
+      <line x1="40" y1="170" x2="180" y2="30" stroke="#1F2937" stroke-width="3"/>
+      <line x1="110" y1="100" x2="160" y2="150" stroke="#15803D" stroke-width="2.5" marker-end="url(#ag)"/>
+      <text x="166" y="160" class="sm" style="fill:#15803D">n</text>
+      <text x="110" y="200" text-anchor="middle" class="xs">切线 t=(1,1)，法线 n=(1,-1)，t·n=0</text>
+    </g>
+    <g transform="translate(300,20)">
+      <text x="150" y="10" text-anchor="middle" class="b sm">x 拉长 2 倍：直接用 M 变换法线 ✗</text>
+      <line x1="10" y1="170" x2="290" y2="30" stroke="#1F2937" stroke-width="3"/>
+      <line x1="150" y1="100" x2="250" y2="150" stroke="#B91C1C" stroke-width="2.5" marker-end="url(#ar)"/>
+      <text x="256" y="160" class="sm" style="fill:#B91C1C">M·n</text>
+      <text x="150" y="200" text-anchor="middle" class="xs">t′=(2,1)，M·n=(2,-1)，点积 = 3 ≠ 0</text>
+    </g>
+    <g transform="translate(600,20)">
+      <text x="120" y="10" text-anchor="middle" class="b sm">用 (M⁻¹)ᵀ 变换 ✓</text>
+      <line x1="-20" y1="170" x2="260" y2="30" stroke="#1F2937" stroke-width="3"/>
+      <line x1="120" y1="100" x2="150" y2="160" stroke="#15803D" stroke-width="2.5" marker-end="url(#ag)"/>
+      <text x="158" y="170" class="sm" style="fill:#15803D">n′</text>
+      <text x="120" y="200" text-anchor="middle" class="xs">(M⁻¹)ᵀn=(0.5,-1)，与 t′ 点积 = 0</text>
+    </g>
+  </svg>
+  <figcaption><b>图 2-2</b>　非均匀缩放下，法线必须用模型矩阵的逆转置变换才能保持与表面垂直。</figcaption>
+  </figure>
+  <p>证明只要一行。设表面切线 t 与法线 n 垂直：<code>nᵀt = 0</code>。切线跟着表面走，变换后 <code>t′ = M t</code>。要找矩阵 G 使 <code>n′ = G n</code> 仍然垂直于 t′：</p>
+  <div class="fm">n′ᵀ t′ = (G n)ᵀ (M t) = nᵀ (GᵀM) t = 0　⇐　GᵀM = I　⇒　<b>G = (M⁻¹)ᵀ</b></div>
+  <ul>
+    <li>如果 M 只有旋转和<strong>均匀缩放</strong>，<code>(M⁻¹)ᵀ</code> 与 M 只差一个标量，归一化后方向相同，可以直接用 M（实测程序 E13 里的 <code>stdVS</code> 就是这么做的）。</li>
+    <li>只需要取左上角 3×3（法线是方向，不受平移影响）。</li>
+    <li>引擎通常在 CPU 端预先算好"世界到物体"矩阵（Unity 的 <code>unity_WorldToObject</code>），Shader 里用它的转置去乘法线。</li>
+  </ul>
+
+  <h2>2.6 三对最容易混淆的约定</h2>
+  <div class="tbl"><table>
+    <tr><th>约定</th><th>两种写法</th><th>会影响什么</th></tr>
+    <tr><td>行向量 / 列向量</td><td>列向量：<code>p′ = M·p</code>，矩阵从右往左作用（GL、本书）<br>行向量：<code>p′ = p·M</code>，从左往右作用（老 D3D 教程、UE）</td><td>矩阵乘法顺序：列向量写 <code>P·V·M</code>，行向量写 <code>M·V·P</code>；两者的矩阵互为转置</td></tr>
+    <tr><td>行主序 / 列主序</td><td>行主序：内存里先存第一行（C/C++ 二维数组、DirectXMath 的 XMFLOAT4X4）<br>列主序：先存第一列（GLSL 默认；HLSL 的 cbuffer 默认也按 column_major 打包）</td><td>只影响<strong>内存布局</strong>，不影响数学。CPU 传矩阵给 Shader 时布局不一致，就得转置一次</td></tr>
+    <tr><td>左手系 / 右手系</td><td>右手系：x 右、y 上、z 指向观察者（GL、本书、Blender）<br>左手系：z 指向屏幕里（D3D 传统、Unity、UE 是 z 向上的左手系）</td><td>叉积方向、三角形正面绕序、投影矩阵 z 项的符号</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 面试易错</span>
+  <p>"行主序就是行向量"是错的，这是两件独立的事：一个是<em>数学约定</em>（向量放在矩阵左边还是右边），一个是<em>存储约定</em>（二维数组怎么摊平成一维）。遇到"矩阵传进 Shader 后物体飞了"的问题，先确认这两件事，再确认是否需要转置。</p></div>
+
+  <h2>2.7 实测：跟踪一个顶点的旅程</h2>
+  <p>实测程序 E1 取立方体的一个角 (0.5, 0.5, 0.5)，打印它在每个空间里的坐标，并对比三种深度约定（D3D、OpenGL、Reversed-Z）的投影结果：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E1</div><pre>局部坐标 (立方体一角)            : (0.500, 0.500, 0.500, 1)
+世界坐标 = Model * p             : (0.683, 0.500, -4.817, 1)   [平移(0,0,-5)·绕Y转30°]
+观察坐标 = View * world          : (0.683, 0.473, -7.819, 1)   [相机(0,1,3)看向(0,0,-5)，-Z 为前方]
+[D3D [0,1]     ] 裁剪坐标 (0.665, 0.820, 7.7264, w=<span class="hl">7.819</span>) -> NDC (0.0851, 0.1049, 0.988198) -> 屏幕 (347.24, 161.12) 深度缓冲值 <span class="hl">0.988198</span>
+[OpenGL [-1,1] ] 裁剪坐标 (0.665, 0.820, 7.6341, w=7.819) -> NDC (0.0851, 0.1049, 0.976397) -> 屏幕 (347.24, 161.12) 深度缓冲值 0.988198
+[Reversed-Z    ] 裁剪坐标 (0.665, 0.820, 0.0923, w=7.819) -> NDC (0.0851, 0.1049, 0.011802) -> 屏幕 (347.24, 161.12) 深度缓冲值 <span class="hl">0.011802</span>
+观察：w_clip 恰好等于 -z_view = 7.819（相机到该点沿视线方向的距离），透视除法就是"除以距离"。</pre></div>
+  <div class="co ver"><span class="h">🔬 从输出里能读出什么</span>
+  <ul>
+    <li><strong>w_clip = 7.819 = −z_view</strong>：投影矩阵的第 4 行就是 (0,0,−1,0)，它把"距离"搬进了 w。</li>
+    <li><strong>三种约定的 x、y、屏幕坐标完全一样</strong>，只有 z 不同——深度约定只影响深度缓冲里存的值，不影响"画在哪里"。</li>
+    <li>这个点离相机 7.8 米，在 near=0.1、far=100 下，标准 D3D 深度已经是 <strong>0.988</strong>——只剩不到 1.2% 的深度范围留给 7.8～100 米。这就是第 8 章深度精度问题的伏笔；Reversed-Z 下它是 0.0118，靠近 0 的地方浮点数最密。</li>
+    <li>OpenGL 的 NDC 深度是 0.976，经 <code>(z+1)/2</code> 映射后存入缓冲的值与 D3D 完全相同。</li>
+  </ul></div>
+
+  <h2>2.8 游戏实战：大世界的浮点精度</h2>
+  <p>float 只有 24 位有效数字。在距离原点 10 公里的地方，float 能表示的最小间隔约为 1 毫米；到 100 公里就是 8 毫米左右。如果顶点着色器里先算 <code>world = M·p</code> 再算 <code>V·world</code>，两个很大的数相减（物体位置 − 相机位置）会丢掉大量精度，表现为远离原点时<strong>模型抖动、顶点颤动</strong>。</p>
+  <div class="co net"><span class="h">🎮 游戏实战：相机相对渲染（Camera-Relative Rendering）</span>
+  <p>做法是在 CPU 上用 double 计算 <code>物体位置 − 相机位置</code>，把结果（一个不大的数）放进模型矩阵，然后观察矩阵里只保留旋转、不带平移。这样 GPU 上所有坐标都是"相对相机"的小数值。UE5 的大世界坐标（LWC）、Unity HDRP 的 Camera Relative Rendering 都是这个思路。MOBA 地图只有一两百米见方，一般遇不到这个问题，但开放世界、飞行类游戏必须处理。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>链路：<strong>局部 →(M) 世界 →(V) 观察 →(P) 裁剪 →(÷w) NDC →(视口) 屏幕</strong>；VS 只负责到裁剪空间。</li>
+    <li>齐次坐标让平移和透视都能用矩阵表达；点 w=1、方向 w=0。</li>
+    <li>TRS 顺序是先缩放、再旋转、后平移（列向量约定下写作 <code>T·R·S</code>）。</li>
+    <li>观察矩阵是相机世界矩阵的逆，LookAt 利用正交矩阵"逆 = 转置"直接拼出来。</li>
+    <li>法线变换用 <strong>(M⁻¹)ᵀ</strong>，因为要保持 nᵀt=0；只有旋转+均匀缩放时可以直接用 M。</li>
+    <li>行/列向量是数学约定，行/列主序是存储约定，两者无关。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：骨骼蒙皮在哪个空间、哪个阶段做？</summary>
+  <p>通常在顶点着色器里、局部空间做：每个顶点按权重混合若干根骨骼的"蒙皮矩阵"（骨骼当前姿态矩阵 × 绑定姿态的逆矩阵），得到动画后的局部坐标，再乘 MVP。法线同样要用蒙皮矩阵变换（骨骼矩阵一般无非均匀缩放，可直接用）。也有引擎用计算着色器预先蒙皮，结果写入缓冲供多个 Pass 复用。</p></details>
+  <details class="quiz"><summary>自测：为什么 W 分量对方向向量是 0？如果你不小心传了 1 会怎样？</summary>
+  <p>方向只表示"朝向"，与位置无关，平移不应改变它。w=0 时平移列乘以 0 被消掉。如果传了 1，光照方向会被加上物体的世界位置，在原点附近看起来正常、远离原点后光照方向越来越歪——这是一个很典型的"只在某些地方出错"的 Bug。</p></details>
+</section>

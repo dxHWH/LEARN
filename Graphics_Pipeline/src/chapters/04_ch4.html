@@ -1,0 +1,143 @@
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>顶点处理与图元装配</h1>
+    <p class="lead">顶点从显存被读出、被着色、被组装成三角形，然后先过一道"背面剔除"的筛子。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>理解顶点缓冲、索引缓冲和 Post-Transform 顶点缓存，知道为什么索引能省顶点着色</li>
+    <li>知道曲面细分、几何着色器、Mesh Shader 分别解决什么问题，为什么移动端很少用前两者</li>
+    <li>掌握背面剔除的实际实现（屏幕空间有符号面积），并用实测数据说明它到底剔掉多少</li>
+    <li>建立"剔除漏斗"：从 CPU 视锥剔除到 GPU 零面积剔除，每一层在哪里、省什么</li>
+  </ul></div>
+
+  <h2>4.1 输入装配：从显存里读出顶点</h2>
+  <p>一个网格在显存里通常由两块数据组成：</p>
+  <ul>
+    <li><strong>顶点缓冲（VB）</strong>：每个顶点的属性——位置、法线、切线、uv、颜色、骨骼索引和权重等。布局可以<em>交错</em>（一个顶点的所有属性挨着放，AoS）也可以<em>分流</em>（每种属性一个流，SoA）。只画深度的 Pass 只需要位置，把位置单独放一个流可以减少带宽——这是很多引擎把 Position 单独成流的原因。</li>
+    <li><strong>索引缓冲（IB）</strong>：每 3 个索引组成一个三角形（Triangle List）。16 位索引最多引用 65536 个顶点，大网格要用 32 位或拆成多段。</li>
+  </ul>
+  <p>输入装配（IA）阶段按照"输入布局"（Input Layout / Vertex Descriptor）解析这两块数据，把顶点送进顶点着色器。</p>
+
+  <h2>4.2 顶点着色器与顶点缓存：为什么要用索引</h2>
+  <p>顶点着色器对<strong>每个顶点</strong>运行一次，最少要输出裁剪空间位置 <code>SV_Position</code>，以及要传给像素着色器的插值属性（varyings）。</p>
+<!--code:hlsl:一个最小的顶点着色器（HLSL）-->
+cbuffer PerObject { float4x4 _MVP; float4x4 _ObjectToWorld; float4x4 _WorldToObject; };
+struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; };
+struct VSOut { float4 posCS : SV_Position; float3 nrmWS : TEXCOORD0; float2 uv : TEXCOORD1; };
+
+VSOut VS(VSIn v) {
+    VSOut o;
+    o.posCS = mul(_MVP, float4(v.pos, 1));                          // 裁剪空间，交给硬件裁剪与 ÷w
+    o.nrmWS = normalize(mul(v.nrm, (float3x3)_WorldToObject));      // 行向量乘 = 乘以逆矩阵的转置
+    o.uv    = v.uv;
+    return o;
+}
+<!--/code-->
+  <p>一个封闭网格里，每个顶点平均被 5～6 个三角形共享。如果直接用三角形列表把每个三角形的 3 个顶点都存一份，顶点着色器要做 3 倍于"顶点数"的工作。索引缓冲配合 GPU 的<strong>Post-Transform 顶点缓存</strong>解决这个问题：GPU 记住最近处理过的若干个顶点索引的输出，遇到重复索引直接复用结果。</p>
+  <div class="tbl"><table>
+    <tr><th>网格（实测程序生成）</th><th>顶点数</th><th>三角形数</th><th>索引数</th><th>不用索引时 VS 次数</th><th>理想缓存下 VS 次数</th></tr>
+    <tr><td>立方体（每面 4 顶点，法线不共享）</td><td>24</td><td>12</td><td>36</td><td>36</td><td>24</td></tr>
+    <tr><td>UV 球 64×32</td><td>2145</td><td>3968</td><td>11904</td><td>11904</td><td>2145（省 82%）</td></tr>
+  </table></div>
+  <p>衡量缓存效率的指标叫 <strong>ACMR</strong>（平均每个三角形的缓存未命中数）：理想的规则网格接近 0.5，完全随机的索引顺序接近 3。离线的网格优化工具（如 meshoptimizer、Forsyth 算法）会重排三角形顺序，让共享顶点的三角形挨在一起提交。</p>
+  <div class="co warn"><span class="h">⚠️ 面试易错：立方体为什么是 24 个顶点而不是 8 个</span>
+  <p>"顶点"在 GPU 眼里是<strong>所有属性的组合</strong>，而不只是位置。立方体的一个角被三个面共享，但三个面的法线（和 uv）不同，所以要拆成 3 个顶点：8×3=24。同理，模型的 UV 接缝、硬边（法线不连续处）都会让顶点数增加。美术报给你的"面数"和引擎统计的"顶点数"差很多，原因就在这里。</p></div>
+
+  <h2>4.3 可选的几何阶段：曲面细分、几何着色器、Mesh Shader</h2>
+  <div class="tbl"><table>
+    <tr><th>阶段</th><th>能做什么</th><th>代价/现状</th></tr>
+    <tr><td>曲面细分（Hull Shader → Tessellator → Domain Shader）</td><td>在 GPU 上把粗网格细分成细网格，配合位移贴图做地形、海面；按距离自适应细分</td><td>小三角形会让光栅化和 Quad 效率急剧下降（第 6 章 E8）；移动端支持差、功耗高</td></tr>
+    <tr><td>几何着色器（GS）</td><td>以图元为单位输入，可以输出 0～N 个新图元：广告牌扩展、阴影体、单 Pass 渲染立方体贴图</td><td>输出数量不定，硬件难以并行，<strong>普遍很慢</strong>；Metal 根本不支持。现代做法改用计算着色器或 Mesh Shader</td></tr>
+    <tr><td>任务/网格着色器（Task/Amplification + Mesh Shader）</td><td>用类似计算着色器的方式直接生成"小块网格"（Meshlet，约 64 顶点 / 126 三角形），并在 GPU 上逐 Meshlet 做视锥/背面/遮挡剔除</td><td>DX12 Ultimate / Vulkan 扩展 / Metal 3；UE5 Nanite 思路的硬件化。替代 IA + VS + GS</td></tr>
+  </table></div>
+
+  <h2>4.4 图元装配与背面剔除</h2>
+  <p>顶点着色完毕，经过裁剪和透视除法，3 个顶点被组装成一个屏幕空间三角形。下一步是<strong>背面剔除</strong>：一个封闭物体背对相机的那一半表面一定被正面挡住，没必要光栅化。</p>
+  <p>"背面"怎么判定？约定从外面看三角形顶点是<strong>逆时针</strong>（CCW，GL/本书默认）或<strong>顺时针</strong>（CW，D3D 默认）排列的为正面。投影到屏幕后，背面三角形的绕序会反过来——所以只需要计算屏幕空间的<strong>有符号面积</strong>：</p>
+  <div class="fm">2A = (x₁ − x₀)(y₂ − y₀) − (y₁ − y₀)(x₂ − x₀)　　符号决定正反面，A = 0 为退化三角形</div>
+<!--code:cpp:soft_raster.cpp · rasterTri 开头：用定点坐标算有符号面积，做背面剔除-->
+i64 area = (X[1] - X[0]) * (Y[2] - Y[0]) - (Y[1] - Y[0]) * (X[2] - X[0]);
+if (area == 0) { T.st.degenerate++; return; }        // 零面积（包括被吸附到同一点的微小三角形）
+bool front = area < 0;  // NDC 中逆时针 = 屏幕(y 向下)中有符号面积为负
+if (s.cull && !front) { T.st.culled++; return; }
+<!--/code-->
+  <p>为什么不用"法线点乘视线"判断？在透视投影下，同一个三角形上不同点看过去的视线方向不同，用某一个点的视线判断可能出错；而屏幕空间面积的符号是<strong>精确</strong>的（它就是"投影之后这个三角形朝哪边"），而且光栅化本来就要算这个面积（第 5 章的边函数），几乎零额外开销。</p>
+
+  <h3>实测：背面剔除到底剔掉多少</h3>
+  <p>常听到"背面剔除能剔掉一半三角形"。E3 用一个 64×32 的 UV 球，从不同距离观察：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E3</div><pre>球体三角形数：3968
+相机距离 输入     剔除     退化     剔除率  理论 1-(1-r/d)/2
+1.5        3968       3448       0               <span class="hl">86.9%</span>          83.3%
+3.0        3968       2869       0               72.3%          66.7%
+10.0       3968       2300       0               58.0%          55.0%
+100.0      3968       2002       0               50.5%          50.5%</pre></div>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(30,10)">
+      <circle cx="300" cy="100" r="80" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="2"/>
+      <circle cx="40" cy="100" r="6" fill="#1F2937"/><text x="40" y="128" text-anchor="middle" class="xs">相机（近）</text>
+      <line x1="40" y1="100" x2="275.4" y2="23.9" stroke="#C2410C" stroke-width="1.5"/>
+      <line x1="40" y1="100" x2="275.4" y2="176.1" stroke="#C2410C" stroke-width="1.5"/>
+      <path d="M275.4,23.9 A80,80 0 0 0 275.4,176.1" fill="none" stroke="#15803D" stroke-width="5"/>
+      <text x="230" y="104" class="xs" style="fill:#15803D">可见</text>
+      <text x="335" y="98" text-anchor="middle" class="xs" style="fill:#2F5BD3">不可见</text><text x="335" y="114" text-anchor="middle" class="xs" style="fill:#2F5BD3">（被剔除）</text>
+      <text x="230" y="206" text-anchor="middle" class="xs">离得近：切点围出的可见球冠小于半球</text>
+    </g>
+    <g transform="translate(480,10)">
+      <circle cx="250" cy="100" r="80" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="2"/>
+      <text x="20" y="104" class="xs">相机在很远处 →</text>
+      <path d="M250,20 A80,80 0 0 0 250,180" fill="none" stroke="#15803D" stroke-width="5"/>
+      <text x="196" y="104" class="xs" style="fill:#15803D">可见≈半球</text>
+      <text x="200" y="206" text-anchor="middle" class="xs">离得远：视线接近平行，可见部分趋近一半</text>
+    </g>
+  </svg>
+  <figcaption><b>图 4-1</b>　从距离 d 看半径 r 的球，可见球冠的面积占比为 (1 − r/d)/2。</figcaption>
+  </figure>
+  <div class="co ver"><span class="h">🔬 从输出里能读出什么</span>
+  <ul>
+    <li>背面剔除率<strong>不是固定 50%</strong>：相机离凸物体越近，剔除率越高（1.5 倍半径处达到 86.9%）；远处趋近 50%。</li>
+    <li>实测略高于理论值，因为网格是离散的：轮廓附近的三角形只要中心略偏到背面就整体被剔除；而且 UV 球两极的三角形更小更密。</li>
+    <li>背面剔除省的是<strong>光栅化和像素着色</strong>，不省顶点着色——顶点在剔除之前已经算完了。要省顶点着色，必须在更早的阶段剔除（CPU 视锥剔除、Mesh Shader 的 Meshlet 法线锥剔除）。</li>
+  </ul></div>
+  <div class="co net"><span class="h">🎮 游戏实战：哪些东西要关背面剔除</span>
+  <p>树叶、草、旗帜、披风这类"单片"模型需要双面渲染（Cull Off），而它们背面的法线是反的——像素着色器里要用 <code>SV_IsFrontFace</code>（GLSL 的 <code>gl_FrontFacing</code>）把法线翻过来，否则背面光照是错的。另一个常见例外是阴影 Pass：有的引擎会改成剔除正面（Cull Front），只让背面写入阴影贴图，以减少自阴影痤疮（第 11 章）。</p></div>
+
+  <h2>4.5 剔除漏斗：每一层在哪里、省什么</h2>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm">越早剔除，省得越多；但越早的剔除粒度越粗</text>
+    <polygon points="60,36 800,36 760,76 100,76" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="430" y="62" text-anchor="middle" class="sm"><tspan class="b">CPU 视锥剔除</tspan>：物体包围盒 vs 6 个平面 —— 省 Draw Call、顶点、一切</text>
+    <polygon points="100,82 760,82 720,122 140,122" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="430" y="108" text-anchor="middle" class="sm"><tspan class="b">遮挡剔除</tspan>：PVS 预计算 / 软件光栅遮挡 / GPU Hi-Z 查询 —— 被墙挡住的物体整体不画</text>
+    <polygon points="140,128 720,128 680,168 180,168" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="430" y="154" text-anchor="middle" class="sm"><tspan class="b">GPU 驱动剔除</tspan>：计算着色器 / Mesh Shader 逐 Meshlet 剔除 —— 省顶点着色</text>
+    <polygon points="180,174 680,174 640,214 220,214" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="430" y="200" text-anchor="middle" class="sm"><tspan class="b">裁剪 + 背面 + 零面积剔除</tspan>（固定功能）—— 省光栅化和像素</text>
+    <polygon points="220,220 640,220 600,260 260,260" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="430" y="246" text-anchor="middle" class="sm"><tspan class="b">Hi-Z / Early-Z</tspan>（第 8 章）—— 逐块/逐像素省像素着色</text>
+    <text x="430" y="286" text-anchor="middle" class="xs">E3 中"退化"一列为 0：64×32 球在 512×512 上没有被吸附成零面积的三角形；当物体在屏幕上很小时，这一层会剔掉大量三角形</text>
+  </svg>
+  <figcaption><b>图 4-2</b>　剔除漏斗。背面剔除只是最后几道筛子之一。</figcaption>
+  </figure>
+
+  <h2>4.6 游戏实战：MOBA 里的顶点预算</h2>
+  <ul>
+    <li><strong>小兵和野怪</strong>：同一模型大量重复，适合 GPU Instancing；骨骼动画则用 <em>GPU 蒙皮</em>或把动画烘焙进纹理（Vertex Animation Texture / 骨骼矩阵纹理），让 Instancing 不受"每个实例动画不同"的限制。</li>
+    <li><strong>顶点格式压缩</strong>：uv 和颜色用 half 或 UNorm8；法线用八面体编码压到 2 个 16 位数；骨骼权重用 4×UNorm8。顶点带宽是移动端带宽的重要组成部分。</li>
+    <li><strong>LOD</strong>：MOBA 镜头距离固定，LOD 切换主要发生在"技能镜头/回城动画"之类的特写；更多的收益来自控制同屏最大顶点数（例如英雄 5k～1 万面、小兵 1～2 千面量级，具体看项目）。</li>
+  </ul>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>顶点缓冲存属性，索引缓冲存三角形；Post-Transform 缓存让共享顶点只着色一次（64×32 球省 82% 的 VS 调用）。</li>
+    <li>"顶点"是所有属性的组合：硬边、UV 接缝都会复制顶点（立方体 24 个顶点）。</li>
+    <li>几何着色器普遍慢；曲面细分会产生小三角形；Mesh Shader 是现代替代方案。</li>
+    <li>背面剔除靠<strong>屏幕空间有符号面积</strong>判断，精确且几乎免费；剔除率随距离变化，近处可达 80% 以上，远处趋近 50%。</li>
+    <li>背面剔除不省顶点着色；越早的剔除（CPU 视锥、遮挡、GPU 驱动）省得越多。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：模型导入后有一半的面"消失"了，可能是什么原因？</summary>
+  <p>最常见的是<strong>绕序或手性不一致</strong>：建模软件和引擎的正面绕序约定不同，或者模型做了负缩放（镜像）——负缩放会翻转所有三角形在屏幕上的绕序，导致正面被当成背面剔除。引擎通常检测模型矩阵行列式的符号，为负时自动翻转剔除模式。另一个原因是法线朝内（建模时翻转了法线）。</p></details>
+  <details class="quiz"><summary>自测：为什么几何着色器慢，而 Mesh Shader 快？</summary>
+  <p>几何着色器每个输入图元可以输出不定数量的图元，硬件必须保持输出顺序与输入一致、预留最坏情况的输出缓冲，导致并行度低、片上存储压力大。Mesh Shader 以"工作组"为单位一次性生成一个固定上限的小网格，模型和计算着色器一样规则，可以充分并行，还能在生成前就剔除整个 Meshlet。</p></details>
+</section>

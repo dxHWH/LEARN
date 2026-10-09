@@ -1,0 +1,179 @@
+<div class="part-head" data-toc="第一部分 · 全景">
+  <div class="no">PART ONE</div>
+  <h1>第一部分　全景：一帧画面是怎么来的</h1>
+  <p>在钻进每个阶段之前，先站远一点：CPU 和 GPU 如何分工、命令怎样从游戏逻辑一路走到显卡、GPU 为什么天生适合做这件事。后面所有的性能结论都建立在这一章的模型上。</p>
+</div>
+
+<section class="chapter" id="ch1">
+  <div class="ch-head">
+    <div class="no">CHAPTER 01</div>
+    <h1>一帧画面是怎么来的</h1>
+    <p class="lead">16.6 毫秒里，CPU 准备"画什么"，GPU 决定"每个像素长什么样"。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清一帧从游戏逻辑到屏幕显示的完整链路：游戏线程 → 渲染线程 → 驱动 → 命令缓冲 → GPU → 交换链</li>
+    <li>理解 Draw Call 的真实开销在哪里，以及合批 / Instancing / SRP Batcher 分别在省什么</li>
+    <li>理解 GPU 的 SIMT 执行模型：Warp、延迟隐藏、分支发散，以及它们对 Shader 写法的影响</li>
+    <li>建立"光栅化管线 = 以物体为序"的直觉，并能和光线追踪对比</li>
+  </ul></div>
+
+  <h2>1.1 两颗处理器的接力：CPU 和 GPU 怎样分工</h2>
+  <p>假设你在玩一局 MOBA，屏幕上有地图、10 个英雄、小兵、技能特效和 UI。每一帧，引擎都要回答两个问题：</p>
+  <ol>
+    <li><strong>画什么、按什么顺序画</strong>——这是 CPU 的工作。游戏线程更新逻辑（移动、技能、动画），渲染线程据此做视锥剔除、按材质排序、合批，再把"设置状态 + 绘制"翻译成图形 API 调用。</li>
+    <li><strong>每个像素是什么颜色</strong>——这是 GPU 的工作。它接收命令，把成千上万个三角形变换、光栅化成几百万个像素，并为每个像素运行着色器。</li>
+  </ol>
+  <p>两者之间隔着一条<strong>命令缓冲（Command Buffer）</strong>：CPU 往里写命令，GPU 从里读命令，两边是异步的。CPU 调用 <code>Draw</code> 时 GPU 并不会马上开始画——命令只是被记录下来，稍后才被提交、执行。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm">一帧的流水：CPU 和 GPU 错开一到两帧并行工作（Frames in Flight）</text>
+    <g class="sm"><text x="20" y="66">游戏线程</text><text x="20" y="116">渲染线程</text><text x="20" y="166">驱动/提交</text><text x="20" y="216">GPU</text><text x="20" y="266">显示</text></g>
+    <line x1="100" y1="40" x2="100" y2="290" stroke="#E5E7EB"/>
+    <!-- frame columns -->
+    <g class="xs"><text x="180" y="40" text-anchor="middle">0–16.6ms</text><text x="380" y="40" text-anchor="middle">16.6–33.3ms</text><text x="580" y="40" text-anchor="middle">33.3–50ms</text><text x="770" y="40" text-anchor="middle">50ms–</text></g>
+    <line x1="280" y1="44" x2="280" y2="290" stroke="#CBD5E1" stroke-dasharray="3 3"/>
+    <line x1="480" y1="44" x2="480" y2="290" stroke="#CBD5E1" stroke-dasharray="3 3"/>
+    <line x1="680" y1="44" x2="680" y2="290" stroke="#CBD5E1" stroke-dasharray="3 3"/>
+    <!-- game thread -->
+    <rect x="110" y="50" width="150" height="26" rx="5" fill="#FFF4EC" stroke="#C2410C"/><text x="185" y="68" text-anchor="middle" class="sm">逻辑 帧N</text>
+    <rect x="290" y="50" width="150" height="26" rx="5" fill="#FFF4EC" stroke="#C2410C"/><text x="365" y="68" text-anchor="middle" class="sm">逻辑 帧N+1</text>
+    <rect x="490" y="50" width="150" height="26" rx="5" fill="#FFF4EC" stroke="#C2410C"/><text x="565" y="68" text-anchor="middle" class="sm">逻辑 帧N+2</text>
+    <!-- render thread -->
+    <rect x="290" y="100" width="170" height="26" rx="5" fill="#FEF6E4" stroke="#B45309"/><text x="375" y="118" text-anchor="middle" class="sm">剔除·排序·录命令 N</text>
+    <rect x="490" y="100" width="170" height="26" rx="5" fill="#FEF6E4" stroke="#B45309"/><text x="575" y="118" text-anchor="middle" class="sm">剔除·排序·录命令 N+1</text>
+    <!-- submit -->
+    <rect x="440" y="150" width="34" height="26" rx="5" fill="#F3EEFE" stroke="#6D28D9"/><text x="457" y="168" text-anchor="middle" class="xs">提交</text>
+    <rect x="640" y="150" width="34" height="26" rx="5" fill="#F3EEFE" stroke="#6D28D9"/><text x="657" y="168" text-anchor="middle" class="xs">提交</text>
+    <!-- gpu -->
+    <rect x="480" y="200" width="180" height="26" rx="5" fill="#EAF7EF" stroke="#15803D"/><text x="570" y="218" text-anchor="middle" class="sm">GPU 执行 帧N</text>
+    <rect x="680" y="200" width="160" height="26" rx="5" fill="#EAF7EF" stroke="#15803D"/><text x="760" y="218" text-anchor="middle" class="sm">GPU 执行 帧N+1</text>
+    <!-- display -->
+    <rect x="680" y="250" width="160" height="26" rx="5" fill="#EAF0FD" stroke="#2F5BD3"/><text x="760" y="268" text-anchor="middle" class="sm">显示 帧N（VSync）</text>
+    <path d="M185,76 C185,90 300,86 330,100" fill="none" stroke="#9CA3AF" marker-end="url(#a)"/>
+    <path d="M457,176 L500,200" fill="none" stroke="#9CA3AF" marker-end="url(#a)"/>
+    <path d="M640,226 L700,250" fill="none" stroke="#9CA3AF" marker-end="url(#a)"/>
+    <text x="430" y="312" text-anchor="middle" class="xs">输入延迟 ≈ 从"逻辑帧 N 读到手指操作"到"帧 N 上屏"，这里约 3 帧 · 帧率由最慢的那条泳道决定</text>
+  </svg>
+  <figcaption><b>图 1-1</b>　多线程渲染下的帧流水。CPU 领先 GPU 一到两帧是常态，这样两边都不用等对方。</figcaption>
+  </figure>
+
+  <p>这张图有两个直接的工程含义：</p>
+  <ul>
+    <li><strong>帧率取决于最慢的那条泳道。</strong>游戏线程慢叫"逻辑瓶颈"，渲染线程/驱动慢叫"CPU 渲染瓶颈"（通常是 Draw Call 太多），GPU 慢叫"GPU 瓶颈"（顶点、填充率或带宽）。优化之前必须先知道是哪一条——第 12 章专门讲定位方法。</li>
+    <li><strong>CPU 读 GPU 的结果代价极高。</strong>如果 CPU 在帧 N+1 里同步读回帧 N 的渲染结果（比如 <code>ReadPixels</code>、遮挡查询立即取结果），就会让流水线"排空"：CPU 停下来等 GPU 画完，GPU 画完又等 CPU 发新命令。这就是为什么遮挡查询结果通常延迟一两帧使用。</li>
+  </ul>
+
+  <h2>1.2 Draw Call：一条命令为什么会贵</h2>
+  <p>一次 Draw Call 就是 CPU 对 GPU 说"用当前的状态，画这些三角形"。真正贵的不是 <code>Draw</code> 这一下本身，而是它前面要准备的东西和驱动做的工作：</p>
+  <div class="tbl"><table>
+    <tr><th>开销来源</th><th>具体是什么</th><th>典型优化</th></tr>
+    <tr><td>状态切换</td><td>换 Shader 程序、混合/深度状态、渲染目标；驱动可能要重新编译/链接管线状态</td><td>按材质/Shader 排序，减少 SetPass；DX12/Vulkan 预编译 PSO</td></tr>
+    <tr><td>资源绑定</td><td>绑定纹理、常量缓冲、顶点缓冲；上传每个物体的矩阵等常量</td><td>SRP Batcher（常量常驻 GPU，只更新变化的部分）、Bindless</td></tr>
+    <tr><td>驱动校验</td><td>旧 API（GL/DX11）每次调用都要检查状态合法性、跟踪资源依赖</td><td>换现代 API，命令缓冲多线程录制</td></tr>
+    <tr><td>提交与同步</td><td>命令缓冲刷新、用户态到内核态切换</td><td>减少 flush，批量提交</td></tr>
+  </table></div>
+  <p>减少 Draw Call 的三种常见手段，省的东西各不相同：</p>
+  <div class="cards">
+    <div class="card"><div class="t">静态合批</div><p>离线把共享材质的静态网格合并成一个大网格。省 Draw Call，代价是<strong>内存变大</strong>（每份实例的顶点都复制了一份）、无法单独剔除。</p></div>
+    <div class="card"><div class="t">动态合批</div><p>每帧在 CPU 上把小网格的顶点变换到世界空间后拼起来。省 Draw Call，但<strong>CPU 要做顶点变换</strong>，只适合顶点很少的物体。</p></div>
+    <div class="card"><div class="t">GPU Instancing</div><p>一次 Draw 画 N 份同一网格，每份的矩阵/颜色放在实例缓冲里，由顶点着色器用 <code>SV_InstanceID</code> 读取。适合草、树、小兵这种<strong>同网格大量重复</strong>的物体。</p></div>
+    <div class="card"><div class="t">SRP Batcher</div><p>不减少 Draw Call 数量，而是让<strong>每个 Draw Call 变便宜</strong>：材质常量常驻显存，只在变化时更新，相同 Shader 变体的物体之间不再重复设置状态。</p></div>
+  </div>
+  <div class="co warn"><span class="h">⚠️ 面试易错</span>
+  <p>"合批就是为了减少 Draw Call"只说对了一半。更准确的说法是：<strong>合批是为了减少 CPU 端每次绘制的准备开销（主要是状态切换和常量上传）</strong>。在 DX12/Vulkan/Metal 下单次 Draw 本身已经很便宜，真正的成本更多在 SetPass（换材质/Shader）。所以面试官常追问："SRP Batcher 不减少 Draw Call，为什么也能提速？"——答案就是它减少的是每次 Draw 之间的状态设置。</p></div>
+
+  <h2>1.3 GPU 为什么快：成千上万个"慢而简单"的线程</h2>
+  <p>CPU 为了让<em>一个</em>线程尽可能快，花大量晶体管做分支预测、乱序执行和大缓存；GPU 反其道而行：把晶体管堆成大量简单的计算单元，同时跑成千上万个线程，<strong>用"线程多"来掩盖"内存慢"</strong>。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm">SIMT：一个 Warp（NVIDIA 32 线程 / AMD Wave 32 或 64）共享一条指令流</text>
+    <rect x="20" y="36" width="380" height="240" rx="12" fill="#F8FAFC" stroke="#94A3B8"/>
+    <text x="210" y="58" text-anchor="middle" class="b">一个 SM / CU（流式多处理器）</text>
+    <rect x="36" y="70" width="110" height="40" rx="6" fill="#EAF0FD" stroke="#2F5BD3"/><text x="91" y="95" text-anchor="middle" class="sm">Warp 调度器</text>
+    <g>
+      <rect x="160" y="70" width="224" height="40" rx="6" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="272" y="95" text-anchor="middle" class="sm">32 条 ALU 通道（同一条指令）</text>
+    </g>
+    <rect x="36" y="122" width="348" height="34" rx="6" fill="#FFF4EC" stroke="#C2410C"/><text x="210" y="144" text-anchor="middle" class="sm">寄存器堆（几万个 32 位寄存器，被所有驻留 Warp 瓜分）</text>
+    <rect x="36" y="166" width="168" height="34" rx="6" fill="#F3EEFE" stroke="#6D28D9"/><text x="120" y="188" text-anchor="middle" class="sm">共享内存 / L1</text>
+    <rect x="216" y="166" width="168" height="34" rx="6" fill="#FEF6E4" stroke="#B45309"/><text x="300" y="188" text-anchor="middle" class="sm">纹理单元 + 纹理缓存</text>
+    <text x="210" y="226" text-anchor="middle" class="xs">驻留 Warp 越多 → 越能掩盖访存延迟（Occupancy）</text>
+    <text x="210" y="246" text-anchor="middle" class="xs">寄存器用得越多 → 能驻留的 Warp 越少</text>
+
+    <!-- latency hiding timeline -->
+    <text x="630" y="58" text-anchor="middle" class="b">延迟隐藏：Warp 轮流上场</text>
+    <g class="xs"><text x="430" y="92">Warp 0</text><text x="430" y="122">Warp 1</text><text x="430" y="152">Warp 2</text><text x="430" y="182">Warp 3</text></g>
+    <rect x="480" y="80" width="40" height="18" fill="#15803D"/><rect x="520" y="80" width="200" height="18" fill="#E5E7EB"/><rect x="720" y="80" width="40" height="18" fill="#15803D"/>
+    <rect x="520" y="110" width="40" height="18" fill="#15803D"/><rect x="560" y="110" width="200" height="18" fill="#E5E7EB"/>
+    <rect x="560" y="140" width="40" height="18" fill="#15803D"/><rect x="600" y="140" width="200" height="18" fill="#E5E7EB"/>
+    <rect x="600" y="170" width="40" height="18" fill="#15803D"/><rect x="640" y="170" width="160" height="18" fill="#E5E7EB"/>
+    <text x="620" y="125" class="xs">等纹理返回（几百个周期）</text>
+    <rect x="480" y="210" width="14" height="12" fill="#15803D"/><text x="500" y="220" class="xs">计算</text>
+    <rect x="550" y="210" width="14" height="12" fill="#E5E7EB"/><text x="570" y="220" class="xs">等待内存</text>
+    <text x="630" y="252" text-anchor="middle" class="xs">只要总有一个 Warp 处于"可计算"状态，ALU 就不会闲着</text>
+  </svg>
+  <figcaption><b>图 1-2</b>　SIMT 执行与延迟隐藏。GPU 不靠缓存命中，而是靠"切换到别的 Warp"来掩盖访存延迟。</figcaption>
+  </figure>
+
+  <p>这个模型直接解释了 Shader 编写里的几条经验：</p>
+  <ul>
+    <li><strong>分支发散（Divergence）</strong>：同一 Warp 的线程如果走了 if 的不同分支，硬件只能<em>两条分支都执行</em>，用掩码屏蔽不该写结果的线程。所以"按像素随机的分支"很贵，而"按材质/按 Draw Call 一致的分支"（uniform branch）几乎免费。</li>
+    <li><strong>寄存器压力与 Occupancy</strong>：一个复杂 Shader 用了很多寄存器，SM 上能同时驻留的 Warp 就变少，掩盖延迟的能力就下降。这是"Shader 变复杂，即使 ALU 不是瓶颈也变慢"的常见原因。</li>
+    <li><strong>像素着色器按 2×2 Quad 打包</strong>：一个 Warp 的 32 个线程其实是 8 个 2×2 像素块。第 6 章会看到，这是导数 <code>ddx/ddy</code> 能工作的前提，也是小三角形浪费的根源。</li>
+  </ul>
+  <div class="co deep"><span class="h">🧠 深入：统一着色器架构</span>
+  <p>早期 GPU（DX9 时代）有专门的"顶点单元"和"像素单元"，场景顶点多时像素单元闲着，反之亦然。从 DX10 / Xbox 360 开始，GPU 改为<strong>统一着色器架构</strong>：同一批计算单元按需运行顶点、像素、计算着色器。今天说"管线有 VS、PS 两个阶段"指的是<em>逻辑阶段</em>，物理上它们跑在同一批 SM 上。</p></div>
+
+  <h2>1.4 可编程与固定功能：哪些能写代码，哪些只能配置</h2>
+  <p>回到图 0-1，管线里的阶段分两类：</p>
+  <div class="tbl"><table>
+    <tr><th>类型</th><th>阶段</th><th>你能控制什么</th></tr>
+    <tr><td><span class="yes">可编程</span></td><td>顶点着色器、（外壳/域/几何着色器）、像素着色器、计算着色器；新架构下的任务/网格着色器</td><td>任意代码：变换、光照、采样、discard、写深度</td></tr>
+    <tr><td><span class="mid">固定功能、可配置</span></td><td>输入装配、裁剪、透视除法、视口变换、背面剔除、光栅化、深度/模板测试、混合</td><td>只能设置状态：剔除模式、深度函数、混合因子、模板操作、多重采样数……</td></tr>
+  </table></div>
+  <p>固定功能阶段之所以不开放编程，是因为它们是<strong>极高频、极规则</strong>的操作（每秒数十亿次的覆盖测试、深度比较），做成专用硬件比通用 ALU 快一到两个数量级、也更省电。这也解释了为什么"在 PS 里 discard"或"在 PS 里写深度"会破坏性能：你让一个本可以在固定硬件里提前完成的决定，被迫推迟到可编程阶段之后（第 8 章）。</p>
+
+  <h2>1.5 两种画法：光栅化与光线追踪</h2>
+  <figure>
+  <svg viewBox="0 0 860 220" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="400" height="180" rx="12" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="220" y="44" text-anchor="middle" class="b" style="fill:#2F5BD3">光栅化：以物体为序（Object Order）</text>
+    <g class="sm"><text x="40" y="76">for 每个三角形:</text><text x="60" y="100">投影到屏幕</text><text x="60" y="124">for 它覆盖的每个像素:</text><text x="80" y="148">着色，并与深度缓冲比较</text></g>
+    <text x="220" y="182" text-anchor="middle" class="xs">可见性靠 Z-Buffer；天然适合硬件流水；全局效果（阴影、反射）要额外 Pass</text>
+    <rect x="440" y="20" width="400" height="180" rx="12" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="640" y="44" text-anchor="middle" class="b" style="fill:#6D28D9">光线追踪：以像素为序（Image Order）</text>
+    <g class="sm"><text x="460" y="76">for 每个像素:</text><text x="480" y="100">从相机发射一条光线</text><text x="480" y="124">找最近的交点（BVH 加速）</text><text x="480" y="148">在交点处再发阴影/反射光线</text></g>
+    <text x="640" y="182" text-anchor="middle" class="xs">可见性靠求交；全局效果自然；随机访存多，硬件 RT Core 才实用化</text>
+  </svg>
+  <figcaption><b>图 1-3</b>　两种方法的循环顺序正好相反。今天的游戏几乎都是"光栅化为主 + 局部光追"的混合方案。</figcaption>
+  </figure>
+  <p>光栅化的核心优势是<strong>数据访问高度规则</strong>：一个三角形覆盖的像素在屏幕上是连续的一片，访问的纹理也在一小块区域里，缓存命中率极高；光线追踪的光线会四散到场景各处，访存随机。这正是光栅化能在手机上以 60fps 跑的原因，也是本书只讲光栅化管线的原因。</p>
+
+  <h2>1.6 游戏实战：一局 MOBA 的一帧里有什么</h2>
+  <p>以一款移动端 MOBA 为例，一帧通常由十几个 Pass 组成（不同项目差异很大，下面是一种典型结构）：</p>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>Pass</th><th>做什么</th><th>本书对应</th></tr>
+    <tr><td>1</td><td>Shadow Map</td><td>从主光源方向只写深度（英雄、小兵、建筑）</td><td>第 11 章</td></tr>
+    <tr><td>2</td><td>不透明物体（前向）</td><td>地形、建筑、角色；从前往后排序以利用 Early-Z</td><td>第 8 章</td></tr>
+    <tr><td>3</td><td>天空/背景</td><td>放在不透明之后画，大部分像素被深度测试拒掉</td><td>第 8 章</td></tr>
+    <tr><td>4</td><td>半透明 / 特效</td><td>技能特效、粒子；从后往前排序，大量使用加法混合</td><td>第 9 章</td></tr>
+    <tr><td>5</td><td>后处理</td><td>Bloom、调色、抗锯齿（FXAA 或 MSAA Resolve）</td><td>第 9 章</td></tr>
+    <tr><td>6</td><td>UI</td><td>血条、技能按钮、小地图；大量半透明、Overdraw 高</td><td>第 9、12 章</td></tr>
+  </table></div>
+  <div class="co net"><span class="h">🎮 游戏实战：为什么 MOBA 手游这么在意 Overdraw 和带宽</span>
+  <p>MOBA 镜头是固定俯视角，屏幕中央经常同时出现十几个技能特效叠在一起，团战时半透明粒子的 Overdraw 能达到十几层；而手机 GPU 的带宽只有桌面显卡的几分之一、还要和 CPU 共享、发热就降频。所以手游渲染优化的第一优先级通常是<strong>"少写像素、少读写显存"</strong>，而不是"少算几条 ALU 指令"。第 10 章的 TBR 架构和第 12 章的优化清单都是从这个约束出发的。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>CPU 决定<strong>画什么</strong>（剔除、排序、录制命令），GPU 决定<strong>每个像素长什么样</strong>；两者通过命令缓冲异步协作，通常错开 1～2 帧。</li>
+    <li>帧率由最慢的泳道决定；CPU 同步读 GPU 结果会让流水线排空。</li>
+    <li>Draw Call 贵在<strong>状态切换、资源绑定和驱动校验</strong>；静态合批、动态合批、Instancing、SRP Batcher 省的东西各不相同。</li>
+    <li>GPU 用 SIMT + 大量驻留 Warp 来掩盖访存延迟；分支发散和寄存器压力是 Shader 性能的两大隐形杀手。</li>
+    <li>固定功能阶段（光栅化、深度测试、混合）比可编程阶段快得多，破坏它们的"提前决定"会付出代价。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：GPU Instancing 和静态合批都能减少 Draw Call，什么情况下选哪个？</summary>
+  <p>看<strong>是否是同一个网格</strong>和<strong>内存预算</strong>。大量重复的同一网格（草、树、小兵）用 Instancing：只存一份顶点，实例数据很小，还能逐实例剔除。不同网格但同材质的静态物体（场景摆件）用静态合批：能合成一次绘制，但要付出顶点数据复制的内存，且合并后整体剔除。</p></details>
+  <details class="quiz"><summary>自测：为什么说"一个 Shader 里写了 if 不一定慢"？</summary>
+  <p>分支的代价取决于同一 Warp 内的线程是否走同一条路。如果条件来自常量（材质参数、关键字），整个 Draw Call 的所有线程走同一分支，只执行一侧，几乎没有代价；如果条件按像素随机变化（例如依赖噪声纹理），同一 Warp 内两侧分支都要执行，代价接近两侧之和。</p></details>
+</section>

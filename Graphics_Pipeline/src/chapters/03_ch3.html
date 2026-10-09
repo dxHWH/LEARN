@@ -1,0 +1,181 @@
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>投影与裁剪</h1>
+    <p class="lead">投影矩阵把"距离"藏进 w；裁剪必须赶在除以 w 之前完成。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能从相似三角形出发推导透视投影矩阵，说清每一项的来历</li>
+    <li>理解 NDC 深度是距离的<strong>倒数</strong>的线性函数——这是透视校正和深度精度问题的共同根源</li>
+    <li>说清为什么要在齐次裁剪空间裁剪，以及 w&lt;0、w=0 会发生什么</li>
+    <li>了解保护带（Guard Band）：为什么 GPU 实际上几乎只裁近平面</li>
+    <li>掌握 D3D / OpenGL / Vulkan / Metal 在 NDC 和视口上的差异</li>
+  </ul></div>
+
+  <h2>3.1 视锥体：正交投影与透视投影</h2>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(20,20)">
+      <text x="190" y="12" text-anchor="middle" class="b">正交投影：长方体 → 立方体</text>
+      <circle cx="30" cy="110" r="6" fill="#1F2937"/><text x="30" y="136" text-anchor="middle" class="xs">相机</text>
+      <rect x="100" y="50" width="250" height="120" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <line x1="100" y1="50" x2="100" y2="170" stroke="#2F5BD3" stroke-width="2"/><text x="100" y="188" text-anchor="middle" class="xs">near</text>
+      <line x1="350" y1="50" x2="350" y2="170" stroke="#2F5BD3" stroke-width="2"/><text x="350" y="188" text-anchor="middle" class="xs">far</text>
+      <rect x="160" y="80" width="30" height="30" fill="#C2410C"/><rect x="280" y="80" width="30" height="30" fill="#C2410C"/>
+      <text x="225" y="212" text-anchor="middle" class="xs">远近一样大 · 用于 UI、2D、阴影贴图（平行光）、小地图</text>
+    </g>
+    <g transform="translate(450,20)">
+      <text x="190" y="12" text-anchor="middle" class="b">透视投影：平截头体 → 立方体</text>
+      <circle cx="20" cy="110" r="6" fill="#1F2937"/>
+      <path d="M20,110 L360,20 L360,200 Z" fill="none" stroke="#CBD5E1" stroke-dasharray="4 3"/>
+      <path d="M90,91.5 L360,20 L360,200 L90,128.5 Z" fill="#EAF7EF" stroke="#15803D"/>
+      <line x1="90" y1="91.5" x2="90" y2="128.5" stroke="#15803D" stroke-width="2.5"/><text x="90" y="146" text-anchor="middle" class="xs">near</text>
+      <text x="360" y="218" text-anchor="middle" class="xs">far</text>
+      <rect x="140" y="95" width="20" height="20" fill="#C2410C"/><rect x="290" y="95" width="20" height="20" fill="#C2410C"/>
+      <text x="200" y="232" text-anchor="middle" class="xs">同样大小的方块，近处占视锥截面的比例大 → 近大远小</text>
+    </g>
+  </svg>
+  <figcaption><b>图 3-1</b>　两种投影的视锥体。投影矩阵的任务就是把它"捏"成标准立方体（NDC）。</figcaption>
+  </figure>
+
+  <h2>3.2 推导透视投影矩阵</h2>
+  <p>在观察空间里，相机在原点、看向 −Z。一个点 (x, y, z) 投影到距离为 n 的近平面上，由相似三角形：</p>
+  <div class="fm">x<sub>proj</sub> = n · x / (−z)　　　y<sub>proj</sub> = n · y / (−z)</div>
+  <p>除以 −z 不是线性运算，矩阵做不到。办法是：<strong>让矩阵输出 w = −z，把除法推迟给硬件</strong>。所以投影矩阵的第 4 行是 <code>(0, 0, −1, 0)</code>。</p>
+  <p>x 和 y 再乘一个缩放，使视野边缘落到 ±1：设垂直视场角为 fovy、宽高比为 aspect，令 <code>t = 1 / tan(fovy/2)</code>，则第 1、2 行是 <code>(t/aspect, 0, 0, 0)</code> 和 <code>(0, t, 0, 0)</code>。</p>
+  <p>最后是 z。我们也需要深度用于遮挡判断，而且希望它在除以 w 之后落在固定区间。z 只能写成 <code>z<sub>clip</sub> = A·z + B</code>（第 3 行是 <code>(0,0,A,B)</code>），于是：</p>
+  <div class="fm">z<sub>ndc</sub> = (A·z + B) / (−z) = −A − B / z　　令 z=−n ⇒ 0，z=−f ⇒ 1（D3D 约定）</div>
+  <p>解这两个方程得 <code>A = f/(n−f)</code>，<code>B = n·f/(n−f)</code>。整理得到右手系、深度范围 [0,1] 的透视矩阵（实测程序 <code>perspective()</code> 的 <code>DM_D3D</code> 分支）：</p>
+  <div class="fm">P = ⎡ t/aspect　0　　0　　　0　　⎤<br>　　⎢ 0　　　　t　　0　　　0　　⎥<br>　　⎢ 0　　　　0　 f/(n−f)　 nf/(n−f) ⎥<br>　　⎣ 0　　　　0　 −1　　　　0　　⎦</div>
+<!--code:cpp:soft_raster.cpp · 四种深度约定的投影矩阵（只有第 3 行不同）-->
+static M4 perspective(float fovyDeg, float aspect, float n, float f, int mode) {
+    M4 r{};
+    float t = 1.f / tanf(fovyDeg * (float)M_PI / 360.f);
+    r.m[0][0] = t / aspect; r.m[1][1] = t; r.m[3][2] = -1;  // w_clip = -z_view
+    switch (mode) {
+    case DM_D3D:    r.m[2][2] = f / (n - f);       r.m[2][3] = n * f / (n - f); break;  // near->0, far->1
+    case DM_REV:    r.m[2][2] = n / (f - n);       r.m[2][3] = n * f / (f - n); break;  // near->1, far->0
+    case DM_GL:     r.m[2][2] = (f + n) / (n - f); r.m[2][3] = 2 * f * n / (n - f); break;  // [-1,1]
+    case DM_REVINF: r.m[2][2] = 0;                 r.m[2][3] = n; break;  // far->∞，z_ndc = n / d
+    }
+    return r;
+}
+<!--/code-->
+
+  <h2>3.3 一个关键事实：NDC 深度是"距离倒数"的线性函数</h2>
+  <p>把上面的 z<sub>ndc</sub> 换成距离 d = −z：</p>
+  <div class="fm">z<sub>ndc</sub>(d) = −A + B/d　＝　<b>a + b · (1/d)</b></div>
+  <p>深度值和 <code>1/d</code> 成线性关系，而不是和 d 成线性关系。这个看似不起眼的事实，在后面会被引用三次：</p>
+  <div class="cards">
+    <div class="card"><div class="t">① 深度可以在屏幕空间线性插值</div><p>在屏幕空间里，<code>1/w</code> 是线性变化的（第 6 章证明），所以 z<sub>ndc</sub> 也是。硬件可以直接用重心坐标线性插值深度，不需要透视校正。</p></div>
+    <div class="card"><div class="t">② 属性插值必须做透视校正</div><p>反过来，uv、颜色这些属性是在三维空间里线性分布的，在屏幕空间就不是线性的，必须借助 <code>1/w</code> 校正（第 6 章 E5）。</p></div>
+    <div class="card"><div class="t">③ 深度精度极不均匀</div><p>1/d 在近处变化剧烈、远处几乎不变，深度值大量集中在近平面附近。E6 实测：near=0.1 时，<strong>一半的深度值花在了前 0.2 米</strong>（第 8 章）。</p></div>
+  </div>
+
+  <h2>3.4 为什么必须在除以 w 之前裁剪</h2>
+  <p>直觉上，先除以 w 得到 NDC，再把超出 [−1,1] 的部分切掉，似乎更简单。但这在有顶点位于相机<strong>背后</strong>时会出大问题：</p>
+  <ul>
+    <li>相机背后的点 z&gt;0，于是 <strong>w = −z &lt; 0</strong>。除以负数会让 x、y 变号——点被"翻"到屏幕另一侧。</li>
+    <li>恰好在相机平面上的点 w = 0，除法直接得到无穷大。</li>
+  </ul>
+  <p>实测程序 E2 构造了这样一个三角形：A、B 在相机前方 2 米，C 在相机背后 1 米（想象一块从你脚下延伸到前方的地面）：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E2</div><pre>顶点A 观察空间(-1.00,-0.50,-2.00)  clip=(-0.974,-0.866,  1.902, w= 2.000)  朴素除法->屏幕(   164.1,   257.9)
+顶点B 观察空间( 1.00,-0.50,-2.00)  clip=( 0.974,-0.866,  1.902, w= 2.000)  朴素除法->屏幕(   475.9,   257.9)
+顶点C 观察空间( 0.50,-0.50, 1.00)  clip=( 0.487,-0.866, -1.101, w=<span class="bad">-1.000</span>)  朴素除法->屏幕(   164.1,    24.1)  <span class="bad"><-- w<0：被翻到屏幕另一侧！</span>
+近平面裁剪后得到 4 个顶点（三角形变成四边形 -> 扇形拆成 2 个三角形）：
+  P0 观察空间(-1.000,-0.500,-2.000)  w=2.000  屏幕(  164.1,  257.9)  深度 0.9510
+  P1 观察空间( 1.000,-0.500,-2.000)  w=2.000  屏幕(  475.9,  257.9)  深度 0.9510
+  P2 观察空间( 0.683,-0.500,-0.100)  w=0.100  屏幕( <span class="hl">2450.4, 1738.8</span>)  深度 0.0000
+  P3 观察空间(-0.050,-0.500,-0.100)  w=0.100  屏幕(  164.1, 1738.8)  深度 0.0000
+实际光栅化：输入 1 个三角形，被裁剪 1 个，送入光栅化 2 个，覆盖 38760 个像素（地面从脚下一直铺到远处）。</pre></div>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(20,10)">
+      <text x="190" y="14" text-anchor="middle" class="b sm" style="fill:#B91C1C">朴素做法：先 ÷w（错误）</text>
+      <rect x="40" y="30" width="320" height="180" fill="#F8FAFC" stroke="#94A3B8"/>
+      <text x="200" y="226" text-anchor="middle" class="xs">屏幕 640×360（缩放示意）</text>
+      <polygon points="122,159 238,159 122,42" fill="#FDEEEE" stroke="#B91C1C" stroke-width="2"/>
+      <circle cx="122" cy="42" r="4" fill="#B91C1C"/><text x="132" y="46" class="xs" style="fill:#B91C1C">C'（被翻到上方）</text>
+      <circle cx="122" cy="159" r="4" fill="#1F2937"/><text x="100" y="176" class="xs">A</text>
+      <circle cx="238" cy="159" r="4" fill="#1F2937"/><text x="244" y="176" class="xs">B</text>
+      <text x="200" y="246" text-anchor="middle" class="xs" style="fill:#B91C1C">画出了一个指向天空的错误三角形，真正的地面却没画</text>
+    </g>
+    <g transform="translate(450,10)">
+      <text x="190" y="14" text-anchor="middle" class="b sm" style="fill:#15803D">正确做法：齐次空间裁剪近平面</text>
+      <rect x="40" y="30" width="320" height="180" fill="#F8FAFC" stroke="#94A3B8"/>
+      <polygon points="122,159 238,159 360,210 122,210" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+      <circle cx="122" cy="159" r="4" fill="#1F2937"/><text x="100" y="156" class="xs">P0</text>
+      <circle cx="238" cy="159" r="4" fill="#1F2937"/><text x="244" y="156" class="xs">P1</text>
+      <text x="200" y="198" text-anchor="middle" class="xs" style="fill:#15803D">P2、P3 在屏幕下方之外</text>
+      <text x="200" y="246" text-anchor="middle" class="xs" style="fill:#15803D">得到从脚下铺到前方的地面（两个三角形），超出屏幕的部分由包围盒钳制丢弃</text>
+    </g>
+  </svg>
+  <figcaption><b>图 3-2</b>　E2 的两种处理方式。裁剪必须发生在 w 还"有符号"的齐次空间里。</figcaption>
+  </figure>
+  <p>在齐次空间里，"点在视锥内"可以写成 6 个不需要除法的不等式：</p>
+  <div class="fm">−w ≤ x ≤ w　　−w ≤ y ≤ w　　0 ≤ z ≤ w（D3D/Vulkan/Metal）或 −w ≤ z ≤ w（OpenGL）</div>
+  <p>每个不等式都是 4D 空间里的一个"平面"，裁剪就是用 Sutherland–Hodgman 算法依次用平面切多边形：保留在内侧的顶点，对跨越平面的边按有符号距离插值出新顶点。一个三角形被一个平面切，最多变成四边形；被 6 个平面切，最多变成 9 边形，再拆成扇形三角形送去光栅化。</p>
+<!--code:cpp:soft_raster.cpp · 近平面裁剪（Sutherland–Hodgman，单平面）-->
+static float nearDist(int mode, const V4& c) {        // 有符号距离：>=0 在内侧
+    switch (mode) { case DM_D3D: return c.z;         // 0 <= z
+                    case DM_GL:  return c.z + c.w;   // -w <= z
+                    default:     return c.w - c.z; } // Reversed-Z：z <= w
+}
+static int clipNear(const State& s, const VOut* in, VOut* out, int na) {
+    int n = 0;
+    for (int i = 0; i < 3; i++) {
+        const VOut& a = in[i]; const VOut& b = in[(i + 1) % 3];
+        float da = nearDist(s.clip, a.c), db = nearDist(s.clip, b.c);
+        if (da >= 0) out[n++] = a;                                       // a 在内侧，保留
+        if ((da >= 0) != (db >= 0)) out[n++] = lerpV(a, b, da / (da - db), na);  // 边跨越平面，插出交点
+    }
+    return n;   // 0、3 或 4 个顶点
+}
+<!--/code-->
+  <div class="co deep"><span class="h">🧠 深入：为什么在 4D 里线性插值是对的</span>
+  <p>裁剪空间到观察空间之间只差一个<strong>线性</strong>变换（投影矩阵可逆），所以观察空间里的直线在裁剪空间里仍是直线，在裁剪空间里对 (x,y,z,w) 和所有属性按同一个 t 线性插值，得到的就是三维空间中那条边上的真实点。一旦除以 w，这条性质就没有了——这又是"必须在除法之前裁剪"的一个理由。</p></div>
+
+  <h2>3.5 保护带：GPU 其实很少真的裁 x/y</h2>
+  <p>注意 E2 输出里的 P2：屏幕坐标 (2450, 1739)，远远超出 640×360 的屏幕。实测程序并没有对 x/y 平面做裁剪，而是让光栅化器<strong>直接遍历被钳制到屏幕范围内的包围盒</strong>——超出屏幕的像素根本不会被访问。</p>
+  <p>真实 GPU 也是这么做的，叫<strong>保护带（Guard Band）</strong>：光栅化器的定点坐标范围远大于屏幕（例如 ±32K 像素），只要三角形落在这个大范围内，就不需要真正生成新顶点，靠 Scissor 和包围盒丢掉屏幕外的部分即可。真正必须裁剪的只有：</p>
+  <ul>
+    <li><strong>近平面</strong>：因为 w≤0 会导致除法翻转或除零，保护带帮不了；</li>
+    <li>超出保护带范围的极大三角形（定点数会溢出）；</li>
+    <li>远平面（可选，D3D 有 DepthClipEnable 开关；关掉时叫"深度钳制"，阴影渲染常用来避免投射体被远/近平面切掉）。</li>
+  </ul>
+  <div class="co tip"><span class="h">✅ 面试答法</span>
+  <p>问"裁剪是怎么做的"，可以分三层答：①<strong>在哪</strong>：在齐次裁剪空间、透视除法之前；②<strong>为什么</strong>：避免 w≤0 导致的翻转和除零，且 4D 空间插值保持线性；③<strong>实际硬件</strong>：x/y 依赖保护带 + 包围盒钳制，真正生成新顶点的只有近平面（以及超出保护带的情况），因为裁剪会改变图元数量、打断流水，硬件尽量避免。</p></div>
+
+  <h2>3.6 视口变换与各 API 的差异</h2>
+  <p>透视除法后得到 NDC，再由视口变换映射到像素坐标。以 W×H 的屏幕、左上角为原点为例：</p>
+  <div class="fm">x<sub>screen</sub> = (x<sub>ndc</sub> + 1) / 2 · W　　y<sub>screen</sub> = (1 − y<sub>ndc</sub>) / 2 · H　　depth = z<sub>ndc</sub>（D3D）或 (z<sub>ndc</sub>+1)/2（GL）</div>
+  <div class="tbl"><table>
+    <tr><th>API</th><th>NDC 深度范围</th><th>NDC y 方向</th><th>屏幕原点</th><th>备注</th></tr>
+    <tr><td>Direct3D 11/12</td><td>[0, 1]</td><td>向上</td><td>左上</td><td>视口变换里翻转 y</td></tr>
+    <tr><td>OpenGL</td><td>[−1, 1]</td><td>向上</td><td>左下</td><td>可用 <code>glClipControl</code> 改成 [0,1]（GL 4.5）</td></tr>
+    <tr><td>Vulkan</td><td>[0, 1]</td><td><strong>向下</strong></td><td>左上</td><td>从 GL 移植要翻 y（负视口高度或改投影矩阵）</td></tr>
+    <tr><td>Metal</td><td>[0, 1]</td><td>向上</td><td>左上</td><td>纹理坐标原点在左上</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 面试易错：渲染到纹理后画面上下颠倒</span>
+  <p>这是跨平台引擎最常见的问题之一：GL 的纹理坐标原点在左下，D3D/Metal/Vulkan 在左上。Unity 用 <code>_ProjectionParams.x</code> 和 <code>UNITY_UV_STARTS_AT_TOP</code> 宏来处理；自己写引擎时要统一一个约定，并在"采样渲染目标"这条路径上集中做翻转。</p></div>
+
+  <h2>3.7 游戏实战：近平面和 FOV 怎么设</h2>
+  <div class="cards">
+    <div class="card"><div class="t">近平面不能太小</div><p>深度精度主要由 near 决定（第 8 章）：E6 实测中 near 从 0.1 改成 1.0，1000 米处的 Z-Fighting 从 30.5% 降到 0%。第一人称游戏常设 0.01～0.1，第三人称/俯视角可以设到 0.3～1。</p></div>
+    <div class="card"><div class="t">近平面不能太大</div><p>太大时相机贴近墙壁或角色会被"切开"（穿模）。第一人称的手臂/武器经常用单独的相机或单独的投影矩阵渲染。</p></div>
+    <div class="card"><div class="t">宽屏适配</div><p>固定垂直 FOV、让水平 FOV 随宽高比变大（Hor+），宽屏玩家能看到更多。MOBA 这类竞技游戏会限制最大视野，避免超宽屏获得信息优势。</p></div>
+    <div class="card"><div class="t">正交相机</div><p>UI、小地图、平行光阴影都用正交投影。正交投影 w 恒为 1，深度与距离线性相关，精度均匀，不需要透视校正。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>透视投影矩阵用第 4 行 <code>(0,0,−1,0)</code> 把<strong>距离放进 w</strong>，除法由硬件完成；x、y 由 fovy 和 aspect 缩放，z 的两个系数由"near→0、far→1"解出。</li>
+    <li>NDC 深度是 <strong>1/d 的线性函数</strong>：所以深度能在屏幕空间线性插值、属性插值需要透视校正、深度精度集中在近处。</li>
+    <li>裁剪必须在<strong>齐次空间、除以 w 之前</strong>：避免 w&lt;0 翻转和 w=0 除零；4D 中线性插值仍正确。</li>
+    <li>硬件依赖<strong>保护带</strong>，x/y 基本不真正裁剪，近平面才必须裁。</li>
+    <li>D3D/Vulkan/Metal 深度 [0,1]，GL 默认 [−1,1]；Vulkan NDC y 向下。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：正交投影需要透视除法吗？深度精度有什么特点？</summary>
+  <p>正交投影矩阵的第 4 行是 (0,0,0,1)，w 恒为 1，透视除法相当于什么都没做；深度与观察空间 z 呈线性关系，精度在 near 到 far 之间均匀分布。所以平行光阴影贴图通常用正交投影，精度问题比透视的聚光灯阴影小，主要矛盾是"覆盖范围 vs 分辨率"（级联阴影 CSM 就是为此而生）。</p></details>
+  <details class="quiz"><summary>自测：一个三角形三个顶点都在视锥外，它一定看不见吗？</summary>
+  <p>不一定。三个顶点分别在左、右、上三个平面外侧时，三角形的中间部分仍可能横穿视锥。只有三个顶点都在<strong>同一个</strong>平面外侧时才能直接剔除（这就是实测程序里 <code>clipOut</code> 的判断条件：三个顶点都在近平面外）。视锥剔除包围盒时也是同理。</p></details>
+</section>

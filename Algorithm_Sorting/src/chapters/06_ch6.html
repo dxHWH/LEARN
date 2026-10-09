@@ -1,0 +1,153 @@
+<section class="chapter" id="ch6">
+  <div class="ch-head">
+    <div class="no">CHAPTER 06</div>
+    <h1>堆排序：最坏有保证的原地排序</h1>
+    <p class="lead">把数组看成一棵完全二叉树，反复取出堆顶的最大值放到末尾。理论上很完美，实际跑起来却不快。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>掌握数组和完全二叉树之间的下标映射，能写出 siftDown</li>
+    <li>理解为什么自底向上建堆是 O(n)，而不是 O(n log n)</li>
+    <li>说清堆排为什么比快排慢，以及它在哪些地方不可替代</li>
+  </ul></div>
+
+  <h2>6.1 二叉堆：用数组存一棵完全二叉树</h2>
+  <p><strong>大顶堆</strong>：每个节点都不小于它的孩子，所以堆顶 <code>a[0]</code> 是最大值。因为是完全二叉树，节点可以按层序紧密地存在数组里，不需要指针：</p>
+  <figure>
+  <svg viewBox="0 0 860 350" xmlns="http://www.w3.org/2000/svg">
+    <g stroke="#9CA3AF" stroke-width="1.5">
+      <line x1="430" y1="40" x2="250" y2="100"/><line x1="430" y1="40" x2="610" y2="100"/>
+      <line x1="250" y1="100" x2="160" y2="160"/><line x1="250" y1="100" x2="340" y2="160"/>
+      <line x1="610" y1="100" x2="520" y2="160"/><line x1="610" y1="100" x2="700" y2="160"/>
+      <line x1="160" y1="160" x2="115" y2="220"/>
+    </g>
+    <g stroke="#2F5BD3" stroke-width="1.6">
+      <circle cx="430" cy="40" r="20" fill="#DBEAFE"/><circle cx="250" cy="100" r="20" fill="#FFFFFF"/><circle cx="610" cy="100" r="20" fill="#FFFFFF"/>
+      <circle cx="160" cy="160" r="20" fill="#FFFFFF"/><circle cx="340" cy="160" r="20" fill="#FFFFFF"/><circle cx="520" cy="160" r="20" fill="#FFFFFF"/><circle cx="700" cy="160" r="20" fill="#FFFFFF"/>
+      <circle cx="115" cy="220" r="20" fill="#FFFFFF"/>
+    </g>
+    <g class="mono b" text-anchor="middle">
+      <text x="430" y="45">9</text><text x="250" y="105">7</text><text x="610" y="105">8</text>
+      <text x="160" y="165">3</text><text x="340" y="165">5</text><text x="520" y="165">6</text><text x="700" y="165">2</text><text x="115" y="225">1</text>
+    </g>
+    <g class="xs" text-anchor="middle" style="fill:#C2410C">
+      <text x="430" y="12">[0]</text><text x="250" y="72">[1]</text><text x="610" y="72">[2]</text>
+      <text x="124" y="148">[3]</text><text x="376" y="148">[4]</text><text x="484" y="148">[5]</text><text x="736" y="148">[6]</text><text x="80" y="214">[7]</text>
+    </g>
+    <g>
+      <rect x="230" y="262" width="48" height="32" rx="5" fill="#DBEAFE" stroke="#2F5BD3"/>
+      <rect x="280" y="262" width="48" height="32" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <rect x="330" y="262" width="48" height="32" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <rect x="380" y="262" width="48" height="32" rx="5" fill="#FEF3C7" stroke="#B45309"/>
+      <rect x="430" y="262" width="48" height="32" rx="5" fill="#FEF3C7" stroke="#B45309"/>
+      <rect x="480" y="262" width="48" height="32" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <rect x="530" y="262" width="48" height="32" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <rect x="580" y="262" width="48" height="32" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/>
+    </g>
+    <g class="mono b" text-anchor="middle">
+      <text x="254" y="283">9</text><text x="304" y="283">7</text><text x="354" y="283">8</text><text x="404" y="283">3</text>
+      <text x="454" y="283">5</text><text x="504" y="283">6</text><text x="554" y="283">2</text><text x="604" y="283">1</text>
+    </g>
+    <g class="xs mono" text-anchor="middle">
+      <text x="254" y="308">0</text><text x="304" y="308">1</text><text x="354" y="308">2</text><text x="404" y="308">3</text>
+      <text x="454" y="308">4</text><text x="504" y="308">5</text><text x="554" y="308">6</text><text x="604" y="308">7</text>
+    </g>
+    <path d="M304,262 Q354,236 404,262" fill="none" stroke="#B45309" stroke-width="1.5" marker-end="url(#ao)"/>
+    <path d="M304,262 Q379,226 454,262" fill="none" stroke="#B45309" stroke-width="1.5" marker-end="url(#ao)"/>
+    <text x="430" y="336" text-anchor="middle" class="sm">下标 i 的父节点 (i−1)/2，左孩子 2i+1，右孩子 2i+2（图中 a[1]=7 的孩子是 a[3]、a[4]）</text>
+    <text x="680" y="283" class="sm">按层序存放，</text><text x="680" y="301" class="sm">没有空洞</text>
+  </svg>
+  <figcaption><b>图 6-1</b>　大顶堆 [9,7,8,3,5,6,2,1]：树和数组是同一份数据的两种看法</figcaption>
+  </figure>
+
+  <h2>6.2 两个阶段：建堆，然后反复取堆顶</h2>
+  <ol>
+    <li><strong>建堆</strong>：从最后一个非叶子节点 <code>n/2−1</code> 开始往前，对每个节点做 siftDown（下沉）。全部做完，整个数组就是一个大顶堆。</li>
+    <li><strong>排序</strong>：把堆顶（最大值）和堆的最后一个元素交换，最大值就到了最终位置；堆的大小减 1，对新的堆顶做 siftDown 恢复堆的性质。重复 n−1 次。</li>
+  </ol>
+  <!--trace {"rows":[
+    {"lab":"大顶堆","a":[9,7,8,3,5,6,2,1],"s":"k.......","note":"堆顶 a[0] = 9 是最大值"},
+    {"lab":"交换","a":[1,7,8,3,5,6,2,9],"s":"x......d","note":"9 与堆尾交换，就位；堆大小变为 7"},
+    {"lab":"下沉","a":[8,7,1,3,5,6,2,9],"s":"x.x....d","note":"1 的孩子是 7、8，与较大的 8 交换"},
+    {"lab":"下沉","a":[8,7,6,3,5,1,2,9],"s":"..x..x.d","note":"1 的孩子是 6、2，与 6 交换；堆恢复"},
+    {"lab":"交换","a":[2,7,6,3,5,1,8,9],"s":"x.....dd","note":"堆顶 8 与堆尾交换，就位"},
+    {"lab":"下沉","a":[7,5,6,3,2,1,8,9],"s":"xx..x.dd","note":"2 先与 7 交换，再与 5 交换"}],
+    "names":{"k":"堆顶"},
+    "cap":"<b>图 6-2</b>　堆排序的前两轮：每轮把最大值换到末尾，再让新的堆顶下沉，一共下沉 O(log n) 层"} -->
+<!--code:cpp:heap_sort.h-->
+template <class T, class Less>
+void sift_down(T* a, int i, int n, Less& less) {   // 在 a[0, n) 中让 a[i] 下沉
+    T v = std::move(a[i]);
+    for (;;) {
+        int c = 2 * i + 1;
+        if (c >= n) break;
+        if (c + 1 < n && less(a[c], a[c + 1])) ++c;    // 取较大的孩子
+        if (!less(v, a[c])) break;                      // v >= 孩子：找到位置
+        a[i] = std::move(a[c]);                         // 孩子上移（“挖坑”法，比反复 swap 少一半赋值）
+        i = c;
+    }
+    a[i] = std::move(v);
+}
+
+template <class T, class Less = std::less<T>>
+void heap_sort(T* a, int n, Less less = {}) {
+    for (int i = n / 2 - 1; i >= 0; --i) sift_down(a, i, n, less);   // 建堆：O(n)
+    for (int end = n - 1; end > 0; --end) {
+        std::swap(a[0], a[end]);                                     // 最大值归位
+        sift_down(a, 0, end, less);                                  // O(log n)
+    }
+}
+// 等价的 STL 写法：std::make_heap(b, e); std::sort_heap(b, e);
+<!--/code-->
+
+  <h2>6.3 为什么建堆是 O(n)</h2>
+  <p>直觉上，n/2 个节点各下沉 O(log n)，应该是 O(n log n)。但大多数节点都在底层，下沉不了几层：高度为 h 的节点最多有 n/2<sup>h+1</sup> 个，每个最多下沉 h 层，所以总代价是</p>
+  <p style="text-align:center;font-family:var(--mono)">Σ<sub>h≥0</sub> (n / 2<sup>h+1</sup>) · h  =  n · Σ h/2<sup>h+1</sup>  =  n · 1  =  O(n)</p>
+  <p>一半的节点是叶子，根本不用动；四分之一的节点只下沉 1 层……真正下沉 log n 层的只有根节点一个。<strong>反过来，如果一个个 push 进去建堆（上浮），就是 O(n log n)</strong>，因为多数节点在底部，要上浮很多层。这是一个常见的追问点。</p>
+
+  <h2>6.4 复杂度与性质</h2>
+  <div class="tbl"><table>
+    <tr><th>性质</th><th>结论</th></tr>
+    <tr><td>时间</td><td>最好、平均、最坏都是 O(n log n)；比较次数约 2n log₂n（E2：n=1000 随机，16840 次，约为归并的 1.8 倍）</td></tr>
+    <tr><td>空间</td><td><strong>O(1)</strong>，迭代实现，没有递归，这是它最大的优点</td></tr>
+    <tr><td>稳定</td><td><span class="no">✘</span>：堆顶和堆尾的交换跨度非常大（E1 逆序对 2916，所有算法里最多）</td></tr>
+    <tr><td>自适应</td><td><span class="no">✘</span>：输入有序也一样要建堆、拆堆（E5：有序 35.90 ms，快排 3.94 ms）</td></tr>
+  </table></div>
+
+  <h2>6.5 为什么堆排在实践中慢</h2>
+  <!--bars {"title":"实测 E5：N = 100 万随机 int","unit":"ms","items":[["堆排序",73.59,"r"],["归并排序",70.07,"o"],["std::sort",51.38,"b"],["工程版快排",47.27,"g"]],"cap":"<b>图 6-3</b>　同为 O(n log n)，堆排比快排慢了约 56%"} -->
+  <ul>
+    <li><strong>缓存不友好</strong>：下沉时从 i 跳到 2i+1，越往下跨度越大。100 万个 int 是 4 MB，下层节点之间相隔几十 KB 甚至几 MB，几乎每次访问都会缓存未命中。快排的两个指针都是顺序扫描。</li>
+    <li><strong>比较次数多</strong>：每下沉一层要比较两次（先比较两个孩子，再和孩子比较），总数约 2n log n。</li>
+    <li><strong>分支难预测</strong>：“左孩子大还是右孩子大”基本是随机的。</li>
+    <li><strong>拆堆阶段反复把小元素换到堆顶</strong>，它几乎一定会一路沉到底，做了很多无用的比较。</li>
+  </ul>
+  <div class="co deep"><span class="h">深入一层：两种改进</span>
+    <p><strong>Floyd 的自底向上堆排（bottom-up heapsort）</strong>：既然换上来的元素多半会沉到底，那就先沿着“较大孩子”的路径直接走到叶子（每层只比较一次），再从叶子往上找它真正的位置。比较次数能降到约 n log₂n。<strong>d 叉堆</strong>（如 4 叉堆）：树高变成 log₄n，一个节点的孩子在内存里相邻，缓存表现更好，优先队列常用这种结构。</p>
+  </div>
+
+  <h2>6.6 不可替代的场合</h2>
+  <div class="cards">
+    <div class="card"><div class="t">introsort 的兜底</div><p>快排递归深度超过 2⌊log₂n⌋ 时，<code>std::sort</code> 对当前区间改用堆排，从而保证最坏 O(n log n)，而且不需要额外内存。</p></div>
+    <div class="card"><div class="t">内核和嵌入式</div><p>Linux 内核的 <code>lib/sort.c</code> 是堆排：没有递归，不会撑爆很小的内核栈；O(1) 内存；最坏情况可预测。</p></div>
+    <div class="card"><div class="t">Top-K / partial_sort</div><p>维护大小为 K 的堆，扫描一遍是 O(n log K)。E9：100 万个积分取前 100，小顶堆 0.41 ms，全量排序 58.61 ms。</p></div>
+    <div class="card"><div class="t">游戏里的优先队列</div><p>技能 / Buff 定时器（按到期时间的小顶堆）、A* 的 open list、事件调度、k 路归并，本质上都是堆。</p></div>
+  </div>
+
+  <h2>6.7 交互实验</h2>
+  <p>注意看两个阶段：前半段在建堆，柱子没有明显规律；后半段每轮都把当前最高的柱子换到右侧，变绿就位。</p>
+  <div class="lab sortlab" id="lab-hs" data-algos="heap" data-n="20"></div><!--/lab-->
+
+  <div class="co warn"><span class="h">面试注意</span>
+    <ul>
+      <li>建堆 O(n) 要会证明，至少要能说出“大多数节点在底层，下沉不了几层”。</li>
+      <li>升序排序用<strong>大顶堆</strong>（每轮把最大值放到末尾）。很多人会下意识地说“小顶堆”，那样得到的是降序。</li>
+      <li><code>std::priority_queue</code> 默认是大顶堆；要小顶堆得写 <code>std::priority_queue&lt;int, std::vector&lt;int&gt;, std::greater&lt;int&gt;&gt;</code>。</li>
+    </ul>
+  </div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>数组下标：父 (i−1)/2，孩子 2i+1、2i+2；升序用大顶堆。</li>
+    <li>自底向上建堆 <strong>O(n)</strong>；排序阶段 n−1 次下沉，每次 O(log n)。</li>
+    <li>最坏 O(n log n)、<strong>O(1) 空间</strong>、不稳定、不自适应；缓存不友好，实测比快排慢约 56%。</li>
+    <li>用途：introsort 兜底、内核排序、Top-K、优先队列、定时器。</li>
+  </ul></div>
+</section>

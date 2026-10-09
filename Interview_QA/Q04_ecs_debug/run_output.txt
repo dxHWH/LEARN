@@ -1,0 +1,86 @@
+ecs_debug_demo  _MSC_VER=1944  Release(/O2)
+
+===== Part1 代际句柄：悬空实体引用 =====
+  导弹锁定：E1v0 { Name{missile} Target{E0v0} }
+  敌人销毁后新建友军：E0v1 { Name{ally_hero} Health{100} }
+  [反例·只存索引] 导弹命中槽位 0 -> E0v1 { Name{ally_hero} Health{50} }  ← 打中了友军，且没有任何报错
+  [正例·索引+代际]   [ECS-CHECK] 失效句柄 E0v0（槽位当前 v1，已被新实体复用） system=<main>
+  结果=nullptr，导弹应改为「目标丢失」逻辑
+
+===== Part2 遍历中结构变更：swap-and-pop 导致漏处理 =====
+ [反例] CleanupSystem 在 each 里直接 destroy：
+  [ECS-ASSERT] 遍历中发生结构变更：destroy<*>(E0)  system=CleanupSystem frame=0
+  [ECS-ASSERT] 遍历中发生结构变更：destroy<*>(E2)  system=CleanupSystem frame=0
+  期望存活 2 个(E1,E3)；实际存活 4 个: E5(hp=0) E1(hp=30) E4(hp=0) E3(hp=60)  僵尸=2  violations=2
+ [正例] 用 CommandBuffer 延迟到同步点：
+  期望存活 2 个(E1,E3)；实际存活 2 个: E3(hp=60) E1(hp=30)  僵尸=0  violations=0
+
+===== Part3 组件 watchpoint：谁改了 Boss 的血？ =====
+    [watch] f1  MoveSystem           E0 Position{0.0,0.0} -> Position{1.0,0.0}
+    [watch] f1  PoisonSystem         E0 Health{100} -> Health{65}
+    [watch] f1  RegenSystem          E0 Health{65} -> Health{70}
+    [watch] f2  MoveSystem           E0 Position{1.0,0.0} -> Position{2.0,0.0}
+    [watch] f2  PoisonSystem         E0 Health{70} -> Health{35}
+    [watch] f2  RegenSystem          E0 Health{35} -> Health{40}
+    [watch] f3  MoveSystem           E0 Position{2.0,0.0} -> Position{3.0,0.0}
+    [watch] f3  PoisonSystem         E0 Health{40} -> Health{5}
+    [watch] f3  RegenSystem          E0 Health{5} -> Health{10}
+    [watch] f4  MoveSystem           E0 Position{3.0,0.0} -> Position{4.0,0.0}
+    [watch] f4  PoisonSystem         E0 Health{10} -> Health{-25}
+    [watch] f4  RegenSystem          E0 Health{-25} -> Health{-20}
+    [watch] f4  DeathSystem(延迟)  E0 add<Dead>
+    [watch] f4  DeathSystem(延迟)  E0 remove<Poison>
+    [watch] f5  MoveSystem           E0 Position{4.0,0.0} -> Position{5.0,0.0}
+    [watch] f5  RegenSystem          E0 Health{-20} -> Health{-15}
+    [watch] f6  MoveSystem           E0 Position{5.0,0.0} -> Position{6.0,0.0}
+    [watch] f6  RegenSystem          E0 Health{-15} -> Health{-10}
+  6 帧后：E0v0 { Name{boss} Position{6.0,0.0} Velocity{1.0,0.0} Health{-10} Dead }
+
+===== Part4 执行顺序追踪 + 分 System 性能 =====
+    [watch] f7  MoveSystem           E0 Position{6.0,0.0} -> Position{7.0,0.0}
+  [trace] f7 #1 MoveSystem     匹配实体=20001  待执行命令=0
+  [trace] f7 #2 PoisonSystem   匹配实体=0      待执行命令=0
+    [watch] f7  RegenSystem          E0 Health{-10} -> Health{-5}
+  [trace] f7 #3 RegenSystem    匹配实体=20001  待执行命令=0
+  [trace] f7 #4 DeathSystem    匹配实体=20001  待执行命令=0
+  [trace] f7 同步点：回放 0 条延迟命令
+  共 207 帧统计：
+  System         平均us/帧   最大us 平均实体  占比
+  MoveSystem           23.8       43.7      20001   18.6%
+  PoisonSystem          8.9       70.5          0    7.0%
+  RegenSystem          15.2       26.1      20001   11.8%
+  DeathSystem          80.2      294.4      20001   62.6%
+
+===== Part5 帧同步 desync：帧哈希定位第一帧 + 组件 diff =====
+ [有 bug]  A 的 Position 遍历顺序: u0 u1 u2 u3 | B: u0 u1 u3 u2
+  帧  A.netHash  B.netHash  一致?  | 含实体索引的哈希一致?
+   1   FA6822DE   FA6822DE   ✓   | ✗
+   2   ED892F37   ED892F37   ✓   | ✗
+   3   6AA8A7CB   6AA8A7CB   ✓   | ✗
+   4   44539D0B   44539D0B   ✓   | ✗
+   5   23F92D28   2A6A2279   ✗   | ✗
+  >>> 第一次不一致在第 5 帧，组件级 diff：
+    单例 itemOwner : A=102  B=103
+    NetId 102 (u2) Velocity: A=Velocity{2.0,0.0}  B=Velocity{1.0,0.0}
+    NetId 103 (u3) Velocity: A=Velocity{1.0,0.0}  B=Velocity{2.0,0.0}
+   6   B77BDDFB   3ACF3F5E   ✗   | ✗
+   7   3F8EEE1B   B3D4101E   ✗   | ✗
+   8   27BBFEF4   0B53CF05   ✗   | ✗
+  结论：NetId 哈希首次分歧帧=5；含实体索引的哈希首次分歧帧=1（第 1 帧就报，属于误报）
+ [修复后]  A 的 Position 遍历顺序: u0 u1 u2 u3 | B: u0 u1 u3 u2
+  帧  A.netHash  B.netHash  一致?  | 含实体索引的哈希一致?
+   1   FA6822DE   FA6822DE   ✓   | ✗
+   2   ED892F37   ED892F37   ✓   | ✗
+   3   6AA8A7CB   6AA8A7CB   ✓   | ✗
+   4   44539D0B   44539D0B   ✓   | ✗
+   5   23F92D28   23F92D28   ✓   | ✗
+   6   B77BDDFB   B77BDDFB   ✓   | ✗
+   7   3F8EEE1B   3F8EEE1B   ✓   | ✗
+   8   27BBFEF4   27BBFEF4   ✓   | ✗
+  结论：NetId 哈希首次分歧帧=-1；含实体索引的哈希首次分歧帧=1（第 1 帧就报，属于误报）
+
+===== Part6 调试功能的运行时开销（100 万实体 Move）=====
+  eachNoDbg（调试代码编译期剔除）    0.85 ms  (0.85 ns/实体)
+  each（带 watch 检查，0 个被 watch）    1.23 ms  (1.23 ns/实体)
+  each（全部被 watch：快照+memcmp）    7.38 ms  (7.38 ns/实体)
+  （记录到的变更次数=15000000，防止被优化）

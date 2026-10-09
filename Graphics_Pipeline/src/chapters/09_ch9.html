@@ -1,0 +1,163 @@
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>输出合并：模板、混合与抗锯齿</h1>
+    <p class="lead">片元通过了所有测试，最后一步是和帧缓冲里已有的东西"合"在一起——这一步决定了半透明能不能画对、锯齿能不能消掉。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>记住逐片元操作的顺序：裁剪矩形 → (Alpha Test) → 模板测试 → 深度测试 → 混合 → 写掩码</li>
+    <li>会用模板缓冲实现描边、遮挡显示（X-Ray）、遮罩、传送门等效果</li>
+    <li>理解混合方程，以及为什么半透明必须排序、为什么加法混合可以不排序</li>
+    <li>理解预乘 Alpha 解决的问题，以及 OIT 的基本思路</li>
+    <li>比较 SSAA、MSAA、FXAA、TAA：分别消除哪一种走样、代价是什么</li>
+  </ul></div>
+
+  <h2>9.1 逐片元操作的顺序</h2>
+  <figure>
+  <svg viewBox="0 0 860 150" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm">
+      <rect x="10" y="40" width="100" height="56" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="60" y="64" text-anchor="middle">像素着色器</text><text x="60" y="82" text-anchor="middle" class="xs">颜色 / discard</text>
+      <line x1="110" y1="68" x2="126" y2="68" stroke="#4B5563" marker-end="url(#a)"/>
+      <rect x="130" y="40" width="100" height="56" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="180" y="64" text-anchor="middle">Scissor</text><text x="180" y="82" text-anchor="middle" class="xs">裁剪矩形</text>
+      <line x1="230" y1="68" x2="246" y2="68" stroke="#4B5563" marker-end="url(#a)"/>
+      <rect x="250" y="40" width="100" height="56" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="300" y="64" text-anchor="middle">模板测试</text><text x="300" y="82" text-anchor="middle" class="xs">Stencil</text>
+      <line x1="350" y1="68" x2="366" y2="68" stroke="#4B5563" marker-end="url(#a)"/>
+      <rect x="370" y="40" width="100" height="56" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="420" y="64" text-anchor="middle">深度测试</text><text x="420" y="82" text-anchor="middle" class="xs">Depth</text>
+      <line x1="470" y1="68" x2="486" y2="68" stroke="#4B5563" marker-end="url(#a)"/>
+      <rect x="490" y="40" width="100" height="56" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="540" y="64" text-anchor="middle">混合</text><text x="540" y="82" text-anchor="middle" class="xs">Blend</text>
+      <line x1="590" y1="68" x2="606" y2="68" stroke="#4B5563" marker-end="url(#a)"/>
+      <rect x="610" y="40" width="100" height="56" rx="8" fill="#F3F4F6" stroke="#94A3B8"/><text x="660" y="64" text-anchor="middle">写掩码</text><text x="660" y="82" text-anchor="middle" class="xs">ColorMask</text>
+      <line x1="710" y1="68" x2="726" y2="68" stroke="#4B5563" marker-end="url(#a)"/>
+      <rect x="730" y="40" width="120" height="56" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="790" y="64" text-anchor="middle">帧缓冲</text><text x="790" y="82" text-anchor="middle" class="xs">(MSAA → Resolve)</text>
+    </g>
+    <text x="430" y="124" text-anchor="middle" class="xs">模板和深度测试在硬件中通常与 Early-Z 一起提前执行；"模板测试结果"还能决定深度测试失败/通过时对模板值做什么操作</text>
+  </svg>
+  <figcaption><b>图 9-1</b>　输出合并阶段（D3D 称 Output Merger，GL 称 Per-Fragment Operations）。</figcaption>
+  </figure>
+
+  <h2>9.2 模板缓冲：给像素打标签</h2>
+  <p>模板缓冲为每个像素存一个 8 位整数（通常与 24 位深度打包成 D24S8，或 D32F + S8）。模板测试把参考值与缓冲值按位掩码比较，并根据三种结果——<strong>模板失败 / 模板通过但深度失败 / 都通过</strong>——分别执行 Keep、Replace、Increment、Decrement、Invert、Zero 等操作。</p>
+  <div class="tbl"><table>
+    <tr><th>效果</th><th>做法</th></tr>
+    <tr><td>角色描边</td><td>Pass 1 正常画角色并把模板写成 1；Pass 2 把角色沿法线外扩一点，只在模板 ≠ 1 的地方画描边色</td></tr>
+    <tr><td>遮挡显示（X-Ray / 透视轮廓）</td><td>角色被墙挡住的部分显示一个半透明剪影：画角色时 <code>ZTest Greater</code>（只在被挡住时通过），并用模板防止同一像素被叠多次</td></tr>
+    <tr><td>UI 遮罩（Mask）</td><td>先把遮罩形状写进模板，再只在模板匹配处画子元素；嵌套遮罩用递增的模板值</td></tr>
+    <tr><td>传送门 / 镜子</td><td>门框区域写模板，再在模板区域内用另一个相机矩阵渲染门后的场景</td></tr>
+    <tr><td>延迟光照的光源体积</td><td>用模板标记"被光源体积覆盖且在几何体前面"的像素，只对这些像素做光照（第 11 章）</td></tr>
+    <tr><td>阴影体（Shadow Volume）</td><td>Depth-Fail（Carmack's Reverse）：正面深度失败 +1、背面深度失败 −1，模板非零即在阴影中</td></tr>
+  </table></div>
+  <div class="co net"><span class="h">🎮 游戏实战：MOBA 里的模板</span>
+  <p>英雄走进草丛或被建筑挡住时显示轮廓/半透明剪影、选中目标的高亮描边、技能指示器只画在地面上（不画到英雄身上）——这些都是模板的典型用法。注意：模板值是全局共享的 8 位资源，引擎要统一分配位（例如 bit0～2 给描边、bit3 给 UI 遮罩、bit4 标记角色），否则不同系统会互相覆盖。</p></div>
+
+  <h2>9.3 混合方程</h2>
+  <p>混合把像素着色器输出的颜色（源，src）和帧缓冲中已有的颜色（目标，dst）合成：</p>
+  <div class="fm">C<sub>out</sub> = C<sub>src</sub> · F<sub>src</sub>　⊕　C<sub>dst</sub> · F<sub>dst</sub>　　（⊕ 可以是 Add / Sub / RevSub / Min / Max）</div>
+  <div class="tbl"><table>
+    <tr><th>名称</th><th>F<sub>src</sub> / F<sub>dst</sub></th><th>效果</th><th>满足交换律？</th></tr>
+    <tr><td>Alpha 混合（Over）</td><td>SrcAlpha / OneMinusSrcAlpha</td><td>普通半透明：玻璃、烟雾、UI</td><td class="no">否</td></tr>
+    <tr><td>预乘 Alpha</td><td>One / OneMinusSrcAlpha</td><td>同上，但颜色已预先乘过 alpha（9.5 节）</td><td class="no">否</td></tr>
+    <tr><td>加法（Additive）</td><td>One / One（或 SrcAlpha / One）</td><td>火焰、光效、能量、Bloom 叠加：只会变亮</td><td class="yes">是</td></tr>
+    <tr><td>乘法（Multiply）</td><td>DstColor / Zero</td><td>阴影贴花、暗化、染色</td><td class="yes">是</td></tr>
+    <tr><td>Min / Max</td><td>—</td><td>特殊效果、深度类数据的合成</td><td class="yes">是</td></tr>
+  </table></div>
+
+  <h2>9.4 半透明为什么必须排序</h2>
+  <p>E11 在白色背景上依次叠加 3 层 alpha=0.5 的红、绿、蓝，穷举全部 6 种顺序：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E11</div><pre>白色背景上依次叠加 3 层 alpha=0.5 的 红/绿/蓝（Over 混合 src*a + dst*(1-a)）：
+  顺序 R->G->B : Over 结果 (0.250, 0.375, <span class="hl">0.625</span>)    Additive 结果 (1.30, 1.30, 1.30)
+  顺序 R->B->G : Over 结果 (0.250, <span class="hl">0.625</span>, 0.375)    Additive 结果 (1.30, 1.30, 1.30)
+  顺序 G->R->B : Over 结果 (0.375, 0.250, <span class="hl">0.625</span>)    Additive 结果 (1.30, 1.30, 1.30)
+  顺序 G->B->R : Over 结果 (<span class="hl">0.625</span>, 0.250, 0.375)    Additive 结果 (1.30, 1.30, 1.30)
+  顺序 B->R->G : Over 结果 (0.375, <span class="hl">0.625</span>, 0.250)    Additive 结果 (1.30, 1.30, 1.30)
+  顺序 B->G->R : Over 结果 (<span class="hl">0.625</span>, 0.375, 0.250)    Additive 结果 (1.30, 1.30, 1.30)
+结论：Over 混合不满足交换律 -> 半透明必须排序；Additive 满足交换律 -> 粒子特效常用加法混合免排序。</pre></div>
+  <figure>
+  <svg viewBox="0 0 860 150" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(20,10)">
+      <text x="0" y="16" class="sm b">Over 混合的 6 种顺序（最后画的颜色占 50%）</text>
+      <rect x="0" y="30" width="120" height="60" rx="6" fill="rgb(64,96,159)"/><text x="60" y="106" text-anchor="middle" class="xs">R→G→B</text>
+      <rect x="135" y="30" width="120" height="60" rx="6" fill="rgb(64,159,96)"/><text x="195" y="106" text-anchor="middle" class="xs">R→B→G</text>
+      <rect x="270" y="30" width="120" height="60" rx="6" fill="rgb(96,64,159)"/><text x="330" y="106" text-anchor="middle" class="xs">G→R→B</text>
+      <rect x="405" y="30" width="120" height="60" rx="6" fill="rgb(159,64,96)"/><text x="465" y="106" text-anchor="middle" class="xs">G→B→R</text>
+      <rect x="540" y="30" width="120" height="60" rx="6" fill="rgb(96,159,64)"/><text x="600" y="106" text-anchor="middle" class="xs">B→R→G</text>
+      <rect x="675" y="30" width="120" height="60" rx="6" fill="rgb(159,96,64)"/><text x="735" y="106" text-anchor="middle" class="xs">B→G→R</text>
+      <text x="400" y="132" text-anchor="middle" class="xs">同样三层玻璃，6 种画法得到 6 种颜色：Over 的结果取决于顺序，正确的物理顺序是"从后往前"</text>
+    </g>
+  </svg>
+  <figcaption><b>图 9-2</b>　E11 的六种结果（按 sRGB 近似显示）。</figcaption>
+  </figure>
+  <p>Over 混合 <code>dst' = a·src + (1−a)·dst</code> 的含义是"src 盖在 dst 上面"，所以必须先画远的（dst）、后画近的（src）。半透明物体的标准做法：</p>
+  <ol>
+    <li>先画完所有不透明物体（写深度）；</li>
+    <li>半透明物体<strong>从后往前</strong>排序，开启深度测试（被不透明物体挡住的不画）、<strong>关闭深度写入</strong>（否则近处的半透明会把后画的、更远的半透明挡掉——但我们已经排过序了，这种情况本不该发生；关闭写入是为了让排序不完美时也不至于"消失"）。</li>
+  </ol>
+  <div class="co warn"><span class="h">⚠️ 面试易错：按物体排序也不完全对</span>
+  <p>引擎按<strong>物体中心到相机的距离</strong>排序，但物体之间可能互相穿插（两片交叉的玻璃），或者一个物体自身有多层（一个半透明的球，前表面和后表面）——这些情况下物体级排序必然有错。常见缓解手段：自身多层的模型先画背面再画正面（Cull Front 再 Cull Back 两个 Pass）；或先用一个 Pass 只写深度、再用 LEQUAL 只画最前面一层（"半透明但只显示最外层"）；彻底解决需要 OIT。</p></div>
+  <h3>顺序无关透明（OIT）</h3>
+  <div class="cards">
+    <div class="card"><div class="t">深度剥离 Depth Peeling</div><p>每个 Pass 剥出"下一层"最近的表面，N 层需要 N 个 Pass。结果精确但开销与层数成正比。</p></div>
+    <div class="card"><div class="t">逐像素链表 / A-Buffer</div><p>每个像素用原子操作把所有片元追加到链表，最后排序合成。精确，显存不可控。</p></div>
+    <div class="card"><div class="t">加权混合 WBOIT</div><p>用与深度相关的权重做可交换的加权平均，一个 Pass 完成。近似，但对烟雾、粒子足够好，移动端也可用。</p></div>
+    <div class="card"><div class="t">Moment / MLAB / 等</div><p>用矩或固定数量的片上层数近似透射率，在质量和成本之间折中；移动端可借助 Pixel Local Storage 实现。</p></div>
+  </div>
+
+  <h2>9.5 预乘 Alpha：消灭"黑边"</h2>
+  <p>贴图里完全透明的像素颜色通常是任意值（常见的是黑色）。双线性过滤时，不透明像素和透明像素的颜色会被<strong>先插值再按 alpha 混合</strong>，透明像素的黑色就渗进了边缘：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E11 双线性过滤 + 混合</div><pre>双线性过滤的"黑边"：texel A=不透明白(1,1,1,a=1)，texel B=全透明但颜色为黑(0,0,0,a=0)，在两者正中采样，背景为绿(0,1,0)
+  直通 Alpha：过滤后 (0.50,0.50,0.50,a=0.50) -> 混合结果 (<span class="bad">0.250, 0.750, 0.250</span>)   <-- 偏暗，出现黑边
+  预乘 Alpha：过滤后 (0.50,0.50,0.50,a=0.50) -> 混合结果 (<span class="ok">0.500, 1.000, 0.500</span>)   <-- 正确：白与绿各半</pre></div>
+  <p>直通（Straight）Alpha 下，过滤后的颜色 0.5 代表的是"一半白一半黑"，再乘以 alpha 0.5 混合，等于把黑色也算了进去。预乘（Premultiplied）Alpha 把颜色事先乘好 alpha（透明像素的颜色自然是 0），过滤时颜色和 alpha 按同样的比例变化，结果在数学上就是正确的。</p>
+  <ul>
+    <li>预乘后混合因子变成 <code>One, OneMinusSrcAlpha</code>，还能<strong>用同一个混合状态同时表达 Over 和 Additive</strong>（alpha=0 时就是纯加法）——粒子系统可以把两种粒子合进一个批次。</li>
+    <li>Mipmap 生成、缩放图片、多层合成也应该在预乘空间里做。</li>
+  </ul>
+
+  <h2>9.6 抗锯齿：三种走样，四种方案</h2>
+  <p>"锯齿"其实是几种不同的走样：</p>
+  <div class="cards">
+    <div class="card"><div class="t">几何走样</div><p>三角形边缘：每个像素只看中心一个点是否被覆盖（第 5 章）。</p></div>
+    <div class="card"><div class="t">着色走样</div><p>像素内部：高频的高光、法线贴图、细条纹在每个像素只算一次时闪烁。</p></div>
+    <div class="card"><div class="t">纹理走样</div><p>纹理缩小时（第 7 章），由 Mipmap/各向异性解决。</p></div>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>做法</th><th>解决</th><th>代价</th></tr>
+    <tr><td>SSAA（超采样）</td><td>以 N 倍分辨率渲染再降采样；每个样本都跑 PS</td><td>几何 + 着色</td><td>PS、带宽、显存全部 ×N</td></tr>
+    <tr><td>MSAA（多重采样）</td><td>每像素 N 个覆盖/深度样本，<strong>PS 只跑一次</strong>，结果写入所有被覆盖的样本；最后 Resolve 平均</td><td>几何（边缘）</td><td>深度/颜色存储 ×N；PS 几乎不变；对着色走样无效</td></tr>
+    <tr><td>FXAA / SMAA（后处理）</td><td>在最终图像上检测高对比度边缘并沿边方向模糊</td><td>几何（部分）</td><td>很便宜；会糊掉细节文字和纹理；时间上不稳定</td></tr>
+    <tr><td>TAA（时域）</td><td>每帧对投影矩阵做亚像素抖动，用运动矢量把历史帧重投影后与当前帧混合</td><td>几何 + 着色 + 部分纹理</td><td>需要运动矢量；会产生拖影/鬼影，需要邻域裁剪；画面偏软</td></tr>
+  </table></div>
+  <p>E10 用一个高频条纹着色的场景（含一个细长条），与 256 样本的参考图比较边缘像素和内部像素的误差：</p>
+  <div class="term"><div class="bar">soft_raster.exe · E10</div><pre>方式                         RMSE边缘 RMSE内部   PS执行 深度/颜色样本 边缘(纯色)RMSE
+无 AA (1 样本)                  0.1835     0.1683       4705       4705       0.2569
+MSAA 4x (每像素着色 1 次)     0.1175     <span class="bad">0.1683</span>       <span class="ok">4946</span>      18810       <span class="ok">0.1063</span>
+SSAA 4x (每样本着色)          <span class="ok">0.0620     0.0067</span>      <span class="bad">18810</span>      18810       0.1063
+（边缘像素 539 个，内部像素 4371 个；内部是高频条纹着色，用来暴露"着色走样"）</pre></div>
+<!--img:e10_1x:无 AA;e10_msaa4:MSAA 4×;e10_ssaa4:SSAA 4×;e10_ref:参考（256 样本）|<b>图 9-3</b>　E10 局部放大 4 倍。MSAA 让三角形边缘变平滑，但内部的条纹和无 AA 一模一样（着色仍是每像素一次）；SSAA 同时平滑了边缘和内部条纹；最右为参考。-->
+  <div class="co ver"><span class="h">🔬 从输出里能读出什么</span>
+  <ul>
+    <li><strong>纯色几何（最后一列）上，MSAA 4× 与 SSAA 4× 的边缘误差完全相同</strong>（0.1063）——对几何走样，两者等效；而 MSAA 的 PS 执行次数只比无 AA 多 5%（4946 vs 4705，多出来的是只被部分样本覆盖、但中心不在三角形内的边缘像素），SSAA 则是 4 倍。</li>
+    <li><strong>内部着色走样 MSAA 毫无改善</strong>（0.1683 与无 AA 相同），SSAA 降到 0.0067。这就是"MSAA 治不了高光闪烁和法线贴图闪烁"的直接证据。</li>
+    <li>两者的深度/颜色样本数都是 4 倍（18810）：<strong>MSAA 省的是着色，不省存储和带宽</strong>——在桌面 IMR 上这意味着 4 倍的帧缓冲带宽（第 10 章 E12：IMR 下 MSAA 4× 的流量是 TBR 的 134 倍）。</li>
+  </ul></div>
+  <div class="co deep"><span class="h">🧠 深入：MSAA 的几个细节</span>
+  <ul>
+    <li><strong>采样点位置</strong>：4× 用旋转栅格（实测程序里的 <code>(-2,-6),(6,-2),(-6,2),(2,6)</code>/16），让接近水平和竖直的边也能得到 4 级灰度。</li>
+    <li><strong>PS 在哪里求值</strong>：默认在像素中心，即使中心不在三角形内（外插）；用 <code>centroid</code> 改为在被覆盖样本的重心处求值。</li>
+    <li><strong>Alpha To Coverage</strong>：把 PS 输出的 alpha 转成覆盖掩码（alpha=0.5 → 覆盖 2 个样本），让 Alpha Test 的树叶边缘也能被 MSAA 平滑，且不需要排序。</li>
+    <li><strong>延迟渲染与 MSAA 不兼容</strong>：G-Buffer 要按样本存储，带宽和显存爆炸；这是延迟渲染普遍用 TAA 的原因之一（第 11 章）。</li>
+  </ul></div>
+  <div class="co net"><span class="h">🎮 游戏实战：移动端 MOBA 选哪种 AA</span>
+  <p>移动端 TBR 上 MSAA 很便宜：多重采样的颜色和深度只存在片上 Tile 内存里，Resolve 也在片上完成，只写回最终的 1× 结果（第 10 章）。所以前向渲染的手游通常首选 <strong>MSAA 2×/4×</strong>，并把 MSAA 渲染目标设为 memoryless（不分配系统内存）。注意如果中途需要把颜色或深度"拷出来"给后处理用（比如读深度做软粒子），就会触发 Resolve + 写回，MSAA 的优势就没了。TAA 在移动端则要考虑运动矢量 Pass 的开销和快速镜头移动下的拖影。</p></div>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>输出合并顺序：Scissor → 模板 → 深度 → 混合 → 写掩码（硬件会把模板/深度尽量提前）。</li>
+    <li>模板缓冲是 8 位"像素标签"：描边、遮挡剪影、UI 遮罩、传送门、光源体积；引擎要统一分配模板位。</li>
+    <li>Over 混合不满足交换律（E11：6 种顺序 6 种颜色），半透明必须<strong>从后往前</strong>、开深度测试、关深度写入；加法和乘法混合可交换，可免排序。</li>
+    <li>预乘 Alpha 让过滤和混合在数学上一致，消除黑边，还能把 Over 和 Additive 合并成一种混合状态。</li>
+    <li>E10：MSAA 4× 对几何走样等效于 SSAA 4×，PS 只多 5%；但对着色走样无效，且存储/带宽是 4 倍。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：UI 为什么是移动端 Overdraw 的大户？怎么优化？</summary>
+  <p>UI 几乎全是半透明（圆角、阴影、渐隐），无法利用深度测试剔除，而且常常是全屏面板层层叠加，每层都要读写帧缓冲。优化：全屏不透明面板打开时<strong>关闭下层 UI 和 3D 场景的渲染</strong>；图片尽量裁掉透明区域（用多边形网格代替四边形，减少透明像素）；合并图集减少批次；静态 UI 缓存成一张 RT；避免大面积的全透明点击区域仍参与渲染。</p></details>
+  <details class="quiz"><summary>自测：为什么开了 MSAA，角色身上的高光还是在闪？</summary>
+  <p>MSAA 只对三角形覆盖做多次采样，像素着色仍然每像素一次，所以着色走样（高光、法线贴图、细节纹理的高频变化）完全不受影响。解决办法是从源头降低着色频率：法线贴图做 Mip 并配合 Toksvig / LEAN 之类的方法调整粗糙度（"镜面抗锯齿"），或者用 TAA。</p></details>
+</section>

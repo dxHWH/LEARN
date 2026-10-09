@@ -40,9 +40,9 @@
   <h2>7.2 可靠性光谱：不是所有数据都需要 TCP 那样的可靠</h2>
   <p>把"可靠性"拆开，至少有两个独立的维度：<strong>是否保证送达</strong>，以及<strong>是否保证顺序</strong>。顺序这一维还有一个很实用的中间态：<strong>只要最新</strong>（sequenced，旧的晚到就直接丢）。组合起来就是一张光谱：</p>
   <figure>
-  <svg viewBox="0 0 860 380" xmlns="http://www.w3.org/2000/svg">
+  <svg viewBox="0 0 860 384" xmlns="http://www.w3.org/2000/svg">
     <line x1="140" y1="40" x2="140" y2="330" stroke="#4B5563"/><line x1="140" y1="330" x2="840" y2="330" stroke="#4B5563"/>
-    <text x="490" y="362" text-anchor="middle" class="b sm">顺序保证（从弱到强） →</text>
+    <text x="490" y="374" text-anchor="middle" class="b sm">顺序保证（从弱到强） →</text>
     <text x="40" y="190" text-anchor="middle" class="b sm" transform="rotate(-90 40 190)">送达保证 →</text>
     <g class="sm b" text-anchor="middle"><text x="260" y="350">无序</text><text x="490" y="350">只要最新（Sequenced）</text><text x="720" y="350">严格有序</text></g>
     <g class="sm b" text-anchor="end"><text x="132" y="110">可靠</text><text x="132" y="260">不可靠</text></g>
@@ -129,10 +129,10 @@
     <text x="75" y="56" text-anchor="middle" class="b sm" style="fill:#B91C1C">对应本书位置</text>
     <g class="xs" text-anchor="middle">
       <text x="75" y="90">① 7.2 节 / 第 11 章</text>
-      <text x="75" y="144">② 8.10 节</text>
-      <text x="75" y="198">③ 8.1～8.7 节</text>
+      <text x="75" y="144">② 8.11 节</text>
+      <text x="75" y="198">③ 8.1～8.8 节</text>
       <text x="75" y="214">KCP 见第 9 章</text>
-      <text x="75" y="266">④ 8.8～8.9 节</text>
+      <text x="75" y="266">④ 8.9～8.10 节</text>
       <text x="75" y="320">⑤ 8.11 节 / QUIC</text>
       <text x="75" y="374">⑥ 8.11 节</text>
     </g>

@@ -1,0 +1,182 @@
+<div class="part-head" data-toc="第六部分 · 面试">
+  <div class="no">PART SIX</div>
+  <h1>第六部分　面试：把知识变成口述答案</h1>
+  <p>面试不是背书。这一部分把全书的内容整理成"30 秒口述版"、高频题参考答案、易错说法对照表和速记卡，并留出一组预留问题，供后续模拟面试逐题深挖。</p>
+</div>
+
+<section class="chapter" id="ch13">
+  <div class="ch-head">
+    <div class="no">CHAPTER 13</div>
+    <h1>面试题库与速记</h1>
+    <p class="lead">每题先给"一句话答案"，再给要点；能带上本书实测数字的地方，都标了出处。</p>
+  </div>
+
+  <h2>13.1 "请介绍一下渲染管线"——30 秒 / 2 分钟版</h2>
+  <div class="ans">
+    <div class="q">30 秒版</div>
+    <p>渲染管线分三大段：<strong>应用阶段</strong>在 CPU 上做剔除、排序、合批并提交 Draw Call；<strong>几何阶段</strong>在 GPU 上由顶点着色器把顶点从局部空间经 MVP 变换到裁剪空间，然后硬件做裁剪、透视除法、视口变换和背面剔除；<strong>光栅化与像素阶段</strong>把三角形离散成片元、做透视校正插值，经过 Early-Z 后运行像素着色器（纹理采样和光照），最后在输出合并阶段做模板/深度测试和混合，写入帧缓冲。可编程的是顶点和像素着色器，其余是可配置的固定功能。</p>
+    <div class="q">2 分钟版要额外点出的 5 个"深度信号"</div>
+    <ol>
+      <li><strong>w 的意义</strong>：投影矩阵把距离放进 w；裁剪必须在除以 w 之前做，否则相机背后的点会翻转（E2）。</li>
+      <li><strong>光栅化的精确性</strong>：定点亚像素 + Top-Left 规则保证共享边不漏不重（E4）。</li>
+      <li><strong>透视校正</strong>：1/w 在屏幕空间线性，属性要插值 a/w 和 1/w 再相除（E5）。</li>
+      <li><strong>Early-Z 与排序</strong>：不透明从前往后画，PS 次数可降到可见像素数；discard 和写深度会破坏它（E7）。</li>
+      <li><strong>移动端 TBR</strong>：深度、混合、MSAA 在片上完成，带宽是第一约束（E12）。</li>
+    </ol>
+  </div>
+
+  <h2>13.2 高频题与参考答案</h2>
+  <h3>A · 坐标变换与投影</h3>
+  <div class="ans">
+    <div class="q">Q1 MVP 分别做什么？为什么不一步到位？</div>
+    <p>M 把局部坐标变到世界，V 把世界变到以相机为原点的观察空间，P 把视锥映射到裁剪空间（齐次）。分开是因为每个空间各有用途：局部空间便于实例化和蒙皮，世界空间做光照物理，观察空间让投影公式简单。实际上 CPU 通常预乘成一个 MVP 传给 Shader，但世界坐标仍需要单独的 M。</p>
+    <div class="q">Q2 为什么要用齐次坐标？w=0 和 w=1 分别表示什么？</div>
+    <p>为了用矩阵表示平移和透视。w=1 是点（受平移影响），w=0 是方向（不受平移影响）。透视时 w 存放距离，硬件除以 w 实现"近大远小"。</p>
+    <div class="q">Q3 推一下透视投影矩阵。</div>
+    <p>相似三角形得 x'=n·x/(−z)；令第 4 行 (0,0,−1,0) 使 w=−z；x、y 按 1/tan(fov/2) 和宽高比缩放；z 行写成 (0,0,A,B)，由"−n→0、−f→1"解出 A=f/(n−f)、B=nf/(n−f)（D3D [0,1] 约定）。关键结论：z_ndc 与 1/d 线性相关。（第 3.2 节）</p>
+    <div class="q">Q4 法线为什么用逆转置矩阵？</div>
+    <p>要保持法线与切线垂直：nᵀt=0，t'=Mt，设 n'=Gn，则需 GᵀM=I，即 G=(M⁻¹)ᵀ。只有旋转和均匀缩放时可直接用 M。（第 2.5 节）</p>
+    <div class="q">Q5 为什么在裁剪空间裁剪，而不是 NDC？</div>
+    <p>相机背后的点 w&lt;0，除以 w 会翻转到屏幕另一侧；w=0 会除零；而且裁剪空间与观察空间是线性关系，插值出的新顶点正确。E2：一个顶点在相机后 1 米，朴素除法把它投到屏幕上方，近平面裁剪后得到 4 个顶点、拆成 2 个三角形。实际硬件靠保护带几乎只裁近平面。（第 3.4、3.5 节）</p>
+    <div class="q">Q6 D3D 和 OpenGL 在投影上有什么不同？</div>
+    <p>NDC 深度范围 D3D/Vulkan/Metal 为 [0,1]，GL 为 [−1,1]；Vulkan 的 NDC y 向下；纹理坐标原点 GL 在左下、其他在左上；传统上 D3D 左手系、GL 右手系（这只是约定，由矩阵决定）。（第 3.6 节）</p>
+  </div>
+
+  <h3>B · 光栅化与插值</h3>
+  <div class="ans">
+    <div class="q">Q7 光栅化是怎么判断像素在三角形内的？</div>
+    <p>用三条边函数 E(p)=(b−a)×(p−a)，三个值同号则采样点在内。边函数是线性函数，可增量计算、可对整块像素快速接受/拒绝，三者除以面积就是重心坐标。（第 5.2 节）</p>
+    <div class="q">Q8 两个三角形共享一条边，边上的像素会被画两次吗？</div>
+    <p>不会。硬件把顶点吸附到 8 位亚像素定点网格，用整数算边函数（精确、水密），并用 Top-Left 规则决定 E=0 的样本归谁。E4：顶点对齐像素中心的网格里 2131 个边上像素，"全收"重复 2131 次、"全不收"漏 2131 个，Top-Left 零误差；float 边函数在大坐标下会出现个别漏画/重复。（第 5.3、5.4 节）</p>
+    <div class="q">Q9 什么是透视校正插值？为什么深度不需要？</div>
+    <p>屏幕空间里 1/w 和 a/w 是线性的，a 不是；所以插值 a/w 和 1/w 再相除。深度存的是 z/w，本身就是"除以 w"的形式，可直接线性插值。E5：不校正时地面 uv 平均误差 17 个纹理重复，校正后与射线求交真值一致。（第 6.2、6.3 节）</p>
+    <div class="q">Q10 ddx/ddy 是怎么来的？为什么 PS 按 2×2 执行？</div>
+    <p>PS 以 2×2 Quad 为单位执行，导数就是 Quad 内相邻像素的差分；三角形外的像素作为 Helper Lane 陪跑。这让 Mipmap LOD 选择成为可能，代价是小三角形浪费：E8 中 1 像素三角形 Quad 效率 27%，细长三角形不到 50%。（第 6.5、6.6 节）</p>
+    <div class="q">Q11 为什么小三角形对 GPU 不友好？</div>
+    <p>① Quad 效率低（边缘 Quad 半空）；② 很多三角形一个像素都不覆盖却走完了顶点和设置（E8：0.5 像素三角形一半零覆盖）；③ 光栅化器每周期处理的三角形数有上限；④ TBR 上 Binning 开销随三角形数增长。对策是 LOD，以及 Nanite 式的软光栅。</p>
+  </div>
+
+  <h3>C · 深度、模板与可见性</h3>
+  <div class="ans">
+    <div class="q">Q12 什么是 Early-Z？什么时候失效？</div>
+    <p>把深度测试提前到 PS 之前，丢弃被挡住的片元。PS 写深度时完全失效；discard/Alpha Test、Alpha To Coverage 会推迟深度写入；写 UAV 需要显式声明；中途改变深度比较方向会让 Hi-Z 失效；从后往前画时剔不掉任何东西。（第 8.2 节）</p>
+    <div class="q">Q13 不透明物体为什么要从前往后画？效果有多大？</div>
+    <p>让 Early-Z 尽早建立近处深度，后面被挡的片元不再着色。E7：400 个矩形、平均 Overdraw 26.7 层，Late-Z PS 执行 599 万次，Early-Z 随机顺序 74 万次，从前往后 22.4 万次（等于可见像素数），耗时 3764ms → 191ms；从后往前和 Late-Z 一样慢。（第 8.3 节）</p>
+    <div class="q">Q14 Z-Prepass 有什么用？什么时候不该用？</div>
+    <p>先只写深度再用 EQUAL 着色，不依赖排序就能让 PS 次数等于可见像素数（E7：224506 次，248ms），深度还能被 SSAO 等复用。代价是多一遍几何。PS 便宜而顶点多的场景、以及移动端 TBDR（硬件 HSR 已经做了同样的事）不该用。</p>
+    <div class="q">Q15 什么是 Z-Fighting？怎么解决？</div>
+    <p>两个面的深度差小于深度缓冲在该距离处的分辨率，前后关系随机。标准 Z 的精度集中在近处（near=0.1 时一半深度值用于前 0.2 米，1000 米处只能分辨 0.6 米）。解决：增大 near（最有效）、Reversed-Z + D32F、避免共面、深度偏移、贴花改用模板或延迟贴花。（第 8.4、8.6 节）</p>
+    <div class="q">Q16 Reversed-Z 为什么能提高精度？24 位深度能用吗？</div>
+    <p>投影让远处的深度挤在一起，浮点数让可表示值挤在 0 附近；反转后远处映射到 0，两种不均匀互相抵消，相对精度近似恒定。E6：1000 米处可分辨距离从 0.6m 降到 0.00007m，8 公里内零 Z-Fighting。24 位定点是均匀的，反转无效。</p>
+    <div class="q">Q17 模板缓冲能做什么？举三个游戏里的例子。</div>
+    <p>8 位像素标签。描边（先写模板再外扩画轮廓）、角色被墙遮挡时显示剪影、UI 遮罩、传送门/镜子、延迟渲染光源体积、阴影体。（第 9.2 节）</p>
+  </div>
+
+  <h3>D · 纹理与像素</h3>
+  <div class="ans">
+    <div class="q">Q18 Mipmap 解决什么问题？代价是什么？</div>
+    <p>纹理缩小时一个像素覆盖很多 texel，只采一个点会走样（摩尔纹、闪烁）。Mipmap 预先滤波，按 LOD 选层。代价是多 1/3 内存；收益是走样消失且缓存命中率大幅提高（E9：80.8% → 99.3%）。它让远处<strong>更模糊</strong>而不是更清楚。</p>
+    <div class="q">Q19 LOD 怎么计算？</div>
+    <p>由 Quad 差分得到 uv 的屏幕导数，乘纹理尺寸得到像素在纹理中的两个边长，取较长者 ρ，LOD=log₂ρ。三线性在 floor 和 floor+1 两层之间插值。（第 7.3 节）</p>
+    <div class="q">Q20 双线性、三线性、各向异性的区别？</div>
+    <p>双线性：一层内 2×2 加权（4 texel）；三线性：两层各一次双线性再插值（8 texel），解决 Mip 层切换的接缝；各向异性：斜视时像素脚印是细长的，按短边选 LOD、沿长边取多个样本。E9：全图误差 0.221 → 0.087 → 0.026，取样数 4 → 7.6 → 39.3。</p>
+    <div class="q">Q21 discard 为什么在移动端特别贵？</div>
+    <p>它让硬件无法在着色前确定片元是否不透明：Early-Z 无法提前写深度，TBDR 的 HSR 被打断，被挡住的片元也得着色。移动端尽量用 Alpha Blend 或实体几何代替，必须用时放在不透明物体之后绘制。</p>
+    <div class="q">Q22 Shader 里的 if 一定慢吗？</div>
+    <p>不一定。同一 Warp 走同一分支（uniform 分支，例如由材质参数决定）几乎无开销；按像素发散时两侧都要执行。另外分支里不能用依赖导数的 Sample()。（第 1.3、6.5 节）</p>
+  </div>
+
+  <h3>E · 混合与抗锯齿</h3>
+  <div class="ans">
+    <div class="q">Q23 半透明物体为什么要从后往前画、关闭深度写入？</div>
+    <p>Over 混合不满足交换律（E11：三层 RGB 六种顺序得到六种颜色），正确的物理含义是近的盖在远的上面，所以从后往前；深度写入关闭，避免排序不完美时近处半透明把远处半透明整个挡掉。深度测试仍开启，被不透明物体挡住的不画。</p>
+    <div class="q">Q24 物体互相穿插的半透明怎么办？</div>
+    <p>物体级排序必然有错。缓解：拆分网格、先背面后正面两个 Pass、深度预写只保留最外层；根本解决用 OIT：深度剥离、逐像素链表、加权混合 WBOIT（近似、单 Pass、移动端可用）。</p>
+    <div class="q">Q25 什么是预乘 Alpha？</div>
+    <p>颜色预先乘以 alpha 存储，混合因子用 One / OneMinusSrcAlpha。它让过滤和混合在数学上一致，消除透明边缘的黑边（E11：直通 Alpha 结果 (0.25,0.75,0.25)，预乘 (0.5,1,0.5)），并能用同一混合状态表达 Over 与 Additive。</p>
+    <div class="q">Q26 MSAA 和 SSAA 的区别？</div>
+    <p>SSAA 每个样本都着色；MSAA 每像素多个覆盖/深度样本，PS 只跑一次。对几何边缘两者等效（E10：纯色边缘误差都是 0.1063，MSAA 的 PS 只多 5%），但 MSAA 对着色走样无效（内部误差与无 AA 相同 0.1683）。两者的存储都是 N 倍。</p>
+    <div class="q">Q27 为什么延迟渲染不好做 MSAA？TAA 的原理和缺点？</div>
+    <p>G-Buffer 要按样本存储和光照，带宽与显存乘以 N。TAA 每帧亚像素抖动投影矩阵，用运动矢量重投影历史帧并混合，等效于时间上的超采样；缺点是拖影、鬼影（需要邻域裁剪）、画面偏软、需要运动矢量 Pass。</p>
+  </div>
+
+  <h3>F · 架构与性能</h3>
+  <div class="ans">
+    <div class="q">Q28 IMR 和 TBR 的区别？</div>
+    <p>IMR 来一个三角形画一个，深度和颜色直接读写显存；TBR 先 Binning 把整帧图元分到 Tile，再逐 Tile 在片上完成光栅化、深度、混合、MSAA，只写回最终颜色。TBDR 还在着色前做隐藏面消除。E12 简化模型：IMR 流量是 TBR 的 28～78 倍，MSAA 4× 时 134 倍。（第 10 章）</p>
+    <div class="q">Q29 移动端渲染要注意什么？</div>
+    <p>带宽第一：Load/Store 用 Clear/DontCare、深度 Memoryless；减少 RT 切换和抓屏；MSAA 片上 Resolve；少用 Alpha Test；控制半透明面积；ASTC + Mipmap；half 精度；控制顶点数。（第 10.6 节）</p>
+    <div class="q">Q30 Draw Call 为什么贵？怎么优化？</div>
+    <p>贵在 CPU 端的状态切换、资源绑定、驱动校验和提交。优化：静态合批（省 DC、费内存）、动态合批（CPU 变换顶点）、GPU Instancing（同网格大量重复）、SRP Batcher（不减 DC 但让每次 DC 更便宜）、减少材质和变体、现代 API 多线程录制。（第 1.2 节）</p>
+    <div class="q">Q31 前向渲染和延迟渲染怎么选？</div>
+    <p>光源少、要 MSAA、半透明多、移动端带宽紧 → 前向（或 Forward+）；大量动态光源、复杂屏幕空间效果、PC/主机 → 延迟（Tiled/Clustered）。（第 11.4 节）</p>
+    <div class="q">Q32 怎么定位 GPU 瓶颈？</div>
+    <p>先看 GPU 时间是否 ≈ 帧时间，再"改一个变量"：降分辨率有效 → 像素相关；换小纹理有效 → 纹理带宽；PS 输出常量有效 → ALU；关混合/MSAA 有效 → ROP/带宽；减面有效 → 顶点。然后截帧定位到具体 Pass 和 Draw Call。（第 12 章）</p>
+    <div class="q">Q33 阴影痤疮和彼得潘是什么？</div>
+    <p>阴影贴图的一个 texel 覆盖一段表面却只存一个深度，bias 太小时表面一半判为自阴影（E13：46.65% 误判）；bias 太大时接触处漏光、阴影脱离物体（漏光增加 2.7 倍）。用斜率缩放偏移、Normal Offset、剔除正面、PCF 缓解。（第 11.3 节）</p>
+  </div>
+
+  <h2>13.3 易错说法对照表</h2>
+  <div class="tbl"><table>
+    <tr><th>❌ 常见错误说法</th><th>✅ 更准确的说法</th></tr>
+    <tr><td>顶点着色器输出 NDC 坐标</td><td>输出<strong>裁剪空间</strong>齐次坐标，除以 w 由硬件在裁剪之后完成</td></tr>
+    <tr><td>深度缓冲存的是到相机的距离</td><td>存 z/w（与 1/d 线性相关），非线性；后处理要反算线性深度</td></tr>
+    <tr><td>背面剔除能剔掉一半三角形</td><td>与距离有关：近处可达 87%，远处趋近 50%（E3）；且不省顶点着色</td></tr>
+    <tr><td>Mipmap 让远处更清楚</td><td>让远处<strong>更模糊</strong>，目的是消除走样并提高缓存命中</td></tr>
+    <tr><td>MSAA 能解决所有锯齿</td><td>只解决几何边缘；高光/法线贴图闪烁（着色走样）无效</td></tr>
+    <tr><td>MSAA 很贵</td><td>IMR 上存储带宽 ×N；TBR 上片上 Resolve 几乎免费</td></tr>
+    <tr><td>Early-Z 一直生效</td><td>写深度、discard、A2C、UAV、比较方向改变时失效或受限</td></tr>
+    <tr><td>Z-Prepass 总是有益</td><td>多一遍几何；PS 便宜或 TBDR 上通常亏</td></tr>
+    <tr><td>Reversed-Z 对 24 位深度也有效</td><td>只对浮点深度有效</td></tr>
+    <tr><td>合批就是为了减少 Draw Call</td><td>本质是减少 CPU 端每次绘制的准备开销（状态切换、常量上传）</td></tr>
+    <tr><td>延迟渲染光源再多也不影响性能</td><td>每盏光仍要读覆盖区域的 G-Buffer；需要 Tiled/Clustered</td></tr>
+    <tr><td>行主序 = 行向量</td><td>一个是存储布局，一个是数学约定，彼此独立</td></tr>
+    <tr><td>每帧 Clear 是浪费</td><td>TBR 上 Clear 最便宜，Load 才要读 DRAM</td></tr>
+  </table></div>
+
+  <h2>13.4 预留问题：模拟面试题单</h2>
+  <p>下面这些题在书中只点到为止，适合作为后续模拟面试的追问方向。每一题回答后会单独整理成一份 md 文档（放在 <code>Interview_QA/</code> 下），并按"点评 → 满分口述版 → 深度讲解 → 追问 → 速记卡"的格式补充。</p>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>题目</th><th>考察点</th></tr>
+    <tr><td>G01</td><td>从调用 DrawIndexed 到像素出现在屏幕上，完整讲一遍发生了什么（含驱动和交换链）</td><td>全局串联、CPU/GPU 同步</td></tr>
+    <tr><td>G02</td><td>手推透视投影矩阵，并说明为什么 z 不能直接用 −z_view</td><td>投影、深度插值</td></tr>
+    <tr><td>G03</td><td>为什么 1/w 在屏幕空间是线性的？给出证明</td><td>透视校正数学</td></tr>
+    <tr><td>G04</td><td>Hi-Z 和 Early-Z 的区别？GPU 驱动的遮挡剔除（Hi-Z Culling）怎么做？</td><td>可见性层次</td></tr>
+    <tr><td>G05</td><td>Alpha Test 和 Alpha Blend 各自的问题？草地/树叶怎么渲染最好？</td><td>Early-Z、HSR、A2C、排序</td></tr>
+    <tr><td>G06</td><td>MSAA 的 Resolve 发生在哪？延迟渲染下怎么做抗锯齿？</td><td>AA 与渲染路径</td></tr>
+    <tr><td>G07</td><td>TAA 的实现细节：抖动序列、运动矢量、历史裁剪、鬼影处理</td><td>时域方法</td></tr>
+    <tr><td>G08</td><td>级联阴影（CSM）的划分策略与抖动（Shimmering）问题</td><td>阴影工程</td></tr>
+    <tr><td>G09</td><td>PCF、PCSS、VSM、ESM 的区别</td><td>软阴影</td></tr>
+    <tr><td>G10</td><td>Forward+ / Clustered Shading 的光源分配是怎么做的？</td><td>计算着色器、光源剔除</td></tr>
+    <tr><td>G11</td><td>G-Buffer 怎么设计？法线如何压缩？移动端怎么做延迟渲染？</td><td>延迟渲染、带宽</td></tr>
+    <tr><td>G12</td><td>OIT 有哪些方案，各自的优缺点？</td><td>半透明</td></tr>
+    <tr><td>G13</td><td>Shader 变体是什么？变体爆炸怎么处理？</td><td>工程化</td></tr>
+    <tr><td>G14</td><td>GPU Instancing 的原理？和 SRP Batcher 能同时用吗？</td><td>CPU 优化</td></tr>
+    <tr><td>G15</td><td>Mesh Shader / Nanite 的思路是什么？为什么能处理海量三角形？</td><td>现代几何管线</td></tr>
+    <tr><td>G16</td><td>Occupancy 是什么？寄存器数怎么影响性能？</td><td>GPU 执行模型</td></tr>
+    <tr><td>G17</td><td>线性空间与 Gamma 空间：为什么光照要在线性空间算？sRGB 纹理和 sRGB RT 分别做了什么？</td><td>颜色管理</td></tr>
+    <tr><td>G18</td><td>HDR 与色调映射：为什么需要浮点 RT？移动端怎么省？</td><td>后处理、带宽</td></tr>
+    <tr><td>G19</td><td>描边有哪几种做法？各自优缺点？</td><td>模板、法线外扩、后处理边缘检测</td></tr>
+    <tr><td>G20</td><td>一个手游团战掉帧，你会怎么排查？（结合 TBR 讲）</td><td>综合性能分析</td></tr>
+  </table></div>
+
+  <h2>13.5 附录：速记卡</h2>
+  <div class="cards">
+    <div class="card"><div class="t">① 管线顺序</div><p>应用(CPU) → IA → VS → (HS/DS/GS) → 裁剪 → ÷w → 视口 → 背面剔除 → 光栅化 → 插值 → Early-Z → PS → 模板/深度 → 混合 → 帧缓冲</p></div>
+    <div class="card"><div class="t">② 投影矩阵</div><p>第 4 行 (0,0,−1,0) → w=−z；z_ndc = a + b/d；D3D: A=f/(n−f), B=nf/(n−f)；Reversed: A=n/(f−n), B=nf/(f−n)</p></div>
+    <div class="card"><div class="t">③ 裁剪</div><p>齐次空间：−w≤x,y≤w，0≤z≤w；先裁后除；硬件靠保护带，主要裁近平面（E2：3→4 顶点）</p></div>
+    <div class="card"><div class="t">④ 光栅化</div><p>边函数同号即内；8 位亚像素定点；Top-Left：上边（水平向右）与左边（向上）包含 E=0（E4：零漏零重）</p></div>
+    <div class="card"><div class="t">⑤ 透视校正</div><p>a = Σλᵢaᵢ/wᵢ ÷ Σλᵢ/wᵢ；深度 z/w 直接线性插值（E5：误差 17 → 0.0001）</p></div>
+    <div class="card"><div class="t">⑥ 2×2 Quad</div><p>导数 = Quad 差分；Helper Lane 陪跑；1px 三角形效率 27%，细长 48%（E8）</p></div>
+    <div class="card"><div class="t">⑦ Mipmap</div><p>LOD = log₂(max(|∂uv/∂x|,|∂uv/∂y|)·size)；+33% 内存；三线性 8 texel；各向异性按短边选层（E9）</p></div>
+    <div class="card"><div class="t">⑧ Early-Z</div><p>失效：写深度、discard、A2C、UAV；从前往后 PS 次数=可见像素（E7：599 万 → 22 万）</p></div>
+    <div class="card"><div class="t">⑨ 深度精度</div><p>精度 ∝ near/d²；增大 near 最有效；Reversed-Z + D32F：1000m 处 0.6m → 0.07mm（E6）</p></div>
+    <div class="card"><div class="t">⑩ 混合</div><p>Over 不可交换 → 从后往前、关 ZWrite；Additive 可交换；预乘 Alpha 消黑边（E11）</p></div>
+    <div class="card"><div class="t">⑪ 抗锯齿</div><p>SSAA 全治全贵；MSAA 治边不治着色、PS ≈1×、存储 N×；FXAA 便宜偏糊；TAA 全面但拖影（E10）</p></div>
+    <div class="card"><div class="t">⑫ TBR</div><p>Binning → 逐 Tile 片上渲染 → 只写颜色；Clear/DontCare/Memoryless；怕抓屏、RT 切换、Alpha Test、顶点多（E12）</p></div>
+    <div class="card"><div class="t">⑬ 阴影</div><p>两遍：光源深度 → 比较；bias 小痤疮、大漏光；斜率缩放 + PCF（E13：46.65% → 0.02%）</p></div>
+    <div class="card"><div class="t">⑭ 渲染路径</div><p>前向：简单/MSAA/半透明/移动端；延迟：多光源/G-Buffer 带宽；Forward+：计算着色器分块光源</p></div>
+    <div class="card"><div class="t">⑮ 定位瓶颈</div><p>CPU/GPU → 降分辨率 → 换小纹理 → PS 输出常量 → 关混合/MSAA → 减面 → 截帧定位</p></div>
+    <div class="card"><div class="t">⑯ Draw Call</div><p>贵在状态切换/绑定/驱动；静态合批、动态合批、Instancing、SRP Batcher 各省不同的东西</p></div>
+  </div>
+</section>

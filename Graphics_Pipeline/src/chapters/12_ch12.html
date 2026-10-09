@@ -1,0 +1,107 @@
+<section class="chapter" id="ch12">
+  <div class="ch-head">
+    <div class="no">CHAPTER 12</div>
+    <h1>性能分析与优化：沿着管线找瓶颈</h1>
+    <p class="lead">优化的第一步永远是"定位"：先知道慢在哪一站，再决定改什么。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>掌握"CPU 瓶颈 vs GPU 瓶颈"以及 GPU 内部"顶点 / 像素 / 带宽 / 纹理"瓶颈的判别方法</li>
+    <li>会用"一次只改一个变量"的实验法定位瓶颈</li>
+    <li>建立一张"管线阶段 → 常见问题 → 优化手段"的对照表</li>
+    <li>能完整讲述一个"团战掉帧"的排查过程</li>
+  </ul></div>
+
+  <h2>12.1 先分清：CPU 还是 GPU</h2>
+  <p>回到第 1 章的帧流水：帧时间由最慢的泳道决定。判断方法：</p>
+  <div class="tbl"><table>
+    <tr><th>观察</th><th>说明</th></tr>
+    <tr><td>主线程/渲染线程的 CPU 耗时 ≈ 帧时间，GPU 耗时明显更短</td><td><strong>CPU 瓶颈</strong>：逻辑（脚本、物理、动画）或渲染线程（剔除、排序、Draw Call 提交）</td></tr>
+    <tr><td>GPU 耗时 ≈ 帧时间，CPU 线程有空闲（在等 Present / Fence）</td><td><strong>GPU 瓶颈</strong></td></tr>
+    <tr><td>降低渲染分辨率，帧率明显上升</td><td>GPU 像素相关瓶颈（像素着色、填充率、带宽）</td></tr>
+    <tr><td>降低分辨率帧率不变，减少物体数量帧率上升</td><td>CPU（Draw Call）或 GPU 顶点瓶颈</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">⚠️ 面试易错：手机上的"GPU 瓶颈"可能是发热</span>
+  <p>移动设备在持续高负载下会降频（Thermal Throttling），前 5 分钟 60fps、之后 40fps 并不罕见。所以手游性能测试要看<strong>长时间稳定帧率和功耗</strong>，而不只是峰值帧率。降低带宽（第 10 章）往往是对功耗最有效的优化。</p></div>
+
+  <h2>12.2 GPU 内部：一次只改一个变量</h2>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="18" text-anchor="middle" class="sm">GPU 瓶颈定位决策树（每一步只改一个变量，看 GPU 帧时间）</text>
+    <rect x="330" y="32" width="200" height="40" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="430" y="57" text-anchor="middle" class="sm b">GPU 时间 ≈ 帧时间</text>
+    <line x1="430" y1="72" x2="430" y2="94" stroke="#4B5563" marker-end="url(#a)"/>
+    <rect x="300" y="96" width="260" height="40" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="430" y="121" text-anchor="middle" class="sm">把渲染分辨率降到 50%</text>
+    <path d="M300,116 L160,116 L160,156" fill="none" stroke="#4B5563" marker-end="url(#a)"/><text x="230" y="110" text-anchor="middle" class="xs">明显变快</text>
+    <path d="M560,116 L700,116 L700,156" fill="none" stroke="#4B5563" marker-end="url(#a)"/><text x="630" y="110" text-anchor="middle" class="xs">几乎不变</text>
+    <rect x="40" y="158" width="240" height="40" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="160" y="183" text-anchor="middle" class="sm b">像素相关瓶颈</text>
+    <rect x="580" y="158" width="240" height="40" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="700" y="183" text-anchor="middle" class="sm b">顶点 / 几何相关瓶颈</text>
+    <g class="xs">
+      <text x="20" y="222">• 换成 1×1 纹理 → 变快：纹理带宽</text>
+      <text x="20" y="240">• PS 改成输出常量色 → 变快：ALU / 着色</text>
+      <text x="20" y="258">• 关混合、关 MSAA → 变快：ROP / 帧缓冲带宽</text>
+      <text x="20" y="276">• 看 Overdraw 视图：层数 &gt; 3 就是可疑点</text>
+      <text x="560" y="222">• 换低 LOD 模型 → 变快：顶点着色 / 顶点带宽</text>
+      <text x="560" y="240">• VS 简化（去蒙皮）→ 变快：顶点 ALU</text>
+      <text x="560" y="258">• 关阴影 Pass → 变快：阴影几何过多</text>
+      <text x="560" y="276">• 微小三角形多：Quad 效率低（第 6 章）</text>
+    </g>
+  </svg>
+  <figcaption><b>图 12-1</b>　"改变一个变量"的定位法。真机上配合 GPU 厂商的硬件计数器（ALU 利用率、纹理缓存命中、带宽）会更精确。</figcaption>
+  </figure>
+  <div class="cards">
+    <div class="card"><div class="t">RenderDoc</div><p>PC / Android 截帧：逐 Draw Call 看输入输出、状态、纹理、网格、Shader 调试，Overdraw / 四边形开销可视化。</p></div>
+    <div class="card"><div class="t">Xcode GPU Frame Capture</div><p>iOS：每个 Pass 的耗时、带宽、Load/Store Action 检查（会直接提示不必要的 Load/Store）。</p></div>
+    <div class="card"><div class="t">Snapdragon Profiler / Arm Mobile Studio</div><p>Adreno / Mali 的硬件计数器：Binning 时间、片上带宽、Shader 周期、纹理缓存命中率。</p></div>
+    <div class="card"><div class="t">引擎内置</div><p>Unity Frame Debugger / Profiler、UE 的 <code>stat gpu</code>、<code>ProfileGPU</code>、Insights：先在引擎里定位到 Pass，再用厂商工具深挖。</p></div>
+  </div>
+
+  <h2>12.3 管线阶段 × 常见问题 × 优化手段</h2>
+  <div class="tbl"><table>
+    <tr><th>阶段</th><th>症状</th><th>优化手段</th><th>本书</th></tr>
+    <tr><td>应用阶段（CPU）</td><td>渲染线程耗时高、Draw Call / SetPass 多</td><td>视锥/遮挡剔除；合批、GPU Instancing、SRP Batcher；减少材质与 Shader 变体；多线程录制命令</td><td>1.2</td></tr>
+    <tr><td>顶点处理</td><td>降分辨率无效、减面有效</td><td>LOD、减少顶点属性、压缩格式、顶点缓存优化（索引重排）、阴影用低模</td><td>4.2、4.6</td></tr>
+    <tr><td>图元装配/光栅化</td><td>大量微小/细长三角形</td><td>LOD 保证三角形面积；避免远处曲面细分；Nanite 式软光栅</td><td>5.5、6.6</td></tr>
+    <tr><td>像素着色</td><td>降分辨率有效、PS 简化有效</td><td>减少 Overdraw（排序、Prepass/HSR）；half 精度；把计算挪到 VS 或预计算到贴图；减少分支发散；动态分辨率</td><td>1.3、8.3</td></tr>
+    <tr><td>纹理</td><td>换小纹理有效</td><td>Mipmap、ASTC/BCn 压缩、减少采样次数、合并通道（Mask 图打包到 RGBA）、各向异性只开给地面</td><td>7.5、7.6</td></tr>
+    <tr><td>深度/模板</td><td>Early-Z 失效</td><td>避免 discard / 写深度；Alpha Test 物体后画；开 Reversed-Z 修 Z-Fighting</td><td>8.2、8.4</td></tr>
+    <tr><td>混合/输出</td><td>半透明 Overdraw 高、UI 面积大</td><td>控制特效面积与层数；粒子用低分辨率 RT 渲染再合成；UI 裁透明区、全屏界面关掉下层</td><td>9.4</td></tr>
+    <tr><td>帧缓冲带宽</td><td>手机发热、关 MSAA/后处理有效</td><td>Load/Store 用 Clear/DontCare；Memoryless；减少 RT 切换；合并后处理；MSAA 片上 Resolve</td><td>10.3、10.6</td></tr>
+  </table></div>
+
+  <h2>12.4 案例：MOBA 团战掉帧排查（典型流程示例）</h2>
+  <p>下面是一个典型问题的排查思路（数字为示意，不同项目差异很大）：中端安卓机平时 60fps，十人团战放大招时掉到 35fps。</p>
+  <div class="ans">
+    <div class="q">① 先分 CPU / GPU</div>
+    <p>引擎 Profiler 显示团战时渲染线程从 6ms 涨到 9ms（技能特效多了 Draw Call），但 GPU 帧时间从 14ms 涨到 28ms → <strong>主要是 GPU 瓶颈</strong>，CPU 的增量是次要问题。</p>
+    <div class="q">② GPU 里分像素 / 顶点</div>
+    <p>把渲染分辨率从 100% 降到 70%，团战帧率从 35 升到 52 → <strong>像素相关</strong>。开 Overdraw 视图：大招范围内特效层数达到 15～20 层。</p>
+    <div class="q">③ 定位具体资源</div>
+    <p>RenderDoc 截帧，按耗时排序 Draw Call：前 10 名中有 7 个是某两个英雄的大招特效——全屏大小的半透明面片、Additive + 扭曲（Grab Pass）、每层采样 3 张 512² 纹理。扭曲特效还触发了一次额外的 RenderPass 切换（第 10 章）。</p>
+    <div class="q">④ 对症优化</div>
+    <ul>
+      <li>特效面片按实际形状裁剪（四边形 → 多边形网格），透明区域面积减少约一半；</li>
+      <li>同屏同类特效设上限，远离镜头中心的特效降级（减少层数和粒子数）；</li>
+      <li>扭曲改为只对英雄技能开启、低端机关闭，避免 Grab Pass；</li>
+      <li>特效纹理检查 Mipmap 和 ASTC 压缩，合并 Mask 通道减少采样次数；</li>
+      <li>（可选）特效统一渲染到 1/2 分辨率 RT 再合成。</li>
+    </ul>
+    <div class="q">⑤ 验证与防回退</div>
+    <p>同一回放录像重跑，统计团战段的平均帧率、1% Low 帧率和功耗；把"特效 Overdraw 层数""单特效最大面积"做成资源规范和自动检查，防止新英雄再次引入。</p>
+  </div>
+  <div class="co tip"><span class="h">✅ 面试答法</span>
+  <p>面试官问"遇到掉帧怎么查"，按"<strong>复现 → CPU/GPU 归因 → GPU 内部归因（改变量） → 截帧定位到 Pass/Draw Call → 对症优化 → 回归验证与规范化</strong>"的顺序讲，并在每一步说出一个具体工具和一个具体判据。比直接罗列"合批、LOD、压缩纹理"更能体现工程能力。</p></div>
+
+  <h2>12.5 几条容易被忽视的经验</h2>
+  <ul>
+    <li><strong>Shader 变体爆炸</strong>：每个 <code>multi_compile</code> 关键字翻倍变体数，导致包体、内存和首次加载编译卡顿（"Shader 编译卡顿"）。用 <code>shader_feature</code>、变体剥离、预热（Warmup）和 PSO 缓存。</li>
+    <li><strong>精度</strong>：移动端 PS 默认用 half，但世界坐标、UV 大范围平铺、时间累加量必须用 float，否则远处或长时间运行后出现抖动和条纹。</li>
+    <li><strong>动态分辨率</strong>：GPU 时间超标时自动降低 3D 渲染分辨率（UI 保持原分辨率），是对像素瓶颈最"兜底"的手段。</li>
+    <li><strong>帧率稳定比峰值重要</strong>：一次 50ms 的卡顿比平均帧率低 5fps 更伤体验；资源加载、Shader 编译、GC 都会造成尖峰。</li>
+  </ul>
+
+  <div class="recap"><div class="t">本章小结</div><ul>
+    <li>先分 CPU / GPU：看各线程耗时与 GPU 耗时，谁 ≈ 帧时间谁就是瓶颈。</li>
+    <li>GPU 内部用"改一个变量"定位：降分辨率 → 像素相关；减面 → 顶点相关；换小纹理 → 纹理带宽；PS 输出常量 → ALU；关混合/MSAA → ROP 与帧缓冲带宽。</li>
+    <li>每个管线阶段都有对应的典型问题和优化手段（表 12.3），优化前要先对号入座。</li>
+    <li>排查流程：复现 → 归因 → 截帧定位 → 对症优化 → 回归验证 → 规范化防回退。</li>
+  </ul></div>
+</section>

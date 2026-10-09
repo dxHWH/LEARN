@@ -1,0 +1,168 @@
+<header class="cover">
+  <div class="kicker">COMPUTER GRAPHICS · RASTERIZATION PIPELINE</div>
+  <h1>图形学渲染管线<br><em>从一个顶点到一个像素</em></h1>
+  <p class="sub">一本面向游戏客户端秋招的渲染管线深度学习书。从"CPU 发出一条 Draw Call 之后 GPU 里发生了什么"讲起，沿着数据流依次拆开坐标变换、投影与裁剪、光栅化与插值、纹理采样、深度测试、混合与抗锯齿，再站到硬件视角比较桌面 IMR 和移动端 TBR，最后用"阴影 + 光照"两遍渲染的完整案例把所有阶段串起来。书中每个关键结论都配有一个可编译运行的软件光栅化器（约 1000 行 C++）的实测数据和渲染图。</p>
+  <div class="meta">
+    <span class="pill b">6 部分 · 14 章 · 速记附录</span>
+    <span class="pill o">13 组实测实验 · 26 张渲染输出</span>
+    <span class="pill g">26 张原理插图 + 22 张实测渲染图</span>
+    <span class="pill p">3 个交互实验</span>
+    <span class="pill">MOBA 移动端 场景贯穿</span>
+  </div>
+</header>
+
+<section class="chapter" id="ch0">
+  <div class="ch-head">
+    <div class="no">CHAPTER 00</div>
+    <h1>阅读指南：一张地图串起整条管线</h1>
+    <p class="lead">先看清全貌：数据从哪里来、在哪里变形、在哪里变成像素、哪些阶段能写代码、哪些阶段只能配置。</p>
+  </div>
+
+  <h2>一条主线：管线就是一条"把三维数据逐步离散化"的流水线</h2>
+  <p>渲染管线的知识点看起来非常散：MVP 矩阵、齐次坐标、裁剪、光栅化、重心坐标、Mipmap、Early-Z、混合、MSAA、TBR……面试时也常被拆成一道道独立的题目来问。其实它们都在回答同一个问题：</p>
+  <div class="co ana"><span class="h">🧭 全书主线</span>
+  <p><strong>场景是连续的（三角形有无穷多个点），屏幕是离散的（只有 W×H 个像素）。管线要做的就是：把三维空间里的连续几何，经过一系列坐标变换压到二维屏幕上，再决定"每个像素被谁覆盖、长什么颜色、最终能不能留下来"。</strong></p>
+  <p>每一个阶段要么在<em>变换坐标</em>（几何阶段），要么在<em>采样离散化</em>（光栅化），要么在<em>计算颜色</em>（像素阶段），要么在<em>决定取舍</em>（测试与混合）。而几乎所有的经典问题——走样、Z-Fighting、透视扭曲、Overdraw——都是"离散化"或"有限精度"带来的副作用。</p></div>
+  <p>读的时候遇到一个新知识点，可以问自己两句：<em>它处在流水线的哪一站？它是为了解决哪一种"离散化/精度/性能"问题？</em>能答上这两句，这个点就不再是孤立的一道题。</p>
+
+  <figure>
+  <svg viewBox="0 0 860 470" xmlns="http://www.w3.org/2000/svg">
+    <text x="430" y="20" text-anchor="middle" class="sm">渲染管线全景（以 D3D11 / OpenGL 4 为蓝本）· 颜色表示可编程性 · 角标为本书章节</text>
+    <!-- legend -->
+    <rect x="150" y="32" width="14" height="14" rx="3" fill="#FFF4EC" stroke="#C2410C"/><text x="170" y="44" class="xs">CPU 端</text>
+    <rect x="240" y="32" width="14" height="14" rx="3" fill="#EAF7EF" stroke="#15803D"/><text x="260" y="44" class="xs">可编程着色器</text>
+    <rect x="356" y="32" width="14" height="14" rx="3" fill="#EAF0FD" stroke="#2F5BD3"/><text x="376" y="44" class="xs">固定功能（可配置）</text>
+    <rect x="496" y="32" width="14" height="14" rx="3" fill="#F3EEFE" stroke="#6D28D9" stroke-dasharray="3 2"/><text x="516" y="44" class="xs">可选阶段</text>
+    <rect x="590" y="32" width="14" height="14" rx="3" fill="#FEF6E4" stroke="#B45309"/><text x="610" y="44" class="xs">显存资源</text>
+
+    <!-- row 1 : application & geometry -->
+    <text x="20" y="80" class="b" style="fill:#C2410C">应用阶段</text>
+    <rect x="20" y="90" width="150" height="70" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="95" y="114" text-anchor="middle" class="b">游戏逻辑 / 剔除</text>
+    <text x="95" y="134" text-anchor="middle" class="xs">视锥/遮挡剔除、排序、合批</text>
+    <text x="95" y="150" text-anchor="middle" class="xs">设置状态 → Draw Call</text>
+    <text x="160" y="104" class="xs" style="fill:#C2410C">1·12</text>
+
+    <line x1="170" y1="125" x2="196" y2="125" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <text x="200" y="80" class="b" style="fill:#2F5BD3">几何阶段</text>
+    <rect x="200" y="90" width="110" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="255" y="116" text-anchor="middle" class="b">输入装配 IA</text>
+    <text x="255" y="136" text-anchor="middle" class="xs">读 VB / IB</text>
+    <text x="255" y="150" text-anchor="middle" class="xs">顶点格式解析</text>
+    <text x="298" y="104" class="xs" style="fill:#2F5BD3">4</text>
+    <line x1="310" y1="125" x2="326" y2="125" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="330" y="90" width="110" height="70" rx="10" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+    <text x="385" y="116" text-anchor="middle" class="b">顶点着色器</text>
+    <text x="385" y="136" text-anchor="middle" class="xs">局部 → 裁剪空间</text>
+    <text x="385" y="150" text-anchor="middle" class="xs">输出 SV_Position</text>
+    <text x="426" y="104" class="xs" style="fill:#15803D">2</text>
+    <line x1="440" y1="125" x2="456" y2="125" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="460" y="90" width="120" height="70" rx="10" fill="#F3EEFE" stroke="#6D28D9" stroke-dasharray="4 3"/>
+    <text x="520" y="114" text-anchor="middle" class="b">曲面细分 / GS</text>
+    <text x="520" y="134" text-anchor="middle" class="xs">HS → Tessellator → DS</text>
+    <text x="520" y="150" text-anchor="middle" class="xs">（现代：Mesh Shader）</text>
+    <text x="566" y="104" class="xs" style="fill:#6D28D9">4</text>
+    <line x1="580" y1="125" x2="596" y2="125" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="600" y="90" width="240" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="720" y="114" text-anchor="middle" class="b">图元装配 · 裁剪 · 透视除法 · 视口</text>
+    <text x="720" y="134" text-anchor="middle" class="xs">齐次空间裁剪 → ÷w 得 NDC → 屏幕坐标</text>
+    <text x="720" y="150" text-anchor="middle" class="xs">背面剔除（有符号面积）</text>
+    <text x="826" y="104" class="xs" style="fill:#2F5BD3">3·4</text>
+
+    <!-- connector down -->
+    <path d="M720,160 L720,196 L95,196 L95,226" fill="none" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <text x="400" y="190" text-anchor="middle" class="xs">每个三角形：3 个屏幕坐标 + 深度 + 1/w + 插值属性</text>
+
+    <!-- row 2 : rasterization & pixel -->
+    <text x="20" y="222" class="b" style="fill:#2F5BD3">光栅化阶段</text>
+    <rect x="20" y="230" width="150" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="95" y="254" text-anchor="middle" class="b">三角形设置+光栅化</text>
+    <text x="95" y="274" text-anchor="middle" class="xs">边函数 · Top-Left 规则</text>
+    <text x="95" y="290" text-anchor="middle" class="xs">生成片元 · 2×2 Quad</text>
+    <text x="160" y="244" class="xs" style="fill:#2F5BD3">5</text>
+    <line x1="170" y1="265" x2="196" y2="265" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="200" y="230" width="110" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="255" y="254" text-anchor="middle" class="b">属性插值</text>
+    <text x="255" y="274" text-anchor="middle" class="xs">重心坐标</text>
+    <text x="255" y="290" text-anchor="middle" class="xs">透视校正</text>
+    <text x="298" y="244" class="xs" style="fill:#2F5BD3">6</text>
+    <line x1="310" y1="265" x2="326" y2="265" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="330" y="230" width="110" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="385" y="254" text-anchor="middle" class="b">Early-Z / 模板</text>
+    <text x="385" y="274" text-anchor="middle" class="xs">Hi-Z 粗剔除</text>
+    <text x="385" y="290" text-anchor="middle" class="xs">（条件满足才生效）</text>
+    <text x="426" y="244" class="xs" style="fill:#2F5BD3">8</text>
+    <line x1="440" y1="265" x2="456" y2="265" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="460" y="230" width="120" height="70" rx="10" fill="#EAF7EF" stroke="#15803D" stroke-width="2"/>
+    <text x="520" y="254" text-anchor="middle" class="b">像素着色器</text>
+    <text x="520" y="274" text-anchor="middle" class="xs">纹理采样 · 光照</text>
+    <text x="520" y="290" text-anchor="middle" class="xs">输出颜色 / discard</text>
+    <text x="566" y="244" class="xs" style="fill:#15803D">7</text>
+    <line x1="580" y1="265" x2="596" y2="265" stroke="#4B5563" stroke-width="1.6" marker-end="url(#a)"/>
+    <rect x="600" y="230" width="240" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="720" y="254" text-anchor="middle" class="b">输出合并 Output Merger</text>
+    <text x="720" y="274" text-anchor="middle" class="xs">Late-Z · 模板测试 · 混合 · MSAA Resolve</text>
+    <text x="720" y="290" text-anchor="middle" class="xs">写入颜色/深度缓冲</text>
+    <text x="820" y="244" class="xs" style="fill:#2F5BD3">8·9</text>
+
+    <!-- memory row -->
+    <rect x="20" y="340" width="820" height="56" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="40" y="364" class="b" style="fill:#B45309">显存</text>
+    <g class="xs">
+      <text x="100" y="364">顶点/索引缓冲</text>
+      <text x="220" y="364">常量缓冲（MVP 矩阵等）</text>
+      <text x="390" y="364">纹理（Mip 链）</text>
+      <text x="510" y="364">深度/模板缓冲</text>
+      <text x="640" y="364">颜色缓冲（RT）</text>
+      <text x="100" y="384">移动端 TBR：深度/颜色先放在片上 Tile 内存，一帧末尾才写回 DRAM（第 10 章）</text>
+    </g>
+    <line x1="255" y1="300" x2="255" y2="338" stroke="#B45309" stroke-dasharray="3 3"/>
+    <line x1="520" y1="300" x2="520" y2="338" stroke="#B45309" stroke-dasharray="3 3"/>
+    <line x1="720" y1="300" x2="720" y2="338" stroke="#B45309" stroke-dasharray="3 3"/>
+    <line x1="385" y1="160" x2="385" y2="180" stroke="#B45309" stroke-dasharray="3 3"/>
+
+    <text x="430" y="428" text-anchor="middle" class="sm">贯穿全书的 3 个"副作用"：<tspan class="b" style="fill:#B91C1C">走样</tspan>（离散采样）· <tspan class="b" style="fill:#B91C1C">精度</tspan>（浮点/定点有限位）· <tspan class="b" style="fill:#B91C1C">浪费</tspan>（Overdraw、Quad、带宽）</text>
+    <text x="430" y="452" text-anchor="middle" class="xs">第 11 章用"阴影 Pass + 光照 Pass"把上面所有阶段串成一帧；第 12 章讲怎么定位瓶颈</text>
+  </svg>
+  <figcaption><b>图 0-1</b>　渲染管线全景。绿色两站是你写 Shader 的地方，蓝色站只能通过渲染状态配置。</figcaption>
+  </figure>
+
+  <h2>全书结构</h2>
+  <div class="tbl"><table>
+    <tr><th>部分</th><th>章节</th><th>核心问题</th><th>配套实验</th></tr>
+    <tr><td>一 · 全景</td><td>1 一帧画面是怎么来的</td><td>CPU 和 GPU 怎么分工？Draw Call 为什么贵？GPU 为什么擅长"并行"？</td><td>—</td></tr>
+    <tr><td rowspan="3">二 · 几何阶段</td><td>2 坐标空间与变换</td><td>MVP 每一步在干什么？法线为什么要用逆转置？</td><td>E1</td></tr>
+    <tr><td>3 投影与裁剪</td><td>透视矩阵怎么推？w 是什么？为什么在除以 w 之前裁剪？</td><td>E2</td></tr>
+    <tr><td>4 顶点处理与图元装配</td><td>索引缓冲与顶点缓存、背面剔除、曲面细分与 Mesh Shader</td><td>E3</td></tr>
+    <tr><td rowspan="2">三 · 光栅化</td><td>5 光栅化</td><td>像素归谁？边函数、定点亚像素、Top-Left 规则</td><td>E4 · 交互</td></tr>
+    <tr><td>6 属性插值</td><td>重心坐标、透视校正、2×2 Quad、ddx/ddy</td><td>E5 · E8 · 交互</td></tr>
+    <tr><td rowspan="3">四 · 像素阶段</td><td>7 片元着色与纹理</td><td>过滤、Mipmap、LOD 公式、各向异性、纹理缓存</td><td>E9</td></tr>
+    <tr><td>8 深度与可见性</td><td>Early-Z 何时失效？Z-Prepass 值不值？Reversed-Z 为何更准？</td><td>E6 · E7 · 交互</td></tr>
+    <tr><td>9 输出合并</td><td>模板、混合、半透明排序、预乘 Alpha、MSAA vs SSAA vs TAA</td><td>E10 · E11</td></tr>
+    <tr><td rowspan="3">五 · 架构与工程</td><td>10 GPU 硬件视角</td><td>IMR vs TBR/TBDR，带宽为什么是移动端第一敌人</td><td>E12</td></tr>
+    <tr><td>11 综合案例：一帧的多个 Pass</td><td>Shadow Map 两遍渲染、深度偏移、前向/延迟/Forward+</td><td>E13</td></tr>
+    <tr><td>12 性能分析与优化</td><td>瓶颈怎么定位？合批、Instancing、LOD、RenderDoc</td><td>—</td></tr>
+    <tr><td>六 · 面试</td><td>13 面试题库 + 附录速记卡</td><td>40 道高频题、易错说法、预留模拟面试题</td><td>—</td></tr>
+  </table></div>
+
+  <h2>标记约定</h2>
+  <div class="cards">
+    <div class="card"><div class="t">🔬 实测</div><p>来自配套程序 <code>demos/soft_raster.cpp</code> 的真实输出（Windows 11 + MSVC 14.44 /O2，单线程 CPU）。数字可复现，但它是<em>软件模拟</em>：用来证明"机制"，不代表某款 GPU 的绝对性能。</p></div>
+    <div class="card"><div class="t">🎮 游戏实战</div><p>放到游戏客户端（尤其 MOBA 手游）里，这个知识点对应什么工程问题、引擎里怎么做。</p></div>
+    <div class="card"><div class="t">⚠️ 面试易错</div><p>面试中常见的错误说法或追问陷阱，以及更准确的表述。</p></div>
+    <div class="card"><div class="t">🧠 深入</div><p>推导或底层细节。第一遍可以跳过，准备二面/三面时再回来读。</p></div>
+  </div>
+
+  <h2>配套程序怎么跑</h2>
+  <p>软件光栅化器只依赖 C++ 标准库，一个文件实现了完整的"顶点着色 → 近平面裁剪 → 透视除法 → 定点光栅化（Top-Left）→ 透视校正插值 → Early/Late-Z → 像素着色 → 混合 → MSAA Resolve"，并在每个环节插了计数器：</p>
+<!--code:bash:编译与运行（在 demos/ 目录）-->
+# MSVC（开发者命令行，或按 build_env.sh 设好 INCLUDE/LIB/PATH）
+$ cl /nologo /std:c++latest /EHsc /O2 /utf-8 soft_raster.cpp
+$ soft_raster.exe > run_output.txt        # 13 组实验，约 10 秒
+$ python ppm2png.py                       # out/*.ppm -> out/png/*.png（纯标准库）
+<!--/code-->
+  <p>书里出现的每一张渲染图都是这个程序输出的，构建电子书时以 base64 内嵌进 HTML，所以这本书是一个可以离线打开的单文件。</p>
+
+  <div class="co tip"><span class="h">✅ 怎么用这本书准备面试</span>
+  <p>① 第一遍按顺序读，把图 0-1 能默画出来；② 每章末尾的"本章小结"背成口述版；③ 第 13 章的题目先自己答一遍再看参考答案；④ 被问到"你怎么证明"时，用书里的实测数字回答——<strong>"我自己写过一个软光栅，测过 Early-Z 从前往后画能把 PS 执行次数从 599 万降到 22 万"</strong>，比背定义有说服力得多。</p></div>
+</section>

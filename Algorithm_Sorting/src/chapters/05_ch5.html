@@ -1,0 +1,245 @@
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>快速排序：最快的平均，最危险的最坏</h1>
+    <p class="lead">面试里被问得最多、追问得最深的排序。要讲清楚三件事：分区怎么写，pivot 怎么选，最坏情况怎么防。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能手写 Lomuto 和 Hoare 两种分区，说出它们的差别和各自的坑</li>
+    <li>理解退化的原因：有序输入、大量重复、递归过深导致栈溢出（本章有实测）</li>
+    <li>掌握三路快排、递归短边、三数取中 / ninther 这些工程手段</li>
+    <li>能用快速选择在 O(n) 平均时间内求第 K 大</li>
+  </ul></div>
+
+  <h2>5.1 核心思想：分区</h2>
+  <p>选一个基准值 pivot，把数组分成两部分：左边都 ≤ pivot，右边都 ≥ pivot，然后递归地处理两边。和归并相反，<strong>快排的工作在“分”这一步做完，“合”什么都不用做</strong>。分区完成时，左右两部分之间已经有序了。</p>
+  <p>它的效率完全取决于<strong>分得是否均匀</strong>。每次都对半分，递归深度是 log₂n，总共 O(n log n)；每次都分成 0 和 n−1，递归深度是 n，总共 O(n²)。</p>
+  <figure>
+  <svg viewBox="0 0 860 280" xmlns="http://www.w3.org/2000/svg">
+    <text x="210" y="24" text-anchor="middle" class="b" style="fill:#15803D">理想：每次对半分</text>
+    <text x="640" y="24" text-anchor="middle" class="b" style="fill:#B91C1C">最坏：每次分成 0 和 n−1</text>
+    <g fill="#EAF7EF" stroke="#15803D" stroke-width="1.3">
+      <rect x="30" y="44" width="360" height="16" rx="3"/>
+      <rect x="30" y="80" width="176" height="16" rx="3"/><rect x="214" y="80" width="176" height="16" rx="3"/>
+      <rect x="30" y="116" width="84" height="16" rx="3"/><rect x="122" y="116" width="84" height="16" rx="3"/><rect x="214" y="116" width="84" height="16" rx="3"/><rect x="306" y="116" width="84" height="16" rx="3"/>
+      <rect x="30" y="152" width="38" height="16" rx="3"/><rect x="76" y="152" width="38" height="16" rx="3"/><rect x="122" y="152" width="38" height="16" rx="3"/><rect x="168" y="152" width="38" height="16" rx="3"/>
+      <rect x="214" y="152" width="38" height="16" rx="3"/><rect x="260" y="152" width="38" height="16" rx="3"/><rect x="306" y="152" width="38" height="16" rx="3"/><rect x="352" y="152" width="38" height="16" rx="3"/>
+    </g>
+    <text x="210" y="196" text-anchor="middle" class="sm">… 共 log₂n 层，每层合计处理 n 个元素</text>
+    <text x="210" y="218" text-anchor="middle" class="sm b" style="fill:#15803D">总代价 ≈ n log₂n，递归深度 log₂n</text>
+    <g fill="#FDEEEE" stroke="#B91C1C" stroke-width="1.3">
+      <rect x="460" y="44" width="360" height="16" rx="3"/>
+      <rect x="460" y="70" width="340" height="16" rx="3"/>
+      <rect x="460" y="96" width="320" height="16" rx="3"/>
+      <rect x="460" y="122" width="300" height="16" rx="3"/>
+      <rect x="460" y="148" width="280" height="16" rx="3"/>
+      <rect x="460" y="174" width="260" height="16" rx="3"/>
+    </g>
+    <g fill="#6D28D9"><circle cx="808" cy="78" r="5"/><circle cx="788" cy="104" r="5"/><circle cx="768" cy="130" r="5"/><circle cx="748" cy="156" r="5"/><circle cx="728" cy="182" r="5"/></g>
+    <text x="826" y="82" class="xs" style="fill:#6D28D9">pivot</text>
+    <text x="640" y="218" text-anchor="middle" class="sm">… 共 n 层，第 k 层处理 n−k 个元素</text>
+    <text x="640" y="240" text-anchor="middle" class="sm b" style="fill:#B91C1C">总代价 ≈ n²/2，递归深度 n → 可能栈溢出</text>
+    <text x="430" y="270" text-anchor="middle" class="xs">平均情况下，即使每次只按 1:9 分，深度也只有 log₁₀/₉ n ≈ 6.6 log₂n，仍是 O(n log n)</text>
+  </svg>
+  <figcaption><b>图 5-1</b>　快排的递归树：分得均匀与否，决定了是 n log n 还是 n²</figcaption>
+  </figure>
+
+  <h2>5.2 Lomuto 分区：单指针，好写但有坑</h2>
+  <p>取最后一个元素作 pivot。用 i 标记“小于区”的下一个空位，j 从左往右扫描：遇到比 pivot 小的元素，就和 <code>a[i]</code> 交换，i 加 1。扫完以后，把 pivot 和 <code>a[i]</code> 交换，pivot 就到了它的最终位置。</p>
+  <!--trace {"rows":[
+    {"lab":"初始","a":[2,8,7,1,3,5,6,4],"s":".......v","p":{"i/j":0},"note":"pivot = 末元素 4"},
+    {"lab":"j = 0","a":[2,8,7,1,3,5,6,4],"s":"k......v","p":{"j":0,"i":1},"note":"2 < 4：进入小于区，i → 1"},
+    {"lab":"j = 3","a":[2,1,7,8,3,5,6,4],"s":"kx.x...v","p":{"i":2,"j":3},"note":"8、7 跳过；1 < 4，与 a[1]=8 交换"},
+    {"lab":"j = 4","a":[2,1,3,8,7,5,6,4],"s":"kkx.x..v","p":{"i":3,"j":4},"note":"3 < 4，与 a[2]=7 交换"},
+    {"lab":"扫完","a":[2,1,3,8,7,5,6,4],"s":"kkk....v","p":{"i":3},"note":"5、6 ≥ 4 跳过，扫描结束"},
+    {"lab":"归位","a":[2,1,3,4,7,5,6,8],"s":"kkkd....","g":[[0,2,"< 4","b"],[4,7,"≥ 4","o"]],"note":"a[i] 与 pivot 交换：4 到达最终位置"}],
+    "names":{"k":"小于 pivot 区","d":"pivot 的最终位置"},
+    "cap":"<b>图 5-2</b>　Lomuto 分区（CLRS 的经典例子）：分区结束时 pivot 一定在它的最终位置上"} -->
+<!--code:cpp:Lomuto 分区-->
+int partition_lomuto(int* a, int lo, int hi) {   // [lo, hi]，返回 pivot 的最终下标
+    int p = a[hi], i = lo;
+    for (int j = lo; j < hi; ++j)
+        if (a[j] < p) std::swap(a[i++], a[j]);
+    std::swap(a[i], a[hi]);
+    return i;          // 递归 [lo, i-1] 和 [i+1, hi]，pivot 本身不再参与
+}
+<!--/code-->
+  <p>Lomuto 有两个缺陷：一是交换次数多，每个比 pivot 小的元素都要换一次；二是<strong>遇到大量相等元素会退化</strong>。全部相等时 <code>a[j] &lt; p</code> 永远为假，i 一直不动，每次都分成 0 和 n−1，于是变成 O(n²)。</p>
+
+  <h2>5.3 Hoare 分区：双指针相向而行</h2>
+  <p>Hoare 在 1961 年发明快排时用的就是这种分区：i 从左往右找 ≥ pivot 的元素，j 从右往左找 ≤ pivot 的元素，两边都找到就交换，直到 i、j 相遇。</p>
+  <!--trace {"rows":[
+    {"lab":"初始","a":[3,8,2,5,1,4,7,6],"s":"...v....","note":"pivot = a[mid] = 5（记下的是值）"},
+    {"lab":"扫描","a":[3,8,2,5,1,4,7,6],"s":".c...c..","p":{"i":1,"j":5},"note":"i 停在 8（≥5），j 停在 4（≤5）"},
+    {"lab":"交换","a":[3,4,2,5,1,8,7,6],"s":".x...x..","note":"交换 a[1] 和 a[5]"},
+    {"lab":"扫描","a":[3,4,2,5,1,8,7,6],"s":"...cc...","p":{"i":3,"j":4},"note":"i 停在 5，j 停在 1"},
+    {"lab":"交换","a":[3,4,2,1,5,8,7,6],"s":"...xx...","note":"交换 a[3] 和 a[4]"},
+    {"lab":"相遇","a":[3,4,2,1,5,8,7,6],"s":"........","p":{"j":3,"i":4},"g":[[0,3,"≤ 5","b"],[4,7,"≥ 5","o"]],"note":"i ≥ j，返回 j = 3。pivot 不一定在最终位置！"}],
+    "cap":"<b>图 5-3</b>　Hoare 分区：递归 [lo, j] 和 [j+1, hi]，pivot 也参与递归"} -->
+<!--code:cpp:面试 5 分钟手写版（Hoare + 取中间值）-->
+void quick_sort(int* a, int lo, int hi) {      // [lo, hi]
+    if (lo >= hi) return;
+    int p = a[lo + (hi - lo) / 2];             // 取中间位置的值：有序输入不会退化
+    int i = lo - 1, j = hi + 1;
+    while (i < j) {
+        do ++i; while (a[i] < p);              // 严格小于：遇到等于 pivot 的也停下
+        do --j; while (a[j] > p);
+        if (i < j) std::swap(a[i], a[j]);
+    }
+    quick_sort(a, lo, j);                      // 用 j 划分
+    quick_sort(a, j + 1, hi);
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>对比项</th><th>Lomuto</th><th>Hoare</th></tr>
+    <tr><td>指针</td><td>单向，i 慢 j 快</td><td>双向，相向而行</td></tr>
+    <tr><td>交换次数（随机）</td><td>约 n/2</td><td>约 n/6，少约 3 倍</td></tr>
+    <tr><td>全部相等</td><td><span class="no">退化 O(n²)</span></td><td><span class="yes">每次都停下交换，正好对半分</span></td></tr>
+    <tr><td>分区后 pivot</td><td>在最终位置，不再参与递归</td><td>不一定在最终位置，两侧都可能包含它</td></tr>
+    <tr><td>递归区间</td><td>[lo, i−1] 和 [i+1, hi]</td><td>[lo, j] 和 [j+1, hi]</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：Hoare 的三个经典 bug</span>
+    <ol>
+      <li><strong>用 <code>&lt;=</code> 代替 <code>&lt;</code></strong>：<code>while (a[i] &lt;= p)</code> 在全等数组上会让 i 一路冲出右边界。</li>
+      <li><strong>pivot 取 <code>a[hi]</code> 又用 j 划分</strong>：比如 <code>[1, 2]</code> 以 2 为 pivot，i 和 j 都停在下标 1，返回 j = 1，于是又递归 [0, 1]，形成死循环。用 j 划分时，pivot 必须取 <code>a[lo]</code> 或向下取整的中点。反过来，如果用 i 划分（[lo, i−1]、[i, hi]），pivot 就不能取 <code>a[lo]</code>。</li>
+      <li><strong>把 j 写成 i</strong>：两种组合不能混用。最稳妥的做法是背熟上面这一套。</li>
+    </ol>
+  </div>
+
+  <h2>5.4 pivot 怎么选</h2>
+  <div class="tbl"><table>
+    <tr><th>策略</th><th>做法</th><th>弱点</th><th>谁在用</th></tr>
+    <tr><td>首 / 尾元素</td><td>直接取 <code>a[lo]</code> 或 <code>a[hi]</code></td><td>有序、逆序输入直接 O(n²)</td><td>教科书</td></tr>
+    <tr><td>中间元素</td><td><code>a[(lo+hi)/2]</code></td><td>可以被构造出最坏输入（如“风琴管”序列）</td><td>手写模板</td></tr>
+    <tr><td>随机</td><td>随机选一个下标</td><td>期望 O(n log n)；要调随机数，结果不可复现</td><td>算法课、面试</td></tr>
+    <tr><td>三数取中</td><td>lo、mid、hi 三者的中位数</td><td>仍可被构造攻击（McIlroy 1999），概率极低</td><td>libstdc++</td></tr>
+    <tr><td>九数取中（ninther）</td><td>取三组“三数取中”的中位数</td><td>更稳，代价是多做几次比较</td><td>MSVC（区间 &gt; 40）、pdqsort（区间 &gt; 128）</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">深入一层：确定性的 pivot 总能被攻击</span>
+    <p>McIlroy 在《A Killer Adversary for Quicksort》里构造了一个“对抗比较器”：它在排序过程中动态决定元素的大小，能让任何确定性选 pivot 的快排都跑出 O(n²)。这在服务器上可能变成拒绝服务攻击。所以工业实现不靠 pivot 选得巧来保证最坏情况，而是<strong>监控递归深度，超过阈值就换成堆排序</strong>，这就是 introsort（第 8 章）。</p>
+  </div>
+
+  <h2>5.5 退化实测：比较次数、递归深度、栈溢出</h2>
+  <p>把朴素版（Lomuto + 末元素作 pivot）和工程版（三数取中 + Hoare + 小区间插排 + 递归短边）放在一起，分别喂随机和有序的数据：</p>
+  <div class="tbl"><table>
+    <tr><th>E4：输入</th><th>朴素版比较次数</th><th>朴素版递归深度</th><th>工程版比较次数</th><th>工程版递归深度</th></tr>
+    <tr><td>N=1000 随机</td><td>10,453</td><td>18</td><td>11,171</td><td>4</td></tr>
+    <tr><td>N=1000 有序</td><td class="no">499,500</td><td class="no">999</td><td>7,188</td><td>6</td></tr>
+    <tr><td>N=16000 随机</td><td>268,630</td><td>35</td><td>258,659</td><td>8</td></tr>
+    <tr><td>N=16000 有序</td><td class="no">127,992,000</td><td class="no">15,999</td><td>179,068</td><td>10</td></tr>
+  </table></div>
+  <p>有序的 16000 个数，朴素版比较了 1.28 亿次，正好是 n(n−1)/2；工程版只比较了 18 万次。在 E3 的计时中（N=20000），朴素版有序输入要 61.26 ms，工程版只要 0.06 ms，<strong>相差约 1000 倍</strong>。</p>
+  <div class="term"><div class="bar">E4 · 把朴素快排放进不同大小的线程栈</div><pre>  快排-朴素 有序 N=  2000，线程栈  64KB：<span class="bad">【栈溢出 STACK_OVERFLOW】</span>，最大递归深度 502
+  快排-朴素 有序 N= 20000，线程栈  64KB：<span class="bad">【栈溢出 STACK_OVERFLOW】</span>，最大递归深度 495
+  快排-朴素 有序 N= 10000，线程栈 1024KB：<span class="ok">正常完成</span>，最大递归深度 9999
+  快排-朴素 有序 N= 20000，线程栈 1024KB：<span class="bad">【栈溢出 STACK_OVERFLOW】</span>，最大递归深度 10732
+  快排-工程 有序 N=1000000，线程栈  64KB：<span class="ok">正常完成</span>，最大递归深度 16</pre></div>
+  <p>每层递归大约占 100 字节栈空间。Windows 主线程默认栈是 1 MB，<strong>只要 2 万个有序元素就能把它撑爆</strong>。游戏引擎的 Job 线程、协程或纤程的栈通常更小（几十 KB 很常见），几百层就溢出。递归短边的工程版排 100 万个元素，最大深度只有 16。</p>
+  <div class="co net"><span class="h">游戏客户端视角：线上崩溃的一种典型来源</span>
+    <p>“策划配了一张已经排好序的表，加载时用自己写的快排再排一次，在 Job 线程里栈溢出。”这类问题在开发机上很难复现，因为开发机的数据往往是乱序的，或者跑在主线程上栈更大。<strong>结论：不要在引擎代码里手写快排，用 <code>std::sort</code>。真要手写，就必须递归短边并加深度限制。</strong></p>
+  </div>
+
+  <h2>5.6 递归短边、循环长边：把栈深压到 O(log n)</h2>
+  <p>每次分区后，只对<strong>较短的一边</strong>递归，较长的一边改成在当前函数里用循环继续处理。每次递归调用处理的区间长度都不超过父区间的一半，所以递归深度 ≤ log₂n，和输入无关。注意，这只保证了栈深，时间复杂度最坏仍然是 O(n²)。</p>
+<!--code:cpp:工程版快排（三数取中 + Hoare + 小区间插排 + 递归短边）-->
+template <class T, class Less = std::less<T>>
+void quick_sort_engineered(T* a, int lo, int hi, Less less = {}) {   // [lo, hi]
+    while (hi - lo > 16) {
+        int mid = lo + (hi - lo) / 2;
+        // 三数取中：结束后 a[lo] <= a[mid] <= a[hi]，两端还能起到哨兵作用
+        if (less(a[mid], a[lo])) std::swap(a[mid], a[lo]);
+        if (less(a[hi],  a[lo])) std::swap(a[hi],  a[lo]);
+        if (less(a[hi],  a[mid])) std::swap(a[hi], a[mid]);
+        T p = a[mid];
+        int i = lo - 1, j = hi + 1;
+        for (;;) {
+            do ++i; while (less(a[i], p));
+            do --j; while (less(p, a[j]));
+            if (i >= j) break;
+            std::swap(a[i], a[j]);
+        }
+        if (j - lo < hi - j) { quick_sort_engineered(a, lo, j, less); lo = j + 1; }   // 递归短边
+        else                 { quick_sort_engineered(a, j + 1, hi, less); hi = j; }   // 长边留给 while
+    }
+    insertion_sort(a + lo, hi - lo + 1, less);   // ≤ 17 个元素：插入排序收尾
+}
+<!--/code-->
+
+  <h2>5.7 三路快排：专治大量重复</h2>
+  <p>游戏数据里重复键非常多：品质只有 5 档、职业只有 6 种、队伍只有 2 个。Dijkstra 的“荷兰国旗”分区把数组分成三段：<strong>&lt; p、= p、&gt; p</strong>。中间那段已经就位，不再参与递归。重复越多，递归规模缩小得越快。</p>
+  <!--trace {"rows":[
+    {"lab":"初始","a":[4,6,4,2,4,9,1,4],"s":"v.......","p":{"lt":0,"i":1,"gt":7},"note":"p = 4"},
+    {"lab":"①","a":[4,4,4,2,4,9,1,6],"s":"ex.....w","p":{"lt":0,"i":1,"gt":6},"note":"6 > p：与 a[gt] 交换，gt−−（i 不动）"},
+    {"lab":"②","a":[4,4,4,2,4,9,1,6],"s":"eee....w","p":{"lt":0,"i":3,"gt":6},"note":"两个 4 都等于 p：i++"},
+    {"lab":"③","a":[2,4,4,4,4,9,1,6],"s":"keee...w","p":{"lt":1,"i":4,"gt":6},"note":"2 < p：与 a[lt] 交换，lt++、i++"},
+    {"lab":"④","a":[2,4,4,4,4,1,9,6],"s":"keeee.ww","p":{"lt":1,"i/gt":5},"note":"4 等于 p 则 i++；9 > p 换到右区"},
+    {"lab":"结束","a":[2,1,4,4,4,4,9,6],"s":"kkeeeeww","p":{"lt":2,"gt":5},"g":[[0,1,"< 4","b"],[2,5,"= 4，已就位","t"],[6,7,"> 4","o"]],"note":"1 < p 换到左区；i > gt，结束"}],
+    "names":{"k":"< p 区","e":"= p 区","w":"> p 区"},
+    "cap":"<b>图 5-4</b>　三路划分：不变式 [lo, lt) &lt; p，[lt, i) = p，(gt, hi] &gt; p，[i, gt] 尚未处理"} -->
+<!--code:cpp:三路快排-->
+template <class T, class Less = std::less<T>>
+void quick_sort_3way(T* a, int lo, int hi, Less less = {}) {   // [lo, hi]
+    if (lo >= hi) return;
+    std::swap(a[lo], a[lo + rand() % (hi - lo + 1)]);          // 随机 pivot（示意；工程上用 <random>）
+    T p = a[lo];
+    int lt = lo, i = lo + 1, gt = hi;
+    while (i <= gt) {
+        if (less(a[i], p))      std::swap(a[lt++], a[i++]);
+        else if (less(p, a[i])) std::swap(a[i], a[gt--]);      // 换过来的元素还没看过，所以 i 不动
+        else                    ++i;
+    }
+    quick_sort_3way(a, lo, lt - 1, less);                      // [lt, gt] 全等于 p，跳过
+    quick_sort_3way(a, gt + 1, hi, less);
+}
+<!--/code-->
+  <div class="co ver"><span class="h">实测 E5：N = 100 万，三路的长处和代价</span>
+    <p><strong>大量重复（16 种值）</strong>：三路 7.95 ms，工程版 Hoare 16.29 ms，<code>std::sort</code> 9.68 ms。<strong>有序</strong>：三路 20.84 ms，Hoare 3.94 ms。三路每处理一个元素都要做两次比较、交换也更多，所以没有重复时反而更慢。MSVC 的 <code>std::sort</code> 在分区时会把等于 pivot 的元素聚到中间（<code>_Partition_by_median_guess_unchecked</code> 返回一个相等区间），兼顾了两种情况。</p>
+  </div>
+
+  <h2>5.8 为什么快排在实践中最快</h2>
+  <p>快排的平均比较次数约为 1.39 n log₂n，比归并的 ~n log₂n 还多。它快在每一步的代价小：</p>
+  <ul>
+    <li><strong>内层循环极简</strong>：和放在寄存器里的 pivot 比较，然后指针加 1。</li>
+    <li><strong>访存顺序</strong>：两个指针各自顺序扫描，硬件预取效果好；区间缩小到能放进 L1 以后，后面的操作全部命中缓存。</li>
+    <li><strong>写得少</strong>：E2（n=1000 随机）中，工程版快排写 6730 次，归并写 18686 次，堆写 11585 次。</li>
+    <li><strong>原地</strong>：不需要额外缓冲，没有分配开销。</li>
+  </ul>
+
+  <h2>5.9 快速选择：O(n) 求第 K 大</h2>
+  <p>只想要第 K 小的元素时，分区以后只需要进入<strong>包含 K 的那一边</strong>，另一边直接丢掉。平均工作量是 n + n/2 + n/4 + … ≈ 2n，即 O(n)。最坏仍是 O(n²)；用中位数的中位数（BFPRT）选 pivot 可以保证最坏 O(n)，但常数太大，工程上很少用。<code>std::nth_element</code> 是 introselect：快速选择 + 深度兜底。</p>
+<!--code:cpp:快速选择（LeetCode 215 的核心）-->
+int quick_select(std::vector<int>& a, int k) {   // 返回第 k 小（k 从 0 开始），会打乱 a
+    int lo = 0, hi = int(a.size()) - 1;
+    while (lo < hi) {
+        int p = a[lo + (hi - lo) / 2], i = lo - 1, j = hi + 1;
+        while (i < j) {
+            do ++i; while (a[i] < p);
+            do --j; while (a[j] > p);
+            if (i < j) std::swap(a[i], a[j]);
+        }
+        if (k <= j) hi = j; else lo = j + 1;   // 只保留包含 k 的那一边
+    }
+    return a[k];
+}
+<!--/code-->
+
+  <h2>5.10 交互实验：三种快排对比</h2>
+  <p>先选“快排 · Lomuto”，数据切到“已有序”，观察每次分区后右侧都是空的、递归一层只少一个元素；再换成“Hoare + 三数取中”。最后选“大量重复”，对比三路划分。</p>
+  <div class="lab sortlab" id="lab-qs" data-algos="quickL,quickH,quick3" data-n="20"></div><!--/lab-->
+
+  <div class="co warn"><span class="h">面试注意：快排高频追问清单</span>
+    <ul>
+      <li><strong>最坏情况什么时候出现？</strong> pivot 总是取到最大或最小值：首 / 尾作 pivot 遇到有序或逆序输入；Lomuto 遇到全相等的输入。</li>
+      <li><strong>空间复杂度？</strong> 平均 O(log n)，朴素实现最坏 O(n)；递归短边可以保证 O(log n)。<strong>不是 O(1)。</strong></li>
+      <li><strong>稳定吗？</strong> 不稳定，因为分区时有远距离交换。</li>
+      <li><strong>和堆排比？</strong> 两者平均都是 n log n，但快排缓存友好、写得少，实测更快（E5：47 ms 对 74 ms）；堆排的优势是最坏有保证、O(1) 空间。</li>
+      <li><strong>怎么避免最坏情况？</strong> 随机 / 三数取中 / ninther 选 pivot 只能降低概率；真正的保证要靠 introsort 的深度限制，切换到堆排。</li>
+    </ul>
+  </div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>Lomuto：好写，pivot 最终归位；交换多，全相等时退化。Hoare：交换少约 3 倍，全相等时对半分；pivot 不一定归位，递归 [lo, j]、[j+1, hi]。</li>
+    <li>退化实测：有序的 16000 个数，朴素版比较 1.28 亿次、递归 15999 层；1 MB 栈遇到 2 万个有序元素就溢出。</li>
+    <li>工程四件套：<strong>三数取中 / ninther、Hoare、小区间插排、递归短边</strong>；再加深度限制 + 堆排兜底，就是 introsort。</li>
+    <li>三路快排专治重复键（E5：7.95 ms 对 16.29 ms）；快速选择平均 O(n)。</li>
+  </ul></div>
+</section>
