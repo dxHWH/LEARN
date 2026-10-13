@@ -1,0 +1,12 @@
+# /Game/Blueprints/Hit_CameraShake1  (Blueprint)
+ParentClass: /Script/GameplayCameras.LegacyCameraShake
+
+## Hit_CameraShake1_C Default__Hit_CameraShake1_C
+   OscillationDuration = 0.20000000298023224
+   OscillationBlendOutTime = 0.15000000596046448
+   RotOscillation = ('struct', 'ROscillator', {'Pitch': ('struct', 'FOscillator', {'Amplitude': 2.0, 'Frequency': 15.0, 'InitialOffset': 'EOO_OffsetZero'}), 'Roll': ('struct', 'FOs
+   LocOscillation = ('struct', 'VOscillator', {'X': ('struct', 'FOscillator', {'Amplitude': 1.0, 'Frequency': 2.0}), 'Y': ('struct', 'FOscillator', {'Amplitude': 1.0, 'Frequency': 
+   bSingleInstance = True
+   RootShakePattern = RootShakePattern
+
+## Custom events / RPC

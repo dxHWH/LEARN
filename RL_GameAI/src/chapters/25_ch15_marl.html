@@ -1,0 +1,148 @@
+<section class="chapter" id="ch15">
+<div class="ch-head"><div class="no">CHAPTER 15</div><h1>多智能体 RL 与自博弈</h1><p class="lead">对抗游戏没有现成的“标准答案”可学，强 Bot 几乎都是靠和自己打出来的。可是“和当前的自己打”会陷入策略循环：学会克制 A 的 B，又被 C 克制，转一圈回到 A。解决办法是和过去的自己、和一群对手打，并用 Elo 之类的评分衡量强度。合作场景（5v5 队友配合）还有信用分配的问题，值分解和 CTDE 是标准答案。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>用无差异条件解出石头剪刀布的纳什均衡；用实测说明朴素自博弈为什么会循环、虚拟自博弈为什么能收敛。</li>
+<li>说清 MARL 的三大难点与 CTDE 范式，推出 QMIX 单调约束 ⇒ IGM。</li>
+<li>把 Elo 更新解释成 logistic 回归的在线 SGD，理解 K 的取舍和 Elo 在非传递博弈中的局限。</li>
+<li>能设计自博弈对手池、难度分档与匹配方案。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>多智能体环境里每个智能体的“环境”包含其他正在学习的智能体，所以是非平稳的；合作时还要解决信用分配（团队赢了是谁的功劳）和联合动作空间爆炸。主流范式是 CTDE：训练时 critic 能看全局信息，执行时每个智能体只用自己的观测，代表算法有 MAPPO、QMIX。QMIX 把各智能体的 Q 用单调网络混合成团队 Q，单调性保证“各自贪心 = 团队贪心”。对抗游戏用自博弈训练：朴素地和当前自己打会策略循环（石头剪刀布式的非传递性），所以要和历史版本组成的对手池打——虚拟自博弈对历史平均做最优响应、PFSP 优先挑打不过的对手、AlphaStar 用主智能体加“专门找漏洞”的 exploiter 组成联赛。强度用 Elo 衡量：期望胜率 $1/(1+10^{(R_B-R_A)/400})$，赛后按 $K(s-E)$ 更新，本质是胜负的 logistic 回归；但 Elo 只有一维，表达不了循环克制，所以还要看对固定基准的胜率和可利用度。难度分级靠不同训练阶段的 checkpoint、温度、反应延迟和观测噪声，再用胜率做动态匹配。</p></div>
+
+<h2>15.1 博弈论基础：纳什均衡</h2>
+<p>多智能体 RL 的标准模型是<strong>随机博弈</strong>（马尔可夫博弈）：每个智能体 i 有自己的动作 $a^i$ 和奖励 $r^i(s,\boldsymbol a)$，转移依赖联合动作。按奖励关系分三类：<strong>完全合作</strong>（所有人奖励相同，比如同队队友）、<strong>零和</strong>（$r^1=-r^2$，1v1 对抗）、<strong>混合</strong>（5v5：队内合作、队间对抗）。最优的概念变成<strong>纳什均衡</strong>：任何一方单独改变策略都不能获益。</p>
+<!--deriv 石头剪刀布的纳什均衡：混合策略的无差异条件
+u_{\text{石头}}(q) & = 0\cdot q_R-1\cdot q_P+1\cdot q_S,\quad u_{\text{布}}(q)=q_R-q_S,\quad u_{\text{剪刀}}(q)=-q_R+q_P || 对手按 $q=(q_R,q_P,q_S)$ 出招时，我方三个动作的期望收益
+u_{\text{石头}} & = u_{\text{布}}=u_{\text{剪刀}} || 无差异条件：如果我方以正概率混合三种动作，它们的期望收益必须相等，否则把概率全挪给收益最高的那个会更好
+q_S-q_P & = q_R-q_S=q_P-q_R\ \Rightarrow\ q_R=q_P=q_S || 三个差相等且和为 0，所以都为 0
+* q^* & = \big(\tfrac13,\tfrac13,\tfrac13\big),\qquad\text{均衡收益}=0 || 对称地，我方也是均匀混合。可利用度 $\max_iu_i(q)$ 衡量策略离均衡多远：纳什均衡处为 0
+-->
+
+<h2>15.2 自博弈：为什么会循环，怎么破</h2>
+<p>石头剪刀布是游戏中“克制关系”的最小模型（英雄克制、兵种相克、战术相克）。比较三种训练方式（<code>demos/ch15_selfplay.cpp</code> E1，初始策略 (0.5, 0.3, 0.2)）：</p>
+<ul>
+<li><strong>朴素自博弈</strong>：始终和“当前的自己”对打，用精确的 softmax 策略梯度更新（相当于复制者动力学）。</li>
+<li><strong>迭代最优响应</strong>：每轮直接换成上一轮策略的最优响应。</li>
+<li><strong>虚拟自博弈（FSP）</strong>：每轮对“历史上所有版本的平均策略”做最优响应，再把结果并入平均。</li>
+</ul>
+<!--plot {"x":[0,3000],"y":[0,0.85],"h":280,"xlabel":"训练轮数","ylabel":"出“石头”的概率","legend":"tr","hlines":[[0.3333,"纳什均衡 1/3","s"]],
+"series":[{"path":"ch15.e1.naive_r","n":"朴素自博弈（当前策略）","c":"r"},{"path":"ch15.e1.fsp_r","n":"虚拟自博弈（历史平均策略）","c":"b","sw":2.4}],
+"cap":"<b>图 15-1</b>　石头剪刀布上的自博弈（C++ 实测）。朴素自博弈的策略在 0.18 到 0.56 之间来回绕圈，永远不收敛；虚拟自博弈的平均策略收敛到 1/3。迭代最优响应更极端：石头 → 布 → 剪刀 → 石头，周期为 3。"} -->
+<!--plot {"x":[0,3000],"y":[0.001,1],"logy":true,"h":240,"xlabel":"训练轮数","ylabel":"可利用度（对数刻度）","legend":"tr",
+"series":[{"path":"ch15.e1.naive_e","n":"朴素自博弈","c":"r"},{"path":"ch15.e1.fsp_e","n":"虚拟自博弈（平均策略）","c":"b","sw":2.4}],
+"cap":"<b>图 15-2</b>　可利用度（最优响应能从这个策略身上赢多少）。朴素自博弈始终在 [[ch15.e1.naive_e_end|.2f]] 附近波动；虚拟自博弈 [[ch15.e1.K]] 轮后降到 [[ch15.e1.fsp_e_end|.4f]]，约按 $1/\\sqrt{k}$ 的速度下降。"} -->
+<p>循环的原因：两人零和博弈里，“对当前自己的最优响应”总在追逐一个移动的靶子，而非传递的克制关系让追逐变成兜圈子。FSP 的平均策略相当于“混合了所有见过的打法”，对它做最优响应不会被单一打法带偏；对两人零和博弈，FSP 的平均策略收敛到纳什均衡。深度 RL 版本的工程做法：</p>
+<div class="tbl"><table>
+<tr><th>做法</th><th>对手怎么选</th><th>代表</th></tr>
+<tr><td>和最新版本打</td><td>当前策略的副本</td><td>容易循环、遗忘早期打法</td></tr>
+<tr><td>历史对手池</td><td>保存 checkpoint，按比例抽历史版本（如 80% 最新、20% 历史）</td><td>OpenAI Five</td></tr>
+<tr><td>PFSP（优先虚拟自博弈）</td><td>按胜率加权抽对手，比如权重 $(1-p_{\text{win}})^2$，多打打不过的</td><td>AlphaStar</td></tr>
+<tr><td>联赛 / 种群</td><td>主智能体 + 专门针对主智能体找漏洞的 main exploiter + 针对整个联赛的 league exploiter</td><td>AlphaStar League</td></tr>
+<tr><td>课程式自博弈 + 蒸馏</td><td>先在小范围（固定阵容）训练多个教师，再蒸馏到一个学生，扩展到全英雄池</td><td>腾讯绝悟（Ye et al., 2020）</td></tr>
+</table></div>
+<p class="tcap"><b>表 15-1</b>　自博弈的对手选择策略。</p>
+
+<h2>15.3 MARL 的难点与 CTDE</h2>
+<ul>
+<li><strong>非平稳</strong>：队友 / 对手也在学，单个智能体看到的转移和奖励分布在变，第 3 章的 MDP 假设不成立，经验回放里的旧数据也会过时。</li>
+<li><strong>信用分配</strong>：团队奖励只有一个，谁的动作导致了胜利？只用团队奖励训练个体，会让“躺赢”的智能体也被强化。</li>
+<li><strong>维度爆炸</strong>：联合动作空间是各智能体动作空间的乘积，5 个英雄各 100 个动作就是 $10^{10}$。</li>
+<li><strong>部分可观测</strong>：每个智能体只能看到自己视野里的东西（战争迷雾）。</li>
+</ul>
+<!--flow {"w":900,"h":220,
+"boxes":[
+{"id":"c","x":300,"y":20,"w":300,"h":60,"t":"集中式 critic（只在训练时用）","s":"输入全局状态 s / 所有人的观测与动作","c":"p"},
+{"id":"a1","x":60,"y":140,"w":200,"h":56,"t":"智能体 1 的策略 π¹(a¹|o¹)","s":"只看自己的观测","c":"b"},
+{"id":"a2","x":350,"y":140,"w":200,"h":56,"t":"智能体 2 的策略 π²(a²|o²)","s":"参数可共享 + 角色 ID","c":"b"},
+{"id":"a3","x":640,"y":140,"w":200,"h":56,"t":"智能体 n 的策略","s":"执行时完全分散","c":"b"}],
+"arrows":[
+{"p":[[380,80],[160,140]],"c":"p","dash":true,"label":"优势 / 价值","lx":200,"ly":104},
+{"p":[[450,80],[450,140]],"c":"p","dash":true},
+{"p":[[520,80],[740,140]],"c":"p","dash":true}],
+"cap":"<b>图 15-3</b>　CTDE（集中训练、分散执行）。训练时 critic 用全局信息来降低非平稳与信用分配的困难；部署时每个智能体只用自己的观测，满足游戏里“Bot 不能开全图”的要求。MAPPO 就是“共享参数的 PPO + 集中式价值函数”。"} -->
+
+<h2>15.4 值分解：VDN 与 QMIX</h2>
+<p>合作任务里如果学一个团队 $Q_{\text{tot}}(s,\boldsymbol a)$，执行时要在联合动作空间上取 max，不可行。值分解让每个智能体学自己的 $Q_i(o^i,a^i)$，再组合成 $Q_{\text{tot}}$，用团队奖励端到端训练。关键要求是 <strong>IGM</strong>（Individual-Global-Max）：各智能体分别对自己的 $Q_i$ 取 argmax，拼起来恰好是 $Q_{\text{tot}}$ 的 argmax，这样分散执行和集中训练是一致的。</p>
+<!--deriv QMIX 的单调约束 ⇒ IGM
+Q_{\text{tot}} & = f\big(Q_1(a^1),\dots,Q_n(a^n);s\big),\qquad\frac{\partial f}{\partial Q_i}\ge0\ \ \forall i || QMIX：混合网络的权重由以全局状态 s 为输入的超网络生成，取绝对值保证非负
+Q_i(\hat a^i) & \ge Q_i(a^i)\quad\forall a^i,\qquad\hat a^i=\argmax_{a^i}Q_i(a^i) || 每个智能体的贪心动作
+f\big(Q_1(\hat a^1),\dots,Q_n(\hat a^n)\big) & \ge f\big(Q_1(a^1),\dots,Q_n(a^n)\big) || f 对每个参数单调不减，逐个把 $Q_i(a^i)$ 换成更大的 $Q_i(\hat a^i)$，f 只会变大
+* \argmax_{\boldsymbol a}Q_{\text{tot}} & =\big(\hat a^1,\dots,\hat a^n\big) || 满足 IGM；VDN（$Q_{\text{tot}}=\sum Q_i$）是 f 为求和的特例
+-->
+<p>单调约束是充分条件而不是必要条件，它限制了能表示的 $Q_{\text{tot}}$：如果最优配合需要“我的动作好坏取决于你选了什么”（比如两人必须同时开团才有收益，单独开团是送死），单调混合就表示不了，这是 QMIX 的主要局限（QTRAN、QPLEX 试图放宽）。手撕脚本在 2000 个随机实例上验证：非负权重的混合从不违反 IGM，允许负权重时违反了 1749 次。</p>
+<p><strong>策略方法</strong>：MADDPG（每个智能体一个 actor，critic 输入所有人的观测和动作）；IPPO（每个智能体独立跑 PPO）和 MAPPO（共享参数 + 集中式价值）。实践中 MAPPO 在很多合作基准上表现很强，而且实现简单，是游戏里 5v5 队伍 Bot 的常用起点。</p>
+
+<h2>15.5 Elo：本质是 logistic 回归</h2>
+<!--deriv Elo 更新 = 对胜负结果做 logistic 回归的在线 SGD
+\Pr(A\text{ 胜 }B) & = E_A=\frac{1}{1+10^{(R_B-R_A)/400}}=\sigma\big(c\,(R_A-R_B)\big),\quad c=\frac{\ln10}{400} || 和第 13 章的 Bradley-Terry 模型是同一个模型；分差 400 分 ≈ 胜率 10:1
+\ell & = s\log E_A+(1-s)\log(1-E_A) || 一局结果 $s\in\{0,\tfrac12,1\}$ 的对数似然
+\frac{\partial\ell}{\partial R_A} & = c\,(s-E_A),\qquad\frac{\partial\ell}{\partial R_B}=-c\,(s-E_A) || logistic 回归的梯度（第 9 章 softmax 梯度 $y-p$ 的二分类版本）
+* R_A & \leftarrow R_A+K\,(s-E_A),\qquad R_B\leftarrow R_B-K\,(s-E_A) || 学习率 η 的 SGD 一步，$K=\eta c$；双方变化量相同、方向相反，总分守恒
+-->
+<p>所以 K 就是学习率：大 K 收敛快但稳态时分数抖得厉害（第 5 章常数步长的抖动），小 K 稳但慢。20 名真实实力已知的选手随机配对的实测（50 次重复，<code>demos/ch15_selfplay.cpp</code> E2）：</p>
+<!--plot {"x":[0,20000],"y":[0,220],"h":270,"xlabel":"总对局数","ylabel":"评分误差 RMSE（相对真实实力）","legend":"tr",
+"series":[{"path":"ch15.e2.runs.0.err","n":"K = 8","c":"b"},{"path":"ch15.e2.runs.1.err","n":"K = 16","c":"g"},{"path":"ch15.e2.runs.2.err","n":"K = 32","c":"a"},{"path":"ch15.e2.runs.3.err","n":"K = 64","c":"r"}],
+"cap":"<b>图 15-4</b>　K 的取舍（C++ 实测）。K = 64 只需 [[ch15.e2.runs.3.reach]] 局误差就降到 100 以下，但稳态误差 [[ch15.e2.runs.3.steady|.0f]]；K = 8 需要 [[ch15.e2.runs.0.reach]] 局，稳态误差只有 [[ch15.e2.runs.0.steady|.0f]]。实际系统对新玩家用大 K（快速定级）、对老玩家用小 K。"} -->
+<p><strong>Elo 的局限：只有一维</strong>。把石头剪刀布式的循环克制放进来（A 胜 B、B 胜 C、C 胜 A 各 70%，D 对所有人五五开），20 万局后：</p>
+<!--dtab {"rows":"ch15.e3.rows","cols":[["对阵","pair"],["真实胜率","true",".2f"],["Elo 预测胜率","pred",".3f"],["偏差","err","+.3f"]],
+"cap":"<b>表 15-2</b>　非传递博弈下的 Elo（E3）。四个人的分数都收敛到 1500 附近（A [[ch15.e3.rating.0|.0f]]、B [[ch15.e3.rating.1|.0f]]、C [[ch15.e3.rating.2|.0f]]、D [[ch15.e3.rating.3|.0f]]），所有对阵都预测成五五开，循环克制的那几对偏差达到 [[ch15.e3.maxerr|.2f]]。"} -->
+<p>这对游戏 AI 评估很重要：“新版本 Bot 的 Elo 更高”不代表它全面更强，可能只是克制了对手池里占多数的那类打法。所以除了 Elo，还要看对一组固定基准对手（规则 AI、各阶段 checkpoint、人类高手）的胜率矩阵，以及可利用度（专门训练一个 exploiter 去打它，看能赢多少）。TrueSkill 在 Elo 的基础上给每个人的分数加上不确定度 σ（新人 σ 大），并支持团队对局。</p>
+
+<h2>15.6 难度分级与匹配</h2>
+<div class="tbl"><table>
+<tr><th>手段</th><th>做法</th><th>注意</th></tr>
+<tr><td>checkpoint 池</td><td>训练过程中保存不同强度的模型，按 Elo 分档</td><td>早期 checkpoint 弱得“不自然”（乱走），不一定像低段位玩家</td></tr>
+<tr><td>温度 / 采样</td><td>推理时 softmax 温度调高、或在 top-k 内采样</td><td>太高会出现明显的“昏招”</td></tr>
+<tr><td>反应时间与 APM</td><td>动作延迟若干帧、限制每分钟操作数</td><td>拟人化的重要组成，也让对局更公平</td></tr>
+<tr><td>观测噪声 / 视野限制</td><td>瞄准加抖动、技能释放位置加噪声、缩小感知范围</td><td>FPS Bot 的“命中率”最好通过这一层控制</td></tr>
+<tr><td>目标胜率驱动</td><td>动态难度调整：根据玩家近期胜负切换档位，目标胜率 50% 左右</td><td>要平滑，避免玩家察觉“被放水”</td></tr>
+<tr><td>条件化策略</td><td>训练时把“强度 / 风格”作为输入，一个模型覆盖多档</td><td>需要对应的数据或奖励设计（第 14、16 章）</td></tr>
+</table></div>
+<p class="tcap"><b>表 15-3</b>　Bot 难度分级的常用手段。面试问“AI 太强 / 太弱怎么办”时，从这张表里挑两三个结合具体游戏讲。</p>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch15_interview.py</code> 逐字相同（FSP 的结果与 C++ demo 完全一致）：</p>
+<!--code:py:Elo / 可利用度 / 虚拟自博弈 / QMIX 单调混合（Python，面试手撕版）-->
+{{demo:ch15_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch15_interview.py 的输出-->
+{{demo:ch15_interview_output.txt}}
+<!--/code-->
+
+<h2>15.7 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“自博弈就是和自己打，越打越强”</td><td>忽略循环</td><td>非传递博弈里朴素自博弈会兜圈子（图 15-1）；要用对手池 / FSP / 联赛</td></tr>
+<tr><td>“Elo 高就是更强”</td><td>Elo 一维</td><td>循环克制时 Elo 失效（表 15-2）；配合基准胜率矩阵和可利用度</td></tr>
+<tr><td>“QMIX 能表示任意团队价值”</td><td>单调约束有限制</td><td>只能表示单调可分解的价值，强耦合的配合表示不了</td></tr>
+<tr><td>“MARL 就是每个智能体各跑一个 RL”</td><td>那是独立学习</td><td>独立学习忽略非平稳和信用分配；CTDE 用集中式 critic 解决</td></tr>
+<tr><td>“K 越大 Elo 越准”</td><td>混淆速度和精度</td><td>K 是学习率：大 K 快但稳态噪声大（图 15-4）</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:多智能体 / 自博弈常见追问链-->
+对抗游戏的 Bot 怎么训练？
+├─ 自博弈为什么会策略循环？ → 非传递克制 + 追逐移动靶（图 15-1）
+│   └─ 怎么缓解？ → 历史对手池 / FSP 平均策略 / PFSP 按胜率挑对手 / 联赛 + exploiter
+├─ MARL 难在哪？ → 非平稳、信用分配、联合动作爆炸、部分可观测 → CTDE
+│   └─ QMIX 原理与局限？ → 单调混合 ⇒ IGM；表示不了强耦合配合
+├─ Elo 怎么算？ → E = 1/(1+10^{ΔR/400})，R += K(s−E)；= logistic 回归的 SGD
+│   └─ Elo 的问题？ → 一维，循环克制失效；用胜率矩阵、可利用度、TrueSkill
+└─ 怎么做不同难度？ → checkpoint 池、温度、反应延迟 / APM、观测噪声、动态难度、条件化策略
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 15 章</div><ul>
+<li>纳什均衡：无人能单方面获益；混合策略用无差异条件求，RPS 为 (1/3, 1/3, 1/3)。</li>
+<li>朴素自博弈循环；FSP 对历史平均做最优响应，两人零和下平均策略收敛到纳什。</li>
+<li>工程：对手池（OpenAI Five）、PFSP + 联赛（AlphaStar）、课程自博弈 + 蒸馏（绝悟）。</li>
+<li>MARL 难点：非平稳 / 信用分配 / 维度爆炸 / 部分可观测；CTDE、MAPPO。</li>
+<li>QMIX：$\partial Q_{\text{tot}}/\partial Q_i\ge0$ ⇒ IGM。</li>
+<li>Elo：$E=1/(1+10^{(R_B-R_A)/400})$，$R\leftarrow R+K(s-E)$ = logistic 回归 SGD；一维、不能表示循环。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：Elo 分差 200 分，期望胜率是多少？</summary><p>$1/(1+10^{-0.5})\approx0.76$。分差 100 约 0.64，400 约 0.91。</p></details>
+<details class="quiz"><summary>自测 2：为什么朴素自博弈在“传递性”很强的游戏（比如赛跑类）里没问题？</summary><p>传递博弈里存在一维的“强度”，更强的策略对所有旧策略都更强，追逐当前自己就是在单调变强，不会兜圈子。循环只在存在非传递结构（克制关系）时出现。真实游戏通常两者兼有：大部分是“技术更好就更强”，局部有克制关系，所以既要自博弈又要对手池。</p></details>
+<details class="quiz"><summary>自测 3：MAPPO 的集中式价值函数在部署时还要吗？</summary><p>不需要。价值函数只用于训练时计算优势；部署时只运行每个智能体的策略网络，输入只有自己的观测。这也是 CTDE 允许 critic 使用“作弊信息”（全图、对手状态）的原因。</p></details>
+<details class="quiz"><summary>自测 4：PFSP 按 $(1-p_{\text{win}})^2$ 抽对手，会不会只盯着最强的对手、忘了打弱的？</summary><p>会有这个倾向，所以 AlphaStar 同时保留按“胜率接近 50%”加权的版本，并让一部分对局对抗全联赛；另外已经稳定打赢的对手权重很小但不为 0，可以检测“遗忘”（突然又打不过了，权重会自动升回来）。</p></details>
+</section>

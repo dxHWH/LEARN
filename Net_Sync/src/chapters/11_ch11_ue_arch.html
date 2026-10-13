@@ -1,0 +1,131 @@
+<section class="chapter" id="ch11">
+<div class="ch-head"><div class="no">CHAPTER 11</div><h1>Unreal 网络架构与复制管线</h1><p class="lead">Unreal 的复制系统回答的是一个调度问题：每个服务器 tick、每条连接、成百上千个 Actor，带宽有限，先发谁、发什么、发给谁。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>画出 NetDriver / NetConnection / Channel / PackageMap 的结构，说清 Bunch、可靠性在哪一层实现。</li>
+<li>熟练回答 NetMode、Role / RemoteRole、所有权（Owner → PlayerController → Connection）三组概念，以及 Gameplay 框架各类存在于哪一端。</li>
+<li>按顺序讲出 <code>ServerReplicateActors</code> 的流程：频率门控 → 休眠 → 相关性 → 优先级排序 → 饱和截断。</li>
+<li>用实测理解“优先级 × 等待时间”为什么能避免饿死；知道 Replication Graph 和 Iris 分别解决了什么。</li>
+</ul></div>
+
+<div class="ans30"><span class="h">30 秒面试版答案</span>
+<p>Unreal 默认是服务器权威的状态同步。服务器的 NetDriver 为每个客户端维护一个 NetConnection，连接里有控制通道和每个复制 Actor 一条 ActorChannel；数据以 Bunch 为单位打进 UDP 包，可靠 Bunch 由通道负责重传和排序，对象引用靠 PackageMap 把 UObject 映射成 NetGUID。每个 Actor 在各端有 Role：服务器上是 Authority，拥有它的客户端上可以是 AutonomousProxy（本地控制、做预测），其他客户端上是 SimulatedProxy（插值播放）。所有权沿 Owner 链找到 PlayerController，进而确定连接——Server RPC 只能从拥有者连接发起。每个网络 tick，服务器对需要复制的 Actor 做：按 NetUpdateFrequency 门控、跳过休眠、按连接判相关性、按“NetPriority × 距上次复制时间”（再按距离和视野加权）排序、依次复制直到带宽饱和，没发出去的下一 tick 优先级更高。大规模用 Replication Graph 把相关性做成空间网格等节点，UE5 的新复制系统 Iris 把过滤、优先级改成显式 API，并与游戏线程数据解耦以并行化。</p></div>
+
+<h2>11.1 网络栈的结构</h2>
+<!--flow {"w":900,"h":300,
+"rects":[{"x":8,"y":8,"w":560,"h":284,"c":"b","fill":"#F7F9FF","t":"服务器（Dedicated / Listen Server）"},{"x":580,"y":8,"w":312,"h":284,"c":"t","fill":"#F5FBFA","t":"客户端"}],
+"boxes":[
+{"id":"nd","x":24,"y":36,"w":200,"h":52,"t":"UNetDriver（GameNetDriver）","s":"UIpNetDriver：套接字收发","c":"b","ts":12.2},
+{"id":"c1","x":250,"y":36,"w":300,"h":52,"t":"UNetConnection × N（每个客户端一个）","s":"包序号、ACK、带宽、RTT 统计","c":"b","ts":12.2},
+{"id":"ch0","x":250,"y":104,"w":145,"h":48,"t":"UControlChannel","s":"握手 / 登录 / NMT_*","c":"s","ts":11.5},
+{"id":"ch1","x":405,"y":104,"w":145,"h":48,"t":"UActorChannel × M","s":"每个相关 Actor 一条","c":"o","ts":11.5,"hl":true},
+{"id":"pm","x":24,"y":104,"w":200,"h":48,"t":"UPackageMapClient","s":"UObject ⇄ FNetworkGUID","c":"p","ts":12.2},
+{"id":"rl","x":24,"y":170,"w":526,"h":50,"t":"FRepLayout + 每连接影子状态（FRepState）","s":"对比上次发给这个连接的值，只发变化的属性；丢包时把相关属性重新标脏","c":"a","ts":12.2},
+{"id":"bn","x":24,"y":234,"w":526,"h":46,"t":"Bunch：属性块 / RPC 块；可靠 Bunch 由通道重传、按序交付","s":"多个 Bunch 打进一个 UDP 包；不可靠 Bunch 丢了就丢了","c":"s","ts":12.2},
+{"id":"cnd","x":596,"y":36,"w":280,"h":52,"t":"UNetDriver（客户端）","s":"只有一个 ServerConnection","c":"t","ts":12.2},
+{"id":"cac","x":596,"y":104,"w":280,"h":48,"t":"ActorChannel：收到即生成 / 更新 Actor","s":"首次：Spawn + 初始属性","c":"t","ts":11.5},
+{"id":"cr","x":596,"y":170,"w":280,"h":50,"t":"属性写入 → 调用 OnRep","s":"RPC → 在本端执行对应函数","c":"t","ts":12.2},
+{"id":"demo","x":596,"y":234,"w":280,"h":46,"t":"UDemoNetDriver：录制 / 回放","s":"把复制数据流写进文件","c":"s","ts":12.2}],
+"arrows":[{"from":"nd","to":"c1"},{"from":"c1","to":"ch0","s":["b","t"],"p":[[322,88],[322,104]]},{"from":"c1","to":"ch1","s":["b","t"],"p":[[478,88],[478,104]]},{"from":"ch1","to":"cac","dash":true,"c":"b","p":[[550,128],[596,128]],"label":"UDP","lx":556,"ly":122},{"from":"cac","to":"cr","s":["b","t"]}],
+"cap":"<b>图 11-1</b> Unreal 网络栈 <span class=\"tag ue\">UE 源码</span>。可靠性不是“整个连接要么可靠要么不可靠”，而是 <strong>Bunch 级</strong>的：同一个包里可以既有可靠的 RPC，也有不可靠的属性更新。"} -->
+
+<h2>11.2 NetMode、Role 与所有权</h2>
+<div class="tbl"><table>
+<tr><th>NetMode</th><th>含义</th></tr>
+<tr><td><code>NM_Standalone</code></td><td>单机，不联网（同时是“服务器”和“客户端”）</td></tr>
+<tr><td><code>NM_DedicatedServer</code></td><td>专用服务器：无本地玩家、不渲染</td></tr>
+<tr><td><code>NM_ListenServer</code></td><td>主机：既是服务器又有一个本地玩家（主机玩家没有延迟，存在主机优势）</td></tr>
+<tr><td><code>NM_Client</code></td><td>连接到服务器的客户端</td></tr>
+</table></div>
+<div class="tbl"><table>
+<tr><th>Role（<code>GetLocalRole()</code>）</th><th>出现在哪</th><th>该做什么</th></tr>
+<tr><td><code>ROLE_Authority</code></td><td>服务器上的所有 Actor；客户端本地生成、不复制的 Actor 也是</td><td>跑权威逻辑、改复制属性、发 Client / Multicast RPC</td></tr>
+<tr><td><code>ROLE_AutonomousProxy</code></td><td>拥有它的客户端上（被本地 PlayerController 控制的 Pawn、PlayerController 自己）</td><td>采集输入、本地预测、发 Server RPC</td></tr>
+<tr><td><code>ROLE_SimulatedProxy</code></td><td>其他客户端上</td><td>插值 / 平滑播放，不做权威判断</td></tr>
+<tr><td><code>ROLE_None</code></td><td>不复制的对象</td><td>—</td></tr>
+</table></div>
+<p>服务器上 Pawn 的 RemoteRole 是 AutonomousProxy，但复制给<strong>非拥有者</strong>连接时会被降级为 SimulatedProxy——同一个 Actor 在不同客户端上的 Role 不同 <span class="tag ue">UE 文档</span>。所有权：沿 <code>GetOwner()</code> 链一路往上找到 PlayerController，它的 <code>NetConnection</code> 就是这个 Actor 的“拥有者连接”。它决定了三件事：Server RPC 能否发出（只有拥有者客户端能对该 Actor 调用 Server RPC）、<code>COND_OwnerOnly</code> 等条件复制发给谁、<code>bOnlyRelevantToOwner</code> 的 Actor 复制给谁。</p>
+<!--tree {"cols":["Gameplay 框架类","存在于哪些端","典型职责"],"x":[12,300,560],"root":[
+{"n":"AGameModeBase / AGameMode","col":"b","d":"仅服务器","w":"规则、出生、计分判定、匹配状态机"},
+{"n":"AGameStateBase / AGameState","col":"p","d":"服务器 + 所有客户端","w":"全局对局状态（比分、阶段、服务器时间）"},
+{"n":"APlayerController","col":"a","d":"服务器 + 拥有者客户端","w":"输入、相机、UI 入口、Server RPC 的通道",
+ "c":[{"n":"AHUD / UMG 控件","col":"t","d":"仅拥有者客户端（本地）","w":"界面，读取复制下来的状态显示"}]},
+{"n":"APlayerState","col":"p","d":"服务器 + 所有客户端","w":"玩家名、分数、ping；掉线可保留以便重连恢复"},
+{"n":"APawn / ACharacter","col":"o","d":"服务器 + 相关的客户端","w":"拥有者端 AutonomousProxy，其他端 SimulatedProxy"},
+{"n":"AAIController","col":"b","d":"仅服务器","w":"AI 决策；客户端只看到被控 Pawn 的复制结果"},
+{"n":"UGameInstance","col":"s","d":"每个进程各一份，不复制","w":"跨关卡的本地数据、会话管理"}],
+"cap":"<b>图 11-2</b> Gameplay 框架各类存在于哪一端 <span class=\"tag ue\">UE 文档</span>。面试常问“客户端能不能拿到 GameMode”（不能，GameMode 只在服务器）、“别人的 PlayerController 在我这吗”（不在，PlayerController 只复制给拥有者）。详细的蓝图联机分析见 UE_Coop_Shooter 那本书。"} -->
+
+<h2>11.3 每个网络 tick 发生了什么</h2>
+<p>服务器在 <code>UNetDriver::TickFlush</code> 中调用 <code>ServerReplicateActors</code>（使用 Replication Graph 时由它接管），网络 tick 频率受 <code>NetServerMaxTickRate</code> 限制（BaseEngine.ini 中 IpNetDriver 默认 30）<span class="tag ue">UE 源码 / 配置</span>。流程按官方文档“Detailed Actor Replication Flow”整理：</p>
+<!--flow {"w":900,"h":312,
+"cols":[16,316,616],"colw":[268,268,268],"rows":[10,92,174,256],"bh":64,
+"boxes":[
+{"id":"a","cr":[0,0],"t":"① 收集需要复制的 Actor","s":"SetReplicates(true) 的网络对象列表","s2":"DORM_Initial 休眠者直接跳过","c":"s","ts":12.5},
+{"id":"b","cr":[0,1],"t":"② 频率门控","s":"距上次检查 < 1 / NetUpdateFrequency → 跳过","s2":"可选：自适应频率（向 Min 降）","c":"a","ts":12.5},
+{"id":"c","cr":[0,2],"t":"③ PreReplication","s":"最后修改属性的机会","s2":"DOREPLIFETIME_ACTIVE_OVERRIDE","c":"s","ts":12.5},
+{"id":"d","cr":[1,0],"t":"④ 对每个连接：相关性","s":"bAlwaysRelevant / bOnlyRelevantToOwner","s2":"IsNetRelevantFor · NetCullDistanceSquared","c":"b","ts":12.5,"hl":true},
+{"id":"e","cr":[1,1],"t":"⑤ 休眠检查","s":"该连接上已休眠 → 不发","s2":"FlushNetDormancy 唤醒","c":"b","ts":12.5},
+{"id":"f","cr":[1,2],"t":"⑥ 按优先级排序","s":"GetNetPriority = NetPriority × 等待时间","s2":"再按距离 / 视野 / 是否 ViewTarget 加权","c":"b","ts":12.5,"hl":true},
+{"id":"g","cr":[2,0],"t":"⑦ 依次 ReplicateActor","s":"首次：开通道 + 初始信息","s2":"非拥有者连接：Autonomous → Simulated","c":"o","ts":12.5},
+{"id":"h","cr":[2,1],"t":"⑧ 只发变化的属性","s":"对比该连接的影子状态","s2":"再复制组件与子对象","c":"o","ts":12.5},
+{"id":"i","cr":[2,2],"t":"⑨ 带宽饱和 → 停止","s":"剩下的下一 tick 再来","s2":"等得越久优先级越高","c":"r","ts":12.5,"hl":true},
+{"id":"j","x":16,"y":262,"w":868,"h":40,"t":"④ 中持续不相关超过约 5 s → 关闭该连接上的 Actor 通道（客户端上的这个 Actor 被销毁）","c":"s","ts":12}],
+"chains":[[["a","b","c"]],[["d","e","f"]],[["g","h","i"]]],
+"arrows":[{"from":"c","to":"d","p":[[150,238],[150,248],[300,248],[300,42],[316,42]]},{"from":"f","to":"g","p":[[450,238],[450,248],[600,248],[600,42],[616,42]]}],
+"cap":"<b>图 11-3</b> 传统复制管线（<code>ServerReplicateActors</code>）<span class=\"tag ue\">UE 文档</span>。三列依次是“这个 Actor 这 tick 要不要考虑”“对这个连接要不要发、先发谁”“发什么、发到哪为止”。"} -->
+<div class="tbl"><table>
+<tr><th>属性 / 函数</th><th>作用</th><th>默认值 / 备注</th></tr>
+<tr><td><code>NetUpdateFrequency</code></td><td>每秒最多检查几次是否需要复制</td><td><code>AActor</code> 默认 100；<code>APlayerState</code> 在构造函数里设得很低（源码为 1）——挂 GAS 的项目通常调到 100；UE 5.5 起改为 <code>SetNetUpdateFrequency()</code> / <code>GetNetUpdateFrequency()</code>，直接访问已弃用</td></tr>
+<tr><td><code>MinNetUpdateFrequency</code></td><td>开启自适应频率时的下限</td><td>默认 2</td></tr>
+<tr><td><code>NetPriority</code></td><td>带宽竞争时的权重</td><td>Actor 1.0，Pawn / PlayerController 更高（3.0）</td></tr>
+<tr><td><code>NetCullDistanceSquared</code></td><td>超过这个距离（平方）不相关</td><td>默认 225000000（即 150 米）</td></tr>
+<tr><td><code>bAlwaysRelevant</code> / <code>bOnlyRelevantToOwner</code> / <code>bNetUseOwnerRelevancy</code></td><td>相关性的三个开关</td><td>GameState、PlayerState 总是相关；PlayerController 只对拥有者相关；武器常跟随拥有者的相关性</td></tr>
+<tr><td><code>NetDormancy</code></td><td>休眠：长期不变就不再检查</td><td><code>DORM_Initial</code> 适合关卡里静止的可破坏物；改变前调 <code>FlushNetDormancy()</code></td></tr>
+<tr><td><code>ForceNetUpdate()</code></td><td>下一 tick 立即考虑复制（无视频率门控）</td><td>低频 Actor 偶尔要立刻同步时用</td></tr>
+</table></div>
+
+<h2>11.4 实测：带宽饱和时先发谁 <span class="tag ex">实测 E13</span></h2>
+<p>模型：30 Hz 网络 tick，每 tick 预算 1200 B；10 个英雄（优先级 3、希望 100 Hz、每次 60 B）、20 个投射物（2、30 Hz、30 B）、100 个可拾取物 / 机关（1、10 Hz、20 B）、10 个 PlayerState（1、1 Hz、40 B）。总需求明显超出预算。三种调度：UE 式（优先级 × 距上次发送时间）、静态优先级（永远先发优先级高的）、轮询。</p>
+<!--gbars {"groups":{"path":"e13g.groups"},"h":300,"fmt":".0f","ymax":2200,"title":"各类对象的最长更新间隔（ms，2000 封顶）","series":[{"n":"UE：优先级 × 等待时间","v":{"path":"e13g.max0"},"c":"g"},{"n":"静态优先级","v":{"path":"e13g.max1"},"c":"r"},{"n":"轮询","v":{"path":"e13g.max2"},"c":"b"}],
+"cap":"<b>图 11-4</b> 静态优先级会<strong>饿死</strong>低优先级对象：拾取物最长 [[e13.1_2.max|.0f]] ms 没更新（[[e13.1_2.never|.0f]] 个从未发出），PlayerState 最长 [[e13.1_3.max|.0f]] ms；UE 式调度里等待时间会把低优先级对象的分数“养”上来，所有类别的最长间隔都有界。"} -->
+<!--dtab {"rows":"E13.rows","cols":[["调度","sname"],["对象","cname"],["期望间隔 ms","want",".0f"],["实际平均 ms","avg",".0f"],["最长 ms","max",".0f"],["带宽占比","=f'{share:.1f}%'"],["从未发出","never",".0f"]],"hlif":"s==0","cap":"<b>表 11-1</b> E13 明细。轮询在这个模型里与 UE 式接近，但它不区分重要性；UE 式让英雄的平均间隔（[[e13.0_0.avg|.0f]] ms）略好于轮询（[[e13.2_0.avg|.0f]] ms），最长间隔 [[e13.0_0.max|.0f]] ms 对 [[e13.2_0.max|.0f]] ms。"} -->
+<div class="co deep"><span class="h">“优先级 × 等待时间”的本质</span><p>它是<strong>老化（aging）</strong>调度：一个对象越久没被服务，分数就线性增长，迟早会超过任何高优先级对象，所以不会饿死；而高优先级对象的分数涨得更快，所以平均更新更勤。操作系统的进程调度、网络的加权公平队列都是同一类思想。HOK 的帧同步里没有这个问题——它每帧只发输入，不需要在对象之间分配带宽。</p></div>
+
+<h2>11.5 规模化：Replication Graph 与 Iris</h2>
+<div class="tbl"><table>
+<tr><th></th><th>传统 ServerReplicateActors</th><th>Replication Graph</th><th>Iris</th></tr>
+<tr><td>相关性计算</td><td>每个 Actor × 每个连接调用 <code>IsNetRelevantFor</code>（虚函数）</td><td>Actor 按类路由到节点（空间网格 <code>GridSpatialization2D</code>、总是相关、按连接总是相关……），每个连接直接从节点收集列表，结果可跨连接复用</td><td>过滤器（Filter）API：<code>NetObjectFilter</code>、网格过滤器等，替代 <code>IsNetRelevantFor</code></td></tr>
+<tr><td>优先级</td><td><code>GetNetPriority</code>（虚函数）</td><td>节点内自定义</td><td>优先级器（Prioritizer）API，如 <code>SphereNetObjectPrioritizer</code></td></tr>
+<tr><td>属性复制</td><td>FRepLayout 对比影子状态</td><td>同左</td><td>复制状态与游戏线程数据分离，NetSerializer 量化后做增量；以 Push Model 为主（不推送时退化为按频率轮询）</td></tr>
+<tr><td>RPC 与属性顺序</td><td>没有固定保证</td><td>同左</td><td>RPC 默认在同一连接的状态数据之后发送</td></tr>
+<tr><td>适用</td><td>中小规模</td><td>大世界、大逃杀（Fortnite 使用）</td><td>新一代系统；与 Replication Graph 不兼容</td></tr>
+<tr><td>状态</td><td>默认</td><td>插件，生产可用</td><td>UE 5.1 引入，截至 5.6 官方文档仍标注为 Experimental</td></tr>
+</table></div>
+<p class="tcap">来源：<span class="tag ue">UE 文档 / 源码</span>（Replication Graph 文档、《Getting Started With Iris》《Migrate to Iris》）。Iris 的迁移要点：开启已注册子对象列表 <code>bReplicateUsingRegisteredSubObjectList = true</code>；非 Actor / 组件的子对象要实现 <code>RegisterReplicationFragments</code>；自定义 <code>NetSerialize</code> 的结构体需要 Iris 版 NetSerializer。</p>
+<div class="co ver"><span class="h">版本提示</span><p>Iris、Mover、网络物理都是 UE5 中仍在快速演进的系统，面试时说“我了解它们的设计目标和当前状态（实验性 / Beta），生产项目仍以传统复制 + CMC 为主”比背 API 更稳妥。引用版本号时说清楚“截至我看的 5.x 文档”。</p></div>
+
+<div class="co warn"><span class="h">面试注意</span><p>高频题：“Role 有哪几种、AutonomousProxy 和 SimulatedProxy 区别”“为什么客户端调 Server RPC 没反应”（Actor 不归这个客户端所有，比如对场景里的门直接调 Server RPC——要通过自己的 PlayerController / Pawn 转发）“NetUpdateFrequency 和 tick 什么关系”（门控上限，实际还受 NetServerMaxTickRate 和带宽限制）“带宽不够怎么办”（相关性、休眠、频率、优先级、量化、Replication Graph）。</p></div>
+
+<h2>11.6 坑位</h2>
+<div class="tbl"><table>
+<tr><th>坑</th><th>后果</th><th>修正</th></tr>
+<tr><td>对不归自己所有的 Actor 调 Server RPC</td><td>RPC 被丢弃，日志里有“No owning connection”类警告</td><td>经 PlayerController / 自己的 Pawn 转发，或设置 Owner</td></tr>
+<tr><td>在客户端读 GameMode</td><td>空指针</td><td>需要客户端可见的数据放 GameState / PlayerState</td></tr>
+<tr><td>PlayerState 上挂了频繁变化的数据却没调频率</td><td>更新明显滞后</td><td>调高 NetUpdateFrequency 或改用 ForceNetUpdate</td></tr>
+<tr><td>大量静止 Actor 不休眠</td><td>服务器每 tick 白白检查</td><td>DORM_Initial / DormantAll，改变前 Flush</td></tr>
+<tr><td>bAlwaysRelevant 滥用</td><td>大世界里带宽爆炸</td><td>用距离 / 队伍 / Replication Graph 节点控制</td></tr>
+<tr><td>依赖“属性先到、RPC 后到”</td><td>传统复制下顺序不保证，偶发空引用</td><td>RPC 里带上需要的数据，或在 OnRep 中处理</td></tr>
+</table></div>
+
+<div class="recap"><div class="t">本章速记</div><ul>
+<li>NetDriver → NetConnection（每客户端）→ Control / Actor 通道；Bunch 级可靠性；PackageMap 映射 NetGUID；FRepLayout + 影子状态做增量。</li>
+<li>Role：Authority / AutonomousProxy / SimulatedProxy；所有权沿 Owner 链找 PlayerController → 连接，决定 Server RPC 与 OwnerOnly 复制。</li>
+<li>管线：频率门控 → PreReplication → 相关性 → 休眠 → 优先级（NetPriority × 等待时间，距离 / 视野加权）→ 复制变化属性 → 饱和停止。</li>
+<li>E13：静态优先级会饿死低优先级对象，老化调度不会；规模化用 Replication Graph，新一代 Iris（5.1 引入、仍为实验性）。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：Listen Server 上，主机玩家的 Pawn 的 Role 是什么？客户端玩家的 Pawn 在主机上是什么？</summary>在主机（服务器）进程里两者的 LocalRole 都是 Authority。区别在 RemoteRole 和“是否本地控制”：主机玩家的 Pawn <code>IsLocallyControlled()</code> 为真；客户端玩家的 Pawn 在主机上 RemoteRole 是 AutonomousProxy（复制给它的拥有者时），复制给其他客户端时是 SimulatedProxy。</details>
+<details class="quiz"><summary>自测 2：一个 Actor 的 NetUpdateFrequency 设成 200，服务器 tick 30 Hz，它每秒最多复制几次？</summary>最多约 30 次——NetUpdateFrequency 只是“允许检查的上限”，复制发生在网络 tick 里，而网络 tick 受 NetServerMaxTickRate 限制；另外还要过相关性、优先级和带宽这几关。</details>
+<details class="quiz"><summary>自测 3：为什么 Replication Graph 能比传统方式快很多？</summary>传统方式对每个连接、每个 Actor 都调用一次相关性和优先级虚函数，复杂度约 O(连接数 × Actor 数)；Replication Graph 把 Actor 预先放进节点（如空间网格单元），每个连接只需收集自己所在单元及周边的列表，而且同一份列表可以被多个连接复用。</details>
+</section>

@@ -1,0 +1,16 @@
+# /Game/Blueprints/Weapon/AnimeBP_Weapon  (AnimBlueprint)
+ParentClass: /Script/Engine.AnimInstance
+
+## AnimeBP_Weapon_C Default__AnimeBP_Weapon_C
+   AnimBlueprintExtension_PropertyAccess = ('struct', 'AnimSubsystemInstance', {})
+   AnimBlueprintExtension_Base = ('struct', 'AnimSubsystemInstance', {})
+   AnimGraphNode_Root = ('struct', 'AnimNode_Root', {'Result': ('struct', 'PoseLink', {'LinkID': 1, 'SourceLinkID': 0}), 'Name': 'AnimGraph', 'LayerGroup': 'DefaultSharedGroup', 'Initi
+   AnimGraphNode_Slot = ('struct', 'AnimNode_Slot', {'Source': ('struct', 'PoseLink', {'LinkID': -1, 'SourceLinkID': -1}), 'SlotName': 'DefaultSlot', 'bAlwaysUpdateSourcePose': False, 
+
+## Custom events / RPC
+
+## Graph AnimeBP_Weapon.EventGraph
+
+Event BlueprintUpdateAnimation(DeltaTimeX):  #15
+  // node #14 TryGetPawnOwner EnabledState=ENodeEnabledState::Disabled
+  // node #15 Event BlueprintUpdateAnimation EnabledState=ENodeEnabledState::Disabled

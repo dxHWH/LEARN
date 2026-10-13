@@ -1,0 +1,133 @@
+<div class="part-head" data-toc="附录"><div class="no">APPENDIX</div><h1>附录</h1><p>协议与参数速查、Unreal API / 宏 / CVar 速查、术语表，以及对照原文档的勘误与补充。</p></div>
+
+<section class="chapter" id="appA">
+<div class="ch-head"><div class="no">APPENDIX · A</div><h1>HOK 协议与参数速查</h1><p class="lead">来自《HOK 帧同步机制详解》附录 A / B，补充了“本书在哪一章讲”和“对应实测”。对外交流时只讲机制，不讲协议号。</p></div>
+<h2>A.1 协议</h2>
+<div class="tbl"><table>
+<tr><th>协议号</th><th>协议名</th><th>方向</th><th>用途</th><th>本书</th></tr>
+<tr><td>1034</td><td><code>SCID_FRAPBOOT_SINGLE</code></td><td>S→C</td><td>单帧补发</td><td>Ch6.3</td></tr>
+<tr><td><strong>1035</strong></td><td><code>SCID_FRAPBOOTINFO</code></td><td>S→C</td><td><strong>驱动帧下发（含冗余帧）</strong>，补发帧也走它</td><td>Ch6.2 · Ch6.4</td></tr>
+<tr><td><strong>1036</strong></td><td><code>CSID_REQUESTFRAPBOOTSINGLE</code></td><td>C→S</td><td>帧补发请求（区间，末区间可为开放区间）</td><td>Ch6.3</td></tr>
+<tr><td>1037</td><td><code>CSID_REQUESTFRAPBOOTTIMEOUT</code></td><td>C→S</td><td>超时触发的补发请求</td><td>Ch6.3</td></tr>
+<tr><td>1075</td><td><code>SCID_MULTGAME_BEGINLOAD</code></td><td>S→C</td><td>开局（<code>bCsMode</code> 决定 CC / CS）</td><td>Ch8.6</td></tr>
+<tr><td>1076</td><td><code>CSID_MULTGAME_LOADFIN</code></td><td>C→S</td><td>加载完成</td><td>—</td></tr>
+<tr><td>1077</td><td><code>SCID_MULTGAME_BEGINFIGHT</code></td><td>S→C</td><td>开打</td><td>Ch6.5</td></tr>
+<tr><td>1089</td><td><code>SCID_MULTGAMERECOVERNTF</code></td><td>S→C</td><td>大厅通知重连 Relay</td><td>Ch6.5</td></tr>
+<tr><td><strong>1090</strong></td><td><code>CSID_RECOVERGAMEFRAP_REQ</code></td><td>C→S</td><td>请求缓存帧（进入 Recover）</td><td>Ch6.5</td></tr>
+<tr><td><strong>1091</strong></td><td><code>SCID_RECOVERGAMEFRAP_RSP</code></td><td>S→C</td><td>分片返回缓存帧</td><td>Ch6.5</td></tr>
+<tr><td>1092</td><td><code>SCID_RECONNGAME_NTF</code></td><td>S→C</td><td>告知重连所处阶段</td><td>Ch6.5</td></tr>
+<tr><td>1093</td><td><code>CSID_RECOVERGAMESUCC</code></td><td>C→S</td><td>上报追帧完成</td><td>Ch6.5</td></tr>
+<tr><td>—</td><td><code>CSID_GAMING_UPERMSG</code> / <code>CSID_AI_UPERMSG</code></td><td>C→S</td><td>玩家 / AI 帧命令上行（UDP）</td><td>Ch7</td></tr>
+<tr><td>—</td><td><code>CSID_RELAYSVRPING</code></td><td>↔</td><td>ping（兼带网络统计回传）</td><td>Ch8.1</td></tr>
+<tr><td>—</td><td><code>CSID_RELAYHASHCHECK</code></td><td>C→S</td><td>帧 hash 一致性上报</td><td>Ch8.4</td></tr>
+<tr><td>—</td><td><code>SCID_FRAPPARAM_NTF</code></td><td>S→C</td><td>窗口 / ping 参数下发</td><td>Ch6</td></tr>
+<tr><td>—</td><td><code>SCID_SYNCGAMECORE_FRAPINFO</code></td><td>S→C</td><td>CS 模式 / 录像帧信息</td><td>Ch8.6</td></tr>
+<tr><td>—</td><td><code>CSID_GAMECORE_CLT_INPUTMSG</code></td><td>C→S</td><td>CS 模式下攒批的逻辑输入</td><td>Ch5.5 · Ch8.6</td></tr>
+</table></div>
+<h2>A.2 参数</h2>
+<div class="tbl"><table>
+<tr><th>参数</th><th>默认值</th><th>来源</th><th>本书的相关实测 / 推导</th></tr>
+<tr><td>服务器 / 客户端帧间隔</td><td>66 ms（约 15 帧/秒）</td><td>逻辑层开局下发</td><td>E2 插值滞后、E3 三路线</td></tr>
+<tr><td>接收窗口长度</td><td>900 帧（约 60 秒）</td><td>常量</td><td>图 6-3（缩小演示）</td></tr>
+<tr><td>补发超时阈值</td><td>90 ms</td><td>服务器下发</td><td>E3 模型同参数</td></tr>
+<tr><td>紧急 / 惰性上报频率</td><td>120 ms / 1000 ms</td><td>服务器下发</td><td>E3 断流恢复时间</td></tr>
+<tr><td>短冗余重发间隔</td><td>33 ms</td><td>服务器下发</td><td>E7</td></tr>
+<tr><td>技能全量冗余重发间隔 / 指令超时</td><td>200 ms / 1000 ms</td><td>服务器下发</td><td>E7</td></tr>
+<tr><td>补发区间数上限</td><td>协议上限 − 1（留 1 给窗口外）</td><td>协议常量</td><td>图 6-3 ⑧</td></tr>
+<tr><td>ping 间隔</td><td>0.5 s</td><td>服务器下发</td><td>E8</td></tr>
+<tr><td>卡顿 / 恢复判定阈值</td><td>300 ms / 70 ms</td><td>可配</td><td>图 8-1</td></tr>
+<tr><td>追帧完成阈值</td><td>15 帧（快速恢复 3 帧）</td><td>常量</td><td>Ch6.5 追帧时长估算</td></tr>
+<tr><td>Recover 请求超时 / 连接重连上限</td><td>5 s / 8 次</td><td>常量</td><td>图 6-4、6-5</td></tr>
+<tr><td>反向通道单帧处理上限</td><td>1000 条</td><td>服务器可配</td><td>Ch5.5</td></tr>
+<tr><td>双链路冷却</td><td>30 s</td><td>—</td><td>Ch8.3</td></tr>
+</table></div>
+</section>
+
+<section class="chapter" id="appB">
+<div class="ch-head"><div class="no">APPENDIX · B</div><h1>Unreal 网络 API / 宏 / CVar 速查</h1><p class="lead">按“写代码时会查”的顺序整理；版本相关项已标注。</p></div>
+<div class="tbl"><table>
+<tr><th>类别</th><th>名称</th><th>说明</th></tr>
+<tr><td rowspan="5">属性</td><td><code>UPROPERTY(Replicated)</code> / <code>ReplicatedUsing=OnRep_X</code></td><td>复制属性 / 带通知</td></tr>
+<tr><td><code>GetLifetimeReplicatedProps</code> + <code>DOREPLIFETIME</code> / <code>_CONDITION</code> / <code>_CONDITION_NOTIFY</code> / <code>_WITH_PARAMS_FAST</code></td><td>注册；条件见 Ch12.1；<code>REPNOTIFY_Always</code> 每次都通知</td></tr>
+<tr><td><code>FDoRepLifetimeParams::bIsPushBased</code> + <code>MARK_PROPERTY_DIRTY_FROM_NAME</code></td><td>Push Model（需开启 <code>Net.IsPushModelEnabled</code>）</td></tr>
+<tr><td><code>FFastArraySerializer</code> / <code>MarkItemDirty</code> / <code>PostReplicatedAdd/Change</code> / <code>PreReplicatedRemove</code></td><td>大数组增量复制与逐元素回调</td></tr>
+<tr><td><code>FVector_NetQuantize</code> / <code>NetQuantize10</code> / <code>NetQuantize100</code> / <code>NetQuantizeNormal</code></td><td>量化向量</td></tr>
+<tr><td rowspan="3">RPC</td><td><code>UFUNCTION(Server | Client | NetMulticast, Reliable | Unreliable, WithValidation)</code></td><td>实现 <code>_Implementation</code>；校验 <code>_Validate</code>（返回 false 会断开该客户端）</td></tr>
+<tr><td>所有权</td><td><code>SetOwner</code> / <code>GetOwner</code> / <code>GetNetConnection</code>；Server RPC 只能由拥有者连接发起</td></tr>
+<tr><td>可靠缓冲</td><td>可靠 RPC 堆积超过上限会关闭连接；不要在 Tick 里发 Reliable</td></tr>
+<tr><td rowspan="9">Actor 复制设置</td><td><code>bReplicates</code> / <code>SetReplicates</code></td><td>开启复制</td></tr>
+<tr><td><code>SetReplicateMovement</code> / <code>ReplicatedMovement</code></td><td>复制位置 / 旋转 / 速度</td></tr>
+<tr><td><code>NetUpdateFrequency</code> / <code>MinNetUpdateFrequency</code></td><td>默认 100 / 2；UE 5.5 起用 <code>SetNetUpdateFrequency()</code> 等访问器</td></tr>
+<tr><td><code>NetPriority</code> / <code>GetNetPriority()</code></td><td>带宽竞争权重 × 等待时间</td></tr>
+<tr><td><code>bAlwaysRelevant</code> / <code>bOnlyRelevantToOwner</code> / <code>bNetUseOwnerRelevancy</code> / <code>IsNetRelevantFor()</code></td><td>相关性</td></tr>
+<tr><td><code>NetCullDistanceSquared</code></td><td>默认 225000000（150 m）</td></tr>
+<tr><td><code>NetDormancy</code> / <code>FlushNetDormancy()</code> / <code>ForceNetUpdate()</code></td><td>休眠与强制更新</td></tr>
+<tr><td><code>PreReplication</code> / <code>DOREPLIFETIME_ACTIVE_OVERRIDE</code></td><td>每次复制前动态开关属性（配合 <code>COND_Custom</code>）</td></tr>
+<tr><td><code>bReplicateUsingRegisteredSubObjectList</code> / <code>AddReplicatedSubObject</code></td><td>注册式子对象复制（Iris 必需）</td></tr>
+<tr><td rowspan="4">Role / 模式</td><td><code>GetLocalRole()</code> / <code>GetRemoteRole()</code> / <code>HasAuthority()</code></td><td>Authority / AutonomousProxy / SimulatedProxy</td></tr>
+<tr><td><code>IsLocallyControlled()</code></td><td>是否由本机玩家控制（Listen Server 主机判断常用）</td></tr>
+<tr><td><code>GetNetMode()</code></td><td>Standalone / DedicatedServer / ListenServer / Client</td></tr>
+<tr><td><code>AGameStateBase::GetServerWorldTimeSeconds()</code></td><td>近似服务器时间（未扣单程延迟，Ch2.4）</td></tr>
+<tr><td rowspan="4">CMC</td><td><code>FSavedMove_Character</code>：<code>Clear / SetMoveFor / PrepMoveFor / GetCompressedFlags / CanCombineWith</code></td><td>自定义可预测移动</td></tr>
+<tr><td><code>UpdateFromCompressedFlags</code> / <code>FLAG_Custom_0~3</code> / <code>FCharacterNetworkMoveData</code></td><td>服务器侧恢复输入；更多数据用自定义移动数据（4.26+）</td></tr>
+<tr><td><code>AGameNetworkManager::MAXPOSITIONERRORSQUARED</code> / 时间差异检测</td><td>纠正阈值、防加速</td></tr>
+<tr><td><code>NetworkSmoothingMode</code></td><td>模拟代理平滑：Disabled / Linear / Exponential</td></tr>
+<tr><td rowspan="3">GAS</td><td><code>FPredictionKey</code> / <code>ReplicatedPredictionKey</code></td><td>预测对账与撤销</td></tr>
+<tr><td><code>EGameplayAbilityNetExecutionPolicy</code></td><td>LocalPredicted / LocalOnly / ServerInitiated / ServerOnly</td></tr>
+<tr><td><code>ServerTryActivateAbility</code> / <code>ClientActivateAbilitySucceed / Failed</code> / <code>ServerSetReplicatedTargetData</code></td><td>激活与目标数据</td></tr>
+<tr><td rowspan="7">调试</td><td><code>net PktLag=N</code> / <code>PktLagVariance=N</code> / <code>PktLoss=N</code> / <code>PktOrder=1</code> / <code>PktDup=N</code></td><td>模拟延迟、抖动、丢包、乱序、重复</td></tr>
+<tr><td><code>p.NetShowCorrections 1</code> / <code>p.NetCorrectionLifetime</code></td><td>画出 CMC 纠正</td></tr>
+<tr><td><code>stat net</code> / Network Insights（<code>-NetTrace=1 -trace=net</code>）</td><td>带宽、包、每 Actor 复制开销</td></tr>
+<tr><td><code>NetServerMaxTickRate</code>（IpNetDriver，默认 30）</td><td>服务器网络 tick 上限</td></tr>
+<tr><td><code>net.Iris.UseIrisReplication</code></td><td>运行时启用 Iris（需编译时 <code>bUseIris</code> 与插件）</td></tr>
+<tr><td>Replication Graph（插件）</td><td>大规模相关性；与 Iris 不兼容</td></tr>
+<tr><td>Physics Prediction 设置（项目设置 → Physics）</td><td>启用网络物理预测、最大支持 RTT、重模拟误差阈值（5.4+，实验性 / Beta）</td></tr>
+</table></div>
+</section>
+
+<section class="chapter" id="appC">
+<div class="ch-head"><div class="no">APPENDIX · C</div><h1>术语表</h1><p class="lead">中英对照，按出现顺序。</p></div>
+<div class="tbl"><table>
+<tr><th>术语</th><th>英文</th><th>一句话</th></tr>
+<tr><td>帧同步</td><td>Lockstep / Frame Synchronization</td><td>各端跑相同确定性逻辑、靠相同输入达成一致</td></tr>
+<tr><td>状态同步</td><td>State Synchronization / Replication</td><td>服务器权威计算，复制状态与事件</td></tr>
+<tr><td>确定性</td><td>Determinism</td><td>相同输入 → 逐位相同的输出</td></tr>
+<tr><td>不同步</td><td>Desync</td><td>各端结果分歧并逐帧放大，无法自愈</td></tr>
+<tr><td>定点数</td><td>Fixed-point（Q16.16 / Q32.32）</td><td>用整数表示小数，处处一致</td></tr>
+<tr><td>严格 Lockstep / 延迟型</td><td>Deterministic Lockstep / Delay-based</td><td>收齐才推进 / 用输入延迟吸收抖动</td></tr>
+<tr><td>定频广播不等人</td><td>Fixed-rate relay, no waiting（Time Bucket）</td><td>服务器到点就发，谁没到就没有谁</td></tr>
+<tr><td>回滚</td><td>Rollback（GGPO）</td><td>先预测推进，真值不符时回到分歧帧重算</td></tr>
+<tr><td>冗余帧 / 帧空洞</td><td>Spare Frame / Frame Hole</td><td>一包多帧抗丢包 / 期待帧缺失而后续已到</td></tr>
+<tr><td>突发丢包</td><td>Burst Loss（Gilbert-Elliott）</td><td>丢包成串出现，冗余副本会一起丢</td></tr>
+<tr><td>追帧</td><td>Recover / Catch-up</td><td>拉服务器缓存帧批量重放，追上实时</td></tr>
+<tr><td>预表现</td><td>Pre-presentation</td><td>不依赖演算结果的反馈按键即响应</td></tr>
+<tr><td>快照插值</td><td>Snapshot Interpolation</td><td>渲染过去一段时间的状态，在快照之间插值</td></tr>
+<tr><td>外推 / 航位推算</td><td>Extrapolation / Dead Reckoning</td><td>按速度往前推，转向时会过冲</td></tr>
+<tr><td>客户端预测 / 和解</td><td>Client-side Prediction / Reconciliation</td><td>本地先动；收到权威状态后重放未确认输入</td></tr>
+<tr><td>延迟补偿</td><td>Lag Compensation</td><td>服务器回溯到射手看到的时刻判定命中</td></tr>
+<tr><td>先手优势</td><td>Peeker's Advantage</td><td>探头者先看到对方（对方看到的是插值后的过去）</td></tr>
+<tr><td>兴趣管理 / 相关性</td><td>Interest Management / Relevancy</td><td>只把相关对象发给某个客户端</td></tr>
+<tr><td>休眠</td><td>Net Dormancy</td><td>不变的 Actor 停止复制检查</td></tr>
+<tr><td>自主代理 / 模拟代理</td><td>Autonomous Proxy / Simulated Proxy</td><td>本地控制并预测的副本 / 只做插值播放的副本</td></tr>
+<tr><td>推送模型</td><td>Push Model</td><td>属性修改时显式标脏，而不是每次轮询比较</td></tr>
+<tr><td>预测键</td><td>Prediction Key（GAS）</td><td>把一次预测的所有副作用挂在一起，整体确认或撤销</td></tr>
+<tr><td>重模拟</td><td>Resimulation（Chaos 网络物理）</td><td>物理状态偏差超过阈值时回滚重算</td></tr>
+<tr><td>CC / CS 模式</td><td>Client-Client / Client-Server（HOK）</td><td>逻辑在本地 / 逻辑在服务器</td></tr>
+<tr><td>AGE</td><td>—（HOK）</td><td>表现时间轴系统：C++ 决策、C# 执行</td></tr>
+</table></div>
+</section>
+
+<section class="chapter" id="appD">
+<div class="ch-head"><div class="no">APPENDIX · D</div><h1>对照原文档：勘误与补充</h1><p class="lead">《HOK 帧同步机制详解》整体准确、结构清晰。以下是可以用实测或公开资料补充、或表述需要收紧的几处。</p></div>
+<div class="tbl"><table>
+<tr><th>#</th><th>原文位置与说法</th><th>问题</th><th>更准确的说法</th><th>依据</th></tr>
+<tr><td>1</td><td>1.5 节表格、2.4.5 节总对照：回滚“一人卡顿的影响 = 只有他自己画面跳 / 仅自己画面跳”</td><td>① 卡顿者网络差时，是<strong>其他人</strong>对他的输入预测失败，其他人看到他的角色跳变；② 卡顿超过预测窗口后，P2P 回滚会让<strong>所有人</strong>停下等待</td><td>短抖动：别人看到卡顿者轻微跳变；长断流：全员等待（木桶效应被推迟而非消灭）。原文 2.5.4 节对第 ② 点的描述是正确的，两处表格与之不一致</td><td>E3（图 3-3：好玩家在回滚模型下也卡了 [[e3.rollback.gfz|.0f]] ms）</td></tr>
+<tr><td>2</td><td>20.1 节表格：CC 的优势“手感直接”</td><td>定频广播模型下，自己的操作要经服务器往返、等下一次广播才进入逻辑</td><td>操作延迟 ≈ 自己到服务器的往返 + 等待服务器 tick（E3 约 [[e3.relay.glat|.0f]] ms）；“手感直接”来自预表现（指示器、按钮反馈本地响应），这一点原文 6.4.5 节已经说明</td><td>E3 · Ch5.2</td></tr>
+<tr><td>3</td><td>10.3 节：冗余能抵抗“短时间内连续丢 2~3 个包（只要不超过冗余长度 k）”</td><td>正确，但没有量化 k 的收益</td><td>随机丢包下每多带一帧失败率乘 $p$；突发丢包下只乘 $1-1/L$（L = 平均连丢长度）。移动网络的突发丢包让“加大 k”收益很低，这正是补发存在的理由</td><td>E5 + 推导（Ch6.2）</td></tr>
+<tr><td>4</td><td>18.1 节：主线程测 ping“表现出来就是帧率越低 ping 越高”</td><td>方向正确，但偏差并不单调取决于帧率</td><td>平均偏差上限约一个渲染帧，并与“RTT ÷ 帧长”的余数有关（ping 在帧末发出、下一个帧首取包）；真正把偏差放大的是<strong>长帧</strong>（p95 可达 [[e8.60_1.p95|.0f]] ms）</td><td>E8（表 8-1）</td></tr>
+<tr><td>5</td><td>14.3 节：技能全量冗余“每次发送所有未确认的技能”</td><td>容易被理解为“比短冗余更费带宽”</td><td>因为“确认了就停”，全量冗余平均每个技能只发 [[e7.b5.2.copies|.2f]]~[[e7.g10.2.copies|.2f]] 份，少于短冗余的 3 份；代价是尾延迟（p99 [[e7.g10.2.p99|.0f]] ms）</td><td>E7</td></tr>
+<tr><td>6</td><td>1.2 节：状态同步“每帧全量下发不可接受”</td><td>结论正确，但状态同步通常不会全量下发</td><td>实际是增量 + 量化 + 兴趣管理 + 优先级；100 单位时增量 + AOI 约为帧同步的 2 倍，而不是 30 倍</td><td>E1（表 1-1）</td></tr>
+<tr><td>7</td><td>2.2 节：“种子随帧下发”与 19.1 节“上报附带随机种子”</td><td>不是错误，补充一个更隐蔽的坑</td><td>种子一致只是必要条件，<strong>随机调用次数</strong>也必须一致：表现层或“只对本地玩家执行”的代码调用了逻辑随机，会让序列错位</td><td>Ch4.4</td></tr>
+</table></div>
+<div class="co ver"><span class="h">说明</span><p>以上“依据”中的 E / D 编号指本书 <code>demos/</code> 下的模型实验：参数为假设值，用于说明趋势与量级，不代表 HOK 线上数据。HOK 相关的事实只来自原文档；Unreal 与业界资料以官方文档、源码和公开演讲为准，版本相关内容已标注。</p></div>
+</section>

@@ -1,0 +1,122 @@
+<section class="chapter" id="ch13">
+  <div class="ch-head">
+    <div class="no">CHAPTER 13</div>
+    <h1>UI 层事件图表：主菜单 / 大厅 / HUD / 结算 / 暂停</h1>
+    <p class="lead">UI 只有两条规则：<strong>只读不算</strong>——显示的一切都来自复制下来的状态或本地预测值；<strong>请求走 PC</strong>——按钮只调用拥有者 PlayerController 的 Server RPC 或 GameInstance 的本地函数。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>写出 5 个界面的事件图表，每个都不包含任何规则判断。</li>
+    <li>用事件分发器代替 UMG 属性绑定函数（每帧执行）。</li>
+    <li>说清“只有主机能重开”“暂停不暂停世界”在 UI 上怎么体现。</li>
+  </ul></div>
+
+  <div class="tbl"><table>
+    <tr><th>界面</th><th>何时出现</th><th>读什么</th><th>写什么 / 请求什么</th><th>原 Demo</th></tr>
+    <tr><td>WBP_MainMenu</td><td>L_Menu 地图</td><td>GI.LastError、会话搜索结果</td><td>GI.HostGame / FindGames / JoinGame</td><td>没有联机入口；关卡蓝图里“按任意键开始”</td></tr>
+    <tr><td>WBP_Lobby</td><td>Phase = Waiting</td><td>GS.PlayerArray → 各 PS 的名字、bReady</td><td>PC.Server_SetReady</td><td>“等待其他玩家确认…”文本，无名单</td></tr>
+    <tr><td>WBP_HUD</td><td>Phase = Playing</td><td>AC_Health、武器显示弹数、GS 剩余时间与僵尸数</td><td>—</td><td>属性绑定每帧 Cast GetPlayerPawn(0)；倒计时自己算</td></tr>
+    <tr><td>WBP_Result</td><td>Phase = Won / Lost</td><td>GS.Phase、各 PS 的 Kills</td><td>PC.Server_RequestRestart（仅主机）、GI.LeaveGame</td><td>OpenLevel 重开、QuitGame</td></tr>
+    <tr><td>WBP_Pause</td><td>按 Esc</td><td>—</td><td>关闭自身 / GI.LeaveGame</td><td>SetGamePaused（客户端无效、主机冻结全员）</td></tr>
+  </table></div>
+
+  <h2>0. UI 的网络规格：读哪些复制数据、发哪些 RPC</h2>
+  <p>Widget <strong>只存在于本机</strong>：不复制、没有 Owner 链、不能发 RPC，服务器上的远端 PC 也不会创建它。所以 UI 和网络只有三种接触方式：<strong>读</strong>复制到本机的变量；<strong>订阅</strong>在 OnRep 里广播的分发器；<strong>经由拥有者 PC</strong> 发 Run on Server。本章图里节点底部的青色“⇠ 读复制值”标注，就是 UI 读取的复制数据。</p>
+  <div class="tbl"><table>
+    <tr><th>界面</th><th>读的复制数据（复制设置）</th><th>订阅的通知</th><th>发出的请求</th></tr>
+    <tr><td>WBP_MainMenu</td><td>无（GI.LastError 是本机变量）</td><td>GI 的搜索结果回调</td><td>无 RPC：主持 / 加入是本机 Online Subsystem 调用</td></tr>
+    <tr><td>WBP_Lobby</td><td>PS_Coop.bReady（RepNotify）、PlayerName（引擎复制）</td><td>GS.OnPlayersChanged；PS.OnInfoChanged（在 OnRep_bReady 里广播）</td><td><span class="tag" style="background:#E8EEFC;color:#1D4ED8">PC.Server_SetReady · Reliable</span></td></tr>
+    <tr><td>WBP_HUD</td><td>AC_Health.Health（RepNotify）；Weapon.Ammo（RepNotify · Owner Only）+ 本地预测；GS.MatchEndServerTime、AliveZombies（Replicated）</td><td>OnHealthChanged、OnAmmoChanged；PC 收到 Client_ShowHitMarker / Client_ShowDamageFeedback 后转给 HUD</td><td>无</td></tr>
+    <tr><td>WBP_Result</td><td>GS.Phase（RepNotify）、PS_Coop.Kills（RepNotify）</td><td>GS.OnPhaseChanged（由 PC.HandlePhase 创建本界面）</td><td><span class="tag" style="background:#E8EEFC;color:#1D4ED8">PC.Server_RequestRestart · Reliable</span>（按钮仅主机可见）</td></tr>
+    <tr><td>WBP_Pause</td><td>无</td><td>无</td><td>无（不调用 Set Game Paused）</td></tr>
+  </table></div>
+  <p class="tcap">表 13-1　UI 的网络规格。HUD 读的 Ammo 是 Owner Only：只有持枪者自己的客户端有这份数据——这正是 HUD 只显示“自己”的弹药所需要的</p>
+
+  <h2>1. 主菜单</h2>
+<!--bpgraph {"cols":4,"rg":56,"title":"WBP_MainMenu · 事件图表","nodes":[
+ {"id":"m0","k":"event","x":0,"y":0,"t":"Event Construct","net":"U"},
+ {"id":"m1","k":"flow","x":1,"y":0,"t":"Branch","i":["NOT IsEmpty(GI.LastError)"],"ex":["True","False"]},
+ {"id":"m2","k":"func","x":2,"y":0,"t":"Show Error Text","i":["← GI.LastError（随后清空）"],"ex":[],"rep":"L:GI.LastError，本机变量","var":"GI.LastError"},
+ {"id":"h0","k":"event","x":0,"y":1,"t":"HostButton.OnClicked","net":"U"},
+ {"id":"h1","k":"call","x":1,"y":1,"t":"GI.HostGame","ex":[]},
+ {"id":"j0","k":"event","x":2,"y":1,"t":"JoinButton.OnClicked","net":"U"},
+ {"id":"j1","k":"call","x":3,"y":1,"t":"GI.FindGames","ex":[]},
+ {"id":"r0","k":"cevent","x":0,"y":2,"t":"ShowResults","s":"由 GI 回调","net":"U","o":["Results"]},
+ {"id":"r1","k":"flow","x":1,"y":2,"t":"For Each Loop","i":["Array ← Results"],"ex":["Loop Body","Completed"],"o":["Element"]},
+ {"id":"r2","k":"func","x":2,"y":2,"t":"Create WBP_RoomRow","i":["Result ← Element"],"o":["Row"]},
+ {"id":"r3","k":"func","x":3,"y":2,"t":"Add Child","s":"RoomRow.OnClicked → GI.JoinGame","i":["Content ← Row"],"ex":[]}
+],"l":[["m0","m1"],["m1:True","m2"],["h0","h1"],["j0","j1"],["r0","r1"],["r1:Loop Body","r2"],["r2","r3"]],
+"d":[["r2.o0","r3.i0"]],
+"g":[{"ids":["m0","m1","m2","h0","h1","j0","j1","r0","r1","r2","r3"],"t":"主菜单只和 GameInstance 打交道：这时还没有对局 World，也没有服务器","c":"t"}],
+"cap":"<b>图 13-1</b>　主菜单。上一局断线的原因由 GameInstance 带过来（它跨地图存活），菜单打开时显示一次"} -->
+
+  <h2>2. 大厅</h2>
+<!--bpgraph {"cols":4,"rg":56,"title":"WBP_Lobby · 事件图表","nodes":[
+ {"id":"l0","k":"event","x":0,"y":0,"t":"Event Construct","net":"U"},
+ {"id":"l1","k":"func","x":1,"y":0,"t":"Bind OnPlayersChanged","s":"Target ← GS_Coop","i":["Event ← Refresh"]},
+ {"id":"l2","k":"call","x":2,"y":0,"t":"Refresh","s":"先刷新一次","ex":[]},
+ {"id":"f0","k":"cevent","x":0,"y":1,"t":"Refresh","net":"U"},
+ {"id":"f1","k":"flow","x":1,"y":1,"t":"For Each Loop","i":["Array ← GS.PlayerArray"],"ex":["Loop Body","Completed"],"o":["Element"]},
+ {"id":"f2","k":"func","x":2,"y":1,"t":"Set Row","i":["名字 ← PS.GetPlayerName","勾选 ← PS_Coop.bReady"],"rep":"RD:PS.bReady（RepNotify）· PlayerName"},
+ {"id":"f3","k":"func","x":3,"y":1,"t":"Bind OnInfoChanged","s":"Target ← 该 PS（去重）","i":["Event ← Refresh"],"ex":[]},
+ {"id":"b0","k":"event","x":0,"y":2,"t":"ReadyButton.OnClicked","net":"U"},
+ {"id":"b1","k":"func","x":1,"y":2,"t":"Get Owning Player","s":"Cast To PC_Coop","o":["PC"]},
+ {"id":"b2","k":"call","x":2,"y":2,"t":"PC.Server_SetReady","s":"服务器执行 → Set PS.bReady","net":"SR"},
+ {"id":"b3","k":"func","x":3,"y":2,"t":"Set Is Enabled","s":"按钮变灰，等复制回来打勾","i":["ReadyButton ← false"],"ex":[],"rep":"L:按钮状态，只在本机","var":"ReadyButton"}
+],"l":[["l0","l1"],["l1","l2"],["f0","f1"],["f1:Loop Body","f2"],["f2","f3"],["b0","b1"],["b1","b2"],["b2","b3"]],
+"g":[{"ids":["l0","l1","l2","f0","f1","f2","f3"],"t":"名单：只读 PlayerArray 与 PlayerState","c":"t"},{"ids":["b0","b1","b2","b3"],"t":"准备：通过拥有者 PC 发请求（UI 自己不能发 RPC）","c":"b"}],
+"cap":"<b>图 13-2</b>　大厅。OnPlayersChanged 由 PS_Coop 在 BeginPlay / EndPlay 时调用 GS 的分发器触发（PlayerState 在每一端都会 BeginPlay，所以有人加入、离开时各端名单都会刷新）。Widget 不是 Actor、没有网络连接，不能直接发 RPC"} -->
+
+  <h2>3. HUD：事件驱动，不用属性绑定</h2>
+<!--bpgraph {"cols":4,"rg":56,"title":"WBP_HUD · 事件图表","nodes":[
+ {"id":"h0","k":"cevent","x":0,"y":0,"t":"BindCharacter","s":"由角色本地初始化调用","net":"U","o":["Character"]},
+ {"id":"h1","k":"func","x":1,"y":0,"t":"Bind OnHealthChanged","s":"Target ← Character.AC_Health","i":["Event ← UpdateHealth"],"rep":"RD:Health（RepNotify）→ OnRep 里广播"},
+ {"id":"h2","k":"func","x":2,"y":0,"t":"Bind OnWeaponChanged","s":"Target ← Character","i":["Event ← BindWeapon"]},
+ {"id":"h3","k":"call","x":3,"y":0,"t":"BindWeapon","i":["Weapon ← CurrentWeapon"],"ex":[]},
+ {"id":"w0","k":"cevent","x":0,"y":1,"t":"BindWeapon","net":"U","o":["Weapon"]},
+ {"id":"w1","k":"flow","x":1,"y":1,"t":"Branch","i":["IsValid(Weapon)"],"ex":["True","False"]},
+ {"id":"w2","k":"func","x":2,"y":1,"t":"Bind OnAmmoChanged","s":"Target ← Weapon","i":["Event ← UpdateAmmo"],"rep":"RD:Ammo（Owner Only）→ 减未确认发数"},
+ {"id":"w3","k":"call","x":3,"y":1,"t":"UpdateAmmo","s":"立刻显示一次","i":["← Weapon.GetDisplayedAmmo"],"ex":[]},
+ {"id":"t0","k":"event","x":0,"y":2,"t":"Event Construct","net":"U"},
+ {"id":"t1","k":"timer","x":1,"y":2,"t":"Set Timer by Event","i":["Event ← UpdateClock","Time ← 0.25 · Looping"],"ex":[]},
+ {"id":"t2","k":"cevent","x":2,"y":2,"t":"UpdateClock","net":"U"},
+ {"id":"t3","k":"func","x":3,"y":2,"t":"Set Text","s":"mm:ss，僵尸数","i":["← GS.GetRemainingTime"],"ex":[],"rep":"RD:MatchEndServerTime · AliveZombies"}
+],"l":[["h0","h1"],["h1","h2"],["h2","h3"],["w0","w1"],["w1:True","w2"],["w2","w3"],["t0","t1"],["t2","t3"]],
+"g":[{"ids":["h0","h1","h2","h3","w0","w1","w2","w3"],"t":"血量与弹药：订阅事件，变化时才刷新","c":"t"},{"ids":["t0","t1","t2","t3"],"t":"倒计时：读 GameState 的结束时刻，4 Hz 刷新就够","c":"t"}],
+"cap":"<b>图 13-3</b>　HUD。原 Demo 的血条、弹药、颜色都是 UMG 属性绑定函数：每一帧 Cast GetPlayerPawn(0)、再读 WeaponRef 的复制变量；武器还没复制到时会访问空引用。重做后 HUD 只在角色把自己交给它、或武器变化时重新订阅"} -->
+  <div class="co tip"><span class="h">HUD 为什么由角色“交给”它，而不是 HUD 自己去找</span>
+    <p>HUD 由 PC 在 BeginPlay 创建，此时角色可能还没到（客户端），之后还可能更换（重生、观战），所以 HUD 不能在创建时“找一次角色”就完事。本书让本地控制的角色在 Receive Controller Changed 时调用 <code>HUD.BindCharacter(self)</code>：角色只调用 PC 暴露的一个接口，并不知道 HUD 内部怎么画。想再解耦一层，可以让 PC 订阅自己的 <code>On Possessed Pawn Changed</code>（服务器和客户端都会广播），由 PC 把新 Pawn 转交给 HUD——这样角色完全不需要知道 HUD 的存在。</p>
+  </div>
+
+  <h2>4. 结算与暂停</h2>
+<!--bpgraph {"cols":4,"rg":56,"title":"WBP_Result / WBP_Pause · 事件图表","nodes":[
+ {"id":"r0","k":"event","x":0,"y":0,"t":"Event Construct","s":"WBP_Result","net":"U"},
+ {"id":"r1","k":"func","x":1,"y":0,"t":"Set Title","i":["← GS.Phase == Won ? 胜利 : 失败"],"rep":"RD:GS.Phase（RepNotify）"},
+ {"id":"r2","k":"func","x":2,"y":0,"t":"Set Visibility","s":"RestartButton","i":["← Is Server ? Visible : Collapsed"]},
+ {"id":"r3","k":"func","x":3,"y":0,"t":"Fill Scoreboard","s":"PlayerArray：名字 + Kills","ex":[],"rep":"RD:PS_Coop.Kills（RepNotify）"},
+ {"id":"b0","k":"event","x":0,"y":1,"t":"Restart.OnClicked","net":"U"},
+ {"id":"b1","k":"call","x":1,"y":1,"t":"Server_RequestRestart","s":"Target ← Owning Player(PC_Coop)","net":"SR","ex":[]},
+ {"id":"q0","k":"event","x":2,"y":1,"t":"Leave.OnClicked","net":"U"},
+ {"id":"q1","k":"call","x":3,"y":1,"t":"GI.LeaveGame","s":"Destroy Session → L_Menu","ex":[]},
+ {"id":"p0","k":"event","x":0,"y":2,"t":"Event Construct","s":"WBP_Pause","net":"U"},
+ {"id":"p1","k":"func","x":1,"y":2,"t":"Set Input Mode UI Only","s":"显示鼠标；世界照常运行","ex":[]},
+ {"id":"c0","k":"event","x":2,"y":2,"t":"Resume.OnClicked","net":"U"},
+ {"id":"c1","k":"func","x":3,"y":2,"t":"Remove from Parent","s":"Input Mode：Game Only","ex":[]}
+],"l":[["r0","r1"],["r1","r2"],["r2","r3"],["b0","b1"],["q0","q1"],["p0","p1"],["c0","c1"]],
+"g":[{"ids":["r0","r1","r2","r3","b0","b1","q0","q1"],"t":"结算：重开按钮只对主机可见；服务器端仍会再校验一次","c":"t"},{"ids":["p0","p1","c0","c1"],"t":"暂停菜单：只是 UI，不调用 Set Game Paused","c":"t"}],
+"cap":"<b>图 13-4</b>　结算与暂停。Is Server 在 Listen Server 的主机上为 true；按钮隐藏只是体验，权限检查在 PC 的 Server_RequestRestart 里（图 9-10），不能只靠 UI"} -->
+
+  <div class="co warn"><span class="h">面试注意：UI 的三句“标准答案”</span>
+    <ul>
+      <li><strong>“UI 在哪一端？”</strong>——只在本机，永远不复制；服务器不能“给客户端创建界面”，只能改状态或发 Client RPC，让客户端自己创建。</li>
+      <li><strong>“UI 能直接发 RPC 吗？”</strong>——不能，Widget 不是 Actor、没有 Owner 链；通过 Get Owning Player 拿到本地 PC，调用它的 Server RPC。</li>
+      <li><strong>“为什么不用属性绑定？”</strong>——绑定函数每帧执行，联机下还经常读到尚未复制的空引用；事件驱动只在变化时刷新，也更容易推理。</li>
+    </ul>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>UI = 只读 + 通过 PC / GI 发请求；不做规则判断、不存权威状态。</li>
+    <li>UI 接触网络只有三种方式：读复制下来的变量、订阅 OnRep 里广播的分发器、经拥有者 PC 发 Run on Server（全书 UI 只发 2 个：Server_SetReady、Server_RequestRestart）。</li>
+    <li>主菜单 ↔ GameInstance；大厅 ↔ PlayerArray / PlayerState；HUD ↔ AC_Health / 武器 / GameState；结算 ↔ Phase / Kills。</li>
+    <li>重开按钮只给主机看（Is Server），权限仍由服务器校验；暂停菜单不暂停世界。</li>
+  </ul></div>
+</section>

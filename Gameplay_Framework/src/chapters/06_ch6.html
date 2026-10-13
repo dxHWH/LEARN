@@ -1,0 +1,246 @@
+<section class="chapter" id="ch6">
+  <div class="ch-head">
+    <div class="no">CHAPTER 06</div>
+    <h1>Singleton / GameInstance / 初始化顺序</h1>
+    <p class="lead">五个基础设施都继承同一个 MonoSingleton。它的懒查找、防重和退出标志各自解决了什么；为什么五个子类里只有一个调了 base.Awake；以及一个比它更隐蔽的问题——UI 在 OnEnable 里注册事件时，EventSystem 可能还没 Awake。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>讲清 MonoSingleton 的四个部分：懒查找 / 懒创建、Awake 防重、OnDestroy 清理、退出标志</li>
+    <li>说出“为什么每个子类各有一份单例”（C# 封闭泛型类型各自的静态字段）</li>
+    <li>准确描述漏调 base.Awake 的后果，不夸大也不缩小</li>
+    <li>解释 Awake / OnEnable 跨对象顺序不保证带来的初始化隐患，以及为什么 TimerSystem 没事而 EventSystem 有风险</li>
+    <li>说清单例的代价，并对照 Service Locator、依赖注入、UE Subsystem 给出替代方案</li>
+  </ul></div>
+
+  <h2>6.1 这一章解决什么问题</h2>
+  <p>单例是最常被追问“缺点是什么”的设计模式。这个项目让它更具体：<strong>有一个确定性的 bug（base.Awake 没调）、一个依赖未定义顺序的隐患（Awake 与 OnEnable 之间）、一个只在特定编辑器设置下出现的问题（关闭 Domain Reload）</strong>。能把这三件事讲清楚，“单例的缺点”就不再是背书。</p>
+
+  <h2>6.2 两个模板</h2>
+  <!--code:cs:Singleton.cs:34-94（节选）-->
+public class MonoSingleton<T> : MonoBehaviour where T : MonoBehaviour
+{
+    private static T _instance;
+    private static bool _isApplicationQuitting = false;
+    public static bool HasInstance => (_instance != null && !_isApplicationQuitting);
+
+    protected virtual void Awake()                      // ② 防重：场景里预置了多个时，多余的自杀
+    {
+        if (_instance == null) _instance = this as T;
+        else if (_instance != this) Destroy(gameObject);
+    }
+    public static T Instance
+    {
+        get
+        {
+            if (_isApplicationQuitting) return null;    // ④ 退出时不再创建
+            if (_instance == null)
+            {
+                _instance = FindObjectOfType<T>();      // ① 懒查找
+                if (_instance == null)
+                    _instance = new GameObject(typeof(T).Name).AddComponent<T>();   // 懒创建
+            }
+            return _instance;
+        }
+    }
+    protected virtual void OnDestroy() { if (_instance == this) _instance = null; }   // ③
+    protected virtual void OnApplicationQuit() { _isApplicationQuitting = true; }     // ④
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>部分</th><th>解决什么</th><th>注意</th></tr>
+    <tr><td>① 懒查找 / 懒创建</td><td>没人放也能用；放了就用场景里那个</td><td>任何代码第一次访问 Instance 都可能<strong>创建</strong>对象，包括 OnDestroy 里</td></tr>
+    <tr><td>② Awake 防重</td><td>场景里预置了多个时只留一个</td><td>需要子类调 base.Awake 才生效（6.4 节）；Destroy 的是整个 GameObject</td></tr>
+    <tr><td>③ OnDestroy 清理</td><td>切场景后不留下指向已销毁对象的静态引用</td><td>基类这一步做对了，World 的 OnDestroy 也调了 base</td></tr>
+    <tr><td>④ 退出标志</td><td>退出过程中不再懒创建，避免“幽灵单例”</td><td>每个 T 一份、只置不复位（6.6 节）</td></tr>
+    <tr><td><code>HasInstance</code></td><td>只查询、不创建，给 OnDestroy 用</td><td><code>_instance != null</code> 走的是 Unity 重载的 ==，能识别已销毁</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">为什么“每个子类各有一份单例”</span>
+    <p><code>World : MonoSingleton&lt;World&gt;</code> 这种写法常被叫作 CRTP（源码注释也这么写）。在 C# 里真正起作用的是：<strong>每个封闭泛型类型（MonoSingleton&lt;World&gt;、MonoSingleton&lt;TimerSystem&gt;……）都是独立的类型，各有一份静态字段</strong>。所以 <code>_instance</code> 和 <code>_isApplicationQuitting</code> 都是按 T 分开的。C++ 的 CRTP 也有同样效果（每个模板实例各有静态成员），但 C++ 的 CRTP 更常用于静态多态（基类通过 <code>static_cast&lt;T*&gt;(this)</code> 调用派生类）。</p>
+  </div>
+  <p>另一个模板 <code>Singleton&lt;T&gt; where T : new()</code> 是纯 C# 版，<strong>项目里没有任何类使用它</strong>。它有两个可以被追问的问题：<code>new()</code> 约束要求 T 有公开的无参构造函数，所以任何人都能 <code>new T()</code> 出第二个实例；<code>_instance ??= new T()</code> 不是线程安全的，两个线程同时首次访问可能各建一个（C# 的 <code>Lazy&lt;T&gt;</code> 或静态构造函数能解决）。</p>
+
+  <h2>6.3 谁在用、怎么用</h2>
+  <div class="tbl"><table>
+    <tr><th>单例</th><th>override Awake 调了 base 吗</th><th>在哪些场景预置</th><th>DontDestroyOnLoad</th></tr>
+    <tr><td>World</td><td class="no">否（Awake 是空的，只有注释）</td><td>无，永远懒创建</td><td>否（场景级）</td></tr>
+    <tr><td>TimerSystem</td><td class="no">否（只调 AllocateCapacity）</td><td>SoulDecayScene</td><td>否</td></tr>
+    <tr><td>EventSystem</td><td class="no">否（在 Awake 里创建缓冲区和监听字典）</td><td>SoulDecayScene（Managers 下的子物体）</td><td>否</td></tr>
+    <tr><td>ThreadSafeEventSystem</td><td class="no">否</td><td>无；没有任何代码访问它</td><td>否</td></tr>
+    <tr><td>GameInstance</td><td class="yes">是，而且检查了自己是不是多余的</td><td>MainMenuScene</td><td>是</td></tr>
+  </table></div>
+  <p>两个小事实：SoulDecayScene 里有<strong>两个都叫 “EventSystem” 的 GameObject</strong>——一个是 Unity UI 的事件系统，一个是项目的 EventSystem（挂在 Managers 下），层级面板里只能靠位置区分；GamePlayTest2Scene 没有预置任何单例，三个系统都在第一次被访问时懒创建。</p>
+
+  <h2>6.4 确定性 bug：漏调 base.Awake</h2>
+  <p>四个子类 override 了 Awake 却没调 <code>base.Awake()</code>，基类的防重逻辑对它们<strong>完全不执行</strong>。准确的后果是三条：</p>
+  <div class="tbl"><table>
+    <tr><th>后果</th><th>具体表现</th><th>当前是否发生</th></tr>
+    <tr><td>预置实例不会在 Awake 登记</td><td>在第一次有人访问 <code>Instance</code>（触发 FindObjectOfType）之前，<code>_instance</code> 为 null、<code>HasInstance</code> 为 false</td><td>发生，但影响很小：SoulDecay 的 UI 在 OnEnable 里就访问了 EventSystem.Instance，GameMode 开局就访问了 TimerSystem.Instance</td></tr>
+    <tr><td>多余实例不会自杀</td><td>场景里有两个 TimerSystem（复制了预制体、叠加加载两个场景）时，两个都会 Update；<code>Instance</code> 指向 FindObjectOfType 找到的那一个</td><td>不发生：目前每个场景至多一个</td></tr>
+    <tr><td>先懒创建、后加载预置对象时出现双份</td><td>如果某段代码在预置对象加载前访问了 Instance（例如上一个场景的对象在卸载时），会懒创建一个；之后加载的预置对象也不会自杀</td><td>不发生：OnDestroy 里一律用 HasInstance</td></tr>
+  </table></div>
+  <p>对比唯一做对的 GameInstance：</p>
+  <!--code:cs:GameInstance.cs:6-14-->
+protected override void Awake()
+{
+    base.Awake();                                   // 先调基类，如果我是多余的，基类会把我杀掉
+    if (this == null || Instance != this) return;   // 多余的就不要继续执行
+    DontDestroyOnLoad(this.gameObject);
+}
+<!--/code-->
+  <p>这里有一个可以加分的细节：<strong><code>this == null</code> 这个判断不会生效</strong>。基类调的是 <code>Destroy(gameObject)</code>，按规则 R3，销毁要等到本帧 Update 循环之后，Awake 返回时对象还没销毁，<code>this == null</code> 为 false。真正起作用的是第二个条件 <code>Instance != this</code>——它让多余的实例跳过 DontDestroyOnLoad。代码是对的，但注释里的理由不准确。</p>
+  <div class="co tip"><span class="h">面试注意：说“确定性 bug”，但别夸大成“单例全坏了”</span>
+    <p>准确的说法：“World、TimerSystem、EventSystem 都 override 了 Awake 却没调 base，所以基类的防重和提前登记对它们不生效；现在每个场景至多一个实例，而且懒查找会兜底找到预置对象，所以没有表现出来。如果叠加加载两个带 Managers 的场景，就会有两个 TimerSystem 同时 Update。修复是子类第一行调 base 并在多余时 return，或者基类把 Awake 改成非虚、另给子类一个初始化钩子。”</p>
+  </div>
+
+  <h2>6.5 更隐蔽的隐患：Awake 与 OnEnable 的跨对象顺序</h2>
+  <!--code:cs:SurvivalUIController.cs:19-26 与 EventSystem.cs:37-47-->
+// SurvivalUIController（普通 MonoBehaviour，场景预置）
+private void OnEnable()
+{
+    if (EventSystem.Instance)                                       // 懒查找：找到场景里预置的 EventSystem
+        EventSystem.Instance.Register<ScoreChangedEventArgs>(OnScoreChanged);
+}
+// EventSystem
+override protected void Awake()
+{
+    _frontBuffers = ...; _backBuffers = ...;
+    _listenersDic = new Dictionary<Type, Delegate>();               // 监听字典在 Awake 里才创建
+}
+public void Register<T>(Action<T> listener) where T : IEventArgs
+{
+    if (_listenersDic.ContainsKey(type)) ...                        // Awake 之前调用 → 空引用
+}
+<!--/code-->
+  <p>场景加载时，Unity 对每个对象依次调用 Awake 和 OnEnable，<strong>不同对象之间的先后没有保证</strong>（没有配置 Script Execution Order 时）。如果 SurvivalUIController 排在 EventSystem 前面：</p>
+  <!--code:text:按源码推演（【推断】，验证方法见下）-->
+SurvivalUIController.Awake → OnEnable
+  └ EventSystem.Instance：_instance 为空 → FindObjectOfType 找到场景里的 EventSystem（它还没 Awake）
+  └ Register：_listenersDic == null → NullReferenceException
+     → 两个监听都没注册成功：分数文字永远不更新，寿命文字因为拿不到句柄一直显示 “DIE”
+EventSystem.Awake（稍后）→ 创建字典，一切正常——但 UI 已经错过了注册
+<!--/code-->
+  <p>当前 Demo 能正常运行，说明在这个场景里 EventSystem 恰好先 Awake；这是加载顺序的偶然结果，不是代码保证的。<strong>验证方法</strong>：在 Project Settings → Script Execution Order 里把 SurvivalUIController 设为 −100（早于默认），进入 Play，应当在 Console 看到 Register 处的空引用异常。</p>
+  <div class="co deep"><span class="h">为什么 TimerSystem 没有同样的风险</span>
+    <p>TimerSystem 的核心数组是<strong>字段初始化器</strong>创建的：<code>private TimerData[] _timers = new TimerData[128];</code>、<code>_handleToIndex = new List&lt;int&gt;(128)</code>……C# 的字段初始化器在构造函数里执行，Unity 反序列化创建对象时就已经完成，早于任何 Awake。Awake 里的 AllocateCapacity 只是再确认一次容量。所以即使在 TimerSystem.Awake 之前调用 CreateTimer，数据结构也是就绪的。EventSystem 把初始化全部放在 Awake 里，才有了这个窗口。</p>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>消除这类问题的方向</th><th>原理</th><th>代价</th></tr>
+    <tr><td>能用字段初始化器的就用</td><td>构造时完成，早于所有 Awake</td><td>不能访问其它对象和序列化字段</td></tr>
+    <tr><td>在 Instance getter 或方法内部做一次性初始化</td><td>谁先访问谁触发，与 Awake 顺序无关</td><td>每次访问多一次判断</td></tr>
+    <tr><td>注册放到 Start</td><td>场景加载时所有 Awake 都先于任何 Start</td><td>Start 之前发出的事件收不到（SoulDecay 的开局事件在 World.Update 里发，晚于 Start，没问题）</td></tr>
+    <tr><td>指定执行顺序</td><td><code>[DefaultExecutionOrder(-100)]</code> 让基础设施先初始化</td><td>顺序成了隐式的全局配置</td></tr>
+    <tr><td>显式引导</td><td>一个引导对象按顺序创建并初始化所有系统</td><td>需要改造成“不依赖场景预置”</td></tr>
+  </table></div>
+
+  <h2>6.6 退出标志与 Domain Reload</h2>
+  <ul>
+    <li><b>只置不复位</b>：<code>_isApplicationQuitting</code> 在 OnApplicationQuit 里设为 true，之后没有任何地方设回 false。正常构建里无所谓（进程就要结束了）。</li>
+    <li><b>每个 T 一份，只有存活实例才会置位</b>：退出时没有存活实例的单例类型，标志不会被设置；如果退出过程中有代码访问它的 Instance，仍然会懒创建一个对象。项目里 OnDestroy 统一用 HasInstance，避开了这个问题。</li>
+    <li><b>关闭 Domain Reload（Enter Play Mode Options）之后</b>：静态字段在两次 Play 之间不会重置。第一次 Play 退出时被置位的类型，第二次 Play 时 <code>Instance</code> 直接返回 null——<code>World.RegisterAActor</code> 里 <code>if (Instance == null) return;</code> 会让所有 Actor 都不注册，<strong>整个游戏没有任何 BeginPlay 和 Tick</strong>（按源码推演）。修复方向是用 <code>[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]</code> 在每次进入 Play 时重置静态状态。</li>
+  </ul>
+  <div class="co warn"><span class="h">【扩展知识】两个与版本相关的细节</span>
+    <p>① <code>FindObjectOfType</code> 在 Unity 2023.1 起被标记为过时，替代为 <code>FindFirstObjectByType</code> / <code>FindAnyObjectByType</code>；项目用的是 2022.3，没有警告。② <code>_instance == null</code> 走的是 UnityEngine.Object 重载的 ==，要检查原生对象是否存活，比纯引用比较慢一些；UI 的 Update 里每帧多次调用 <code>TimerSystem.Instance</code>，规模小时可以忽略。</p>
+  </div>
+
+  <h2>6.7 GameInstance：名字有了，职责还没有</h2>
+  <p>GameInstance 只放在 MainMenuScene，Awake 里 DontDestroyOnLoad 并打一行日志，唯一的成员是 <code>CurrentWorld =&gt; World.Instance</code>。它不持有 World、不管理任何系统；而且 <code>CurrentWorld</code> 如果在没有 Actor 的场景（比如主菜单）里被访问，会<strong>懒创建一个 World</strong>。从 SoulDecay 直接开始 Play（不经过主菜单）时，GameInstance 根本不存在。</p>
+  <div class="tbl"><table>
+    <tr><th></th><th>UE 的 UGameInstance</th><th>本项目的 GameInstance</th></tr>
+    <tr><td>生命周期</td><td>引擎创建，跨关卡存在，整个进程一份</td><td>只在从主菜单进入时存在</td></tr>
+    <tr><td>与 World 的关系</td><td>World 由引擎创建和切换，GameInstance 可以访问当前 World</td><td>World 各场景懒创建，GameInstance 只是转发 World.Instance</td></tr>
+    <tr><td>典型职责</td><td>跨关卡数据、在线会话、持有 GameInstanceSubsystem</td><td>无（日志落盘初始化被宏关闭）</td></tr>
+  </table></div>
+
+  <h2>6.8 单例的代价与替代方案</h2>
+  <div class="cards">
+    <div class="card"><div class="t">隐藏依赖</div><p>CombatPawn 依赖 TimerSystem、EventSystem、World 三个单例，这在它的字段和构造参数里看不出来，只能读代码发现。</p></div>
+    <div class="card"><div class="t">初始化顺序</div><p>谁先访问谁创建，顺序随调用路径变化；6.5 节的隐患就是顺序问题的一个实例。</p></div>
+    <div class="card"><div class="t">生命周期含糊</div><p>名字叫“单例”，实际是“每个场景一个”。TimerSystem 随场景销毁，计时器也一起消失——这是想要的行为，但不是从类型上看得出来的。</p></div>
+    <div class="card"><div class="t">难以测试</div><p>MonoSingleton 必须挂在 GameObject 上，EditMode 单元测试里不能直接 new，也很难替换成假的实现（第 20 章）。</p></div>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>替代方案</th><th>做法</th><th>适合</th></tr>
+    <tr><td>Service Locator</td><td>一个注册表按接口存取服务，启动时注册具体实现</td><td>改造成本低，测试时能注册假实现；依赖仍然是隐式的</td></tr>
+    <tr><td>依赖注入（如 VContainer、Zenject）</td><td>容器按作用域（项目 / 场景）创建服务，通过构造函数或字段注入</td><td>依赖显式、作用域清晰；引入框架和学习成本</td></tr>
+    <tr><td>显式引导（Composition Root）</td><td>一个引导对象按固定顺序创建、初始化、Tick 所有系统</td><td>顺序完全可控，最适合解决 6.5 节的问题</td></tr>
+    <tr><td>UE Subsystem</td><td>按宿主划分生命周期：Engine / GameInstance / World / LocalPlayer Subsystem，由引擎自动创建和销毁</td><td>World 级的计时器和事件系统对应 WorldSubsystem；UE 的 FTimerManager 本来就挂在 World 上</td></tr>
+  </table></div>
+
+  <h2>6.9 Code Review：单例相关问题</h2>
+  <div class="tbl"><table>
+    <tr><th>当前设计</th><th>问题</th><th>影响</th><th>改进方向（不写代码）</th></tr>
+    <tr><td>子类 override Awake 不调 base</td><td>防重与提前登记失效</td><td>多实例并存；HasInstance 在首次访问前为 false</td><td>子类首行调 base 并检查；或基类 Awake 非虚 + 子类初始化钩子</td></tr>
+    <tr><td>EventSystem 在 Awake 里创建字典，UI 在 OnEnable 里注册</td><td>依赖不保证的跨对象 Awake 顺序</td><td>顺序反过来时监听注册失败，UI 不更新</td><td>字段初始化器 / 方法内惰性初始化 / 注册移到 Start / 指定执行顺序</td></tr>
+    <tr><td>Instance getter 懒创建</td><td>任何访问都可能创建对象</td><td>OnDestroy、主菜单里意外创建 World</td><td>区分“获取”和“创建”，创建只在引导阶段进行</td></tr>
+    <tr><td>退出标志只置不复位</td><td>关闭 Domain Reload 后第二次 Play 失效</td><td>所有 Actor 不注册</td><td>进入 Play 时重置静态状态</td></tr>
+    <tr><td>多余实例 Destroy(gameObject)</td><td>销毁整个物体</td><td>如果和其它组件放在同一个物体上会被连带销毁</td><td>只销毁组件，或约定单例独占一个物体</td></tr>
+    <tr><td>GameInstance 空壳</td><td>名不副实</td><td>面试时容易被追问“它管理什么”</td><td>让它持有跨场景服务，或删掉</td></tr>
+    <tr><td>Singleton&lt;T&gt; 未使用</td><td>公开构造、非线程安全</td><td>死代码</td><td>删除，或用 Lazy&lt;T&gt;</td></tr>
+  </table></div>
+
+  <h2>6.10 面试追问树</h2>
+  <!--code:text:追问树 · Singleton-->
+Q6-1 讲一下你的 MonoSingleton。为什么每个子类各有一个实例？
+ ├── Q6-2 场景里放了两个 TimerSystem 会怎样？                        ← base.Awake
+ │    └── Q6-3 GameInstance 里的 this == null 判断有用吗？           ← Destroy 延迟
+ └── Q6-4 HasInstance 和 Instance 有什么区别？什么时候用哪个？
+Q6-5 Awake 里能访问别的单例吗？OnEnable 呢？                         ← 6.5 隐患
+ └── Q6-6 为什么 TimerSystem 没这个问题？                            ← 字段初始化器
+Q6-7 关闭 Domain Reload 之后你的单例会怎样？
+Q6-8 单例的缺点是什么？你会用什么替代？UE 是怎么做的？              ← Subsystem
+Q6-9 C++ 里怎么写线程安全的单例？                                    ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q6-1 → Q6-4　MonoSingleton 与 base.Awake</div>
+    <p><b>L1 · 30 秒</b>　泛型基类，四部分：懒查找场景里的实例、找不到就创建；Awake 里登记自己、多余的自杀；OnDestroy 清空静态引用；退出时设置标志不再创建。每个子类各有一份，因为 C# 每个封闭泛型类型有独立的静态字段。</p>
+    <p><b>L2 · 正常回答</b>　有一个我复盘时发现的确定性 bug：World、TimerSystem、EventSystem 都 override 了 Awake 但没调 base，防重和提前登记对它们不生效。现在每个场景至多一个实例，懒查找又会兜底找到预置对象，所以没表现出来；但叠加加载两个带 Managers 的场景，就会有两个 TimerSystem 同时 Update。唯一做对的是 GameInstance。</p>
+    <p><b>L3 · 深入</b>　GameInstance 里还有个细节：它在 base.Awake 之后判断 <code>this == null</code>，但基类调的是 Destroy，销毁是延迟到帧末的，这时 this 还不是 null，真正起作用的是后面的 <code>Instance != this</code>。HasInstance 只查询不创建，所以所有 OnDestroy 里都用它——切场景时如果单例先被销毁，用 Instance 就会重新创建一个泄漏到下一个场景的对象。</p>
+    <p><b>L4 · 面试官攻击</b>　“既然没表现出来，为什么叫 bug？” → 因为它让基类承诺的行为失效了，而失效的条件（多场景叠加、预制体复制）是正常的工程操作，不需要任何错误代码就能触发；而且 HasInstance 在首次访问前返回 false，会让依赖它的清理逻辑静默跳过。修复成本只有一行，没有理由留着。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q6-5 → Q6-6　Awake / OnEnable 里能访问别的单例吗？</div>
+    <p><b>L2</b>　不安全。Unity 只保证同一个对象 Awake 在 OnEnable 和 Start 之前，场景加载时所有 Awake 在所有 Start 之前；不同对象之间的 Awake 顺序不保证。我的 SurvivalUIController 在 OnEnable 里调 EventSystem.Instance.Register，而 EventSystem 的监听字典在它自己的 Awake 里才创建——如果 UI 先 Awake，懒查找能找到 EventSystem 对象，但字典还是 null，注册直接空引用，UI 永远收不到分数和寿命事件。现在能跑，是因为这个场景里 EventSystem 恰好先初始化。</p>
+    <p><b>L3</b>　TimerSystem 没这个问题，因为它的数组是字段初始化器创建的，构造时就完成了，早于任何 Awake。所以修复可以是：EventSystem 也用字段初始化器；或者在 Register 内部做一次性初始化；或者 UI 改在 Start 里注册；或者给基础设施加 DefaultExecutionOrder。我更倾向于显式引导：一个启动对象按顺序初始化所有系统，不依赖场景里谁先被加载。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q6-7　关闭 Domain Reload 之后？</div>
+    <p><b>L2</b>　静态字段在两次 Play 之间不重置。退出标志在第一次退出时被置为 true、之后从不复位，第二次 Play 时 Instance 直接返回 null；World.RegisterAActor 遇到 null 就 return，所有 Actor 都不会注册，整个游戏没有 BeginPlay 和 Tick。解决办法是用 RuntimeInitializeOnLoadMethod 在每次进入 Play 时重置所有单例的静态状态。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q6-8　单例的缺点？怎么替代？</div>
+    <p><b>L2</b>　隐藏依赖（CombatPawn 用了三个单例，从接口上看不出来）、初始化顺序不确定、生命周期含糊（叫单例，实际每个场景一个）、难以测试（MonoBehaviour 不能在 EditMode 里直接 new，也不好换成假实现）。</p>
+    <p><b>L3</b>　替代方案按改造成本排：Service Locator（按接口注册，测试时能替换）、显式引导（一个启动对象按顺序创建和驱动所有系统）、依赖注入框架（按项目 / 场景作用域管理）。UE 的思路是按宿主划分生命周期的 Subsystem：Engine、GameInstance、World、LocalPlayer 各有一类，由引擎自动创建销毁。我的 TimerSystem 和 EventSystem 本质上是“每个 World 一份”，对应 UE 的 WorldSubsystem——UE 的 FTimerManager 本来就挂在 World 上。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“我的单例在 Awake 里会把多余的实例销毁，所以不会有多个实例。”</p>
+    <p><b>问题</b>：四个子类都没调 base.Awake，这段逻辑对它们不执行。</p>
+    <p><b>更好的回答</b>：“基类有防重逻辑，但 World / TimerSystem / EventSystem 漏调了 base.Awake，目前靠每个场景只放一个来保证唯一。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“Awake 一定比 OnEnable 和 Start 早，所以在 OnEnable 里访问别的系统是安全的。”</p>
+    <p><b>问题</b>：顺序保证只针对同一个对象；跨对象时，别人的 Awake 可能还没执行。</p>
+    <p><b>更好的回答</b>：“跨对象的依赖放在 Start 或 BeginPlay，或者让被依赖的系统在被访问时惰性初始化。”</p>
+  </div>
+
+  <h2>6.11 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">C++ 的 Meyers 单例</div><p>函数内静态局部变量：<code>static T&amp; Get() { static T inst; return inst; }</code>。C++11 起标准保证局部静态变量的初始化是线程安全的（编译器生成带锁或原子标志的“magic statics”）。为什么会追过去：游戏客户端岗大多是 C++，单例题几乎一定会转到 C++ 实现。</p></div>
+    <div class="card"><div class="t">双重检查锁</div><p>“先判空、加锁、再判空、再创建”在没有内存屏障时可能让别的线程看到未构造完的对象；C++ 要用 <code>std::atomic</code> 配合 acquire / release，或者直接用 <code>std::call_once</code>。第 13 章的 Log 会遇到同样的问题。</p></div>
+    <div class="card"><div class="t">静态初始化顺序</div><p>不同编译单元的全局对象构造顺序不确定，析构顺序与构造相反；一个全局对象的析构函数里访问另一个已析构的单例就是未定义行为——和“切场景时单例谁先 OnDestroy”是同一个问题。</p></div>
+    <div class="card"><div class="t">C# 的 Lazy&lt;T&gt; 与静态构造函数</div><p>静态构造函数由运行时保证只执行一次且线程安全；<code>Lazy&lt;T&gt;</code> 提供可选的线程安全模式。它们解决了 <code>Singleton&lt;T&gt;</code> 的并发问题，但解决不了“公开构造函数”。</p></div>
+    <div class="card"><div class="t">UE 的 Subsystem</div><p>继承 UWorldSubsystem 等基类即可，引擎在宿主创建时自动实例化、销毁时自动清理，通过 <code>GetWorld()-&gt;GetSubsystem&lt;T&gt;()</code> 访问。它把“全局唯一”换成了“宿主内唯一”，生命周期由类型直接表达。</p></div>
+    <div class="card"><div class="t">依赖注入的作用域</div><p>Singleton（整个容器一份）、Scoped（每个作用域一份，例如每个场景）、Transient（每次注入新建）。项目里 TimerSystem 实际需要的是“场景作用域”，这正是 DI 框架能直接表达、而 MonoSingleton 只能靠约定实现的东西。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>MonoSingleton = <strong>懒查找/懒创建 + Awake 防重 + OnDestroy 清空 + 退出标志</strong>；每个封闭泛型类型一份静态字段。</li>
+    <li><strong>五个子类只有 GameInstance 调了 base.Awake</strong>：防重和提前登记对 World / TimerSystem / EventSystem 不生效；现在靠“每场景至多一个 + 懒查找兜底”没有表现出来。</li>
+    <li>GameInstance 的 <code>this == null</code> 不生效（Destroy 延迟），起作用的是 <code>Instance != this</code>。</li>
+    <li><strong>EventSystem 在 Awake 里建字典、UI 在 OnEnable 里注册</strong>：依赖不保证的跨对象 Awake 顺序；TimerSystem 用字段初始化器所以没这个问题。</li>
+    <li>退出标志只置不复位：关闭 Domain Reload 后第二次 Play，<code>Instance</code> 返回 null，所有 Actor 都不注册。替代方案：Service Locator、显式引导、DI、UE Subsystem。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：在 GamePlayTest2 场景（没有预置任何单例）里，TimerSystem 第一次被创建是在什么时候？它的 Awake 漏调 base 会有影响吗？</summary><p>第一次有人访问 TimerSystem.Instance 时：DemoGameMode.StartPlay 里 CreateTimer。getter 里 FindObjectOfType 找不到，就 new GameObject + AddComponent，Awake 在 AddComponent 内部执行，随后 getter 把 _instance 设为它。整个过程由 getter 完成登记，漏调 base 没有影响——这个 bug 只对“场景预置的实例”有意义。</p></details>
+  <details class="quiz"><summary>自测 2：把 SurvivalUIController 的注册从 OnEnable 移到 Start，为什么能消除 6.5 节的隐患？会不会漏掉开局事件？</summary><p>场景加载时，所有对象的 Awake / OnEnable 都先于任何对象的 Start，所以 UI 的 Start 执行时 EventSystem 一定已经 Awake、字典已创建。开局事件（分数、寿命句柄）是在 World.Update 里由 GameMode / GameState 的 BeginPlay 发出的，晚于所有场景对象的 Start，不会漏。代价是 UI 被禁用再启用时需要另外处理重新注册。</p></details>
+  <details class="quiz"><summary>自测 3：为什么说 TimerSystem 对应 UE 的 WorldSubsystem，而不是 GameInstanceSubsystem？</summary><p>它的生命周期是“每个场景一份、随场景销毁”，切场景时所有计时器都应该消失；GameInstanceSubsystem 会跨关卡存在，计时器就会带到下一个关卡。UE 的 FTimerManager 也挂在 World 上（GameInstance 另有一个用于跨关卡的计时器管理器）。</p></details>
+</section>

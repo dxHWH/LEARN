@@ -1,0 +1,168 @@
+# /Game/Blueprints/Zombie/BP_Zombie  (Blueprint)
+ParentClass: /Script/Engine.Character
+
+## Variables
+- Anime BP Zomebie : object<AnimeBP_Zomebie_C>
+- 初始化速度 : real
+- 血量 : real  [Replicated]
+- 正在被击退 : bool
+- 正在攻击 : bool  [Replicated]
+- 开始骨骼 : name
+- 结束骨骼 : name
+
+## BP_Zombie_C Default__BP_Zombie_C
+   血量 = 100.0
+   Mesh = CharacterMesh0
+   CharacterMovement = CharMoveComp
+   CapsuleComponent = CollisionCylinder
+   ArrowComponent = Arrow
+   AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned
+   RootComponent = CollisionCylinder
+
+## SceneComponent BP_Zombie_C.DefaultSceneRoot_GEN_VARIABLE
+   bVisualizeComponent = True
+
+## SCS_Node BP_Zombie_C.SimpleConstructionScript_0.SCS_Node_0
+   ComponentClass = SceneComponent
+   ComponentTemplate = DefaultSceneRoot_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = DefaultSceneRoot
+
+## Custom events / RPC
+- CustomEvent 追逐玩家   (graph BP_Zombie.EventGraph)
+- CustomEvent 攻击范围检测   (graph BP_Zombie.攻击玩家)
+- CustomEvent 攻击伤害检测   (graph BP_Zombie.攻击玩家)
+- CustomEvent 重置上伤害应用   (graph BP_Zombie.攻击玩家)
+- CustomEvent Multicast_PlayAttackAnim  [RPC Net|Multicast]   (graph BP_Zombie.攻击玩家)
+- CustomEvent Multicast_HitReact  [RPC Net|Multicast]   (graph BP_Zombie.死亡系统)
+- CustomEvent Multicast_Death  [RPC Net|Multicast]   (graph BP_Zombie.死亡系统)
+
+## Graph BP_Zombie.EventGraph
+
+CustomEvent 追逐玩家():  #82
+
+Event ReceiveBeginPlay():  #90
+  CastTo AnimeBP_Zomebie_C(Object=GetAnimInstance(self=Mesh))  -> AsAnime BP Zomebie  #89
+    [then]:
+      Anime BP Zomebie(Anime BP Zomebie=CastTo AnimeBP_Zomebie_C#89.AsAnime BP Zomebie)  #151
+      Macro Switch Has Authority()  #105
+        [Authority]:
+          初始化速度和动画()  #45
+          K2_SetTimer(Object=∅, FunctionName="FindClosestTarget", Time=0.500000, bLooping=true, bMaxOncePerFrame=false, InitialStartDelay=0.000000, InitialStartDelayVariance=0.000000)  #43
+          K2_SetTimer(Object=∅, FunctionName="攻击范围检测", Time=0.100000, bLooping=true, bMaxOncePerFrame=false, InitialStartDelay=0.000000, InitialStartDelayVariance=0.000000)  #42
+  // comment: 单机逻辑
+  // exec nodes with no incoming exec (dead / disconnected): K2_SetTimer#40, Macro Switch Has Authority#104
+
+## Graph BP_Zombie.FindClosestTarget
+
+FunctionEntry():  #93
+  Macro Switch Has Authority()  #108
+    [Authority]:
+      GetAllActorsOfClass(ActorClass=BP_Player_C)  -> OutActors  #46
+      Macro ForEachLoop(Array=GetAllActorsOfClass#46.OutActors) <Exec>  -> Array Element  #106
+        [LoopBody]:
+          Branch(Condition=Less_DoubleDouble(A=GetDistanceTo(OtherActor=Macro ForEachLoop#106.Array Element), B=MinDistance))  #96
+            [true]:
+              ClosestPlayer(ClosestPlayer=Macro ForEachLoop#106.Array Element)  -> Output_Get  #153
+              MinDistance(MinDistance=GetDistanceTo(OtherActor=Macro ForEachLoop#106.Array Element))  #152
+        [Completed]:
+          Macro IsValid(InputObject=ClosestPlayer#153.Output_Get)  #107
+            [Is Valid]:
+              Branch(Condition=正在攻击)  #97
+                [false]:
+                  SimpleMoveToActor(Controller=GetAIController(ControlledActor=self), Goal=ClosestPlayer)  #50
+                  K2_SetFocus(self=GetAIController(ControlledActor=self), NewFocus=ClosestPlayer)  #51
+
+## Graph BP_Zombie.UserConstructionScript
+
+FunctionEntry():  #94
+
+## Graph BP_Zombie.初始化速度和动画
+
+FunctionEntry():  #95
+  SwitchInt(Selection=RandomIntegerInRange(Min=0, Max=1))  #127
+    [0]:
+      移动动画(移动动画=IP_Run_Front, self=Anime BP Zomebie)  #155
+      初始化速度(初始化速度=200.000000)  #157
+      待机动画(待机动画=Select(Option 0=IP_Idle_01, Option 1=IP_Idle_02, Option 2=IP_Idle_08, Index=RandomIntegerInRange(Min=0, Max=2)), self=Anime BP Zomebie)  #158
+      Start Position(Start Position=1.000000, self=Anime BP Zomebie)  #159
+      MaxWalkSpeed(MaxWalkSpeed=初始化速度, self=CharacterMovement)  #160
+    [1]:
+      移动动画(移动动画=IP_Sprint_Front, self=Anime BP Zomebie)  #154
+      初始化速度(初始化速度=480.000000)  #156
+      goto 待机动画 #158
+
+## Graph BP_Zombie.攻击玩家
+
+CustomEvent 攻击范围检测():  #83
+  Macro Switch Has Authority()  #111
+    [Authority]:
+      SphereTraceSingle(Start=K2_GetActorLocation(), End=Add_VectorVector(A=Multiply_VectorVector(A=GetActorForwardVector(), B=150.000000), B=K2_GetActorLocation()), Radius=30.000000, TraceChannel=TraceTypeQuery3, bTraceComplex=false, ActorsToIgnore=∅, DrawDebugType=None, bIgnoreSelf=true, TraceColor=(R=1.000000,G=0.000000,B=0.000000,A=1.000000), TraceHitColor=(R=0.000000,G=1.000000,B=0.000000,A=1.000000), DrawTime=5.000000)  -> ReturnValue  #57
+      Branch(Condition=SphereTraceSingle#57.ReturnValue)  #98
+        [true]:
+          Branch(Condition=正在攻击)  #99
+            [false]:
+              正在攻击(正在攻击=true)  #162
+              Multicast_PlayAttackAnim()  #62
+
+CustomEvent 攻击伤害检测():  #84
+  Macro Switch Has Authority()  #109
+    [Authority]:
+      SphereTraceSingle(Start=GetSocketLocation(self=Mesh, InSocketName=开始骨骼), End=GetSocketLocation(self=Mesh, InSocketName=结束骨骼), Radius=30.000000, TraceChannel=TraceTypeQuery3, bTraceComplex=false, ActorsToIgnore=∅, DrawDebugType=None, bIgnoreSelf=true, TraceColor=(R=1.000000,G=0.000000,B=0.000000,A=1.000000), TraceHitColor=(R=0.000000,G=1.000000,B=0.000000,A=1.000000), DrawTime=5.000000)  -> OutHit, ReturnValue  #55
+      Branch(Condition=SphereTraceSingle#55.ReturnValue)  #100
+        [true]:
+          Macro DoOnce(Start Closed=false)  #110
+          ApplyDamage(DamagedActor=BreakHitResult(Hit=SphereTraceSingle#55.OutHit).HitActor, BaseDamage=10.000000, EventInstigator=∅, DamageCauser=∅, DamageTypeClass=∅)  #66
+          SpawnEmitterAtLocation(EmitterTemplate=P_SmokePuff1b, Location=BreakHitResult(Hit=SphereTraceSingle#55.OutHit).Location, Rotation=Conv_VectorToRotator(InVec=BreakHitResult(Hit=SphereTraceSingle#55.OutHit).Normal), Scale=0.100000,0.100000,0.100000, bAutoDestroy=true, PoolingMethod=None, bAutoActivateSystem=true)  #59
+
+CustomEvent 重置上伤害应用():  #85
+  goto Macro DoOnce #110 <Reset>
+
+CustomEvent Multicast_PlayAttackAnim  [RPC Net|Multicast]():  #86
+  PlayMontage(InSkeletalMeshComponent=Mesh, MontageToPlay=Select(Option 0=RM_RightAttack_Charged_01_Montage, Option 1=RM_RightAttack_Charged_01_Montage, Option 2=RM_RightAttack_Charged_03_Montage, Option 3=RM_LeftAttack_Charged_02_Montage, Index=RandomIntegerInRange(Min=0, Max=3)), PlayRate=1.200000, StartingPosition=0.000000, StartingSection="None", bShouldStopAllMontages=true)  #113
+    [On Completed]:
+      正在攻击(正在攻击=false)  #161
+  // exec nodes with no incoming exec (dead / disconnected): PrintString#67
+  // node #67 PrintString EnabledState=ENodeEnabledState::DevelopmentOnly
+
+## Graph BP_Zombie.死亡系统
+
+CustomEvent Multicast_HitReact  [RPC Net|Multicast]():  #87
+  Branch(Condition=正在攻击)  #102
+    [false]:
+      Branch(Condition=正在被击退)  #103
+        [false]:
+          正在被击退(正在被击退=true)  #164
+          PlayMontage(InSkeletalMeshComponent=Mesh, MontageToPlay=Select(Option 0=Zombie_HitReact_Head_Montage, Option 1=Zombie_HitReact_LeftArm_Montage, Option 2=Zombie_HitReact_RightArm_Montage, Index=RandomIntegerInRange(Min=0, Max=2)), PlayRate=1.000000, StartingPosition=1.300000, StartingSection="None", bShouldStopAllMontages=false)  #114
+            [On Completed]:
+              正在被击退(正在被击退=false)  #165
+            [On Interrupted]:
+              goto 正在被击退 #165
+
+CustomEvent Multicast_Death  [RPC Net|Multicast]():  #88
+  Macro DoOnce(Start Closed=false)  #112
+  SetCollisionEnabled(self=CapsuleComponent, NewType=NoCollision)  #69
+  SetSimulatePhysics(self=Mesh, bSimulate=true)  #74
+  PlayAnimation(self=Mesh, NewAnimToPlay=∅, bLooping=false)  #76
+  MaxWalkSpeed(MaxWalkSpeed=0.0, self=CharacterMovement)  #166
+  Sequence()  #92
+    [then_0]:
+      Delay(Duration=5.000000)  #77
+      K2_DestroyActor()  #78
+    [then_1]:
+      SetCastShadow(self=Mesh, NewCastShadow=false)  #79
+      SetForcedLOD(self=Mesh, InNewForcedLOD=3)  #80
+      K2_ClearTimer(Object=∅, FunctionName="追逐玩家")  #75
+    [then_2]:
+      GetActorOfClass(ActorClass=BP_ZombieSpawn_C)  -> ReturnValue  #70
+      重新生成(self=GetActorOfClass#70.ReturnValue)  #71
+
+Event ReceiveAnyDamage(Damage, DamageType, InstigatedBy, DamageCauser):  #91
+  血量(血量=Subtract_DoubleDouble(A=血量, B=Event ReceiveAnyDamage#91.Damage))  -> Output_Get  #163
+  Branch(Condition=LessEqual_DoubleDouble(A=血量#163.Output_Get, B=0.0))  #101
+    [true]:
+      Multicast_Death()  #72
+    [false]:
+      Multicast_HitReact()  #73
+  // comment: ue5.5 会导致引擎直接崩溃
+  // exec nodes with no incoming exec (dead / disconnected): K2_DestroyComponent#81

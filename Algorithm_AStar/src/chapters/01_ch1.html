@@ -1,0 +1,198 @@
+<div class="part-head" data-toc="第一部分 · 图搜索家族">
+  <div class="no">PART ONE</div>
+  <h1>第一部分　从 BFS 到 A*：图搜索家族</h1>
+  <p>A* 不是凭空出现的。把 BFS、Dijkstra、贪心最佳优先放在一起比较，就能看清 A* 的 f = g + h 到底组合了什么。</p>
+</div>
+
+<section class="chapter" id="ch1">
+  <div class="ch-head">
+    <div class="no">CHAPTER 01</div>
+    <h1>寻路问题的建模，以及 A* 的四位前辈</h1>
+    <p class="lead">先把“地图”变成“图”，再看四种算法各自按什么顺序访问节点。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清游戏里三种常见的寻路图：格子图、路点图、导航网格</li>
+    <li>理解 4 / 8 方向、移动代价和“禁止切角”这几条移动规则</li>
+    <li>看懂 BFS、Dijkstra、贪心最佳优先在同一张图上的搜索范围差异</li>
+    <li>能用一句话说出 A* 和它们的关系</li>
+  </ul></div>
+
+  <h2>1.1 把地图变成图</h2>
+  <p>寻路的本质是在带权图 G = (V, E, cost) 上求起点到终点代价最小的路径。游戏地图本身不是图，要先选一种表示方法：</p>
+  <figure>
+  <svg viewBox="0 0 860 290" xmlns="http://www.w3.org/2000/svg">
+    <text x="150" y="30" text-anchor="middle" class="b">① 格子图（Grid）</text>
+    <text x="430" y="30" text-anchor="middle" class="b">② 路点图（Waypoint Graph）</text>
+    <text x="710" y="30" text-anchor="middle" class="b">③ 导航网格（NavMesh）</text>
+    <g stroke="#E5E7EB" fill="#FFFFFF">
+      <rect x="30" y="50" width="240" height="168" stroke="#9CA3AF"/>
+    </g>
+    <g stroke="#E5E7EB" stroke-width="1">
+      <line x1="54" y1="50" x2="54" y2="218"/><line x1="78" y1="50" x2="78" y2="218"/><line x1="102" y1="50" x2="102" y2="218"/><line x1="126" y1="50" x2="126" y2="218"/><line x1="150" y1="50" x2="150" y2="218"/>
+      <line x1="174" y1="50" x2="174" y2="218"/><line x1="198" y1="50" x2="198" y2="218"/><line x1="222" y1="50" x2="222" y2="218"/><line x1="246" y1="50" x2="246" y2="218"/>
+      <line x1="30" y1="74" x2="270" y2="74"/><line x1="30" y1="98" x2="270" y2="98"/><line x1="30" y1="122" x2="270" y2="122"/><line x1="30" y1="146" x2="270" y2="146"/><line x1="30" y1="170" x2="270" y2="170"/><line x1="30" y1="194" x2="270" y2="194"/>
+    </g>
+    <rect x="126" y="98" width="48" height="72" fill="#4B5563"/>
+    <circle cx="42" cy="134" r="7" fill="#2F5BD3"/><circle cx="258" cy="134" r="7" fill="#B91C1C"/>
+    <rect x="310" y="50" width="240" height="168" fill="#FFFFFF" stroke="#9CA3AF"/>
+    <rect x="406" y="98" width="48" height="72" fill="#4B5563"/>
+    <g stroke="#2F5BD3" stroke-width="1.6">
+      <line x1="330" y1="134" x2="380" y2="76"/><line x1="330" y1="134" x2="380" y2="192"/><line x1="380" y1="76" x2="480" y2="76"/>
+      <line x1="380" y1="192" x2="480" y2="192"/><line x1="480" y1="76" x2="530" y2="134"/><line x1="480" y1="192" x2="530" y2="134"/>
+      <line x1="380" y1="76" x2="380" y2="192"/><line x1="480" y1="76" x2="480" y2="192"/>
+    </g>
+    <g fill="#EAF0FD" stroke="#2F5BD3" stroke-width="1.6">
+      <circle cx="380" cy="76" r="6"/><circle cx="480" cy="76" r="6"/><circle cx="380" cy="192" r="6"/><circle cx="480" cy="192" r="6"/>
+    </g>
+    <circle cx="330" cy="134" r="7" fill="#2F5BD3"/><circle cx="530" cy="134" r="7" fill="#B91C1C"/>
+    <rect x="590" y="50" width="240" height="168" fill="#FFFFFF" stroke="#9CA3AF"/>
+    <g stroke="#15803D" stroke-width="1.4">
+      <rect x="590" y="50" width="96" height="168" fill="#EAF7EF"/>
+      <rect x="686" y="50" width="48" height="48" fill="#F3EEFE" stroke="#6D28D9"/>
+      <rect x="686" y="170" width="48" height="48" fill="#F3EEFE" stroke="#6D28D9"/>
+      <rect x="734" y="50" width="96" height="168" fill="#EAF7EF"/>
+    </g>
+    <rect x="686" y="98" width="48" height="72" fill="#4B5563"/>
+    <g stroke="#C2410C" stroke-width="3"><line x1="686" y1="50" x2="686" y2="98"/><line x1="734" y1="50" x2="734" y2="98"/><line x1="686" y1="170" x2="686" y2="218"/><line x1="734" y1="170" x2="734" y2="218"/></g>
+    <g stroke="#6B7280" stroke-width="1.2" stroke-dasharray="3 3"><line x1="638" y1="134" x2="710" y2="74"/><line x1="710" y1="74" x2="782" y2="134"/><line x1="638" y1="134" x2="710" y2="194"/><line x1="710" y1="194" x2="782" y2="134"/></g>
+    <g fill="#6B7280"><circle cx="638" cy="134" r="3.5"/><circle cx="710" cy="74" r="3.5"/><circle cx="710" cy="194" r="3.5"/><circle cx="782" cy="134" r="3.5"/></g>
+    <circle cx="602" cy="134" r="7" fill="#2F5BD3"/><circle cx="818" cy="134" r="7" fill="#B91C1C"/>
+    <g class="sm" text-anchor="middle">
+      <text x="150" y="240">节点 = 格子，边 = 相邻格</text>
+      <text x="150" y="258" class="xs">512×512 就有 26 万个节点</text>
+      <text x="430" y="240">节点 = 人工 / 自动摆放的点</text>
+      <text x="430" y="258" class="xs">节点少；只能走在边上，路线生硬</text>
+      <text x="710" y="240">节点 = 凸多边形，边 = 公共边（橙）</text>
+      <text x="710" y="258" class="xs">节点最少；多边形内部可自由走</text>
+    </g>
+    <text x="430" y="282" text-anchor="middle" class="xs">同一个房间、同一块障碍：表示越“粗”，图越小，搜索越快，但需要额外的步骤把路径变平滑</text>
+  </svg>
+  <figcaption><b>图 1-1</b>　游戏里的三种寻路图：A* 在三者上都能用，区别只在于“节点是什么、邻居怎么取、代价怎么算”</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>表示</th><th>优点</th><th>缺点</th><th>典型场景</th></tr>
+    <tr><td><strong>格子图</strong></td><td>实现最简单；动态障碍改一个格子就行；天然适合 JPS、流场</td><td>节点多、内存大；路径是锯齿状的，要做平滑</td><td>RTS、塔防、战棋、2D 游戏、服务器上的粗略寻路</td></tr>
+    <tr><td><strong>路点图</strong></td><td>节点很少，速度最快</td><td>只能沿边走；美术改地图就要重摆路点；覆盖不全时会“走不到”</td><td>早期 FPS、固定路线的 NPC、MOBA 小兵沿兵线走</td></tr>
+    <tr><td><strong>导航网格</strong></td><td>节点少，又能覆盖整片可走区域；路径自然</td><td>生成复杂（体素化、区域划分、三角化）；动态修改代价高</td><td>3D 游戏的主流：UE、Unity 内置寻路，Recast/Detour</td></tr>
+  </table></div>
+  <p>后面的算法讲解统一用格子图，因为它最直观；第 7 章再回到导航网格。<strong>A* 本身和图的表示无关</strong>：只要能回答“这个节点有哪些邻居、走过去花多少、离终点估计还有多远”，就能跑 A*。</p>
+
+  <h2>1.2 移动规则：方向、代价与“切角”</h2>
+  <ul>
+    <li><strong>4 方向</strong>：只能上下左右，每步代价 1。</li>
+    <li><strong>8 方向</strong>：再加 4 个斜向。斜走代价应为 √2 ≈ 1.414；如果也算 1，路径会莫名其妙地多走斜线。工程上常用整数 10 / 14 或 1000 / 1414，避免浮点误差。</li>
+    <li><strong>禁止切角</strong>：斜走时，两侧的直邻格都必须可走。否则角色会贴着墙角“穿”过去，在 3D 里表现为模型卡进墙里。</li>
+  </ul>
+  <figure>
+  <svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(120,20)">
+      <g stroke="#E5E7EB" fill="#FFFFFF"><rect x="0" y="0" width="150" height="150"/></g>
+      <g stroke="#E5E7EB"><line x1="50" y1="0" x2="50" y2="150"/><line x1="100" y1="0" x2="100" y2="150"/><line x1="0" y1="50" x2="150" y2="50"/><line x1="0" y1="100" x2="150" y2="100"/></g>
+      <rect x="100" y="50" width="50" height="50" fill="#4B5563"/>
+      <circle cx="75" cy="75" r="9" fill="#2F5BD3"/><circle cx="125" cy="25" r="9" fill="#15803D"/>
+      <line x1="75" y1="75" x2="119" y2="31" stroke="#15803D" stroke-width="2.2" marker-end="url(#ag)"/>
+      <rect x="50" y="0" width="50" height="50" fill="#FFFFFF" stroke="#E5E7EB"/>
+      <text x="75" y="175" text-anchor="middle" class="sm b" style="fill:#B91C1C">允许切角：贴着墙角斜穿</text>
+    </g>
+    <g transform="translate(360,20)">
+      <rect x="0" y="0" width="150" height="150" fill="#FFFFFF" stroke="#E5E7EB"/>
+      <g stroke="#E5E7EB"><line x1="50" y1="0" x2="50" y2="150"/><line x1="100" y1="0" x2="100" y2="150"/><line x1="0" y1="50" x2="150" y2="50"/><line x1="0" y1="100" x2="150" y2="100"/></g>
+      <rect x="100" y="50" width="50" height="50" fill="#4B5563"/>
+      <circle cx="75" cy="75" r="9" fill="#2F5BD3"/><circle cx="125" cy="25" r="9" fill="#15803D"/>
+      <line x1="75" y1="75" x2="117" y2="33" stroke="#B91C1C" stroke-width="2.2" stroke-dasharray="4 3"/>
+      <text x="112" y="58" class="b" style="fill:#B91C1C;font-size:20px">✕</text>
+      <path d="M75,64 V31 H113" fill="none" stroke="#15803D" stroke-width="2.2" marker-end="url(#ag)"/>
+      <text x="75" y="175" text-anchor="middle" class="sm b" style="fill:#15803D">禁止切角：先直走再横走</text>
+    </g>
+    <g transform="translate(600,20)">
+      <rect x="0" y="0" width="150" height="150" fill="#FFFFFF" stroke="#E5E7EB"/>
+      <g stroke="#E5E7EB"><line x1="50" y1="0" x2="50" y2="150"/><line x1="100" y1="0" x2="100" y2="150"/><line x1="0" y1="50" x2="150" y2="50"/><line x1="0" y1="100" x2="150" y2="100"/></g>
+      <rect x="100" y="50" width="50" height="50" fill="#4B5563"/><rect x="50" y="0" width="50" height="50" fill="#4B5563"/>
+      <circle cx="75" cy="75" r="9" fill="#2F5BD3"/><circle cx="125" cy="25" r="9" fill="#15803D"/>
+      <line x1="75" y1="75" x2="117" y2="33" stroke="#B91C1C" stroke-width="2.2" stroke-dasharray="4 3"/>
+      <text x="75" y="175" text-anchor="middle" class="sm b">两侧都堵：无论哪种规则都不能斜穿</text>
+    </g>
+  </svg>
+  <figcaption><b>图 1-2</b>　“切角”规则。本书统一禁止切角；这时“8 方向可达”和“4 连通”是等价的，判断连通性可以用简单的 4 连通 flood fill</figcaption>
+  </figure>
+  <div class="co warn"><span class="h">面试注意：切角是一个常见的线上 bug</span>
+    <p>“小兵卡在墙角”“角色贴墙穿过去了”，很多时候就是寻路允许切角，而物理碰撞不允许。这时寻路给出的路径物理上走不通，角色会卡住或抖动。<strong>寻路的移动规则必须和角色真实的碰撞体积一致</strong>，导航网格要按角色半径向内收缩（agent radius），也是这个道理。</p>
+  </div>
+
+  <h2>1.3 四位前辈：按什么顺序访问节点</h2>
+  <p>所有图搜索都有同一个骨架：维护一个“待处理”集合（open / frontier），每次取出一个节点展开，把它的邻居放进去。<strong>区别只在于“每次取哪一个”</strong>：</p>
+  <div class="tbl"><table>
+    <tr><th>算法</th><th>open 的数据结构</th><th>每次取出</th><th>看了什么信息</th></tr>
+    <tr><td>BFS</td><td>队列（FIFO）</td><td>最早放进去的</td><td>只看步数</td></tr>
+    <tr><td>Dijkstra</td><td>优先队列</td><td>g 最小的（离起点代价最小）</td><td>只看“已经走了多远”</td></tr>
+    <tr><td>贪心最佳优先</td><td>优先队列</td><td>h 最小的（估计离终点最近）</td><td>只看“估计还要走多远”</td></tr>
+    <tr><td><strong>A*</strong></td><td>优先队列</td><td><strong>f = g + h 最小的</strong></td><td>两者都看：经过它的整条路径估计有多长</td></tr>
+  </table></div>
+  <p>下面四张图是在同一张带 U 型障碍的地图上，四种算法跑完后的状态。蓝色是已经展开过的节点（closed），绿色是还在 open 里等待的节点，橙色是最终路径。标题里的“代价”用的是直走 10、斜走 14。</p>
+  <!--grid {"map":[
+    "................",
+    "................",
+    ".......####.....",
+    "..........#.....",
+    "...S......#..G..",
+    "..........#.....",
+    ".......####.....",
+    "................",
+    "................",
+    "................"],
+    "per":2,"cell":26,"nums":"","arrows":false,
+    "panels":[
+      {"algo":"bfs","title":"BFS：展开 {exp}，代价 {cost}"},
+      {"algo":"dijkstra","title":"Dijkstra：展开 {exp}，代价 {cost}"},
+      {"algo":"greedy","title":"贪心最佳优先：展开 {exp}，代价 {cost}"},
+      {"algo":"astar","title":"A*（Octile）：展开 {exp}，代价 {cost}"}],
+    "cap":"<b>图 1-3</b>　同一张图上的四种搜索：BFS 和 Dijkstra 向四周扩散；贪心钻进 U 型凹口再绕出来，路径更长；A* 搜得比 Dijkstra 少，路径同样最优"} -->
+
+  <h3>BFS：只在等权图上最优</h3>
+  <p>BFS 一层一层往外扩，第一次碰到终点时走的<strong>步数</strong>最少。但 8 方向时斜走代价是 1.414，步数最少不等于代价最小。实测 E1 中，随机障碍图上 BFS 有 72% 的路径不是最短的。BFS 的价值在于简单、常数小：在等权图上（比如 4 方向、每步代价相同的战棋），它就是最好的选择；它还常用来做 flood fill、计算连通块、计算“几步之内能走到哪”（战棋的移动范围）。</p>
+
+  <h3>Dijkstra：按 g 扩散</h3>
+  <p>Dijkstra（1959）每次取出 g 最小的节点。边权非负时，一个节点第一次被取出，它的 g 就是最短距离。它的搜索范围是以起点为圆心的“等代价圈”，<strong>完全不知道终点在哪个方向</strong>，所以要把离起点比终点更近的点全部展开一遍。</p>
+<!--code:text:Dijkstra · 伪代码-->
+dist[S] = 0；把 S 放入优先队列
+while 队列非空:
+    u = 取出 dist 最小的节点
+    if u 已处理: continue
+    标记 u 已处理
+    if u == G: break               // 单目标时可以提前结束
+    for 每条边 (u, v, w):
+        if dist[u] + w < dist[v]:
+            dist[v] = dist[u] + w；parent[v] = u；把 v 放入队列
+<!--/code-->
+  <p>它的优点是<strong>一次搜索能得到起点到所有点的最短路</strong>。游戏里如果要“从一个点出发，算到很多目标的距离”（比如 AI 要从所有资源点里挑最近的一个，或者计算整张图的距离场），一次 Dijkstra 比跑很多次 A* 划算得多。</p>
+
+  <h3>贪心最佳优先：按 h 直冲</h3>
+  <p>只看 h，每次都走“看起来离终点最近”的节点。开阔地上它快得惊人（E1：开阔地展开 228 个节点，Dijkstra 要 127329 个），但它对已经走了多远毫不在意，会钻进凹形障碍再绕出来，路径也不保证最短（E1：随机障碍图上 100% 非最优，平均长 14%）。</p>
+
+  <h3>A*：把两者加起来</h3>
+  <p>Hart、Nilsson、Raphael 在 1968 年提出 A*。f(n) = g(n) + h(n) 估计的是“经过 n 的那条完整路径有多长”。g 保证它不会像贪心那样无视已走过的代价，h 让它像贪心一样朝终点偏。只要 h 不高估，A* 就和 Dijkstra 一样能找到最短路，同时搜得更少。</p>
+
+  <h2>1.4 交互实验：同一张图，四种算法</h2>
+  <p>切换地图试试：在“U 型陷阱”上贪心的路径明显绕远；在“迷宫”里 A* 和 Dijkstra 几乎一样，因为启发函数被墙误导了；“空地”上 A* 只展开路径附近的格子。</p>
+  <div class="lab cmplab" id="lab-family" data-algos="bfs,dijkstra,greedy:octile,astar:octile" data-map="trap" data-w="48" data-h="28"></div><!--/lab-->
+
+  <div class="co ver"><span class="h">实测 E1（节选）：512×512，40 次查询的平均展开节点数</span>
+    <div class="tbl"><table>
+      <tr><th>地图</th><th>BFS</th><th>Dijkstra</th><th>贪心</th><th>A*</th></tr>
+      <tr><td>开阔地</td><td>128450</td><td>127329</td><td>228</td><td><strong>228</strong></td></tr>
+      <tr><td>随机障碍 25%</td><td>91515</td><td>90947</td><td>360（非最优）</td><td><strong>11758</strong></td></tr>
+      <tr><td>U 型陷阱</td><td>205173</td><td>207016</td><td>42496（52% 非最优）</td><td><strong>52359</strong></td></tr>
+      <tr><td>迷宫</td><td>80179</td><td>80180</td><td>55842</td><td><strong>79476</strong></td></tr>
+      <tr><td>房间</td><td>114689</td><td>115138</td><td>382（98% 非最优）</td><td><strong>7822</strong></td></tr>
+    </table></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>寻路 = 带权图上的最短路。三种图：<strong>格子</strong>（简单、动态好改）、<strong>路点</strong>（最少节点）、<strong>导航网格</strong>（3D 主流）。</li>
+    <li>8 方向斜走代价 √2（整数 14 / 1414）；<strong>禁止切角</strong>，寻路规则必须和碰撞体积一致。</li>
+    <li>四种算法只差“每次取出谁”：BFS 取最早的，Dijkstra 取 g 最小，贪心取 h 最小，<strong>A* 取 g + h 最小</strong>。</li>
+    <li>A* 在开阔地上和贪心一样快，又和 Dijkstra 一样最优；但启发函数被障碍误导时（迷宫），它也会退化到接近 Dijkstra。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：战棋游戏里要显示“这个单位这回合能走到哪些格子”，用什么算法？</summary><p>每步代价相同时用 BFS，限制层数为移动力；不同地形代价不同（沼泽 2、道路 1）时，用以单位为起点、代价上限为移动力的 Dijkstra。这里没有单一终点，A* 用不上。</p></details>
+  <details class="quiz"><summary>自测：要从 30 个补给点里找离玩家最近的一个，跑 30 次 A* 合适吗？</summary><p>不合适。以玩家为起点跑一次 Dijkstra，第一个被取出的补给点就是最近的，可以立刻停止。也可以把 30 个补给点同时作为起点（多源 Dijkstra）反向搜索。</p></details>
+</section>

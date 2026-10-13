@@ -1,0 +1,169 @@
+<section class="chapter" id="ch10">
+<div class="ch-head"><div class="no">CHAPTER 10</div><h1>Actor-Critic 与 GAE</h1><p class="lead">REINFORCE 的方差来自“整条回报”。Actor-Critic 再训练一个价值网络（critic），用它的估计代替一部分真实回报：一步 TD 误差方差最小但依赖 critic 准不准，蒙特卡洛回报无偏但方差大。GAE 用一个 λ 在两者之间连续调节，是 PPO 的标准配置，也是手撕代码的头号高频题。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>证明 critic 准确时 $\E[\delta_t\mid s_t,a_t]=A_\pi(s_t,a_t)$；推出 GAE 闭式、两端（λ = 0 / 1）和倒序递推。</li>
+<li>说清 GAE 的偏差只来自 critic 误差：critic 精确时任何 λ 都无偏；用实测曲线展示偏差-方差权衡。</li>
+<li>正确处理 <code>terminated</code> / <code>truncated</code> / rollout 末尾三种边界，能手写 GAE 并通过对拍。</li>
+<li>讲清 A3C 与 A2C 的区别、共享 / 分离网络、熵正则与 value loss 系数。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>策略梯度里乘在 $\nabla\log\pi$ 后面的权重可以是回报、回报减基线、Q 或优势，其中<strong>优势</strong> $A(s,a)=Q(s,a)-V(s)$ 方差最小。用 critic $V$ 估计优势最简单的方法是 TD 误差 $\delta_t=r_t+\gamma V(s_{t+1})-V(s_t)$：critic 准确时它是优势的无偏估计，但只看一步，critic 不准就有偏。k 步优势 $\sum_{l<k}\gamma^l\delta_{t+l}$ 看得更远、偏差更小、方差更大。GAE 把所有 k 步优势按 $(1-\lambda)\lambda^{k-1}$ 加权平均，结果是 $\hat A_t=\sum_l(\gamma\lambda)^l\delta_{t+l}$，倒序一遍就能算：$\hat A_t=\delta_t+\gamma\lambda(1-d_t)\hat A_{t+1}$。λ = 0 是一步 TD，λ = 1 是蒙特卡洛回报减 $V$。实现时要分清：<strong>终止</strong>时 $\delta$ 里不加 $\gamma V(s')$，<strong>截断</strong>时要用截断那一刻观测的 $V$ 自举，两者都要切断递推。critic 的回归目标是 $\hat A_t+V(s_t)$，也就是 λ-回报。</p></div>
+
+<h2>10.1 从 REINFORCE 到 Actor-Critic</h2>
+<p>第 9 章证明了：策略梯度可以写成 $\E\big[\sum_t\nabla\log\pi_\theta(a_t\mid s_t)\,\psi_t\big]$，其中 ψ 有很多合法的选择（Schulman et al., 2016 的总结）：</p>
+<div class="tbl"><table>
+<tr><th>ψₜ</th><th>名字 / 算法</th><th>偏差</th><th>方差</th></tr>
+<tr><td>$R(\tau)=\sum_k\gamma^kr_k$</td><td>REINFORCE 原始版</td><td>无</td><td>最大</td></tr>
+<tr><td>$G_t$</td><td>reward-to-go</td><td>无</td><td>大</td></tr>
+<tr><td>$G_t-b(s_t)$</td><td>带基线的 REINFORCE</td><td>无</td><td>较大</td></tr>
+<tr><td>$Q_\pi(s_t,a_t)$</td><td>Q Actor-Critic（QAC）</td><td>取决于 Q 的估计</td><td>中</td></tr>
+<tr><td>$A_\pi(s_t,a_t)$</td><td>Advantage Actor-Critic（A2C）</td><td>取决于估计</td><td>最小（理想情况）</td></tr>
+<tr><td>$\delta_t=r_t+\gamma V(s_{t+1})-V(s_t)$</td><td>一步 TD Actor-Critic</td><td>critic 不准时有偏</td><td>小</td></tr>
+<tr><td>$\hat A^{\text{GAE}(\gamma,\lambda)}_t$</td><td>GAE（PPO 默认）</td><td>随 λ 增大而减小</td><td>随 λ 增大而增大</td></tr>
+</table></div>
+<p class="tcap"><b>表 10-1</b>　策略梯度中可用的权重。从上到下，越来越依赖学到的价值函数，方差越来越小。</p>
+<p><strong>Actor</strong> 是策略网络 $\pi_\theta$，<strong>critic</strong> 是价值网络 $V_\phi$（或 $Q_\phi$）。critic 用第 5 章的 TD / λ-回报方法学 $V_\pi$，actor 用 critic 给出的优势做策略梯度。两者交替改进，就是第 4 章 GPI 的又一个实例：critic 做（近似的）策略评估，actor 做（一小步的）策略改进。</p>
+
+<h2>10.2 TD 误差是优势函数的无偏估计</h2>
+<!--deriv critic 准确时，E[δₜ | sₜ, aₜ] = A_π(sₜ, aₜ)
+\E\big[\delta_t\,\big|\,s_t,a_t\big] & = \E\big[r_t+\gamma V_\pi(s_{t+1})\,\big|\,s_t,a_t\big]-V_\pi(s_t) || 假设 $V=V_\pi$（critic 准确）；$V_\pi(s_t)$ 是常数
+& = Q_\pi(s_t,a_t)-V_\pi(s_t) || Q 的 Bellman 方程：$Q_\pi(s,a)=\E[r+\gamma V_\pi(s')\mid s,a]$
+* & = A_\pi(s_t,a_t) || 所以一步 TD 误差就是优势的无偏样本，只需要学一个 $V$，不必学 $Q$
+# critic 有误差 $V=V_\pi+\varepsilon$ 时：
+\E\big[\delta_t\,\big|\,s_t,a_t\big] & = A_\pi(s_t,a_t)+\gamma\,\E\big[\varepsilon(s_{t+1})\mid s_t,a_t\big]-\varepsilon(s_t) || $-\varepsilon(s_t)$ 只依赖状态，是“基线误差”，不影响策略梯度的期望；<strong>真正有害的是 $\gamma\E[\varepsilon(s_{t+1})\mid s_t,a_t]$</strong>：它随动作变化
+-->
+<p>这一点很重要：critic 误差里“只依赖当前状态”的部分，对策略梯度来说等于换了个基线，无害；有害的是经由下一状态进来、依赖动作的那部分。下面 GAE 的偏差分析就围绕这一项展开。</p>
+
+<h2>10.3 GAE：在一步 TD 和蒙特卡洛之间连续调节</h2>
+<p>只看一步，critic 误差进来的权重是 γ；看 k 步再自举，进来的权重是 $\gamma^k$（第 5 章 n 步回报的误差缩减性质）。k 步优势估计：</p>
+$$\hat A^{(k)}_t=\sum_{l=0}^{k-1}\gamma^l\delta_{t+l}=-V(s_t)+r_t+\gamma r_{t+1}+\cdots+\gamma^{k-1}r_{t+k-1}+\gamma^kV(s_{t+k})$$
+<p>（第二个等号是 TD 误差的“望远镜求和”，中间的 $V$ 两两抵消。）$k=1$ 偏差大、方差小；$k\to\infty$ 就是 $G_t-V(s_t)$，偏差只剩基线误差、方差大。GAE 把它们几何加权平均：</p>
+<!--deriv GAE 的闭式：k 步优势的几何加权平均 = Σ (γλ)ˡ δₜ₊ₗ
+\hat A^{\text{GAE}}_t & \doteq(1-\lambda)\big(\hat A^{(1)}_t+\lambda\hat A^{(2)}_t+\lambda^2\hat A^{(3)}_t+\cdots\big) || 权重 $(1-\lambda)\lambda^{k-1}$ 之和为 1（和第 5 章的 λ-回报完全一样）
+& = (1-\lambda)\big(\delta_t(1+\lambda+\lambda^2+\cdots)+\gamma\delta_{t+1}(\lambda+\lambda^2+\cdots)+\gamma^2\delta_{t+2}(\lambda^2+\cdots)+\cdots\big) || 把每个 $\hat A^{(k)}$ 展开成 δ 之和，再按 $\delta_{t+l}$ 合并同类项：$\delta_{t+l}$ 出现在所有 $k>l$ 的项里
+& = (1-\lambda)\Big(\delta_t\frac{1}{1-\lambda}+\gamma\delta_{t+1}\frac{\lambda}{1-\lambda}+\gamma^2\delta_{t+2}\frac{\lambda^2}{1-\lambda}+\cdots\Big) || 几何级数 $\sum_{k\ge l}\lambda^k=\frac{\lambda^l}{1-\lambda}$
+* \hat A^{\text{GAE}}_t & = \sum_{l=0}^{\infty}(\gamma\lambda)^l\,\delta_{t+l} || λ = 0：$\hat A_t=\delta_t$（一步 TD）；λ = 1：$\sum_l\gamma^l\delta_{t+l}=G_t-V(s_t)$（蒙特卡洛减基线）
+\hat A_t & = \delta_t+\gamma\lambda\,\hat A_{t+1} || 闭式拆出第一项就是倒序递推：从 rollout 末尾往前扫一遍，$O(T)$
+-->
+<p>这就是第 5 章恒等式 ② 的直接应用：$\hat A^{\text{GAE}}_t=G^\lambda_t-V(s_t)$，所以 critic 的回归目标取 $\hat A_t+V(s_t)$，正好是 λ-回报。</p>
+<div class="co tip"><span class="h">面试注意：critic 精确时，GAE 对任何 λ 都无偏</span><p>由 10.2 节，$V=V_\pi$ 时每个 $\E[\delta_{t+l}\mid s_t,a_t]$ 在 $l\ge1$ 时都等于 $\E[A_\pi(s_{t+l},a_{t+l})]=0$（优势在策略下的期望为 0），只剩 $l=0$ 那一项 $A_\pi(s_t,a_t)$。所以<strong>λ 不是在“偏差小的 MC”和“偏差大的 TD”之间选，而是在“对 critic 误差的敏感度”和“方差”之间选</strong>：critic 越不准，越需要大 λ。</p></div>
+<p>在一个 6 状态 × 3 动作的随机 MDP 上验证（γ = 0.95，奖励带噪声）：偏差用转移矩阵解析计算 $\E[\hat A_t\mid s_t,a_t]$，只保留与梯度相关的部分（去掉每个状态内的平移，见 10.2 节）；方差用 [[ch10.e2.N]] 条采样轨迹估计（<code>demos/ch10_ac_gae.cpp</code> E2）。critic 精确时，所有 λ 的偏差² 都只有 [[ch10.e2.exact.b2_0|.0e]] 量级（浮点舍入误差，即严格为 0）；给 critic 加上与 $V$ 同量级的误差后：</p>
+<!--plot {"x":[0,1],"y":[0,0.06],"h":290,"xlabel":"λ","ylabel":"优势估计的误差分量","legend":"tl",
+"series":[{"path":"ch10.e2.noisy.b2","n":"偏差²（与梯度相关的部分）","c":"r","dots":true},{"path":"ch10.e2.noisy.varB","n":"方差 / B（B = 64）","c":"b","dots":true},{"path":"ch10.e2.noisy.mse","n":"均方误差 = 偏差² + 方差 / B","c":"k","dots":true,"sw":2.6}],
+"cap":"<b>图 10-1</b>　带误差 critic 下 GAE 的偏差-方差权衡（C++ 实测）。偏差² 从 λ = 0 的 [[ch10.e2.noisy.b2_0|.4f]] 单调降到 λ = 1 的 0（数值为 [[ch10.e2.noisy.b2_1|.0e]]）；单样本方差从 [[ch10.e2.noisy.var_0|.3f]] 升到 [[ch10.e2.noisy.var_1|.3f]]。batch 为 64 时均方误差最小在 λ = [[ch10.e2.noisy.best|.2f]]。最优 λ 取决于 critic 误差和 batch 大小，没有通用答案。"} -->
+
+<h2>10.4 实现细节：终止、截断与 rollout 末尾</h2>
+<p>PPO / A2C 每次固定采 T 步（比如每个环境 128 步），rollout 里会混着若干局的片段。每一步要区分三种情况：</p>
+<ol>
+<li><strong>终止</strong>（terminated）：游戏真的结束了。$\delta_t=r_t-V(s_t)$，没有未来价值；递推切断。</li>
+<li><strong>截断</strong>（truncated，时间上限）：游戏还没结束，只是我们不玩了。$\delta_t=r_t+\gamma V(s^{\text{final}}_{t+1})-V(s_t)$，<strong>要用截断那一刻的观测</strong>算 $V$；递推同样切断（下一步属于新的一局）。向量化环境在截断时会自动重置，返回的 <code>next_obs</code> 已经是新局的第一帧，真正的最后一帧在 <code>info["final_observation"]</code> 里，这是最常见的 bug 来源。</li>
+<li><strong>rollout 末尾</strong>：游戏在继续，只是这批数据采完了。$\delta_{T-1}$ 用最后一个观测的 $V$ 自举，$\hat A_T$ 视为 0（相当于截断）。</li>
+</ol>
+<!--dtab {"rows":"ch10.e1.rows","hlif":"term==1 or trunc==1","cols":[["t","t"],["rₜ","r","+.1f"],["V(sₜ)","v",".3f"],["V(sₜ₊₁)","=('—' if term else format(vn,'.3f'))"],["终止","=('✓' if term else '')"],["截断","=('✓' if trunc else '')"],["δₜ","delta","+.4f"],["Âₜ（正确）","adv","+.4f"],["critic 目标 Âₜ+V","ret",".4f"],["Âₜ（截断当终止）","adv_bad","+.4f"]],
+"cap":"<b>表 10-2</b>　16 步 rollout 的 GAE 逐步计算（γ = [[ch10.e1.gamma]]，λ = [[ch10.e1.lam]]，<code>demos/ch10_ac_gae.cpp</code> E1 生成，Python 手撕版逐项对拍一致）。高亮的 t = 5 是终止、t = 11 是截断。最后一列把截断错当成终止：t = 11 的 δ 少了 $\\gamma V(s^{\\text{final}})$，t = 6~11 的优势全部跟着偏低。"} -->
+<p>从表里可以看到两个检查点：t = 5 和 t = 11 处的 $\hat A$ 只等于本步的 δ（递推被切断）；t = 15（rollout 末尾）的 $\hat A$ 也只等于 δ，但它的 δ 里包含了 $\gamma V(s_{16})$。手撕代码时把这三种情况都说清楚，面试官基本就满意了。</p>
+
+<h2>10.5 A3C 与 A2C</h2>
+<!--flow {"w":900,"h":250,
+"boxes":[
+{"id":"g","x":40,"y":24,"w":360,"h":46,"t":"A3C：全局参数服务器 θ","s":"Hogwild 式异步写入","c":"o"},
+{"id":"w1","x":30,"y":130,"w":110,"h":56,"t":"worker 1","s":"环境 + 网络副本","c":"o"},
+{"id":"w2","x":165,"y":130,"w":110,"h":56,"t":"worker 2","s":"各自算梯度","c":"o"},
+{"id":"w3","x":300,"y":130,"w":110,"h":56,"t":"worker n","s":"参数可能过期","c":"o"},
+{"id":"b","x":500,"y":24,"w":360,"h":46,"t":"A2C：一个 learner","s":"等所有环境的 rollout 到齐再更新","c":"b"},
+{"id":"e","x":500,"y":130,"w":360,"h":56,"t":"N 个并行环境（向量化）","s":"同一份参数推理一个 batch，GPU 友好","c":"b"}],
+"arrows":[
+{"p":[[85,130],[85,70]],"c":"o","label":"梯度","lx":90,"ly":104},{"p":[[220,130],[220,70]],"c":"o"},{"p":[[355,130],[355,70]],"c":"o"},
+{"p":[[640,70],[640,130]],"c":"b","label":"动作（batch）","lx":648,"ly":104},{"p":[[740,130],[740,70]],"c":"b","label":"N×T 条数据","lx":748,"ly":104}],
+"texts":[
+{"x":220,"y":222,"a":"middle","cls":"sm","t":"异步：靠不同 worker 探索不同状态来去相关"},
+{"x":680,"y":222,"a":"middle","cls":"sm","t":"同步：靠多个环境同时采样来去相关，结果可复现"}],
+"cap":"<b>图 10-2</b>　A3C（左）与 A2C（右）。A3C 的初衷是在没有经验回放的情况下，用多个异步 worker 打破样本相关性；OpenAI 后来发现同步版本 A2C 效果不差，而且能更好地利用 GPU 合批推理。"} -->
+<p>A3C 被 A2C / PPO 取代的原因：① 异步更新时，worker 用过期参数算的梯度会写回全局（“陈旧梯度”），训练不稳定、不可复现；② CPU 上逐个样本推理浪费，同步合批后 GPU 吞吐高得多；③ 大规模训练系统（第 19 章 IMPALA）用“异步采样 + 集中学习 + V-trace 修正”取代了异步梯度。面试回答时可以把这条演进线讲出来。</p>
+
+<h2>10.6 网络结构与总损失</h2>
+<p>A2C / PPO 的总损失一般写成三项：</p>
+$$L(\theta,\phi)=\underbrace{-\frac1N\sum\log\pi_\theta(a_t\mid s_t)\hat A_t}_{\text{策略损失}}+c_v\underbrace{\frac1N\sum\big(V_\phi(s_t)-\hat R_t\big)^2}_{\text{价值损失}}-c_e\underbrace{\frac1N\sum\mathcal H\big(\pi_\theta(\cdot\mid s_t)\big)}_{\text{熵奖励}}$$
+<!--deriv softmax 策略熵的梯度：为什么熵正则能防止过早收敛
+\mathcal H & = -\sum_kp_k\log p_k,\qquad p=\text{softmax}(z) || 均匀分布时最大（$\log K$），确定性策略时为 0
+\frac{\partial\mathcal H}{\partial z_j} & = -\sum_k\frac{\partial p_k}{\partial z_j}(\log p_k+1)=-\sum_kp_k(\mathbb 1[k=j]-p_j)(\log p_k+1) || softmax 的雅可比 $\partial p_k/\partial z_j=p_k(\mathbb 1[k=j]-p_j)$
+* \frac{\partial\mathcal H}{\partial z_j} & = -p_j\big(\log p_j+\mathcal H\big) || 整理（$\sum_kp_k=1$）。$\log p_j>-\mathcal H$（比“平均”更可能）的动作 logit 被压低，反之被抬高：把分布往均匀拉
+-->
+<ul>
+<li><strong>共享躯干还是分离</strong>：共享（一个编码器 + 策略头 + 价值头）省算力、表征可以互相帮助，Atari / 大型游戏 Bot 常用；但价值损失的尺度可能远大于策略损失，会“抢走”表征，需要调 $c_v$（常用 0.5）或做价值归一化。分离网络更稳，连续控制（MuJoCo）和本章 demo 用分离。PPG（Phasic Policy Gradient）则是先分离训练、再定期把价值知识蒸馏回策略网络。</li>
+<li><strong>熵系数</strong> $c_e$：0.01 左右；太大策略一直接近随机，太小早早变成确定性、探索不足。游戏 Bot 里熵也影响“拟人度”和可被针对的程度（第 18 章）。</li>
+<li><strong>梯度裁剪</strong>：按全局范数裁到 0.5，防止偶发的大优势把策略拉坏。</li>
+</ul>
+
+<h2>10.7 实测：CartPole 上的 A2C 与 λ</h2>
+<p>同步 A2C：8 个环境 × 每次 16 步，策略和价值各一个 4-64-64 网络，Adam 学习率 1e-3，熵系数 0.01，梯度裁到 0.5，共 30 万步；λ 取 0、0.9、0.95、1，各 5 个种子（<code>demos/ch10_ac_gae.cpp</code> E3，20 个训练并行）。</p>
+<!--plot {"x":[0,300000],"y":[0,520],"h":290,"xlabel":"环境步数","ylabel":"训练回合平均长度（5 种子平均）","legend":"br",
+"series":[{"path":"ch10.e3.runs.0.mean","n":"λ = 0（一步 TD）","c":"o","dash":true},{"path":"ch10.e3.runs.1.mean","n":"λ = 0.9","c":"b"},{"path":"ch10.e3.runs.2.mean","n":"λ = 0.95","c":"g"},{"path":"ch10.e3.runs.3.mean","n":"λ = 1（MC − V）","c":"p","dash":true}],
+"cap":"<b>图 10-3</b>　A2C 在 CartPole 上的学习曲线（C++ 实测）。λ = 0 完全依赖 critic，早期 critic 很不准，学得最慢、种子差异最大。"} -->
+<div class="tbl"><table>
+<tr><th>λ</th><th>最后 5 万步平均回合长度</th><th>5 个种子</th></tr>
+<tr><td>0</td><td>[[ch10.e3.runs.0.final|.1f]]</td><td>[[ch10.e3.runs.0.fin.0|.0f]] / [[ch10.e3.runs.0.fin.1|.0f]] / [[ch10.e3.runs.0.fin.2|.0f]] / [[ch10.e3.runs.0.fin.3|.0f]] / [[ch10.e3.runs.0.fin.4|.0f]]</td></tr>
+<tr><td>0.9</td><td>[[ch10.e3.runs.1.final|.1f]]</td><td>[[ch10.e3.runs.1.fin.0|.0f]] / [[ch10.e3.runs.1.fin.1|.0f]] / [[ch10.e3.runs.1.fin.2|.0f]] / [[ch10.e3.runs.1.fin.3|.0f]] / [[ch10.e3.runs.1.fin.4|.0f]]</td></tr>
+<tr><td>0.95</td><td>[[ch10.e3.runs.2.final|.1f]]</td><td>[[ch10.e3.runs.2.fin.0|.0f]] / [[ch10.e3.runs.2.fin.1|.0f]] / [[ch10.e3.runs.2.fin.2|.0f]] / [[ch10.e3.runs.2.fin.3|.0f]] / [[ch10.e3.runs.2.fin.4|.0f]]</td></tr>
+<tr><td>1</td><td>[[ch10.e3.runs.3.final|.1f]]</td><td>[[ch10.e3.runs.3.fin.0|.0f]] / [[ch10.e3.runs.3.fin.1|.0f]] / [[ch10.e3.runs.3.fin.2|.0f]] / [[ch10.e3.runs.3.fin.3|.0f]] / [[ch10.e3.runs.3.fin.4|.0f]]</td></tr>
+</table></div>
+<p class="tcap"><b>表 10-3</b>　A2C 实测汇总（满分 500）。</p>
+<p>如实地读：λ = 0 明显最差；0.9、0.95、1 之间的差距小于种子之间的差距，单凭 5 个种子分不出高下。CartPole 的奖励没有噪声、回合不长，蒙特卡洛的方差本来就不大，所以 λ = 1 也很好。<strong>奖励越稀疏、回合越长、critic 越难学，大 λ 的优势越明显</strong>（MOBA 一局上万步，PPO 常用 0.95~0.98）。</p>
+
+<h2>10.8 Actor-Critic 的偏差从哪里来</h2>
+<ul>
+<li><strong>critic 误差</strong>：经由 $\gamma\E[\varepsilon(s')\mid s,a]$ 进入优势（10.2 节），λ 越小越敏感。</li>
+<li><strong>丢掉 $\gamma^t$</strong>：第 9 章 9.3 节，几乎所有实现都这样做。</li>
+<li><strong>截断处理不当</strong>：把截断当终止（表 10-2 最后一列），或者用了重置后新局的观测自举。</li>
+<li><strong>状态不完整</strong>：critic 只能看到观测，部分可观测时 $V(o)$ 本身就是有偏的（第 3 章 POMDP）；多智能体里常给 critic 喂全局信息（CTDE，第 15 章）。</li>
+<li><strong>策略滞后</strong>：critic 学的是旧策略的价值，actor 已经变了；多 epoch 复用数据时更明显（第 11 章 PPO）。</li>
+</ul>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch10_interview.py</code> 逐字相同，运行时读取 C++ 的 16 步样例逐项对拍，并检查 λ = 1 的两端性质和熵梯度：</p>
+<!--code:py:GAE（区分终止 / 截断）+ softmax 熵梯度（Python，面试手撕版）-->
+{{demo:ch10_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch10_interview.py 的输出-->
+{{demo:ch10_interview_output.txt}}
+<!--/code-->
+
+<h2>10.9 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“λ = 1 无偏，λ = 0 有偏”</td><td>忽略了前提</td><td>critic 精确时任何 λ 都无偏；λ 控制的是对 critic 误差的敏感度（图 10-1）</td></tr>
+<tr><td>“GAE 的 done 就是 terminated or truncated”</td><td>混用了两个开关</td><td>δ 里只有 terminated 去掉 $\gamma V(s')$；递推切断用 terminated or truncated</td></tr>
+<tr><td>“截断时用 next_obs 算 V 就行”</td><td>向量化环境已自动重置</td><td>要用截断那一刻的观测（final observation）</td></tr>
+<tr><td>“critic 的目标是 $r+\gamma V(s')$”</td><td>只对 λ = 0 成立</td><td>目标是 $\hat A^{\text{GAE}}_t+V(s_t)$ = λ-回报</td></tr>
+<tr><td>“A3C 比 A2C 快，因为异步”</td><td>忽略了 GPU 合批</td><td>同步合批更高效、可复现；异步带来陈旧梯度</td></tr>
+<tr><td>“熵正则会让策略更随机，所以总是有害”</td><td>只看了一面</td><td>防止过早收敛、保持探索；系数要随训练衰减或自适应</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:Actor-Critic / GAE 常见追问链-->
+critic 的作用是什么？
+├─ 为什么用 TD 误差当优势？ → E[δ | s,a] = A（critic 准时），只学 V 不用学 Q
+│   └─ critic 不准呢？ → 偏差 = γE[ε(s′)|s,a] − ε(s)，后一项像基线无害，前一项有害
+├─ 手写 GAE？ → 倒序：δ = r + γ(1−term)V′ − V；A = δ + γλ(1−end)A′；目标 = A + V
+│   ├─ λ = 0 / 1 分别是什么？ → 一步 TD / MC 回报减 V；推导：k 步优势的几何加权
+│   └─ 截断怎么处理？ → 用 final observation 的 V 自举，同时切断递推
+├─ λ 怎么选？ → critic 越不准、奖励越稀疏、回合越长 → λ 越大；常用 0.95
+├─ A3C 为什么被 A2C / PPO 取代？ → 陈旧梯度、不可复现、不能合批；IMPALA 用 V-trace
+└─ 共享网络有什么问题？ → 价值损失尺度抢表征，调 c_v / 价值归一化 / PPG
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 10 章</div><ul>
+<li>$\E[\delta_t\mid s_t,a_t]=A_\pi(s_t,a_t)$（critic 精确时）；有误差时有害项是 $\gamma\E[\varepsilon(s')\mid s,a]$。</li>
+<li>k 步优势 $\sum_{l<k}\gamma^l\delta_{t+l}$；GAE $=\sum_l(\gamma\lambda)^l\delta_{t+l}=G^\lambda_t-V(s_t)$。</li>
+<li>递推 $\hat A_t=\delta_t+\gamma\lambda(1-\text{end}_t)\hat A_{t+1}$，$\delta_t=r_t+\gamma(1-\text{term}_t)V(s_{t+1})-V(s_t)$。</li>
+<li>截断：用截断时刻观测的 $V$ 自举，切断递推；rollout 末尾同理。</li>
+<li>总损失 = 策略 + $c_v$·价值 − $c_e$·熵；$\partial\mathcal H/\partial z_j=-p_j(\log p_j+\mathcal H)$。</li>
+<li>A2C（同步、合批、可复现）取代 A3C（异步、陈旧梯度）。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：GAE 的有效视界是多少？γ = 0.99、λ = 0.95 时大约看多少步？</summary><p>权重按 $(\gamma\lambda)^l$ 衰减，有效视界约 $1/(1-\gamma\lambda)$。$\gamma\lambda=0.9405$，约 17 步；而 γ = 0.99 本身的视界是 100 步。也就是说，优势估计主要用了近 17 步的真实奖励，更远的部分交给 critic（通过 δ 里的 $V$）。</p></details>
+<details class="quiz"><summary>自测 2：为什么 PPO 实现里通常还要对优势做归一化（减均值、除标准差）？这会引入偏差吗？</summary><p>归一化让每个 batch 的优势尺度一致，学习率不必随奖励尺度调整，正负样本各占一半左右。减去 batch 均值相当于减一个常数基线，期望上不改变梯度方向（严格说 batch 均值与样本相关，有极小的偏差）；除以标准差只是缩放步长。第 11 章的消融实验会看到它的作用。</p></details>
+<details class="quiz"><summary>自测 3：rollout 长度 T 取得很小（比如 5 步）会怎样？</summary><p>每段 rollout 末尾都要自举，λ 再大也只能看到 T 步以内的真实奖励，实际变成了 T 步优势，偏差变大（更依赖 critic）；好处是更新频繁。T 至少要和 $1/(1-\gamma\lambda)$ 同量级，PPO 常用 128~2048。</p></details>
+<details class="quiz"><summary>自测 4：表 10-2 中，为什么 t = 6 到 t = 11 的“截断当终止”优势都变小了，而 t = 0 到 5 不变？</summary><p>t = 11 处少加了 $\gamma V(s^{\text{final}})$（这里是正值），这个误差通过 $\gamma\lambda$ 递推传给同一局里更早的步（t = 6~10），权重依次乘 $\gamma\lambda$。t = 5 是上一局的终止，递推在那里被切断，所以 t ≤ 5 不受影响。</p></details>
+</section>

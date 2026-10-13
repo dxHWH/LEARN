@@ -1,0 +1,94 @@
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>为什么 A* 是对的，以及它最慢的时候</h1>
+    <p class="lead">一段反证法说明最优性，一张图说明它为什么比 Dijkstra 搜得少，再看最坏情况：终点根本到不了。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能在面试里用 30 秒讲清 A* 最优性的证明</li>
+    <li>理解“f &lt; C* 的节点必展开、f &gt; C* 的节点必不展开”，以及 A* 的最优效率</li>
+    <li>说出时间、空间复杂度，以及不可达时的应对手段</li>
+  </ul></div>
+
+  <h2>4.1 最优性证明（h 可采纳）</h2>
+  <p>记最短路径代价为 C*。<strong>反证</strong>：假设 A* 取出终点 G 时 g(G) &gt; C*。</p>
+  <ol>
+    <li>此时，最短路径上一定还有一个节点 n 在 open 里，并且 g(n) 已经等于它的最短距离 g*(n)。（起点在最短路径上；最短路径上第一个还没被展开的节点，它的前驱已被展开过，所以它一定已经以最优的 g 进入了 open。）</li>
+    <li>由可采纳性：f(n) = g*(n) + h(n) ≤ g*(n) + h*(n) = C*。</li>
+    <li>而 f(G) = g(G) + 0 &gt; C* ≥ f(n)。</li>
+    <li>A* 每次取 f 最小的节点，n 的 f 更小，应该先于 G 被取出，矛盾。</li>
+  </ol>
+  <p>所以 G 被取出时 g(G) = C*。<strong>这也解释了为什么必须在出队时判断终点</strong>：入队时 G 的 f 可能大于 C*，那时还有 f 更小的节点没展开。</p>
+  <div class="co tip"><span class="h">面试速答版</span>
+    <p>“反证：如果取出终点时它的 g 比最优大，那最短路径上一定还有一个节点在 open 里。因为 h 不高估，这个节点的 f 不超过最优值，比终点的 f 小，按规则它应该先出队，矛盾。”</p>
+  </div>
+
+  <h2>4.2 一致性带来的两个好处</h2>
+  <p>若 h 一致，对任意边 (n, n')：f(n') = g(n) + c(n, n') + h(n') ≥ g(n) + h(n) = f(n)。也就是说<strong>沿着任何一条边走，f 都不会变小</strong>。由此：</p>
+  <ul>
+    <li><strong>被展开节点的 f 序列单调不减</strong>（第 2 章手算时看到的 40, 40, 48, 48, 54…）。</li>
+    <li><strong>节点第一次出队时 g 就是最优的</strong>，以后不可能再找到更短的路。所以 closed 节点不必重开，惰性删除版只需“出队时跳过已 closed 的条目”。</li>
+  </ul>
+  <p>只可采纳、不一致的 h 下，一个节点可能先以偏大的 g 出队，之后又被更短的路径更新。这时要么允许<strong>重开</strong>（从 closed 移回 open，最坏会导致指数次展开），要么接受次优。实际项目里用的几何距离都是一致的，这个问题一般只出现在自己设计的“组合启发函数”里。</p>
+
+  <h2>4.3 A* 到底省在哪：f = C* 这条等值线</h2>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <defs><clipPath id="clip-c4"><rect x="20" y="10" width="820" height="260" rx="10"/></clipPath></defs>
+    <rect x="20" y="10" width="820" height="260" rx="10" fill="#FFFFFF" stroke="#E5E7EB"/>
+    <circle cx="300" cy="140" r="250" fill="#DBEAFE" fill-opacity=".35" stroke="#2F5BD3" stroke-width="1.6" stroke-dasharray="6 4" clip-path="url(#clip-c4)"/>
+    <ellipse cx="430" cy="140" rx="200" ry="92" fill="#DCFCE7" fill-opacity=".9" stroke="#15803D" stroke-width="2.4"/>
+    <line x1="300" y1="140" x2="560" y2="140" stroke="#C2410C" stroke-width="3"/>
+    <circle cx="300" cy="140" r="9" fill="#2F5BD3"/><text x="300" y="144" text-anchor="middle" class="b wt" style="font-size:11px">S</text>
+    <circle cx="560" cy="140" r="9" fill="#B91C1C"/><text x="560" y="144" text-anchor="middle" class="b wt" style="font-size:11px">G</text>
+    <text x="430" y="104" text-anchor="middle" class="sm b" style="fill:#15803D">f &lt; C*：一定会被展开</text>
+    <text x="430" y="122" text-anchor="middle" class="xs">（开阔地上是以 S、G 为焦点的椭圆）</text>
+    <text x="430" y="248" text-anchor="middle" class="sm b" style="fill:#15803D">绿色边界 f = C*：展不展开看平局决胜</text>
+    <text x="700" y="64" class="sm b" style="fill:#2F5BD3">Dijkstra：g &lt; C*</text>
+    <text x="700" y="82" class="xs">以 S 为圆心、半径 C* 的圆，</text>
+    <text x="700" y="98" class="xs">全部都要展开</text>
+    <text x="60" y="40" class="sm b" style="fill:#6B7280">f &gt; C*：A* 一定不展开</text>
+    <text x="430" y="290" text-anchor="middle" class="sm">h 越接近 h*，绿色区域越扁、越贴近 S—G 这条线；h = 0 时它就膨胀成蓝色的圆</text>
+  </svg>
+  <figcaption><b>图 4-1</b>　A* 的展开范围：f &lt; C* 的节点必展开，f &gt; C* 的必不展开；这就是它比 Dijkstra 省的部分</figcaption>
+  </figure>
+  <p>由 4.1 的论证还能推出：<strong>任何使用同一个可采纳启发函数、并保证找到最短路的算法，都必须展开所有 f &lt; C* 的节点</strong>，否则它无法排除“那里藏着一条更短的路”。A* 恰好只展开这些节点（加上一部分 f = C* 的节点），所以说 A* 是<strong>最优效率</strong>（optimally efficient）的。想比 A* 更快，只有两条路：<strong>换一个更准的 h</strong>，或者<strong>放弃最优</strong>（加权、分层、JPS 之类的剪枝不算放弃最优，它们改变的是图本身）。</p>
+
+  <h2>4.4 复杂度</h2>
+  <div class="tbl"><table>
+    <tr><th>维度</th><th>结论</th><th>说明</th></tr>
+    <tr><td>时间（图上）</td><td><strong>O(E log V)</strong></td><td>每个节点最多展开一次（一致 h），每条边最多引起一次入堆；二叉堆每次操作 log。格子图 E ≈ 8V，所以是 O(V log V)</td></tr>
+    <tr><td>时间（树搜索视角）</td><td>最坏 O(b<sup>d</sup>)，b 为分支数，d 为解的深度</td><td>h 完美时降到 O(d)；h 误差有界（|h − h*| ≤ O(log h*)）时是多项式级</td></tr>
+    <tr><td>空间</td><td><strong>O(V)</strong></td><td>open + closed 要存下所有展开过的节点。<strong>A* 的瓶颈通常是内存，而不是时间</strong></td></tr>
+    <tr><td>最好情况</td><td>O(d)</td><td>开阔地 + 完美启发 + 正确的平局决胜（E1：开阔地 266 格长的路只展开 228 个节点）</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">深入一层：省内存的变体</span>
+    <p><strong>IDA*</strong>（迭代加深 A*）：以 f 为阈值做深度优先搜索，超过阈值就回溯，每轮把阈值提高到上一轮被剪掉的最小 f。内存只有 O(d)，但会大量重复展开，在有环的格子图上很慢，适合 15 数码这类状态空间巨大的谜题。<strong>SMA*</strong>：内存满时丢掉 f 最大的叶子。游戏寻路里几乎不用它们，更常见的做法是把图变小（导航网格、分层）。</p>
+  </div>
+
+  <h2>4.5 最坏情况：终点不可达</h2>
+  <p>A* 只有在 open 被取空时才能断定“无路可走”，而这意味着<strong>起点所在的整个连通块都被展开了一遍</strong>。启发函数在这里完全帮不上忙，还会因为堆变大而比 BFS 更慢。</p>
+  <div class="term"><div class="bar">E8 · 随机障碍 25%，终点在一个被围死的小区域里</div><pre>A* 直接搜：展开 <span class="bad">195130</span> 个节点（= 起点所在连通块 195130 格），耗时 <span class="bad">20.529 ms</span>，结果：无路径
+连通块预计算：加载时 flood fill 一次 <span class="ok">3.602 ms</span>（946 个连通块）；之后每次判定 <span class="ok">0.0003 us</span>（一次数组比较）
+展开上限 20000：2.681 ms 后放弃，可退而求其次走向“h 最小的已探索点”</pre></div>
+  <p>20 ms 已经超过一帧（60 FPS 下 16.7 ms）。点击一次“走到那个被围起来的位置”，游戏就卡一下。四种应对手段：</p>
+  <div class="cards">
+    <div class="card"><div class="t">① 连通块编号</div><p>加载地图时 flood fill，给每个格子标上所属区域编号。查询前先比较编号，不同就直接返回不可达，O(1)。动态障碍改变连通性时要局部重算，导航网格可以在多边形上维护。</p></div>
+    <div class="card"><div class="t">② 展开上限</div><p>超过 N 个节点就放弃。比较安全，但可能把“可达但很远”误判为不可达，所以要和 ① 搭配使用。</p></div>
+    <div class="card"><div class="t">③ 退而求其次</div><p>搜索失败时，返回已展开节点中 h 最小（离终点最近）的那个，让单位走到“能走到的最近处”。玩家点了一个不可达的位置时，这通常就是期望的表现。</p></div>
+    <div class="card"><div class="t">④ 终点吸附</div><p>玩家点的位置在障碍里时，先把终点吸附到最近的可走点，再寻路。Detour 的 <code>findNearestPoly</code> 就做这件事。</p></div>
+  </div>
+  <div class="co warn"><span class="h">面试注意</span>
+    <p>“A* 最坏情况是什么”的标准答案不是 O(b<sup>d</sup>) 这种教科书公式，而是<strong>“终点不可达，要把整个连通块搜完；还有启发函数被凹形障碍误导，要把陷阱填满”</strong>，然后给出对应手段。这体现的是工程判断。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><strong>最优性</strong>：反证，最短路径上总有一个 f ≤ C* 的节点在 open 里，终点不可能以更大的 g 先出队。</li>
+    <li><strong>一致性</strong> ⇒ f 沿边不减 ⇒ 出队即最优 ⇒ closed 不用重开。</li>
+    <li>A* 展开所有 f &lt; C* 的节点，不展开 f &gt; C* 的节点，是<strong>最优效率</strong>的。</li>
+    <li>复杂度：时间 O(E log V)，空间 O(V)，内存往往是瓶颈。</li>
+    <li>最坏情况是<strong>不可达</strong>（E8：20.5 ms 搜完 19.5 万格）→ 连通块编号 O(1) 预判 + 展开上限 + 返回最近点。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：证明里为什么要求“最短路径上的那个节点 g 已经是最优的”？</summary><p>因为 f(n) ≤ C* 依赖 g(n) = g*(n)。如果 n 的 g 偏大，f(n) 可能超过 C*，论证就不成立。这一点由“它的前驱已经以最优 g 被展开过”保证，归纳的起点是 g(S) = 0。</p></details>
+  <details class="quiz"><summary>自测：双向 A* 能更快地发现“不可达”吗？</summary><p>能缓解。如果终点在一个很小的封闭区域里，从终点出发的反向搜索很快就会把那个小区域搜完、open 变空，从而判定不可达，不必把起点那一侧的大连通块搜完。但如果两侧都是大区域，仍然要搜很多。连通块编号仍是最可靠的做法。</p></details>
+</section>

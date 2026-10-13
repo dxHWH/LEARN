@@ -1,0 +1,246 @@
+<div class="part-head" data-toc="PART 0 · 导读与大纲"><div class="no">PART 0</div><h1>导读与全书大纲</h1><p>先把“岗位要什么”“伏羲 RL 考什么”“按什么顺序复习”“每章怎么写”定下来，后面每一章都按这张地图填充。</p></div>
+
+<section class="chapter" id="ch0">
+<div class="ch-head"><div class="no">CHAPTER 00</div><h1>导读：JD 拆解、知识地图与复习路线</h1><p class="lead">这一章不讲新算法，只做三件事：把 JD 翻译成考点；把强化学习的全部知识压成一张地图；约定后面每一章的结构和推导写法（附一页样张）。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>知道这个“AI 系统工程师”岗位在面试里会从哪几个方向追问，以及每个方向对应本书哪一章。</li>
+<li>明确“伏羲强化学习理论基础”的三层含义：理论骨架、伏羲公开的游戏落地方向、真实面经。</li>
+<li>看懂 RL 算法族谱和游戏 Bot 流水线两张总图，按三轮路线复习。</li>
+<li>熟悉本书的推导写法：每一行等式右边都写“凭什么成立”。</li>
+</ul></div>
+
+<h2>30 秒说明：这本书怎么用</h2>
+<p>这是一本<strong>面向游戏 AI 岗位的强化学习面试书</strong>，不是论文综述。主线是一条能在白板上手推的链：<strong>MDP → Bellman 方程 → 动态规划 → MC / TD → Q-learning → DQN → 策略梯度定理 → Actor-Critic / GAE → TRPO / PPO → RLHF / GRPO</strong>；然后把这条链落到游戏里：自博弈、模仿学习拟人化、奖励设计、Bot 系统设计、UE 集成与工具链。</p>
+<p>后续按大纲一章一章写。每写完一章，会同时更新三个产物：<code>md/</code> 下的单章 Markdown、合并版 <code>RL_GameAI_强化学习面试指南.md</code>、电子书 <code>RL_GameAI.html</code> / PDF。你针对某个知识点提问时，回答会追加到对应章节，并在 md 顶部的「提问记录」里留痕。</p>
+
+<h2>0.1 JD 拆解：这个岗位到底考什么</h2>
+<p>把 JD 的 3 条职责和 6 条要求逐条翻译成“面试官会怎么问”，再对到章节。权重是我按岗位描述和公开面经给的复习优先级。</p>
+<div class="tbl"><table>
+<tr><th>JD 条目</th><th>面试会怎么问</th><th>本书章节</th><th>权重</th></tr>
+<tr><td>职责 1：NPC、AI 陪伴、PVE AI、AI Bot 的设计与开发</td><td>“如果让你做 DOTA2 / FPS 的 AI，状态、动作、奖励怎么设计？”“行为树和 RL 怎么选、怎么结合？”“AI 太强 / 太弱怎么办？”</td><td>Ch18 · Ch14 · Ch15 · Ch16 · Ch20</td><td>★★★★</td></tr>
+<tr><td>职责 2：强化学习在游戏 AI 的落地</td><td>PPO / GRPO 原理；自博弈怎么避免策略循环；拟人化与难度分级；奖励塑形与 reward hacking</td><td>Ch9 ~ Ch16</td><td>★★★★</td></tr>
+<tr><td>职责 3：引擎侧 AI 工具链与编辑器</td><td>“你会怎么做一个 AI 调试工具？”对局回放、奖励分解、价值曲线可视化；训练 → 上线管线</td><td>Ch21 · Ch20</td><td>★★</td></tr>
+<tr><td>要求 2：ML / RL 理论基础扎实</td><td>手推 Bellman 方程、策略梯度定理、GAE；PPO 为什么 clip、为什么取 min；KL、交叉熵、重要性采样</td><td>Ch3 ~ Ch13（数学工具就地讲，Ch1–2 速查）</td><td>★★★★</td></tr>
+<tr><td>要求 3：精通 C++ 与 Python</td><td>手撕 Q-learning / GAE / PPO loss / MCTS；C++ 侧推理性能怎么优化</td><td>附录 C · 各章 demo · Ch20</td><td>★★★</td></tr>
+<tr><td>要求 4：商业引擎（Unreal 优先）项目经验</td><td>行为树 / StateTree / EQS；Learning Agents、NNE；“给你做过的 UE 项目加一个 RL Bot 怎么做”</td><td>Ch20（结合 UE_Coop_Shooter 那本书）</td><td>★★★</td></tr>
+<tr><td>要求 5：AI 工具链 / 内容生成管线</td><td>训练 → 评估 → 导出 → 上线的管线设计；PCG、LLM NPC 管线</td><td>Ch21 · Ch19</td><td>★★</td></tr>
+<tr><td>要求 6：沟通协作、推动落地</td><td>项目讲述是否有结构（30 秒 / 3 分钟版本）</td><td>每章「面试注意」· 附录 E</td><td>★</td></tr>
+</table></div>
+<div class="co tip"><span class="h">结合你的背景</span><p>你有两张别人没有的牌：<strong>王者荣耀客户端实习</strong>（MOBA 领域直觉，正好对上腾讯绝悟这类公开工作）和 <strong>UE 双人射击 Demo</strong>（已经有一本复盘书 <code>UE_Coop_Shooter</code>）。Ch18 会用“MOBA 1v1 Bot”和“FPS Bot”做案例，Ch20 会以你的 UE 射击 Demo 为对象设计“加一个 RL Bot”的完整方案。实习相关内容只使用公开可讲的部分。</p></div>
+
+<h2>0.2 「伏羲强化学习理论基础」指什么</h2>
+<p>我把它理解为三层：伏羲 RL 团队认可的<strong>理论骨架</strong>、伏羲<strong>公开的游戏落地方向</strong>、以及<strong>真实面经</strong>里的问法。三层分别决定了本书 Part II~III、Part IV 和每章“高频追问”的内容。</p>
+<div class="cards">
+<div class="card"><div class="t">① 理论骨架</div><p>Datawhale《JoyRL》教程由网易伏羲算法工程师参与编写，章节为 MDP → 动态规划 → 免模型预测 / 控制 → 深度学习基础 → DQN 及进阶 → 策略梯度 → Actor-Critic → DDPG / TD3 → PPO → SAC；伏羲强化学习研究组负责人也为《蘑菇书 EasyRL》写过推荐（书中含大厂面试题）。本书 Part II~III 与这条骨架对齐，并把每个结论补成可手推的推导。</p></div>
+<div class="card"><div class="t">② 伏羲公开的落地方向</div><p>AI 竞技机器人（已在 20 余款游戏落地，强化学习 + 模仿学习）；《永劫无间》噩梦 AI（自博弈训练）；Bot 的拟人化与风格化（BC + RL 损失自动调权、自模仿学习做风格）；奖励塑形（NeurIPS 2020）；多风格 AI（IJCAI 2020 EMOGI）；RLHF 微调游戏 Bot；《逆水寒》手游智能 NPC。→ Part IV</p></div>
+<div class="card"><div class="t">③ 真实面经</div><p>牛客上一篇 27 届「网易伏羲 / 雷火 · 游戏强化学习算法一面」：讲 PPO、GRPO；“如果让你做 DOTA2 的 AI 你会怎么做”（问是否了解腾讯绝悟）；换成 FPS 后追问单位状态的数据格式、地图表示、输入输出、奖励、胜负判定、瞄准怎么体现、切枪切道具；手撕二叉树翻转。→ Ch11 · Ch13 · Ch18</p></div>
+</div>
+<div class="co ver"><span class="h">资料来源与说明</span><p>以上信息来自公开资料：JoyRL Book 仓库说明、《Datawhale 强化学习教程》出版介绍、网易伏羲 2022 年度技术回顾、伏羲 NeurIPS 2020 论文报道、伏羲论文库 EMOGI 页面、伏羲胡裕靖博士在 DataFun 的 AIGA 分享整理、牛客面经。如果你说的“伏羲强化学习理论基础”是某份具体资料（课件、PDF、内部培训材料），发给我，我会把大纲逐章对齐，并在附录加一张对照表。</p></div>
+
+<h2>0.3 知识地图：强化学习算法族谱</h2>
+<p>强化学习的算法很多，但只有两条主干：<strong>学价值再导出策略</strong>（价值派），和<strong>直接优化策略</strong>（策略派）。两条主干在 Actor-Critic 处汇合，PPO 是今天游戏 Bot 和大模型对齐共同的“主力算法”。</p>
+<!--flow {"w":900,"h":548,
+"cols":[22,190,376,562,748],"colw":[128,160,160,160,146],"rows":[70,160,250,340,430],"bh":48,
+"rects":[{"x":12,"y":40,"w":148,"h":450,"c":"s","fill":"#F8FAFC"},{"x":12,"y":502,"w":876,"h":34,"rx":8,"c":"a"}],
+"boxes":[
+{"id":"mdp","cr":[0,0],"t":"MDP · Bellman","s":"Ch3 价值函数","c":"s"},
+{"id":"dp","cr":[0,1],"t":"动态规划 PI/VI","s":"Ch4 需要模型","c":"s"},
+{"id":"mctd","cr":[0,2],"t":"MC · TD · TD(λ)","s":"Ch5 无模型预测","c":"s"},
+{"id":"bandit","cr":[0,3],"t":"探索与利用","s":"Ch7 Bandit · UCB","c":"s"},
+{"id":"ml","cr":[0,4],"t":"ML / DL 速查","s":"Ch1–2 按需查阅","c":"s"},
+{"id":"ql","cr":[1,0],"t":"Sarsa / Q-learning","s":"Ch6 表格型控制","c":"b"},
+{"id":"dqn","cr":[2,0],"t":"DQN","s":"Ch8 经验回放 + 目标网络","c":"b"},
+{"id":"ddqn","cr":[3,0],"t":"Double·Dueling·PER","s":"Ch8 修高估 · 提效率","c":"b"},
+{"id":"rainbow","cr":[4,0],"t":"Rainbow · 分布式 RL","s":"Ch8 集大成","c":"b"},
+{"id":"pg","cr":[1,1],"t":"REINFORCE","s":"Ch9 策略梯度定理","c":"o"},
+{"id":"ac","cr":[2,1],"t":"Actor-Critic · GAE","s":"Ch10 A2C / A3C","c":"o"},
+{"id":"ppo","cr":[3,1],"t":"TRPO → PPO","s":"Ch11 信任域 · clip","c":"o"},
+{"id":"grpo","cr":[4,1],"t":"RLHF · DPO · GRPO","s":"Ch13 大模型对齐","c":"o"},
+{"id":"ddpg","cr":[2,2],"t":"DPG → DDPG","s":"Ch12 确定性策略","c":"p"},
+{"id":"sac","cr":[3,2],"t":"TD3 · SAC","s":"Ch12 双 Q · 最大熵","c":"p"},
+{"id":"off","cr":[4,2],"t":"离线 RL","s":"Ch14 CQL · TD3+BC","c":"p"},
+{"id":"mm","cr":[1,3],"t":"Minimax / α-β","s":"Ch17 博弈树搜索","c":"g"},
+{"id":"mcts","cr":[2,3],"t":"MCTS / UCT","s":"Ch17 蒙特卡洛树搜索","c":"g"},
+{"id":"az","cr":[3,3],"t":"AlphaZero","s":"Ch17 PUCT + 自对弈","c":"g"},
+{"id":"mz","cr":[4,3],"t":"MuZero","s":"Ch17 学到的模型","c":"g"},
+{"id":"il","cr":[2,4],"t":"模仿学习","s":"Ch14 BC · DAgger · GAIL","c":"t"},
+{"id":"sp","cr":[3,4],"t":"自博弈 · MARL","s":"Ch15 League · QMIX","c":"t"},
+{"id":"bot","cr":[4,4],"t":"游戏 Bot 系统","s":"Ch18 PPO+自博弈+BC","c":"t"}],
+"chains":[[["ql","dqn","ddqn","rainbow"],{"c":"b"}],[["pg","ac","ppo","grpo"],{"c":"o"}],[["ddpg","sac","off"],{"c":"p"}],[["mm","mcts","az","mz"],{"c":"g"}],[["il","sp","bot"],{"c":"t"}]],
+"arrows":[
+{"p":[[160,94],[190,94]]},{"p":[[160,184],[190,184]]},{"p":[[160,274],[376,274]]},{"p":[[160,364],[190,364]]},{"p":[[160,454],[376,454]]},
+{"p":[[456,118],[456,160]],"c":"b","dash":true,"label":"critic = 价值网络","lx":462,"ly":143},
+{"p":[[456,208],[456,250]],"c":"o","dash":true,"label":"确定性 actor 的 AC","lx":462,"ly":233},
+{"p":[[642,388],[642,430]],"c":"g","dash":true,"label":"自对弈训练","lx":648,"ly":413}],
+"texts":[
+{"x":86,"y":26,"t":"基石","a":"middle","cls":"b"},{"x":270,"y":26,"t":"表格型 / 经典","a":"middle","cls":"b"},{"x":456,"y":26,"t":"深度 RL","a":"middle","cls":"b"},{"x":642,"y":26,"t":"稳定化 / 进阶","a":"middle","cls":"b"},{"x":818,"y":26,"t":"前沿 / 落地","a":"middle","cls":"b"},
+{"x":86,"y":58,"t":"理论与工具","a":"middle","cls":"xs"},
+{"x":190,"y":63,"t":"价值派 · value-based","cls":"xs b","fill":"#2F5BD3"},
+{"x":190,"y":153,"t":"策略派 · policy-based","cls":"xs b","fill":"#C2410C"},
+{"x":562,"y":243,"t":"连续控制 / 最大熵","cls":"xs b","fill":"#6D28D9"},
+{"x":190,"y":333,"t":"规划与搜索 · model-based","cls":"xs b","fill":"#15803D"},
+{"x":376,"y":423,"t":"游戏 AI 专题","cls":"xs b","fill":"#0F766E"},
+{"x":450,"y":524,"t":"贯穿全书：奖励设计 / 课程 / 分层 Ch16 · 分布式训练 Ch19 · UE 集成与推理部署 Ch20 · AI 工具链 Ch21 · 手撕代码 附录 C","a":"middle","cls":"sm","fill":"#B45309"}],
+"cap":"<b>图 0-1</b>　强化学习算法族谱。左侧是全书的理论基石；五条泳道从左到右是“表格型 → 深度 → 稳定化 → 前沿 / 落地”。虚线是跨流派的关键联系：Actor-Critic 的 critic 就是价值网络；DDPG 是“确定性 actor”的 Actor-Critic；AlphaZero 的自对弈是游戏自博弈训练的源头。"} -->
+<p>读这张图的三个要点，也是面试里最常被串起来问的地方：</p>
+<ul>
+<li><strong>价值派的痛点是“max”</strong>：Q-learning 的 $\max_{a'}Q(s',a')$ 带来高估（Double DQN 修它），也让它很难处理连续 / 超大动作空间——这正是游戏 Bot 多用策略派的原因。</li>
+<li><strong>策略派的痛点是“方差”和“步长”</strong>：REINFORCE 方差大 → 引入 critic 和 GAE；步子太大策略会崩 → TRPO 用 KL 约束、PPO 用 clip。</li>
+<li><strong>GRPO 是 PPO 去掉 critic 的变体</strong>：用同一个提示下一组样本的平均回报当 baseline，这是 Ch13 的核心，也是伏羲面经原题。</li>
+</ul>
+
+<h2>0.4 游戏 AI Bot 全景：每一章在流水线的哪一环</h2>
+<p>族谱讲“算法从哪来”，下面这张图讲“做一个游戏 Bot 要经过哪些环节”。职责 1 ~ 3 对应的正是这条流水线的不同段。</p>
+<!--flow {"w":900,"h":318,
+"boxes":[
+{"id":"n1","x":20,"y":36,"w":190,"h":76,"t":"① 需求定义","s":"强度 · 拟人 · 风格 · 线上成本","s2":"Ch18 · Ch14","c":"s"},
+{"id":"n2","x":240,"y":36,"w":190,"h":76,"t":"② 环境化","s":"UE 训练环境 · 加速仿真 · 并行","s2":"Ch20","c":"t"},
+{"id":"n3","x":460,"y":36,"w":190,"h":76,"t":"③ MDP 设计","s":"观测 · 动作 · 奖励 · 动作掩码","s2":"Ch18 · Ch16","c":"b"},
+{"id":"n4","x":680,"y":36,"w":190,"h":76,"t":"④ 算法选型","s":"PPO / DQN / SAC / BC / MCTS","s2":"Ch8–Ch14 · Ch17","c":"o"},
+{"id":"n5","x":680,"y":172,"w":190,"h":76,"t":"⑤ 训练系统","s":"自博弈 · 种群 · 分布式采样","s2":"Ch15 · Ch19","c":"p"},
+{"id":"n6","x":460,"y":172,"w":190,"h":76,"t":"⑥ 评估","s":"胜率 · Elo · 拟人度 · 难度分档","s2":"Ch14 · Ch15 · Ch21","c":"g"},
+{"id":"n7","x":240,"y":172,"w":190,"h":76,"t":"⑦ 部署推理","s":"ONNX / NNE · 合批 · AI LOD","s2":"Ch20","c":"t"},
+{"id":"n8","x":20,"y":172,"w":190,"h":76,"t":"⑧ 工具链与迭代","s":"对局回放 · 可视化 · 实验管理","s2":"Ch21","c":"a"}],
+"chains":[[["n1","n2","n3","n4"]],[["n4","n5"],{"label":"开训","lx":784,"ly":146}],[["n5","n6","n7","n8"]],[["n8","n1"],{"c":"a","label":"线上数据 · 玩家反馈回流","lx":122,"ly":146}]],
+"rects":[{"x":20,"y":270,"w":850,"h":36,"rx":8,"c":"s","fill":"#F8FAFC"}],
+"texts":[{"x":445,"y":293,"a":"middle","cls":"sm","t":"分工：行为树 / StateTree 负责流程框架、规则兜底与可控性；RL 策略负责战斗等高维、对抗性的决策子树（Ch18 · Ch20）"}],
+"cap":"<b>图 0-2</b>　一个游戏 AI Bot 从需求到上线的 8 个环节及对应章节。面试里“如果让你做 XX 游戏的 AI”这类大题，按这条流水线组织回答就不会漏项；JD 的职责 1 覆盖 ①③⑥，职责 2 覆盖 ④⑤，职责 3 覆盖 ②⑦⑧。"} -->
+<div class="co warn"><span class="h">面试注意</span><p>系统设计题最常见的失分不是算法不会，而是<strong>跳步</strong>：一上来就说“用 PPO 训练”，却没说清观测里有什么、动作空间多大、奖励怎么给、强度怎么控制、线上推理多少毫秒。先报框架（①~⑧），再按面试官的兴趣展开某一环。</p></div>
+
+<h2>0.5 复习路线：三轮</h2>
+<!--flow {"w":900,"h":316,"bw":62,"bh":48,
+"boxes":[
+{"x":12,"y":16,"w":196,"h":58,"rx":10,"t":"第一轮 · 核心理论链","s":"必考：先打通推导主线","c":"b"},
+{"id":"a0","x":228,"y":21,"t":"Ch3","s":"MDP","ts":13,"ss":10.5,"lh":16,"c":"b","hl":true},
+{"id":"a1","x":300,"y":21,"t":"Ch4","s":"DP","ts":13,"ss":10.5,"lh":16,"c":"b"},
+{"id":"a2","x":372,"y":21,"t":"Ch5","s":"MC / TD","ts":13,"ss":10.5,"lh":16,"c":"b"},
+{"id":"a3","x":444,"y":21,"t":"Ch6","s":"Sarsa/Q","ts":13,"ss":10.5,"lh":16,"c":"b"},
+{"id":"a4","x":516,"y":21,"t":"Ch8","s":"DQN","ts":13,"ss":10.5,"lh":16,"c":"b"},
+{"id":"a5","x":588,"y":21,"t":"Ch9","s":"策略梯度","ts":13,"ss":10.5,"lh":16,"c":"b","hl":true},
+{"id":"a6","x":660,"y":21,"t":"Ch10","s":"AC / GAE","ts":13,"ss":10.5,"lh":16,"c":"b"},
+{"id":"a7","x":732,"y":21,"t":"Ch11","s":"PPO","ts":13,"ss":10.5,"lh":16,"c":"b","hl":true},
+{"id":"a8","x":804,"y":21,"t":"Ch13","s":"GRPO","ts":13,"ss":10.5,"lh":16,"c":"b","hl":true},
+{"x":12,"y":120,"w":196,"h":58,"rx":10,"t":"第二轮 · 游戏 AI 专题","s":"对标职责 1 / 2","c":"o"},
+{"x":228,"y":125,"t":"Ch18","s":"Bot 设计","ts":13,"ss":10.5,"lh":16,"c":"o","hl":true},
+{"x":300,"y":125,"t":"Ch15","s":"自博弈","ts":13,"ss":10.5,"lh":16,"c":"o"},
+{"x":372,"y":125,"t":"Ch14","s":"模仿学习","ts":13,"ss":10.5,"lh":16,"c":"o"},
+{"x":444,"y":125,"t":"Ch16","s":"奖励设计","ts":13,"ss":10.5,"lh":16,"c":"o"},
+{"x":516,"y":125,"t":"Ch20","s":"UE 集成","ts":13,"ss":10.5,"lh":16,"c":"o"},
+{"x":12,"y":224,"w":196,"h":58,"rx":10,"t":"第三轮 · 地基与工程","s":"加分项 + 手撕代码","c":"g"},
+{"x":228,"y":229,"t":"Ch1","s":"数学速查","ts":13,"ss":10.5,"lh":16,"c":"g"},
+{"x":300,"y":229,"t":"Ch2","s":"ML 八股","ts":13,"ss":10.5,"lh":16,"c":"g"},
+{"x":372,"y":229,"t":"Ch7","s":"探索","ts":13,"ss":10.5,"lh":16,"c":"g"},
+{"x":444,"y":229,"t":"Ch12","s":"SAC","ts":13,"ss":10.5,"lh":16,"c":"g"},
+{"x":516,"y":229,"t":"Ch17","s":"MCTS","ts":13,"ss":10.5,"lh":16,"c":"g"},
+{"x":588,"y":229,"t":"Ch19","s":"分布式","ts":13,"ss":10.5,"lh":16,"c":"g"},
+{"x":660,"y":229,"t":"Ch21","s":"工具链","ts":13,"ss":10.5,"lh":16,"c":"g"},
+{"x":732,"y":229,"t":"附录","s":"手撕代码","ts":13,"ss":10.5,"lh":16,"c":"g"}],
+"arrows":[
+{"p":[[259,45],[884,45]],"c":"b","sw":2},
+{"p":[[259,149],[594,149]],"c":"o","sw":2},
+{"p":[[259,253],[810,253]],"c":"g","sw":2}],
+"texts":[
+{"x":228,"y":96,"t":"✓ 检验：脱稿推出 Bellman → 策略梯度定理 → GAE → PPO-clip，讲清 Q-learning vs Sarsa、PPO vs GRPO","fill":"#374151"},
+{"x":228,"y":200,"t":"✓ 检验：3 分钟答完「DOTA2 / FPS 的 AI 你会怎么做」，并扛住观测 / 动作 / 奖励 / 评估追问","fill":"#374151"},
+{"x":228,"y":304,"t":"✓ 检验：手撕 Q-learning / GAE / PPO loss / MCTS 能编译运行；ML 八股（BN、交叉熵、过拟合）不卡壳","fill":"#374151"},
+{"x":612,"y":154,"t":"红框 ★ = 面经高频考点","cls":"sm b","fill":"#B91C1C"}],
+"cap":"<b>图 0-3</b>　三轮复习路线。第一轮只走理论主线（Bellman → Q-learning → DQN → 策略梯度 → GAE → PPO → GRPO），保证每个结论都能手推；第二轮把理论落到游戏 AI 大题；第三轮补地基和工程加分项。"} -->
+<div class="tbl"><table>
+<tr><th>轮次</th><th>章节</th><th>目标</th><th>完成标准</th></tr>
+<tr><td>第一轮 · 理论主线</td><td>Ch3 → Ch4 → Ch5 → Ch6 → Ch8 → Ch9 → Ch10 → Ch11 → Ch13</td><td>建立“价值派 / 策略派”两条推导链</td><td>不看书写出 Bellman 期望方程、策略梯度定理、GAE 闭式、PPO-clip 目标，并说清每一步的依据</td></tr>
+<tr><td>第二轮 · 游戏专题</td><td>Ch18 → Ch15 → Ch14 → Ch16 → Ch20</td><td>能回答系统设计大题</td><td>MOBA / FPS Bot 的观测、动作、奖励、训练、评估、部署能按图 0-2 讲完并应对追问</td></tr>
+<tr><td>第三轮 · 地基与工程</td><td>Ch1、Ch2、Ch7、Ch12、Ch17、Ch19、Ch21、附录</td><td>补齐八股和工程细节</td><td>附录 C 的手撕代码全部能编译运行；附录 A 的追问题能 30 秒作答</td></tr>
+</table></div>
+
+<h2>0.6 每章的固定结构与推导写法（附样张）</h2>
+<p>后面每一章都按同样的 9 段展开，方便你复习时快速定位：</p>
+<ol>
+<li><strong>30 秒面试版答案</strong>：先能说出口。</li>
+<li><strong>直觉与图解</strong>：先看懂再推导。</li>
+<li><strong>形式化定义</strong>：统一符号（见 0.7 符号表）。</li>
+<li><strong>逐步推导</strong>：每一行等式都写“依据”（定义 / 线性性 / 全期望公式 / 马尔可夫性 / Jensen…），关键结论高亮。更深的证明放进「选读」框。</li>
+<li><strong>算法伪代码 + 手撕代码</strong>（C++ / Python）。</li>
+<li><strong>实测</strong>：<code>demos/</code> 里的程序跑出来的数字和曲线，正文不手写实验数字。</li>
+<li><strong>游戏 AI 实战</strong>：放进 NPC / PVE / Bot / UE 场景里怎么用、坑在哪。</li>
+<li><strong>面试注意 + 易错说法 + 追问树</strong>。</li>
+<li><strong>速记卡 + 自测题</strong>。</li>
+</ol>
+
+<h3>样张：从回报到 Bellman 期望方程</h3>
+<p>下面用第 3 章的核心结论做一页样张，展示推导框的写法（正式内容在第 3 章展开）。先定义折扣回报：</p>
+$$G_t \;=\; R_{t+1} + \gamma R_{t+2} + \gamma^2 R_{t+3} + \cdots \;=\; \sum_{k=0}^{\infty}\gamma^k R_{t+k+1},\qquad 0\le\gamma<1$$
+<!--deriv 回报的递推关系
+G_t & = R_{t+1} + \gamma R_{t+2} + \gamma^2 R_{t+3} + \cdots || 折扣回报的定义
+& = R_{t+1} + \gamma\left(R_{t+2} + \gamma R_{t+3} + \cdots\right) || 从第二项起提出一个公因子 $\gamma$
+* & = R_{t+1} + \gamma\, G_{t+1} || 括号里正是 $G_{t+1}$ 的定义
+-->
+<p>有了这个递推，状态价值 $V_\pi(s)=\E_\pi[G_t\mid S_t=s]$ 就能写成“一步奖励 + 下一状态价值”的形式：</p>
+<!--deriv Bellman 期望方程（V 形式）
+V_\pi(s) & = \E_\pi\left[G_t \mid S_t = s\right] || 状态价值的定义
+& = \E_\pi\left[R_{t+1} + \gamma G_{t+1} \mid S_t = s\right] || 代入上面的回报递推
+& = \E_\pi\left[R_{t+1} \mid S_t = s\right] + \gamma\,\E_\pi\left[G_{t+1} \mid S_t = s\right] || 期望的线性性
+& = \E_\pi\left[R_{t+1} \mid S_t = s\right] + \gamma\,\E_\pi\Big[\E_\pi\left[G_{t+1} \mid S_{t+1}\right] \,\Big|\, S_t = s\Big] || 全期望公式（对 $S_{t+1}$ 取条件）+ 马尔可夫性：给定 $S_{t+1}$ 后，未来回报与 $S_t$ 无关
+& = \E_\pi\left[R_{t+1} + \gamma\, V_\pi(S_{t+1}) \mid S_t = s\right] || 内层期望正是 $V_\pi(S_{t+1})$；再合并两项
+* & = \sum_{a}\pi(a\mid s)\sum_{s',\,r} p(s',r\mid s,a)\big[\,r + \gamma\, V_\pi(s')\,\big] || 按 $A_t\sim\pi(\cdot\mid s)$、$(S_{t+1},R_{t+1})\sim p(\cdot\mid s,a)$ 把期望写成求和
+-->
+<p>固定策略 $\pi$ 后，记 $R_\pi(s)=\sum_a\pi(a\mid s)\sum_{s',r}p(s',r\mid s,a)\,r$、$P_\pi(s,s')=\sum_a\pi(a\mid s)\,p(s'\mid s,a)$，上式写成矩阵形式就是一个线性方程组：</p>
+$$V_\pi = R_\pi + \gamma P_\pi V_\pi \quad\Longrightarrow\quad V_\pi = (I-\gamma P_\pi)^{-1}R_\pi$$
+<p>直接求逆是 $O(|S|^3)$，状态一多就不现实；更常用的是<strong>迭代策略评估</strong> $V_{k+1}=T^\pi V_k := R_\pi+\gamma P_\pi V_k$。它为什么一定收敛？因为每迭代一次，误差至少缩小 $\gamma$ 倍：</p>
+<!--deriv 迭代误差每步至少缩小 γ 倍（γ-压缩）
+\|V_{k+1}-V_\pi\|_\infty & = \|T^\pi V_k - T^\pi V_\pi\|_\infty || $V_\pi$ 是不动点：$T^\pi V_\pi = V_\pi$
+& = \gamma\,\|P_\pi\,(V_k - V_\pi)\|_\infty || 两边的 $R_\pi$ 相消
+& \le \gamma\,\|V_k - V_\pi\|_\infty || $P_\pi$ 每行非负且和为 1：每个分量都是 $V_k-V_\pi$ 各分量的加权平均，绝对值不超过最大分量
+* & \le \gamma^{k+1}\,\|V_0 - V_\pi\|_\infty || 对 $k$ 递推
+-->
+<p>用一个游戏味的 3 状态例子验证：固定某个对线策略后，英雄在「对线 / 团战 / 回城」三个状态间转移，每步奖励分别为 1、2、−1：</p>
+$$P_\pi=\begin{pmatrix}0.6&0.3&0.1\\0.3&0.4&0.3\\0.9&0&0.1\end{pmatrix},\qquad R_\pi=\begin{pmatrix}1\\2\\-1\end{pmatrix},\qquad \gamma=0.9$$
+<p>构建脚本用高斯消元解出 $V_\pi\approx$ [[mrp.V]]（对线 / 团战 / 回城），再从 $V_0=0$ 开始迭代：初始误差 [[mrp.e0]]，第 10 次 [[mrp.e10]]，第 20 次 [[mrp.e20]]，第 40 次 [[mrp.e40]]。</p>
+<!--conv {"id":"mrp","P":[[0.6,0.3,0.1],[0.3,0.4,0.3],[0.9,0.0,0.1]],"R":[1,2,-1],"gamma":0.9,"K":40,"names":["对线","团战","回城"],
+"cap":"<b>图 0-4</b>　样张 MRP 上的迭代策略评估（数字由 build.py 在构建时真实计算）。左：三个状态的价值从 0 出发逐步逼近各自的 $V_\\pi$（虚线）；回城的奖励为负，前几步先往下走再被拉回。右：实际误差（实线）始终不超过 γ-压缩上界（虚线），两条线几乎平行——第 [[mrp.K]] 次迭代时实际误差是上界的 [[mrp.tight]] 倍。"} -->
+<div class="co deep"><span class="h">选读 · 为什么这个上界几乎是“紧”的</span><p>从 $V_0=0$ 出发，误差是 $V_k-V_\pi=(\gamma P_\pi)^k(V_0-V_\pi)=-\gamma^kP_\pi^kV_\pi$。随机矩阵满足 $P_\pi\mathbf{1}=\mathbf{1}$（每行和为 1），而 $P_\pi^k$ 会把任何向量“抹平”成接近常数向量 $(\mu^\top V_\pi)\,\mathbf{1}$（$\mu$ 为平稳分布），这个方向每迭代一步恰好只乘一个 $\gamma$。所以实际误差 $\approx\gamma^k\,|\mu^\top V_\pi|$，和上界 $\gamma^k\|V_\pi\|_\infty$ 只差一个常数倍。结论：<strong>γ 越接近 1，迭代评估越慢，这个慢是本质的</strong>——这也是 γ 取 0.99 时 critic 难学的一个直观原因。</p></div>
+<div class="co warn"><span class="h">面试注意</span><p>面试官让你“推一下 Bellman 方程”时，得分点在两处依据：<strong>① 回报递推</strong> $G_t=R_{t+1}+\gamma G_{t+1}$；<strong>② 全期望公式 + 马尔可夫性</strong>，所以 $\E[G_{t+1}\mid S_t=s]$ 才能换成 $\E[V_\pi(S_{t+1})\mid S_t=s]$。很多人能默写最终的求和式，但说不出第二步为什么成立。</p></div>
+<div class="co deep"><span class="h">选读 · 为什么 $(I-\gamma P_\pi)$ 一定可逆</span><p>由上面的压缩性，$\|\gamma P_\pi\|_\infty=\gamma<1$，所以 Neumann 级数 $\sum_{k\ge0}(\gamma P_\pi)^k$ 收敛，并且就是 $(I-\gamma P_\pi)^{-1}$。展开来看，$V_\pi=\sum_k\gamma^kP_\pi^kR_\pi$ 恰好是“第 $k$ 步的期望奖励乘 $\gamma^k$ 再求和”——回到了回报的定义。</p></div>
+
+<h2>0.7 统一符号表</h2>
+<p>全书采用 Sutton &amp; Barto（第 2 版）的记号；某章需要另起符号时会在章首注明。</p>
+<div class="tbl"><table>
+<tr><th>符号</th><th>含义</th><th>备注</th></tr>
+<tr><td>$S_t,\ A_t,\ R_{t+1}$</td><td>$t$ 时刻的状态、动作，以及随后得到的奖励</td><td>奖励下标比动作大 1：$A_t$ 的后果是 $R_{t+1}$</td></tr>
+<tr><td>$p(s',r\mid s,a)$</td><td>环境动力学</td><td>$p(s'\mid s,a)$、$r(s,a)$ 是它的边缘 / 期望</td></tr>
+<tr><td>$\pi(a\mid s)$，$\pi_\theta$</td><td>策略 / 参数为 $\theta$ 的策略</td><td>确定性策略记作 $\mu(s)$ 或 $\mu_\theta(s)$</td></tr>
+<tr><td>$\gamma\in[0,1)$</td><td>折扣因子</td><td>有效视界约为 $1/(1-\gamma)$</td></tr>
+<tr><td>$G_t$</td><td>折扣回报</td><td>$G_t=R_{t+1}+\gamma G_{t+1}$</td></tr>
+<tr><td>$V_\pi(s),\ Q_\pi(s,a),\ A_\pi(s,a)$</td><td>状态价值、动作价值、优势</td><td>$A_\pi=Q_\pi-V_\pi$</td></tr>
+<tr><td>$V_*,\ Q_*,\ \pi_*$</td><td>最优价值与最优策略</td><td>$\pi_*(s)=\argmax_a Q_*(s,a)$</td></tr>
+<tr><td>$\delta_t$</td><td>TD 误差</td><td>$\delta_t=R_{t+1}+\gamma V(S_{t+1})-V(S_t)$</td></tr>
+<tr><td>$\tau$</td><td>轨迹 $(S_0,A_0,R_1,S_1,A_1,\dots)$</td><td>$p_\theta(\tau)$ 为其概率</td></tr>
+<tr><td>$J(\theta)$</td><td>策略的目标（期望回报）</td><td>策略梯度对它求导</td></tr>
+<tr><td>$d^\pi(s)$</td><td>策略诱导的（折扣）状态分布</td><td>策略梯度定理、性能差异引理会用</td></tr>
+<tr><td>$\rho_t$ / $r_t(\theta)$</td><td>重要性采样比</td><td>off-policy 中 $\rho_t=\pi(A_t\mid S_t)/b(A_t\mid S_t)$；PPO 中 $r_t(\theta)=\pi_\theta/\pi_{\theta_{\text{old}}}$，注意别和奖励 $r$ 混淆</td></tr>
+<tr><td>$\alpha$</td><td>学习率</td><td>SAC 中另指温度系数，届时注明</td></tr>
+<tr><td>$\mathcal{H}(\pi(\cdot\mid s))$</td><td>策略熵</td><td>熵正则、最大熵 RL</td></tr>
+<tr><td>$\KL(p\,\Vert\, q)$</td><td>KL 散度</td><td>不对称；TRPO / PPO / RLHF 都会用</td></tr>
+</table></div>
+
+<h2>0.8 后续怎么推进、怎么向我提问</h2>
+<ul>
+<li><strong>按章推进</strong>：说“写第 N 章”或“继续”，我按大纲写下一章，同时更新单章 md、合并 md、电子书和 PDF。</li>
+<li><strong>针对知识点追问</strong>：例如“PPO 的 clip 为什么要取 min，再推一遍”“GAE 里 done 和 truncated 怎么处理”。回答会落到对应章节（新增「追问」小节或补充推导），并在 md 顶部「提问记录」留痕。</li>
+<li><strong>调整大纲</strong>：想增删章节、调整深度（比如“TRPO 的单调改进定理要完整证明”），直接说，我会改大纲并标注变更。</li>
+<li><strong>实测</strong>：每章的 demo 放在 <code>demos/chNN_*</code>；表格型算法和数据结构用 C++（MSVC），深度 RL 用 Python + numpy 手写网络（不依赖 gym / PyTorch，自写 CartPole 等环境，保证可复现），关键公式 C++ 与 Python 双实现对拍。</li>
+</ul>
+
+<div class="recap"><div class="t">速记卡 · 第 0 章</div><ul>
+<li>岗位三条职责 = Bot 设计（大题）+ RL 落地（理论）+ 工具链（工程）；理论是门槛，系统设计是区分度。</li>
+<li>理论主线：<strong>Bellman → Q-learning → DQN → 策略梯度 → GAE → PPO → GRPO</strong>，每一步都要能说出“凭什么成立”。</li>
+<li>伏羲公开落地方向：竞技机器人、自博弈（永劫无间噩梦 AI）、拟人化 / 风格化、奖励塑形、多风格 AI、RLHF 微调 Bot、智能 NPC。</li>
+<li>系统设计题按图 0-2 的 ①~⑧ 先报框架，再展开。</li>
+<li>Bellman 期望方程的两处依据：回报递推、全期望公式 + 马尔可夫性；迭代评估收敛靠 γ-压缩。</li>
+</ul></div>
+
+<details class="quiz"><summary>开卷自测 1：为什么 Q-learning 是 off-policy，而 Sarsa 是 on-policy？</summary><p>看更新目标里的下一个动作从哪来：Sarsa 用行为策略<strong>实际采样</strong>的 $A_{t+1}$，学到的是行为策略（含 ε 探索）自身的价值；Q-learning 用 $\max_{a'}Q(S_{t+1},a')$，学到的是<strong>贪心目标策略</strong>的价值，和行为策略怎么探索无关。详见第 6 章。</p></details>
+<details class="quiz"><summary>开卷自测 2：PPO 的 clip 目标为什么还要和未裁剪项取 min？</summary><p>clip 只负责“好的动作别加太多、坏的动作别减太多”；取 min 让目标成为未裁剪目标的<strong>悲观下界</strong>：当比值朝“让目标变差”的方向偏离时不做裁剪，梯度照常把它拉回来。详见第 11 章的四象限分析。</p></details>
+<details class="quiz"><summary>开卷自测 3：GAE 的 λ=0 和 λ=1 分别退化成什么？</summary><p>λ=0 时 $\hat A_t=\delta_t$，即一步 TD 优势（低方差、有偏）；λ=1 时 $\hat A_t=\sum_l\gamma^l\delta_{t+l}=G_t-V(S_t)$，即蒙特卡洛优势（无偏、高方差）。详见第 10 章。</p></details>
+<details class="quiz"><summary>开卷自测 4：为什么只用行为克隆训练的 Bot 会“越玩越偏”？</summary><p>BC 只在专家走过的状态上学；一旦犯小错进入专家没见过的状态，后续错误会累积，误差上界随视界 $T$ 呈 $O(\epsilon T^2)$ 增长。DAgger 让专家在 Bot 自己走到的状态上补标注，把上界降到 $O(\epsilon T)$。详见第 14 章。</p></details>
+</section>

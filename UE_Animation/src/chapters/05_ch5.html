@@ -1,0 +1,176 @@
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>分层骨骼混合：上半身换弹，下半身照跑</h1>
+    <p class="lead">Layered Blend per Bone 是 AnimGraph 里出镜率最高的节点之一。它的两个参数——Blend Depth 和 Mesh Space Rotation Blend——也是面试里最爱问的细节。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>掌握 Layered Blend per Bone 的输入、Branch Filter 与 Blend Mask 两种模式</li>
+    <li>能准确说出 Blend Depth 为 0、正数、负数时每根骨骼的权重</li>
+    <li>理解局部空间与组件空间旋转混合的区别，以及组件空间混合的代价</li>
+    <li>会画一个“运动状态机 + 上半身 Slot + 瞄准偏移 + IK”的典型 AnimGraph</li>
+  </ul></div>
+
+  <h2>5.1 节点长什么样</h2>
+  <ul>
+    <li><strong>Base Pose</strong>：底层姿势，一般是运动状态机的输出。</li>
+    <li><strong>Blend Poses 0..N</strong>：要叠上去的姿势，例如上半身蒙太奇 Slot 的输出；每个有一个 <strong>Blend Weight</strong>（0~1，整体强度）。</li>
+    <li><strong>Layer Setup</strong>：每个 Blend Pose 对应一组规则，决定<strong>哪些骨骼</strong>用它、各用多少。两种模式：
+      <ul><li><strong>Branch Filter</strong>：列出若干 (Bone Name, Blend Depth)，按骨骼分支计算权重。</li>
+          <li><strong>Blend Mask</strong>：引用一个混合遮罩资产（Blend Profile 的遮罩模式），逐骨骼直接指定 0~1 的权重，可视化编辑、可复用、可运行时切换。</li></ul></li>
+    <li>常用开关：<strong>Mesh Space Rotation Blend</strong>、Mesh Space Scale Blend、Curve Blend Option（曲线如何合并）、Blend Root Motion Based on Root Bone（Root Motion 按根骨骼权重混合）。</li>
+  </ul>
+
+  <h2>5.2 Blend Depth：权重怎么分配</h2>
+  <p>设 Branch Filter 的骨骼为 B，B 子树里某骨骼到 B 的层数为 k（B 自己 k = 0）：</p>
+  <div class="tbl"><table>
+    <tr><th>Blend Depth</th><th>权重</th><th>含义</th></tr>
+    <tr><td><strong>0</strong></td><td>B 及所有子孙 = 1</td><td>从 B 开始“硬切”</td></tr>
+    <tr><td><strong>N &gt; 0</strong></td><td>min(1, (k+1) / N)</td><td>从 B 往下 N 层内线性渐入，之后全是 1；Depth = 1 与 0 效果相同</td></tr>
+    <tr><td><strong>负数（−1）</strong></td><td>B 及所有子孙 = 0</td><td>把这个分支从混合里<strong>排除</strong>，常与其他正向规则配合</td></tr>
+    <tr><td>不在任何分支里</td><td>0</td><td>保持 Base Pose</td></tr>
+  </table></div>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm">
+      <text x="20" y="28" class="b">Branch Filter = spine_01</text>
+      <text x="215" y="28" class="b" text-anchor="middle">depth = 0</text><text x="340" y="28" class="b" text-anchor="middle">depth = 2</text>
+      <text x="465" y="28" class="b" text-anchor="middle">depth = 3</text><text x="590" y="28" class="b" text-anchor="middle">depth = 4</text>
+      <text x="740" y="28" class="b" text-anchor="middle">+ clavicle_r / −1</text>
+    </g>
+    <g class="sm mono">
+      <text x="20" y="58">pelvis</text><text x="20" y="84">spine_01  (k=0)</text><text x="20" y="110">spine_02  (k=1)</text>
+      <text x="20" y="136">spine_03  (k=2)</text><text x="20" y="162">neck / head</text><text x="20" y="188">clavicle_r / arm</text><text x="20" y="214">thigh / calf</text>
+    </g>
+    <g class="sm mono" text-anchor="middle">
+      <rect x="180" y="44" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="215" y="58">0</text>
+      <rect x="180" y="70" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="215" y="84" class="wt">1</text>
+      <rect x="180" y="96" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="215" y="110" class="wt">1</text>
+      <rect x="180" y="122" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="215" y="136" class="wt">1</text>
+      <rect x="180" y="148" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="215" y="162" class="wt">1</text>
+      <rect x="180" y="174" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="215" y="188" class="wt">1</text>
+      <rect x="180" y="200" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="215" y="214">0</text>
+
+      <rect x="305" y="44" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="340" y="58">0</text>
+      <rect x="305" y="70" width="70" height="20" rx="4" fill="#9DB4EE"/><text x="340" y="84">0.5</text>
+      <rect x="305" y="96" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="340" y="110" class="wt">1</text>
+      <rect x="305" y="122" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="340" y="136" class="wt">1</text>
+      <rect x="305" y="148" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="340" y="162" class="wt">1</text>
+      <rect x="305" y="174" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="340" y="188" class="wt">1</text>
+      <rect x="305" y="200" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="340" y="214">0</text>
+
+      <rect x="430" y="44" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="465" y="58">0</text>
+      <rect x="430" y="70" width="70" height="20" rx="4" fill="#C8D6F6"/><text x="465" y="84">0.333</text>
+      <rect x="430" y="96" width="70" height="20" rx="4" fill="#7393E4"/><text x="465" y="110" class="wt">0.667</text>
+      <rect x="430" y="122" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="465" y="136" class="wt">1</text>
+      <rect x="430" y="148" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="465" y="162" class="wt">1</text>
+      <rect x="430" y="174" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="465" y="188" class="wt">1</text>
+      <rect x="430" y="200" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="465" y="214">0</text>
+
+      <rect x="555" y="44" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="590" y="58">0</text>
+      <rect x="555" y="70" width="70" height="20" rx="4" fill="#D6E1F8"/><text x="590" y="84">0.25</text>
+      <rect x="555" y="96" width="70" height="20" rx="4" fill="#9DB4EE"/><text x="590" y="110">0.5</text>
+      <rect x="555" y="122" width="70" height="20" rx="4" fill="#5C82E0"/><text x="590" y="136" class="wt">0.75</text>
+      <rect x="555" y="148" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="590" y="162" class="wt">1</text>
+      <rect x="555" y="174" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="590" y="188" class="wt">1</text>
+      <rect x="555" y="200" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="590" y="214">0</text>
+
+      <rect x="705" y="44" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="740" y="58">0</text>
+      <rect x="705" y="70" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="740" y="84" class="wt">1</text>
+      <rect x="705" y="96" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="740" y="110" class="wt">1</text>
+      <rect x="705" y="122" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="740" y="136" class="wt">1</text>
+      <rect x="705" y="148" width="70" height="20" rx="4" fill="#2F5BD3"/><text x="740" y="162" class="wt">1</text>
+      <rect x="705" y="174" width="70" height="20" rx="4" fill="#FDE2E2" stroke="#B91C1C"/><text x="740" y="188" style="fill:#B91C1C">0（排除）</text>
+      <rect x="705" y="200" width="70" height="20" rx="4" fill="#F3F4F6"/><text x="740" y="214">0</text>
+    </g>
+    <text x="430" y="242" text-anchor="middle" class="xs">数值来自实测 E4（与 FAnimationRuntime::CreateMaskWeights 的规则一致）；最右一列为 spine_01/0 再加 clavicle_r/−1</text>
+  </svg>
+  <figcaption><b>图 5-1</b>　Blend Depth 的效果：正数让权重从过滤骨骼开始逐层渐入，避免上下半身交界处“折断”；负数把某个分支挖掉（例如右手保持持枪，只让左手做动作）</figcaption>
+  </figure>
+  <div class="co warn"><span class="h">面试注意：Blend Depth 不是“影响几层骨骼”</span>
+    <p>很多人以为 Depth = 3 表示“只影响 spine_01 往下 3 层”。实际上它是<strong>渐变的层数</strong>：3 层之内权重 1/3、2/3、1 逐步增加，<strong>3 层之后的子孙全部是 1</strong>，影响范围仍是整棵子树。想“只影响某几根”，应该用多个 Branch Filter 配合 −1 排除，或者直接用 Blend Mask。</p>
+  </div>
+
+  <h2>5.3 局部空间混合的问题：上半身被骨盆带偏</h2>
+  <p>场景：角色向右前方斜跑，跑步动画里骨盆朝右扭了 40°，脊柱三节各回扭 −10°（于是头朝 +10°）。上半身播放一个“朝正前方举枪”的动画（制作时骨盆、脊柱都朝前，右臂 +30°）。我们希望：<strong>不管腿怎么跑，枪口都朝正前方</strong>。</p>
+  <!--dials {"par":[-1,0,1,2,3,4,5,4,7],"names":["root","pelvis","spine_01","spine_02","spine_03","neck_01","head","clavicle_r","upperarm_r"],
+    "base":[0,40,-10,-10,-10,0,0,0,0],"aim":[0,0,0,0,0,0,0,0,30],"filter":2,
+    "show":[1,2,3,4,6,8],"target":[null,null,null,null,0,30],
+    "rows":[["下半身姿势（Base）","base",0],["上半身姿势（Aim）","aim",0],["Local · depth 0","local",0],["Mesh Space · depth 0","mesh",0],["Local · depth 3","local",3],["Mesh Space · depth 3","mesh",3]],
+    "cap":"<b>图 5-2</b>　每根骨骼在组件空间里的朝向（构建时按 E4 的同一规则计算）。Local 混合时，spine_01 拿到的是瞄准动画的<b>局部</b>旋转，于是整个上半身随骨盆偏了 40°（depth 3 时偏 30°）；Mesh Space 混合直接取瞄准动画的<b>组件空间</b>朝向，头和右臂都对准目标"} -->
+  <div class="co ver"><span class="h">实测 E4</span>
+    <div class="tbl"><table>
+      <tr><th>模式</th><th>头部朝向</th><th>右上臂朝向</th><th>spine_01 / 02 / 03</th></tr>
+      <tr><td>Local Space · depth 0</td><td class="no">40.00°</td><td class="no">70.00°</td><td>40 / 40 / 40</td></tr>
+      <tr><td>Mesh Space · depth 0</td><td class="yes">0.00°</td><td class="yes">30.00°</td><td>0 / 0 / 0</td></tr>
+      <tr><td>Local Space · depth 3</td><td class="no">30.00°</td><td class="no">60.00°</td><td>33.33 / 30 / 30</td></tr>
+      <tr><td>Mesh Space · depth 3</td><td class="yes">0.00°</td><td class="yes">30.00°</td><td>20.03 / 6.66 / 0（逐节回正）</td></tr>
+    </table></div>
+    <p>耗时（68 骨骼 Mannequin，Branch Filter = spine_01）：局部空间 <strong>0.260 us</strong>/次；Mesh Space 旋转混合 <strong>3.429 us</strong>/次，<strong>13.2 倍</strong>——因为要把两份姿势都做一遍 FK、在组件空间插值、再转回局部空间。</p>
+  </div>
+  <p>Mesh Space · depth 3 是最常见的组合：脊柱逐节从“跟着骨盆”过渡到“对准目标”，上下半身的扭转被分摊到三节脊柱上，看起来像真人拧腰，而头和枪完全对准目标。</p>
+  <div class="lab alab layerlab" id="lab-layer"></div><!--/lab-->
+
+  <h2>5.4 典型的 AnimGraph 结构</h2>
+  <figure>
+  <svg viewBox="0 0 860 230" xmlns="http://www.w3.org/2000/svg">
+    <rect x="14" y="40" width="130" height="50" rx="8" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="79" y="62" text-anchor="middle" class="b sm">Locomotion</text><text x="79" y="79" text-anchor="middle" class="xs">状态机</text>
+    <rect x="164" y="40" width="130" height="50" rx="8" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="229" y="62" text-anchor="middle" class="b sm">Save Cached Pose</text><text x="229" y="79" text-anchor="middle" class="xs">"Loco"（每帧只算一次）</text>
+    <rect x="164" y="130" width="130" height="40" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="229" y="155" text-anchor="middle" class="sm">Use "Loco"</text>
+    <rect x="314" y="130" width="130" height="40" rx="8" fill="#FEF6E4" stroke="#B45309"/><text x="379" y="155" text-anchor="middle" class="sm">Use "Loco"</text>
+    <rect x="464" y="130" width="130" height="50" rx="8" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="529" y="151" text-anchor="middle" class="b sm">Slot 'UpperBody'</text><text x="529" y="168" text-anchor="middle" class="xs">播放蒙太奇；没有时透传</text>
+    <rect x="464" y="30" width="150" height="62" rx="8" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="2"/>
+    <text x="539" y="52" text-anchor="middle" class="b sm">Layered blend per bone</text><text x="539" y="69" text-anchor="middle" class="xs">spine_01 / depth 3</text><text x="539" y="84" text-anchor="middle" class="xs">Mesh Space Rotation ✔</text>
+    <rect x="634" y="40" width="96" height="44" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="682" y="60" text-anchor="middle" class="b sm">Aim Offset</text><text x="682" y="76" text-anchor="middle" class="xs">Yaw/Pitch</text>
+    <rect x="634" y="130" width="96" height="44" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="682" y="150" text-anchor="middle" class="b sm">Foot IK</text><text x="682" y="166" text-anchor="middle" class="xs">Control Rig</text>
+    <rect x="752" y="130" width="96" height="44" rx="8" fill="#111827"/><text x="800" y="157" text-anchor="middle" class="b sm wt">Output Pose</text>
+    <g fill="none" stroke="#4B5563" stroke-width="1.4">
+      <line x1="144" y1="65" x2="160" y2="65" marker-end="url(#a)"/>
+      <path d="M294,150 H304 V62 H460" marker-end="url(#a)"/>
+      <line x1="444" y1="150" x2="460" y2="150" marker-end="url(#a)"/>
+      <line x1="529" y1="130" x2="529" y2="96" marker-end="url(#a)"/>
+      <line x1="614" y1="62" x2="630" y2="62" marker-end="url(#a)"/>
+      <path d="M682,84 V126" marker-end="url(#a)"/>
+      <line x1="730" y1="152" x2="748" y2="152" marker-end="url(#a)"/>
+    </g>
+    <text x="380" y="56" class="xs">Base Pose</text><text x="536" y="118" class="xs">Blend Pose 0</text>
+    <text x="430" y="212" text-anchor="middle" class="xs">顺序很重要：先合成全身姿势 → 再叠加瞄准（网格空间加性）→ 最后做 IK 修正（脚贴地、手握枪）</text>
+  </svg>
+  <figcaption><b>图 5-3</b>　一个常见的射击游戏 AnimGraph。Cached Pose 让运动状态机只求值一次、被两处使用；没有蒙太奇时 Slot 直接输出输入姿势，分层混合等于没混</figcaption>
+  </figure>
+
+  <h2>5.5 其他混合节点速览</h2>
+  <div class="tbl"><table>
+    <tr><th>节点</th><th>作用</th><th>要点</th></tr>
+    <tr><td>Blend</td><td>A、B 按 Alpha 混合</td><td>Alpha 为 0 或 1 时只求值一边（相关性裁剪）</td></tr>
+    <tr><td>Blend Poses by Bool / Int / Enum</td><td>按变量切换，带 Blend Time</td><td>切换是“过渡”，可选 Inertialization 方式</td></tr>
+    <tr><td>Blend Multi</td><td>多路按各自 Alpha 混合</td><td>可设为加性</td></tr>
+    <tr><td>Blend Bone by Channel</td><td>把某根骨骼的平移 / 旋转 / 缩放单独拷到另一根</td><td>可选计算空间</td></tr>
+    <tr><td>Apply Additive / Apply Mesh Space Additive</td><td>叠加加性姿势</td><td>受 LOD Threshold 控制，远处可以不叠</td></tr>
+    <tr><td>Save / Use Cached Pose</td><td>缓存一个子图的结果</td><td>Update 只调用一次（取最高权重的使用者），Evaluate 也只算一次</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">深入：权重为 0 的分支会不会被计算？</span>
+    <p>不会。AnimGraph 在 Update 阶段把权重传下去，权重接近 0 的子图被视为<strong>不相关（not relevant）</strong>，既不 Update 也不 Evaluate。这对性能很关键：状态机里不活跃的状态、Blend 里 Alpha=0 的一边都不花钱。它带来的副作用是——子图重新变得相关时，时间可能从头开始（序列播放器可选 “Reset on Become Relevant”），需要的话用同步组保持相位。UE5 还提供 <strong>Anim Node Functions</strong>（On Become Relevant / On Update / On Initial Update），可以在这些时机执行线程安全逻辑。</p>
+  </div>
+  <div class="co net"><span class="h">游戏客户端实战：分层混合常见问题</span>
+    <ul>
+      <li><strong>挥拳时胯不跟着转，看起来很僵</strong>：过滤骨骼选得太靠上。可以从 pelvis 开始，同时把两条腿用 −1 排除，让胯部跟随上半身动作。</li>
+      <li><strong>上下半身交界处“折断”</strong>：Depth = 0 硬切。改成 2~3 层渐入，或用 Blend Mask 精细调。</li>
+      <li><strong>蒙太奇的 Root Motion 被分层混合吃掉了</strong>：根骨骼不在分支里，权重为 0。开启 Blend Root Motion Based on Root Bone，或在 Slot 之前处理 Root Motion。</li>
+      <li><strong>跑动中开火，枪口方向抖</strong>：用了 Local 混合，骨盆的摆动传到了枪上。开 Mesh Space Rotation Blend。</li>
+    </ul>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>Layered Blend per Bone：Base + 多个 Blend Pose；Layer Setup 用 <strong>Branch Filter</strong> 或 <strong>Blend Mask</strong>。</li>
+    <li>Blend Depth：<strong>0 = 整个子树 1</strong>；<strong>N = 前 N 层 (k+1)/N 渐入，之后 1</strong>；<strong>−1 = 排除该分支</strong>。</li>
+    <li>Local 混合让上半身随骨盆偏（E4：头偏 40°）；<strong>Mesh Space Rotation Blend</strong> 保持组件空间朝向（0°），代价约 13.2 倍。</li>
+    <li>典型结构：状态机 → Cached Pose → Slot（上半身蒙太奇）→ 分层混合 → Aim Offset → IK → Output。</li>
+    <li>权重为 0 的分支不 Update 也不 Evaluate；重新相关时注意时间重置。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：分层混合里，平移也是在组件空间混合吗？</summary><p>不是。Mesh Space Rotation Blend 只影响旋转（另有 Mesh Space Scale Blend 处理缩放），平移仍按局部空间线性插值——骨骼平移大多是骨长，在局部空间混合不会出问题。也正因为只转换旋转，它的开销主要在两次 FK 和“组件空间 → 局部空间”的反算上。</p></details>
+  <details class="quiz"><summary>自测：同一个分层混合节点里，两个 Blend Pose 的分支重叠了怎么办？</summary><p>UE 内部为每根骨骼只记录<strong>一个</strong>来源姿势下标和一个权重（<code>FPerBoneBlendWeight{SourceIndex, BlendWeight}</code>），这根骨骼最终在 Base Pose 和这一个 Blend Pose 之间插值。所以分支重叠时，重叠区域只会取其中一个 Blend Pose，而不是几个姿势的平均。设计上应让各分支互不重叠（例如左手一组、右手一组），需要“几个动作平均”时先用 Blend 节点把它们混好再接进来。</p></details>
+</section>

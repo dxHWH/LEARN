@@ -1,0 +1,54 @@
+# /Game/Blueprints/GM_MyGame  (Blueprint)
+ParentClass: /Script/Engine.GameModeBase
+
+## Variables
+- ReadyCount : int
+- ReadyPlayersList : object<PlayerController>[]
+- 开始 : bool
+
+## GM_MyGame_C Default__GM_MyGame_C
+   开始 = True
+   GameStateClass = BP_MyGameState_C
+   DefaultPawnClass = BP_Player_C
+
+## SceneComponent GM_MyGame_C.DefaultSceneRoot_GEN_VARIABLE
+   bVisualizeComponent = True
+
+## SCS_Node GM_MyGame_C.SimpleConstructionScript_0.SCS_Node_0
+   ComponentClass = SceneComponent
+   ComponentTemplate = DefaultSceneRoot_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = DefaultSceneRoot
+
+## Custom events / RPC
+- CustomEvent AddReadyPlayer  [RPC Net|Reliable|Server]   (graph GM_MyGame.EventGraph)
+
+## Graph GM_MyGame.EventGraph
+
+CustomEvent AddReadyPlayer  [RPC Net|Reliable|Server](RequestingPC):  #29
+  CastTo BP_MyGameState_C(Object=GetGameState())  -> AsBP My Game State  #30
+    [then]:
+      Array_AddUnique(TargetArray=CastTo BP_MyGameState_C#30.AsBP My Game State.ReadyPlayersList, NewItem=CustomEvent AddReadyPlayer  [RPC Net|Reliable|Server]#29.RequestingPC)  #10
+      GetNumPlayers()  -> ReturnValue  #25
+      Branch(Condition=EqualEqual_IntInt(A=GetNumPlayers#25.ReturnValue, B=Array_Length(TargetArray=CastTo BP_MyGameState_C#30.AsBP My Game State.ReadyPlayersList)))  #38
+        [true]:
+          Macro ForEachLoop(Array=CastTo BP_MyGameState_C#30.AsBP My Game State.PlayerArray) <Exec>  -> Array Element  #40
+            [LoopBody]:
+              PrintString(InString="发报", bPrintToScreen=true, bPrintToLog=true, TextColor=(R=0.000000,G=0.660000,B=1.000000,A=1.000000), Duration=2.000000, Key="None")  #19
+              Multicast_StartGame(self=CastTo BP_Player_C(Object=GetPawn(self=Macro ForEachLoop#40.Array Element)).AsBP Player)  #18
+
+Event ReceiveBeginPlay():  #32
+
+Event ReceiveTick(DeltaSeconds):  #33
+  // exec nodes with no incoming exec (dead / disconnected): Array_AddUnique#8, Branch#37, Macro IncrementInt#39
+  // node #12 PrintString EnabledState=ENodeEnabledState::DevelopmentOnly
+  // node #19 PrintString EnabledState=ENodeEnabledState::DevelopmentOnly
+  // node #20 PrintString EnabledState=ENodeEnabledState::DevelopmentOnly
+  // node #21 PrintString EnabledState=ENodeEnabledState::DevelopmentOnly
+  // node #23 PrintString EnabledState=ENodeEnabledState::DevelopmentOnly
+  // node #32 Event ReceiveBeginPlay EnabledState=ENodeEnabledState::Disabled
+  // node #33 Event ReceiveTick EnabledState=ENodeEnabledState::Disabled
+
+## Graph GM_MyGame.UserConstructionScript
+
+FunctionEntry():  #34

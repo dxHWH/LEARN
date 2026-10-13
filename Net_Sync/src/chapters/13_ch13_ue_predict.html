@@ -1,0 +1,129 @@
+<section class="chapter" id="ch13">
+<div class="ch-head"><div class="no">CHAPTER 13</div><h1>Unreal 的预测：CMC、GAS、Mover 与网络物理</h1><p class="lead">第 10 章的“预测 + 和解”落到 Unreal 里有三个实现：角色移动交给 CharacterMovementComponent，技能交给 GAS 的 Prediction Key，而 Mover 和网络物理是 Epic 把它们通用化的下一代尝试。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>按时序讲完 CMC 的一次移动：SavedMove → 本地执行 → ServerMove → 服务器重放与误差判定 → ClientAckGoodMove / ClientAdjustPosition → 客户端重放未确认移动。</li>
+<li>会给 CMC 加一个可预测的自定义移动（冲刺），知道 SavedMove / 压缩标志 / CanCombineWith 各自的作用。</li>
+<li>说清 GAS 的预测：Prediction Key、LocalPredicted、哪些东西能预测、被拒绝时怎么撤销、为什么不会重复扣两次。</li>
+<li>了解 Mover、Network Prediction Plugin、Chaos 网络物理（预测插值 / 重模拟）的定位与成熟度。</li>
+</ul></div>
+
+<div class="ans30"><span class="h">30 秒面试版答案</span>
+<p>CMC 是 Unreal 的角色移动预测：自主代理每帧把输入（加速度、跳跃等压缩标志）和时间戳存成 SavedMove，本地立刻执行，再通过不可靠的 ServerMove RPC 发给服务器（顺带一个重要的旧移动作冗余）；服务器用客户端时间戳算出时间差、重放这次移动，比较客户端声称的位置，误差在阈值内就回 ClientAckGoodMove，超出就回 ClientAdjustPosition；客户端收到纠正后设到权威位置，再把时间戳之后的 SavedMoves 全部重放——这就是第 10 章的和解。其他端的角色是模拟代理，靠复制的移动数据插值并平滑网格。GAS 用 Prediction Key 做技能预测：LocalPredicted 技能在客户端立即激活，生成一个 key 随 ServerTryActivateAbility 发给服务器，期间产生的 GE、GameplayCue、蒙太奇都挂在这个 key 上；服务器拒绝则整体撤销，接受则用复制下来的 key 对账、去掉本地预测的副本避免重复。Mover 是更模块化的新移动框架，网络物理提供预测插值和重模拟，二者在 UE5 中仍处于实验性 / Beta 阶段。</p></div>
+
+<h2>13.1 CMC 的一次移动</h2>
+<!--seq {"p":["客户端（AutonomousProxy）","服务器（Authority）","其他客户端（SimulatedProxy）"],"pc":["o","b","t"],"grp":[],
+"s":[["—","客户端：预测"],[0,0,"ReplicateMoveToServer：新建 FSavedMove（加速度、压缩标志、时间戳）","o"],[0,0,"能与上一个待发移动合并就合并（CanCombineWith），省带宽","s"],[0,0,"PerformMovement：本地立即执行（零延迟手感），SavedMoves.Push","o"],
+[0,1,"ServerMove（不可靠）：时间戳 + 加速度 + 客户端位置 + 标志 + 一个重要旧移动","net"],
+["—","服务器：权威重放"],[1,1,"校验时间戳 → 用时间差（有上限）MoveAutonomous 重放这次移动","b"],[1,1,"比较客户端位置与服务器结果：误差 > 阈值？","b"],
+[1,0,"误差小：ClientAckGoodMove(TimeStamp)（不可靠）","net"],[1,0,"误差大：ClientAdjustPosition(TimeStamp, 位置, 速度, 移动基座…)","net"],
+[1,2,"复制 ReplicatedMovement（位置 / 旋转 / 速度）","rep"],
+["—","客户端：和解"],[0,0,"Ack：丢弃时间戳之前的 SavedMoves","g"],[0,0,"Adjust：设到权威位置 → 重放时间戳之后所有 SavedMoves（ClientUpdatePositionAfterServerUpdate）","r"],
+[2,2,"SimulatedProxy：插值 / 外推 + 网格平滑（SmoothCorrection）","t"]],
+"cap":"<b>图 13-1</b> CharacterMovementComponent 的网络流程 <span class=\"tag ue\">UE 源码</span>。和第 10 章 E11 的“预测 + 和解”逐项对应：SavedMoves = 未确认输入队列，时间戳 = 输入序号，ClientAdjustPosition = 权威状态，重放 = 和解。"} -->
+<div class="tbl"><table>
+<tr><th>CMC 概念</th><th>第 10 章的通用概念</th><th>说明</th></tr>
+<tr><td><code>FSavedMove_Character</code> / <code>SavedMoves</code></td><td>pending 输入队列</td><td>保存加速度、压缩标志、时间戳、起止状态；对象池分配</td></tr>
+<tr><td>TimeStamp</td><td>输入序号</td><td>同时用于服务器计算 DeltaTime；服务器会校验时间戳（防加速）</td></tr>
+<tr><td>ServerMove / ServerMovePacked</td><td>上行输入</td><td>不可靠；带一个“重要的旧移动”（OldMove）作冗余；UE 4.26 起默认使用打包的移动数据容器（新移动 + 待合并移动 + 旧移动）</td></tr>
+<tr><td><code>MAXPOSITIONERRORSQUARED</code>（GameNetworkManager）</td><td>纠正阈值</td><td>位置误差平方超过它才纠正，避免浮点误差导致每帧纠正</td></tr>
+<tr><td>ClientAdjustPosition / ClientVeryShortAdjustPosition</td><td>权威状态</td><td>服务器在发送客户端调整时（每帧最多一次）发出，带时间戳</td></tr>
+<tr><td>ClientUpdatePositionAfterServerUpdate</td><td>和解重放</td><td>把纠正时间戳之后的 SavedMoves 重新执行一遍</td></tr>
+</table></div>
+<div class="co tip"><span class="h">调试工具</span><p><code>p.NetShowCorrections 1</code> 在发生纠正时画出客户端与服务器的胶囊体位置（<code>p.NetCorrectionLifetime</code> 控制显示时长）；<code>net PktLag=100</code>、<code>net PktLoss=5</code>、<code>net PktLagVariance=30</code> 模拟延迟 / 丢包 / 抖动；Network Insights（Unreal Insights 的网络页）看每个 Actor 的复制带宽。纠正频繁出现时，先查“客户端与服务器的移动逻辑是否一致”（例如只在客户端改了 MaxWalkSpeed）。</p></div>
+
+<h2>13.2 给 CMC 加一个可预测的冲刺</h2>
+<p>最常见的错误：客户端按下冲刺时直接改 <code>MaxWalkSpeed</code>，再用一个 Server RPC 通知服务器改。结果是客户端先跑快、服务器晚一个 RTT 才跑快，这段时间里每一步都和服务器对不上，被连续 ClientAdjustPosition 拉回（第 10 章“橡皮筋”）。正确做法是把“是否冲刺”放进 SavedMove，让它和移动输入<strong>一起</strong>被预测、发送、重放：</p>
+<!--code:cpp:UE C++：可预测的冲刺（压缩标志写法，示例，未在本机编译）-->
+class FSavedMove_MyChar : public FSavedMove_Character {
+public:
+    uint8 bWantsToSprint : 1;
+    virtual void Clear() override { FSavedMove_Character::Clear(); bWantsToSprint = 0; }
+    virtual uint8 GetCompressedFlags() const override {
+        uint8 F = FSavedMove_Character::GetCompressedFlags();
+        if (bWantsToSprint) F |= FLAG_Custom_0;                 // 随 ServerMove 一起上行
+        return F;
+    }
+    virtual bool CanCombineWith(const FSavedMovePtr& New, ACharacter* C, float MaxDelta) const override {
+        if (bWantsToSprint != ((FSavedMove_MyChar*)New.Get())->bWantsToSprint) return false;  // 状态变化的移动不能合并
+        return FSavedMove_Character::CanCombineWith(New, C, MaxDelta);
+    }
+    virtual void SetMoveFor(ACharacter* C, float Dt, const FVector& Accel, FNetworkPredictionData_Client_Character& Data) override {
+        FSavedMove_Character::SetMoveFor(C, Dt, Accel, Data);
+        bWantsToSprint = Cast<UMyCMC>(C->GetCharacterMovement())->bWantsToSprint;   // 记录这一步的输入
+    }
+    virtual void PrepMoveFor(ACharacter* C) override {          // 重放（和解）时恢复这一步的输入
+        FSavedMove_Character::PrepMoveFor(C);
+        Cast<UMyCMC>(C->GetCharacterMovement())->bWantsToSprint = bWantsToSprint;
+    }
+};
+
+void UMyCMC::UpdateFromCompressedFlags(uint8 Flags) {           // 服务器从标志位恢复输入
+    Super::UpdateFromCompressedFlags(Flags);
+    bWantsToSprint = (Flags & FSavedMove_Character::FLAG_Custom_0) != 0;
+}
+float UMyCMC::GetMaxSpeed() const {                             // 两端用同一个函数、同一个输入算速度
+    return (bWantsToSprint && IsMovingOnGround()) ? SprintSpeed : Super::GetMaxSpeed();
+}
+// 还需要：FNetworkPredictionData_Client_MyChar::AllocateNewMove() 返回 FSavedMove_MyChar，
+// 并在 UMyCMC::GetPredictionData_Client() 里创建它。
+<!--/code-->
+<p>压缩标志只有 4 个自定义位（<code>FLAG_Custom_0~3</code>）；需要更多数据（例如冲刺能量、瞄准方向）时，UE 4.26 起可以继承 <code>FCharacterNetworkMoveData</code> 自定义打包的移动数据 <span class="tag ue">UE 源码</span>。这一节的原则对任何预测系统都成立：<strong>影响模拟结果的一切输入，都必须进入“被保存、被发送、被重放”的那份数据</strong>——和帧同步“所有输入都要进帧命令”完全一样。</p>
+
+<h2>13.3 模拟代理：别人的角色怎么平滑</h2>
+<p>其他客户端上的角色不跑预测，它们通过 Actor 的 <code>ReplicatedMovement</code>（位置、旋转、速度，可量化）接收服务器状态，CMC 在两次更新之间按速度模拟、收到新状态时做 <strong>SmoothCorrection</strong>：胶囊体直接到新位置，<strong>网格（Mesh）</strong>保留一个偏移、在若干帧内平滑收敛（<code>NetworkSmoothingMode</code>：Disabled / Linear / Exponential）。这就是第 10 章“逻辑位置精确、显示位置平滑”的实现：碰撞与判定用胶囊，玩家看到的是平滑后的网格。</p>
+<div class="co deep"><span class="h">为什么 CMC 不像 Source 那样做固定延迟的快照插值？</span><p>CMC 的模拟代理默认更接近“收到即用 + 模拟外推 + 平滑”，没有一个全局的“渲染过去 100 ms”的插值时间轴，所以延迟更低，但在高抖动下更容易看到修正。需要严格插值（例如电竞回放、观战）的项目会自己做快照缓冲。延迟补偿也不是引擎内置的：Unreal 没有通用的“服务器回溯命中盒”，射击游戏通常自己维护历史（或者像很多项目一样，客户端判定命中、服务器做合理性校验）<span class="tag inf">推断</span>（基于引擎源码中无通用回溯模块）。</p></div>
+
+<h2>13.4 GAS 的预测：Prediction Key</h2>
+<!--seq {"p":["客户端","服务器"],"pc":["o","b"],
+"s":[[0,0,"玩家按技能：LocalPredicted 技能立即激活，生成 FPredictionKey(K)","o"],[0,0,"在 K 的作用域内：预测施加 GE（扣蓝、加 Buff）、播放蒙太奇、触发 GameplayCue","o"],
+[0,1,"ServerTryActivateAbility(技能, K)","net"],[1,1,"检查冷却 / 消耗 / 标签 → 用同一个 K 激活技能并施加 GE","b"],
+["—","服务器接受"],[1,0,"ClientActivateAbilitySucceed；复制的 GE 带着 K（ReplicatedPredictionKey）","net"],[0,0,"收到带 K 的复制 GE → 移除本地预测的那份（不会扣两次）","g"],
+["—","服务器拒绝（例如客户端以为 CD 好了，服务器认为没好）"],[1,0,"ClientActivateAbilityFailed(K)","net"],[0,0,"撤销 K 关联的一切：结束技能、移除预测 GE、停止蒙太奇","r"]],
+"cap":"<b>图 13-2</b> GAS 的预测流程 <span class=\"tag ue\">UE 源码（GameplayPrediction.h 注释）</span>。Prediction Key 就是第 10 章“输入序号”在技能系统里的化身：所有预测副作用都挂在 key 上，才能整体对账或整体撤销。"} -->
+<div class="tbl"><table>
+<tr><th>能预测（随 Prediction Key）</th><th>不预测 / 有限制</th></tr>
+<tr><td>技能激活；由预测技能触发的事件；GE 施加（属性修改、标签修改）；GameplayCue（随 GE 或单独执行）；蒙太奇；移动（交给 CMC）</td><td>GE 的移除；周期性效果（DOT）；预测施加的瞬时 GE 在客户端被当作“无限时长”处理，以便确认或撤销；伤害等关键结果通常只在服务器结算</td></tr>
+</table></div>
+<div class="tbl"><table>
+<tr><th>Net Execution Policy</th><th>含义</th><th>适用</th></tr>
+<tr><td><code>LocalPredicted</code></td><td>客户端预测激活，服务器确认</td><td>玩家主动技能（默认推荐）</td></tr>
+<tr><td><code>LocalOnly</code></td><td>只在本地客户端运行</td><td>纯表现、本地 UI 交互</td></tr>
+<tr><td><code>ServerInitiated</code></td><td>服务器激活，再在拥有者客户端运行</td><td>服务器触发的技能</td></tr>
+<tr><td><code>ServerOnly</code></td><td>只在服务器运行</td><td>被动、AI、纯逻辑</td></tr>
+</table></div>
+<p>需要客户端提供瞄准数据的技能（例如 <code>WaitTargetData</code>）会把目标数据随 key 通过 <code>ServerSetReplicatedTargetData</code> 发给服务器；服务器在 _Implementation 里校验它是否合理（与第 10 章“延迟补偿要校验客户端声称的时刻”是同一个问题）。</p>
+
+<h2>13.5 下一代：Mover、Network Prediction Plugin、网络物理</h2>
+<div class="tbl"><table>
+<tr><th>系统</th><th>定位</th><th>状态（截至查阅的资料）</th></tr>
+<tr><td>Network Prediction Plugin（NPP）</td><td>通用的“输入 / 同步状态 / 辅助状态 + 固定 tick + 回滚重模拟”框架，把 CMC 那套写法抽象成模板</td><td>实验性；社区反馈其开发重心已转向 Chaos 物理后端</td></tr>
+<tr><td>Mover（Mover 2.0）</td><td>CMC 的长期替代：移动模式（Movement Mode）+ 叠加移动（Layered Move）+ 修饰器，模块化、可用于非 Actor；网络预测由后端提供（NPP 或 Chaos）</td><td>5.4 起以实验性插件提供，5.6~5.7 期间进入 Beta（不同资料说法不一，以官方 release notes 为准）；官方仍在做破坏性 API 调整</td></tr>
+<tr><td>Chaos 网络物理</td><td>物理复制模式：预测插值（Predictive Interpolation，在插值时间线上做局部预测）、重模拟（Resimulation，状态偏差超过阈值时回滚重算）；<code>NetworkPhysicsComponent</code> 管理输入 / 状态历史、输入冗余与衰减</td><td>5.4：预测插值为 Beta、重模拟为实验性；项目设置里有“支持的最大 RTT”“触发重模拟的误差阈值（厘米）”等参数；物理复制 LOD 在 5.7 中仍在完善</td></tr>
+</table></div>
+<p class="tcap">来源：<span class="tag ue">UE 文档 / 公开路线图 / 官方论坛</span>。这些系统的共同点是把 GGPO 式的“历史 + 回滚重算”带进了服务器权威的状态同步——第 9 章的结论在这里再次成立：<strong>预测必然伴随回滚，回滚必然需要历史和确定性的重算</strong>（物理的重算只需要“足够接近”，不需要逐位一致，因为服务器会持续纠正）。</p>
+
+<div class="co warn"><span class="h">面试注意</span><p>“CMC 怎么做网络同步”几乎必考，答题顺序：自主代理保存 SavedMove 并本地执行 → 不可靠 ServerMove（带时间戳 + 旧移动冗余）→ 服务器重放并按误差阈值决定 Ack 还是 Adjust → 客户端纠正后重放未确认移动 → 模拟代理插值 + 网格平滑。追问“怎么加冲刺 / 翻滚”时，一定要说“把输入放进 SavedMove（压缩标志或自定义移动数据），不要用 RPC 改速度”。GAS 问到预测时，关键词是 Prediction Key、LocalPredicted、撤销与去重。</p></div>
+
+<h2>13.6 坑位</h2>
+<div class="tbl"><table>
+<tr><th>坑</th><th>后果</th><th>修正</th></tr>
+<tr><td>用 RPC 改 MaxWalkSpeed 做冲刺</td><td>冲刺开始 / 结束时连续纠正、橡皮筋</td><td>输入进 SavedMove，两端同一函数算速度</td></tr>
+<tr><td>只在客户端改了影响移动的参数（重力、摩擦、根运动）</td><td>持续纠正</td><td>参数也要复制，或由输入驱动</td></tr>
+<tr><td>自定义 SavedMove 没实现 CanCombineWith</td><td>状态切换的那一步被合并掉，服务器看不到</td><td>状态不同的移动禁止合并</td></tr>
+<tr><td>根运动蒙太奇只在一端播放</td><td>位置分歧</td><td>根运动蒙太奇要在预测端和服务器端同时播放（GAS 的 PlayMontageAndWait 会处理）</td></tr>
+<tr><td>GAS 里在客户端直接改属性</td><td>服务器不知道、马上被复制覆盖</td><td>通过预测 GE 修改</td></tr>
+<tr><td>预测 GE 施加了伤害</td><td>服务器拒绝时“伤害撤销”很怪</td><td>伤害等关键结果只在服务器结算，客户端只预测表现</td></tr>
+</table></div>
+
+<div class="recap"><div class="t">本章速记</div><ul>
+<li>CMC：SavedMove（加速度 + 标志 + 时间戳）→ 本地执行 → 不可靠 ServerMove（+ 旧移动）→ 服务器重放、误差阈值 → Ack / Adjust → 客户端重放未确认移动；模拟代理插值 + 网格平滑。</li>
+<li>自定义移动：输入进 SavedMove（FLAG_Custom_0~3 或自定义移动数据），实现 SetMoveFor / PrepMoveFor / CanCombineWith / UpdateFromCompressedFlags。</li>
+<li>GAS：Prediction Key 挂住所有预测副作用；LocalPredicted；拒绝整体撤销，接受按 key 去重；GE 移除、周期效果不预测。</li>
+<li>Mover / NPP / Chaos 网络物理：把“历史 + 回滚重算”通用化；仍在实验性 / Beta 阶段。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：CMC 为什么用不可靠 RPC 发 ServerMove？</summary>移动是高频、可被后续数据覆盖的输入；可靠 RPC 丢一个包就会阻塞后续所有移动（队头阻塞），延迟反而更高。丢了的移动由“旧移动冗余”补，或者由下一次移动的时间差覆盖，再不行就靠服务器纠正。</details>
+<details class="quiz"><summary>自测 2：客户端开了加速器（时间流速变快），CMC 怎么防？</summary>服务器用客户端时间戳算 DeltaTime，但会校验时间戳的增长与服务器真实时间的差异（时间差异检测），并限制单次移动的最大 DeltaTime；累计偏差超过阈值时拒绝或惩罚。</details>
+<details class="quiz"><summary>自测 3：GAS 预测扣蓝，服务器也扣了一次，为什么玩家不会看到扣两次？</summary>客户端预测的 GE 带着 Prediction Key；服务器施加的 GE 复制下来时也带着同一个 key（ReplicatedPredictionKey），客户端据此识别出“服务器已经确认了这次预测”，移除本地预测的那份，只保留服务器的那份。</details>
+</section>

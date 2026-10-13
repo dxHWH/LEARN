@@ -1,0 +1,267 @@
+<section class="chapter" id="b3">
+  <div class="ch-head">
+    <div class="no">BASICS · B3</div>
+    <h1>什么是四元数：从“转多少、绕哪根轴”讲起</h1>
+    <p class="lead">四元数就是把“绕哪根轴转、转多少度”编码成 4 个数的方法。它难懂的地方只有三处：为什么存半角、为什么 q 和 −q 是一回事、为什么乘法顺序不能换。本章把这三处讲透。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>知道表示三维旋转的四种方式，以及欧拉角具体出了什么问题（万向节锁、多解、跳变）</li>
+    <li>从二维复数旋转出发，理解四元数是它在三维的推广</li>
+    <li>会用 q = (cos θ/2, n·sin θ/2) 手写常见旋转的四元数，并能反推轴和角</li>
+    <li>理解 q·v·q⁻¹、半角、q 与 −q、乘法不交换、共轭即逆、归一化</li>
+    <li>知道什么时候用四元数、什么时候用矩阵，以及 UE 里 FQuat / FRotator 的常用接口和坑</li>
+  </ul></div>
+
+  <div class="ans">
+    <div class="q">30 秒版：什么是四元数？</div>
+    <p>四元数是 4 个数 (w, x, y, z)，单位长度的四元数表示一个三维旋转：<strong>绕单位轴 n 转 θ，就是 q = (cos θ/2, n·sin θ/2)</strong>。w 管“转多少”，(x, y, z) 管“绕哪根轴”。旋转向量用 q·v·q⁻¹，两个旋转叠加就是两个四元数相乘（顺序不能换），逆就是共轭。</p>
+    <p>引擎用它而不用欧拉角，是因为它<strong>没有万向节锁、插值平滑（slerp / nlerp）、组合旋转便宜、只占 4 个 float、漂移了归一化一下就好</strong>。代价是不直观，所以编辑器面板上仍显示欧拉角（UE 的 FRotator），底层存储和计算用四元数（FQuat）。注意 q 和 −q 是同一个旋转，插值前要检查点积符号。</p>
+  </div>
+
+  <h2>B3.1 为什么旋转这么麻烦</h2>
+  <p>位置很简单：三个数 (x, y, z)，两个位置相加、取平均，逐个分量算就行。旋转也只有 3 个自由度，但它的三个“分量”会<strong>互相影响</strong>：先抬头再转身，和先转身再抬头，结果不一样。所以旋转没法像位置那样逐分量加减，于是出现了好几种表示方法：</p>
+  <div class="tbl"><table>
+    <tr><th>表示</th><th>用几个数</th><th>直观吗</th><th>主要问题</th><th>UE 里谁在用</th></tr>
+    <tr><td><strong>欧拉角</strong>（yaw / pitch / roll）</td><td>3</td><td class="yes">最直观</td><td>万向节锁；一个朝向有多种写法；插值会绕远、会跳变</td><td><code>FRotator</code>：编辑器面板、玩法逻辑（“转身 90°”）</td></tr>
+    <tr><td><strong>旋转矩阵</strong></td><td>9（3×3）</td><td class="no">不直观</td><td>占内存；累乘会“走样”变形；不好插值</td><td><code>FMatrix</code>：渲染、GPU 蒙皮</td></tr>
+    <tr><td><strong>轴角</strong>（轴 n + 角度 θ）</td><td>4</td><td class="mid">比较直观</td><td>两个轴角不好直接组合、插值</td><td>构造四元数时常用（<code>FQuat(Axis, Angle)</code>）</td></tr>
+    <tr><td><strong>四元数</strong></td><td>4</td><td class="no">不直观</td><td>需要理解 q 与 −q、乘法顺序</td><td><code>FQuat</code>：动画数据、姿势混合、FTransform 的旋转</td></tr>
+  </table></div>
+
+  <h2>B3.2 欧拉角的三个问题，用数字看清</h2>
+  <p><strong>欧拉角</strong>把一个旋转拆成三次“绕坐标轴转”：本书 demo 的约定是先绕 X 转 roll（翻滚），再绕 Y 转 pitch（俯仰），最后绕 Z 转 yaw（偏航）。UE 的 FRotator 也是 Pitch / Yaw / Roll 三个角，只是轴的正方向约定略有不同，下面的现象完全一样。</p>
+  <h3>问题一：万向节锁——pitch 到 90° 时少了一个方向</h3>
+  <figure>
+  <svg viewBox="0 0 860 285" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="22" text-anchor="middle" class="b">pitch = 0°：三个环各管一个方向</text>
+    <text x="645" y="22" text-anchor="middle" class="b">pitch = 90°：yaw 环和 roll 环转到了同一平面</text>
+    <g transform="translate(215,135)">
+      <ellipse rx="150" ry="44" fill="none" stroke="#2F5BD3" stroke-width="5"/>
+      <circle r="92" fill="none" stroke="#15803D" stroke-width="5"/>
+      <ellipse rx="26" ry="66" fill="none" stroke="#C2410C" stroke-width="5" opacity=".9"/>
+      <path d="M-18,6 L22,0 L-18,-6 Z" fill="#111827"/>
+      <text x="-150" y="-52" class="sm b" style="fill:#2F5BD3">yaw 环（绕竖直轴）</text>
+      <text x="70" y="-76" class="sm b" style="fill:#15803D">pitch 环</text>
+      <text x="32" y="60" class="sm b" style="fill:#C2410C">roll 环（绕机头方向）</text>
+    </g>
+    <g transform="translate(645,135)">
+      <ellipse rx="150" ry="44" fill="none" stroke="#2F5BD3" stroke-width="5"/>
+      <circle r="92" fill="none" stroke="#15803D" stroke-width="5"/>
+      <ellipse rx="112" ry="32" fill="none" stroke="#C2410C" stroke-width="5" opacity=".9" stroke-dasharray="10 6"/>
+      <path d="M-6,18 L0,-22 L6,18 Z" fill="#111827"/>
+      <text x="0" y="118" text-anchor="middle" class="sm b" style="fill:#B91C1C">机头朝正上方：转 yaw 和转 roll 效果一样</text>
+      <text x="0" y="136" text-anchor="middle" class="xs">（橙色 roll 环与蓝色 yaw 环共面，只剩两种独立转动）</text>
+    </g>
+  </svg>
+  <figcaption><b>图 B3-1</b>　万向节锁示意。三个套在一起的环依次决定 yaw、pitch、roll；中间的 pitch 环转到 90° 后，最外的 yaw 环和最里的 roll 环共面，绕的是同一根轴</figcaption>
+  </figure>
+  <div class="co ver"><span class="h">实测 E12(a)：比较几组欧拉角对应的朝向差多少</span>
+    <div class="tbl"><table>
+      <tr><th>pitch</th><th>(30, p, 0) vs (0, p, 30)</th><th>(30, p, 0) vs (0, p, −30)</th><th>(30, p, 0) vs (60, p, 30)</th></tr>
+      <tr><td>0°</td><td>42.18°</td><td>42.18°</td><td>42.18°</td></tr>
+      <tr><td>45°</td><td>55.34°</td><td>22.74°</td><td>22.74°</td></tr>
+      <tr><td><strong>90°</strong></td><td>60.00°</td><td class="no"><strong>0.00°</strong></td><td class="no"><strong>0.00°</strong></td></tr>
+    </table></div>
+    <p>pitch = 90° 时，(30, 90, 0)、(0, 90, −30)、(60, 90, 30) 是<strong>同一个朝向</strong>：只有 yaw − roll 起作用，yaw 和 roll 各自的值失去了意义。demo 还算出了原因：此时 roll 绕的局部 X 轴在世界里指向 (0, 0, −1)，和 yaw 绕的世界 Z 轴重合。</p>
+  </div>
+  <p>白话：物体本身仍然可以朝任何方向转，坏掉的是<strong>“用三个角来描述它”的这个方法</strong>——在那个位置附近，有一个方向的转动没法用“改一点点角度”来表达，只能让 yaw 和 roll 同时大幅变化。</p>
+  <h3>问题二：同一个朝向，很多种写法</h3>
+  <p>实测 E12(b)：(0, 0, 0) 和 (180, 180, 180) 是同一个朝向（相差 0.0000°）；(90, 0, 0)、(450, 0, 0)、(−270, 0, 0) 也都一样。所以“两个 FRotator 的数字不同”不代表“朝向不同”，比较朝向要转成四元数或看夹角。</p>
+  <h3>问题三：翻过头顶时数值跳变</h3>
+  <div class="co ver"><span class="h">实测 E12(c)：朝向绕 pitch 轴从 80° 匀速转到 100°，每步 0.02°，每步都换算成欧拉角</span>
+    <p>越过 90° 的那一步，<strong>朝向只变了 0.020°，欧拉角却从 (yaw 5°, roll 0°) 跳到 (yaw −175°, roll 180°)</strong>。如果在这两帧之间对欧拉角做插值（比如网络同步时插值 FRotator），中点的朝向离两端都有 <strong>180°</strong>——角色会在一帧里转一整个半圈。</p>
+  </div>
+  <p>再加上第 3 章的例子（Yaw 170° 和 −170° 各占一半，欧拉插值得到 0°），这就是动画系统<strong>存储和混合一律用四元数</strong>的原因。</p>
+
+  <h2>B3.3 先看二维：复数相乘就是旋转</h2>
+  <figure>
+  <svg viewBox="0 0 860 280" xmlns="http://www.w3.org/2000/svg">
+    <line x1="30" y1="160" x2="290" y2="160" stroke="#9CA3AF"/><line x1="150" y1="270" x2="150" y2="30" stroke="#9CA3AF"/>
+    <text x="292" y="164" class="xs">实部</text><text x="156" y="34" class="xs">虚部 i</text>
+    <circle cx="150" cy="160" r="110" fill="none" stroke="#E5E7EB" stroke-width="1.5"/>
+    <line x1="150" y1="160" x2="260" y2="160" stroke="#6B7280" stroke-width="2.4" marker-end="url(#a)"/>
+    <line x1="150" y1="160" x2="245.3" y2="105" stroke="#2F5BD3" stroke-width="2.4" marker-end="url(#ab)"/>
+    <line x1="150" y1="160" x2="178.5" y2="53.7" stroke="#C2410C" stroke-width="2.6" marker-end="url(#ao)"/>
+    <path d="M200,160 A50,50 0 0,0 193.3,135" fill="none" stroke="#2F5BD3" stroke-width="1.6"/><text x="206" y="150" class="xs b" style="fill:#2F5BD3">30°</text>
+    <path d="M220.4,119.4 A80,80 0 0,0 170.7,82.7" fill="none" stroke="#C2410C" stroke-width="1.6"/><text x="214" y="96" class="xs b" style="fill:#C2410C">+45°</text>
+    <text x="264" y="176" class="xs">1</text><text x="252" y="128" class="xs b" style="fill:#2F5BD3">cos30°+i·sin30°</text><text x="184" y="48" class="xs b" style="fill:#C2410C">结果：75°</text>
+    <g class="sm">
+      <text x="362" y="44" class="b">二维旋转 = 乘一个长度为 1 的复数</text>
+      <text x="362" y="72">平面上的点 (x, y) 写成复数 x + y·i（i² = −1）。</text>
+      <text x="362" y="96">乘以 (cos θ + i·sin θ)，等于把它绕原点转 θ：</text>
+      <text x="382" y="120" class="mono">(cos θ + i sin θ)(x + y i)</text>
+      <text x="382" y="140" class="mono">= (x cos θ − y sin θ) + (x sin θ + y cos θ) i</text>
+      <text x="362" y="164">右边正好是二维旋转公式。两个旋转连着做 = 两个复数相乘：</text>
+      <text x="382" y="188" class="mono">(cos30°+i sin30°)(cos45°+i sin45°) = 0.2588 + 0.9659 i</text>
+      <text x="382" y="208">= cos75° + i·sin75°，长度 1.0000（实测 E11(a)）</text>
+      <text x="362" y="236" class="b">二维只需要“转多少”一个数；三维还要说“绕哪根轴”，</text>
+      <text x="362" y="256" class="b">于是需要三个虚数单位 i、j、k —— 这就是四元数。</text>
+    </g>
+  </svg>
+  <figcaption><b>图 B3-2</b>　单位复数表示二维旋转，相乘就是角度相加。四元数是同一个思路在三维的推广：单位四元数表示三维旋转，相乘就是旋转叠加</figcaption>
+  </figure>
+
+  <h2>B3.4 四元数长什么样</h2>
+  <p>四元数写成 <code>q = w + x·i + y·j + z·k</code>，其中 i、j、k 是三个“虚数单位”，满足 <code>i² = j² = k² = ijk = −1</code>（哈密顿 1843 年想出这条规则，当场刻在了都柏林的一座桥上）。平时直接写成 4 个数 <strong>(w, x, y, z)</strong>，或者 <strong>(w, v)</strong>，v = (x, y, z) 叫“虚部 / 向量部分”。</p>
+  <p>做游戏只需要记住一条：<strong>绕单位轴 n 转 θ 角的旋转，对应的四元数是</strong></p>
+<!--code:text:轴角 → 四元数（必背）-->
+q = ( cos(θ/2),  n · sin(θ/2) )
+  = ( w = cos(θ/2),  x = nx·sin(θ/2),  y = ny·sin(θ/2),  z = nz·sin(θ/2) )
+
+反推：θ = 2 · acos(w)          n = (x, y, z) / sin(θ/2)
+条件：w² + x² + y² + z² = 1    （单位四元数才表示纯旋转）
+<!--/code-->
+  <p>白话：<strong>w 管“转了多少”</strong>（w = 1 是没转，w = 0 是转了 180°），<strong>(x, y, z) 管“绕哪根轴”</strong>（方向就是转轴，长度是 sin(θ/2)）。</p>
+  <div class="co ver"><span class="h">实测 E11(b)：常见旋转的四元数（demo 打印）</span>
+    <div class="tbl"><table>
+      <tr><th>旋转</th><th>w</th><th>x</th><th>y</th><th>z</th><th>怎么看出来</th></tr>
+      <tr><td>不转</td><td>1</td><td>0</td><td>0</td><td>0</td><td>单位四元数，FQuat::Identity</td></tr>
+      <tr><td>绕 Z 轴 90°</td><td>0.7071</td><td>0</td><td>0</td><td>0.7071</td><td>cos45° 和 sin45°；只有 z 非零 → 轴是 Z</td></tr>
+      <tr><td>绕 Z 轴 180°</td><td>0</td><td>0</td><td>0</td><td>1</td><td>w = 0 → 转了 180°</td></tr>
+      <tr><td>绕 X 轴 90°</td><td>0.7071</td><td>0.7071</td><td>0</td><td>0</td><td>只有 x 非零 → 轴是 X</td></tr>
+      <tr><td>绕 (1,1,1) 轴 120°</td><td>0.5</td><td>0.5</td><td>0.5</td><td>0.5</td><td>反推：θ = 2·acos(0.5) = 120°，n = (0.5774, 0.5774, 0.5774)</td></tr>
+      <tr><td>绕 Z 轴 360°</td><td>−1</td><td>0</td><td>0</td><td>0</td><td>转一整圈，朝向和不转一样，但四元数是 −1（见 B3.6）</td></tr>
+    </table></div>
+  </div>
+  <div class="lab alab qaxislab" id="lab-qaxis"></div><!--/lab-->
+
+  <h2>B3.5 用四元数转一个向量：q · v · q⁻¹</h2>
+  <ol>
+    <li>把要转的向量 v 写成 w = 0 的四元数：(0, v)。</li>
+    <li>左边乘 q，右边乘 q 的逆 q⁻¹（单位四元数的逆就是共轭，见 B3.7）。</li>
+    <li>结果的 w 仍是 0，(x, y, z) 就是转好的向量。</li>
+  </ol>
+  <p><strong>为什么四元数里存的是半角 θ/2？</strong>因为 q 在左右各乘了一次，每一次“贡献”半个角度，合起来正好转 θ。如果存的是整角，转出来就是 2θ。</p>
+  <p>实际代码不会真的做两次四元数乘法，而是展开成几次叉积。UE 的 <code>FQuat::RotateVector</code> 就是这样写的：</p>
+<!--code:cpp:FQuat::RotateVector 的思路（u = (X, Y, Z)，W 为实部）-->
+// v' = q·v·q⁻¹ 展开后：v' = v + 2w(u × v) + 2u × (u × v)
+// 整理成更省的形式：
+const FVector T      = 2.f * FVector::CrossProduct(u, V);
+const FVector Result = V + (W * T) + FVector::CrossProduct(u, T);
+<!--/code-->
+  <div class="co ver"><span class="h">实测 E11(c)：三种算法对得上</span>
+    <p>10 万个随机向量（长度 1~100）、随机轴和角度：q·v·q⁻¹ 与罗德里格斯旋转公式最大相差 6.80e-05，展开公式与罗德里格斯最大相差 7.38e-05，都是 float 舍入误差（相对误差约 1e-6）。例：绕 Z 90° 的 q 作用于 (1, 0, 0) 得到 (0, 1, 0)——X 轴被转到了 Y 轴。</p>
+  </div>
+
+  <h2>B3.6 q 和 −q：同一个旋转的两个名字</h2>
+  <p>把 (w, x, y, z) 四个数全部取反，夹心公式 q·v·q⁻¹ 里两个负号抵消，转出来的向量完全一样。所以<strong>每个旋转都对应两个四元数</strong>：q 和 −q（数学上叫“双重覆盖”）。从公式看也很自然：转 θ 和转 θ + 360°（多转一圈）朝向相同，但 cos(θ/2) 和 sin(θ/2) 都差了一个负号。</p>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <line x1="70" y1="125" x2="830" y2="125" stroke="#9CA3AF"/><line x1="70" y1="35" x2="70" y2="215" stroke="#9CA3AF"/><line x1="70" y1="35" x2="830" y2="35" stroke="#EEF0F3"/><text x="62" y="39" text-anchor="end" class="xs">1</text><line x1="70" y1="125" x2="830" y2="125" stroke="#EEF0F3"/><text x="62" y="129" text-anchor="end" class="xs">0</text><line x1="70" y1="215" x2="830" y2="215" stroke="#EEF0F3"/><text x="62" y="219" text-anchor="end" class="xs">−1</text><line x1="70.0" y1="35" x2="70.0" y2="215" stroke="#F3F4F6"/><text x="70.0" y="231" text-anchor="middle" class="xs">0°</text><line x1="165.0" y1="35" x2="165.0" y2="215" stroke="#F3F4F6"/><text x="165.0" y="231" text-anchor="middle" class="xs">90°</text><line x1="260.0" y1="35" x2="260.0" y2="215" stroke="#F3F4F6"/><text x="260.0" y="231" text-anchor="middle" class="xs">180°</text><line x1="355.0" y1="35" x2="355.0" y2="215" stroke="#F3F4F6"/><text x="355.0" y="231" text-anchor="middle" class="xs">270°</text><line x1="450.0" y1="35" x2="450.0" y2="215" stroke="#F3F4F6"/><text x="450.0" y="231" text-anchor="middle" class="xs">360°</text><line x1="545.0" y1="35" x2="545.0" y2="215" stroke="#F3F4F6"/><text x="545.0" y="231" text-anchor="middle" class="xs">450°</text><line x1="640.0" y1="35" x2="640.0" y2="215" stroke="#F3F4F6"/><text x="640.0" y="231" text-anchor="middle" class="xs">540°</text><line x1="735.0" y1="35" x2="735.0" y2="215" stroke="#F3F4F6"/><text x="735.0" y="231" text-anchor="middle" class="xs">630°</text><line x1="830.0" y1="35" x2="830.0" y2="215" stroke="#F3F4F6"/><text x="830.0" y="231" text-anchor="middle" class="xs">720°</text><polyline points="70.0,35.0 76.3,35.1 82.7,35.5 89.0,36.1 95.3,37.0 101.7,38.1 108.0,39.4 114.3,41.0 120.7,42.8 127.0,44.8 133.3,47.1 139.7,49.5 146.0,52.2 152.3,55.1 158.7,58.1 165.0,61.4 171.3,64.8 177.7,68.4 184.0,72.1 190.3,76.0 196.7,80.0 203.0,84.1 209.3,88.4 215.7,92.7 222.0,97.2 228.3,101.7 234.7,106.3 241.0,110.9 247.3,115.6 253.7,120.3 260.0,125.0 266.3,129.7 272.7,134.4 279.0,139.1 285.3,143.7 291.7,148.3 298.0,152.8 304.3,157.3 310.7,161.6 317.0,165.9 323.3,170.0 329.7,174.0 336.0,177.9 342.3,181.6 348.7,185.2 355.0,188.6 361.3,191.9 367.7,194.9 374.0,197.8 380.3,200.5 386.7,202.9 393.0,205.2 399.3,207.2 405.7,209.0 412.0,210.6 418.3,211.9 424.7,213.0 431.0,213.9 437.3,214.5 443.7,214.9 450.0,215.0 456.3,214.9 462.7,214.5 469.0,213.9 475.3,213.0 481.7,211.9 488.0,210.6 494.3,209.0 500.7,207.2 507.0,205.2 513.3,202.9 519.7,200.5 526.0,197.8 532.3,194.9 538.7,191.9 545.0,188.6 551.3,185.2 557.7,181.6 564.0,177.9 570.3,174.0 576.7,170.0 583.0,165.9 589.3,161.6 595.7,157.3 602.0,152.8 608.3,148.3 614.7,143.7 621.0,139.1 627.3,134.4 633.7,129.7 640.0,125.0 646.3,120.3 652.7,115.6 659.0,110.9 665.3,106.3 671.7,101.7 678.0,97.2 684.3,92.7 690.7,88.4 697.0,84.1 703.3,80.0 709.7,76.0 716.0,72.1 722.3,68.4 728.7,64.8 735.0,61.4 741.3,58.1 747.7,55.1 754.0,52.2 760.3,49.5 766.7,47.1 773.0,44.8 779.3,42.8 785.7,41.0 792.0,39.4 798.3,38.1 804.7,37.0 811.0,36.1 817.3,35.5 823.7,35.1 830.0,35.0" fill="none" stroke="#2F5BD3" stroke-width="2.4"/><polyline points="70.0,125.0 76.3,120.3 82.7,115.6 89.0,110.9 95.3,106.3 101.7,101.7 108.0,97.2 114.3,92.7 120.7,88.4 127.0,84.1 133.3,80.0 139.7,76.0 146.0,72.1 152.3,68.4 158.7,64.8 165.0,61.4 171.3,58.1 177.7,55.1 184.0,52.2 190.3,49.5 196.7,47.1 203.0,44.8 209.3,42.8 215.7,41.0 222.0,39.4 228.3,38.1 234.7,37.0 241.0,36.1 247.3,35.5 253.7,35.1 260.0,35.0 266.3,35.1 272.7,35.5 279.0,36.1 285.3,37.0 291.7,38.1 298.0,39.4 304.3,41.0 310.7,42.8 317.0,44.8 323.3,47.1 329.7,49.5 336.0,52.2 342.3,55.1 348.7,58.1 355.0,61.4 361.3,64.8 367.7,68.4 374.0,72.1 380.3,76.0 386.7,80.0 393.0,84.1 399.3,88.4 405.7,92.7 412.0,97.2 418.3,101.7 424.7,106.3 431.0,110.9 437.3,115.6 443.7,120.3 450.0,125.0 456.3,129.7 462.7,134.4 469.0,139.1 475.3,143.7 481.7,148.3 488.0,152.8 494.3,157.3 500.7,161.6 507.0,165.9 513.3,170.0 519.7,174.0 526.0,177.9 532.3,181.6 538.7,185.2 545.0,188.6 551.3,191.9 557.7,194.9 564.0,197.8 570.3,200.5 576.7,202.9 583.0,205.2 589.3,207.2 595.7,209.0 602.0,210.6 608.3,211.9 614.7,213.0 621.0,213.9 627.3,214.5 633.7,214.9 640.0,215.0 646.3,214.9 652.7,214.5 659.0,213.9 665.3,213.0 671.7,211.9 678.0,210.6 684.3,209.0 690.7,207.2 697.0,205.2 703.3,202.9 709.7,200.5 716.0,197.8 722.3,194.9 728.7,191.9 735.0,188.6 741.3,185.2 747.7,181.6 754.0,177.9 760.3,174.0 766.7,170.0 773.0,165.9 779.3,161.6 785.7,157.3 792.0,152.8 798.3,148.3 804.7,143.7 811.0,139.1 817.3,134.4 823.7,129.7 830.0,125.0" fill="none" stroke="#C2410C" stroke-width="2.4"/><line x1="133.3" y1="47.1" x2="133.3" y2="80.0" stroke="#6D28D9" stroke-dasharray="3 3"/><circle cx="133.3" cy="47.1" r="5" fill="#2F5BD3"/><circle cx="133.3" cy="80.0" r="5" fill="#C2410C"/><text x="141.3" y="33.1" class="sm b" style="fill:#6D28D9">θ=60°：(0.866, 0, 0, 0.5)</text><line x1="513.3" y1="202.9" x2="513.3" y2="170.0" stroke="#6D28D9" stroke-dasharray="3 3"/><circle cx="513.3" cy="202.9" r="5" fill="#2F5BD3"/><circle cx="513.3" cy="170.0" r="5" fill="#C2410C"/><text x="527.3" y="160.0" class="sm b" style="fill:#6D28D9">θ=420°：(−0.866, 0, 0, −0.5) = −q</text><text x="70" y="255" class="xs">横轴：绕 Z 轴转过的角度 θ</text><line x1="330" y1="251" x2="354" y2="251" stroke="#2F5BD3" stroke-width="2.4"/><text x="360" y="255" class="xs">w = cos(θ/2)</text><line x1="470" y1="251" x2="494" y2="251" stroke="#C2410C" stroke-width="2.4"/><text x="500" y="255" class="xs">z = sin(θ/2)</text><text x="450.0" y="27" text-anchor="middle" class="xs b">θ = 360°：朝向回到原样，四元数却是 (−1, 0, 0, 0)</text>
+  </svg>
+  <figcaption><b>图 B3-3</b>　绕 Z 轴转 θ 时四元数的 w = cos(θ/2) 和 z = sin(θ/2)。θ = 60° 与 θ = 420° 是同一个朝向，四元数却互为相反数；θ 要转满 720° 四元数才回到原值</figcaption>
+  </figure>
+  <div class="co ver"><span class="h">实测 E11(d)</span>
+    <p>绕 Z 60°：q = (0.8660, 0, 0, 0.5000)；绕 Z 420°：q = (−0.8660, 0, 0, −0.5000) = −q。两者以及 −q 作用于 (3, 4, 5) 都得到 (−1.9641, 4.5981, 5.0000)。</p>
+  </div>
+  <div class="co warn"><span class="h">面试注意：q 与 −q 的三个后果</span>
+    <ul>
+      <li><strong>插值前要检查点积</strong>：dot(q₁, q₂) &lt; 0 时，先把其中一个取反再插值，否则会走“远的那条路”（第 3 章 E2：170° 与 −170° 混合，不检查得到 0°，检查后得到 180°）。UE 的 <code>FQuat::Slerp</code>、<code>FQuat::FastLerp</code>、姿势混合用的 <code>AccumulateWithShortestRotation</code> 内部都做了这件事；自己手写混合时最容易漏。</li>
+      <li><strong>判断“两个朝向是否相同”看 |dot| 是否接近 1</strong>，或者直接算夹角（<code>AngularDistance</code>），不要逐分量比较。</li>
+      <li><strong>压缩时可以丢掉 w</strong>：先把 w &lt; 0 的四元数整体取反，保证 w ≥ 0，就能只存 x、y、z，解压时 w = √(1 − x² − y² − z²)（第 2 章）。</li>
+    </ul>
+  </div>
+
+  <h2>B3.7 乘法 = 旋转叠加；顺序不能换；逆 = 共轭</h2>
+  <p>两个四元数相乘，得到“先做一个旋转、再做另一个旋转”的合成旋转。但<strong>旋转本身就不满足交换律</strong>，拿手机试试：先向前翻 90° 再向左转 90°，和先左转再前翻，手机最后的朝向不一样。</p>
+  <div class="co ver"><span class="h">实测 E11(e)：两个 90° 旋转，换个顺序</span>
+    <div class="tbl"><table>
+      <tr><th>顺序</th><th>前方 (1,0,0) 转到</th><th>上方 (0,0,1) 转到</th></tr>
+      <tr><td>先绕 X 90°，再绕 Y 90°</td><td>(0, 0, −1)</td><td>(0, −1, 0)</td></tr>
+      <tr><td>先绕 Y 90°，再绕 X 90°</td><td>(0, 1, 0)</td><td>(1, 0, 0)</td></tr>
+    </table></div>
+    <p>两种顺序得到的朝向相差 <strong>120.0°</strong>。</p>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>UE 类型</th><th><code>C = A * B</code> 的含义</th><th>记法</th></tr>
+    <tr><td><code>FQuat</code></td><td><strong>先 B 后 A</strong>（右边先作用）</td><td>和数学书一样：q·v·q⁻¹ 里 q 在左边</td></tr>
+    <tr><td><code>FTransform</code></td><td><strong>先 A 后 B</strong>（左边先作用）</td><td>FK：<code>Local * ParentComponent</code></td></tr>
+  </table></div>
+  <ul>
+    <li><strong>逆 = 共轭</strong>：单位四元数的逆就是把虚部取反 (w, −x, −y, −z)，表示“反着转回去”。实测 E11(f)：q·q* 与单位四元数最大相差 3.58e-07。</li>
+    <li><strong>两个旋转的“差”</strong> = B · A⁻¹（UE：<code>B * A.Inverse()</code>），表示“从 A 再转多少能到 B”。实测：Yaw 75° · (Yaw 30°)⁻¹ = 绕 Z 转 45.0°。加性动画的旋转部分就是这么算的（第 3 章）。</li>
+  </ul>
+
+  <h2>B3.8 插值：从 A 转到 B 的中间</h2>
+  <p>把所有单位四元数想象成一个球面（实际是四维空间里的球面），球面上每个点是一个朝向。从 A 转到 B：</p>
+  <ul>
+    <li><strong>lerp</strong>：直接按比例混合 4 个分量，相当于在球<strong>内部</strong>走直线，中间点长度小于 1，不再是合法旋转。</li>
+    <li><strong>nlerp</strong>：lerp 之后再归一化，把点“推回”球面。路径和 slerp 一样，但速度不均匀（中间快、两头慢）。</li>
+    <li><strong>slerp</strong>：沿球面的大圆弧匀速走，角度随 t 严格线性变化，但要算 acos 和 sin，更贵。</li>
+  </ul>
+  <p>第 3 章的实测：两姿势夹角 60° 时 nlerp 与 slerp 最大只差 0.27°，而 slerp 慢 4.86 倍，所以姿势混合用 nlerp。</p>
+
+  <h2>B3.9 归一化与“漂移”：四元数也会走样，只是好修</h2>
+  <div class="co ver"><span class="h">实测 E12(d)：每次绕同一轴转 0.37°，连乘 100 万次（float，中途不修正）</span>
+    <div class="tbl"><table>
+      <tr><th>表示</th><th>误差</th><th>单位向量变换后的长度</th></tr>
+      <tr><td>3×3 旋转矩阵</td><td>|MᵀM − I| 最大 2.34e-02（不再正交）</td><td>0.988216（压扁 1.18%）</td></tr>
+      <tr><td>四元数（不归一化）</td><td>|q| = 1.025983</td><td>1.052641（放大 5.3%，因为非单位四元数会把向量缩放 |q|² 倍）</td></tr>
+      <tr><td>四元数（每步归一化）</td><td>|q| = 1</td><td><strong>1.000000</strong></td></tr>
+    </table></div>
+  </div>
+  <p>结论要说准确：<strong>两者都会因为浮点误差慢慢走样</strong>。区别在修复成本：四元数除以自己的长度就重新变成合法旋转（4 个数一次开方）；矩阵要重新正交化（例如 Gram-Schmidt），更贵，还得决定“以哪根轴为准”。所以常听到的“四元数不会形变”是不严谨的，正确说法是“四元数归一化便宜，所以容易保持正确”。</p>
+
+  <h2>B3.10 什么时候用四元数，什么时候用矩阵</h2>
+  <div class="co ver"><span class="h">实测 E11(h)：各 1000 万次，ns/次（本机 float 标量实现，未手工 SIMD）</span>
+    <div class="tbl"><table>
+      <tr><th>操作</th><th>四元数</th><th>3×3 矩阵</th><th>谁快</th></tr>
+      <tr><td>组合两个旋转</td><td><strong>0.78</strong></td><td>7.64</td><td>四元数（16 次乘法 vs 27 次）</td></tr>
+      <tr><td>旋转一个向量</td><td>1.64</td><td><strong>0.50</strong></td><td>矩阵（9 次乘法，最适合批量）</td></tr>
+      <tr><td>四元数 → 矩阵</td><td colspan="2">6.97（每根骨头每帧只需一次）</td><td>—</td></tr>
+      <tr><td>存储</td><td>16 B</td><td>36 B</td><td>四元数</td></tr>
+    </table></div>
+  </div>
+  <p>这正是 UE 的分工：<strong>存储、混合、FK 组合</strong>旋转时用四元数（动画数据、FTransform）；最后要把成千上万个顶点转一下时，先把每根骨头转成<strong>矩阵</strong>，交给 GPU 蒙皮。</p>
+
+  <h2>B3.11 在 UE 里怎么用</h2>
+<!--code:cpp:FRotator / FQuat 常用写法（UE5，FVector 为双精度）-->
+// 1) 编辑器和玩法逻辑里用 FRotator：单位是“度”，构造参数顺序是 (Pitch, Yaw, Roll)
+FRotator Rot(0.f, 90.f, 0.f);                       // 不是 (Roll, Pitch, Yaw)！
+FQuat    Q    = Rot.Quaternion();                    // 转成四元数
+FRotator Back = Q.Rotator();                         // 转回来：Pitch 过 ±90° 时可能得到另一组等价的角
+
+// 2) 轴角构造：角度用“弧度”
+FQuat Q2(FVector::UpVector, FMath::DegreesToRadians(45.f));
+FVector Axis; FVector::FReal Angle;
+Q2.ToAxisAndAngle(Axis, Angle);                      // 反推轴和角
+
+// 3) 旋转 / 反向旋转向量
+FVector Fwd   = Q.RotateVector(FVector::ForwardVector);
+FVector Local = Q.UnrotateVector(WorldDir);          // 等价于用 Q.Inverse() 去转
+
+// 4) 组合：FQuat 的 A * B 表示“先 B 后 A”
+FQuat Combined = Q2 * Q;                             // 先 Q，再 Q2
+
+// 5) 差值：从 Current 转到 Target 还需要的旋转
+FQuat Delta = Target * Current.Inverse();
+
+// 6) 插值：都已经处理了最短路径
+FQuat S = FQuat::Slerp(A, B, Alpha);                 // 匀角速度，结果已归一化
+FQuat L = FQuat::FastLerp(A, B, Alpha).GetNormalized();   // nlerp：FastLerp 本身不归一化
+
+// 7) 比较朝向：看夹角，不要逐分量比较（q 与 -q 是同一朝向）
+const double Deg = FMath::RadiansToDegrees(A.AngularDistance(B));
+<!--/code-->
+  <div class="co warn"><span class="h">面试注意：UE 里四元数相关的坑</span>
+    <ul>
+      <li><strong>存储顺序</strong>：<code>FQuat</code> 的成员和构造函数顺序是 <code>(X, Y, Z, W)</code>，而数学书和本书常写 (w, x, y, z)。手填数字时最容易填错。</li>
+      <li><strong>FRotator 的参数顺序</strong>是 (Pitch, Yaw, Roll)，单位是度；<code>FQuat(Axis, Angle)</code> 的角度是弧度。</li>
+      <li><strong>不要对 FRotator 直接线性插值</strong>：会出现 B3.2 的绕远和跳变。用 <code>FMath::RInterpTo</code>（内部走最短角度差）或转成 FQuat 再 Slerp。</li>
+      <li><strong>累乘之后要 Normalize</strong>：每帧 <code>Q = Delta * Q</code> 累积旋转（比如摄像机），隔一段时间要归一化一次（E12(d)）。</li>
+      <li><strong>FQuat 与 FTransform 的乘法顺序相反</strong>（B3.7），在同一段代码里混用时最容易写反。</li>
+    </ul>
+  </div>
+  <div class="lab alab gimballab" id="lab-gimbal"></div><!--/lab-->
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>欧拉角直观但有三个问题：<strong>万向节锁</strong>（pitch 90° 时只有 yaw − roll 起作用，E12）、<strong>多解</strong>、<strong>跳变</strong>（越过头顶时 0.02° 的变化让 yaw 跳 180°）。</li>
+    <li>单位复数 = 二维旋转；单位四元数 = 三维旋转：<strong>q = (cos θ/2, n·sin θ/2)</strong>，w 管多少、xyz 管轴。</li>
+    <li>转向量：<strong>q·v·q⁻¹</strong>（所以存半角）；<strong>q 与 −q 同一旋转</strong>，插值前检查点积；<strong>乘法不交换</strong>（两种顺序差 120°）；<strong>逆 = 共轭</strong>；差值 = B·A⁻¹。</li>
+    <li>四元数也会漂移，但归一化便宜；组合旋转四元数快（0.78 vs 7.64 ns），转大量向量矩阵快（0.50 vs 1.64 ns）。</li>
+    <li>UE：FRotator（度，Pitch/Yaw/Roll）给人看，FQuat（X,Y,Z,W）给机器算；FQuat 的 A*B 先 B 后 A，FTransform 先 A 后 B。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：一个四元数 w = 0，说明了什么？</summary><p>w = cos(θ/2) = 0，所以 θ = 180°：绕 (x, y, z) 方向的轴转了半圈。比如 (0, 0, 0, 1) 就是绕 Z 轴转 180°。</p></details>
+  <details class="quiz"><summary>自测：为什么插值前要检查两个四元数的点积，而混合位置时不用？</summary><p>位置只有一种写法，(1, 2, 3) 就是 (1, 2, 3)。旋转有两种写法 q 和 −q，它们在“四维球面”上是两个相对的点。如果 A 和 B 选了相反的“半球”，直接插值就会走过大半个球面，看起来就是绕远路转了一大圈。点积小于 0 说明它们在相反的半球，取反其中一个就能走近路。</p></details>
+  <details class="quiz"><summary>自测：既然四元数这么好，为什么 GPU 蒙皮还用矩阵？</summary><p>蒙皮要把几万个顶点各转一次，“旋转一个向量”矩阵只需 9 次乘加，比四元数的展开公式快（E11：0.50 vs 1.64 ns），而且矩阵能把缩放和平移一起打包、几根骨头的矩阵还能直接按权重相加（LBS）。四元数的优势在组合、插值和存储，所以 CPU 端动画计算用四元数，最后每根骨头转换一次矩阵交给 GPU。</p></details>
+</section>

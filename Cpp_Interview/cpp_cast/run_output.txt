@@ -1,0 +1,78 @@
+
+===== 1. static_cast：数值 / 枚举 / explicit / void* / 右值 =====
+static_cast<int>(3.99)          = 3   (向 0 截断，不是四舍五入)
+static_cast<int>(-3.99)         = -3
+static_cast<unsigned>(-1)       = 4294967295
+static_cast<uint8_t>(300)       = 44   (按模 256 截断)
+static_cast<float>(16777217)    = 16777216.0   (float 只有 24 位尾数)
+static_cast<ESkillSlot>(3) 回转 = 3
+static_cast<ESkillSlot>(7) 也照转 = 7
+explicit 构造 + explicit operator double = 2.5
+int* -> void* -> int* 往返       = 100
+static_cast<string&&> 后 s1.size()=0  s2=ArthurTheKnight-very-long-name
+
+===== 2. 类层次：static_cast vs dynamic_cast =====
+static_cast<Warrior*>  = 非空(正确)
+static_cast<Mage*>     = 非空   <- 错误类型也不报错
+dynamic_cast<Mage*>    = nullptr
+[UB] 通过错误指针读 mana = 50   (实际读到的是 Warrior::rage)
+dynamic_cast<Mage&> 失败抛 std::bad_cast: Bad dynamic_cast!
+typeid(*u).name() = struct Warrior
+typeid(u).name()  = struct Unit * __ptr64
+
+===== 3. 多继承下的指针调整 =====
+&sp                                = 000000A5246FFC20
+static_cast<ITickable*>(&sp)       = 000000A5246FFC30   (偏移 +16)
+reinterpret_cast<ITickable*>(&sp)  = 000000A5246FFC20   (偏移 +0)
+tS->tickGroup = 2,  tS->Tick() = ITickable::Tick
+[UB] tR->tickGroup = 1 (读到 layer),  tR->Tick() = IRenderable::Name  <- 调错了虚函数
+static_cast<Sprite*>(tS) == &sp    : 1 (下行时反向调整)
+dynamic_cast<void*>(tS) == &sp     : 1 (取最派生对象首地址)
+static_cast<ITickable*>(空 Sprite*) = 0000000000000000 (编译器插入判空，空指针不加偏移)
+dynamic_cast IRenderable*->ITickable* (cross-cast) == tS : 1
+
+===== 4. 虚继承 / 构造析构中的动态类型 =====
+从虚基类下行只能用 dynamic_cast: x = 42
+构造/析构过程中动态类型的变化:
+  BaseC 构造函数中   typeid=struct BaseC    dynamic_cast<DerivedC*>=nullptr
+  DerivedC 构造函数中 typeid=struct DerivedC dynamic_cast<DerivedC*>=非空
+  BaseC 析构函数中   typeid=struct BaseC    dynamic_cast<DerivedC*>=nullptr
+
+===== 5. shared_ptr 的 cast =====
+dynamic_pointer_cast<Warrior>: 非空, use_count = 2 (共享同一控制块)
+dynamic_pointer_cast<Mage>   : 空
+static_pointer_cast<Warrior> 后 use_count = 3
+
+===== 6. const_cast =====
+对接老接口 LegacyStrLen(const_cast<char*>(name.c_str())) = 6
+非 const At() 复用 const 版本实现, 修改后 At(1) = 999
+对象本身非 const, 经 const 引用去 const 后修改: real = 2 (合法)
+[UB] const int local=10 被改写后: local = 10, *p = 20  (编译器常量折叠了 local)
+[UB] 改写全局 const kMaxLevel -> 异常码 0xC0000005 (EXCEPTION_ACCESS_VIOLATION，只读页，直接崩溃)
+
+===== 7. reinterpret_cast / bit_cast =====
+指针 -> uintptr_t -> 指针 往返相等: 1  (addr=0xa5246ffc50, 低 3 位=0，可借来存标记)
+1.0f 的内存字节: 00 00 80 3F (小端)
+memcpy 取位模式 = 0x3F800000, std::bit_cast = 0x3F800000
+Q_rsqrt(4.0f) = 0.499154, 1/sqrtf(4) = 0.500000
+[UB] 严格别名测试 AliasTest 返回 0 (MSVC 不做基于类型的别名优化；GCC/Clang -O2 通常返回 1)
+
+===== 8. 网络包解析 =====
+sizeof(HeaderNatural)=12 alignof=4 | sizeof(HeaderPacked)=8 alignof=1
+头部地址 % 4 = 1 (未对齐)
+reinterpret_cast 套结构体: msgId=0x1234 seq=0x12345678 len=16
+memcpy 拷到本地结构体  : msgId=0x1234 seq=0x12345678 len=16
+
+===== 9. C 风格转换 =====
+(Unit*)&sec 绕过 private 继承: hp = 100
+(int*)&ci 悄悄去掉了 const: pi 非空 = 1
+(int)3.7f = 3, *(int*)&3.7f = 0x406CCCCD  <- 同样的括号，语义天差地别
+
+===== 10. 类型判断开销（/O2，1024 个对象 × 10000 轮 = 1024 万次，Hero/Prop 各半） =====
+static_cast<Hero*>（不检查，仅基线）      3.7 ms    0.36 ns/次  命中=10240000
+castFlags & CF_Hero（位标志，UE FastCast 思路）      3.7 ms    0.37 ns/次  命中=5120000
+e->AsHero()（虚函数）                       11.4 ms    1.11 ns/次  命中=5120000
+typeid(*e) == typeid(Hero)（只能精确匹配）     21.9 ms    2.14 ns/次  命中=5120000
+dynamic_cast<Actor*>（目标是浅层基类）    135.0 ms   13.18 ns/次  命中=10240000
+dynamic_cast<Hero*>（下行 4 层）           146.6 ms   14.32 ns/次  命中=5120000
+dynamic_cast<IDamageable*>（交叉转换）    191.6 ms   18.71 ns/次  命中=5120000

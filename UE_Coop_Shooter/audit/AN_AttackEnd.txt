@@ -1,0 +1,15 @@
+# /Game/Blueprints/Zombie/AN_AttackEnd  (Blueprint)
+ParentClass: /Script/Engine.AnimNotify
+
+## AN_AttackEnd_C Default__AN_AttackEnd_C
+
+## Custom events / RPC
+
+## Graph AN_AttackEnd.Received_Notify
+
+FunctionEntry(MeshComp, Animation, EventReference):  #10
+  CastTo BP_Zombie_C(Object=GetOwner(self=FunctionEntry#10.MeshComp))  -> AsBP Zombie  #9
+    [then]:
+      K2_ClearTimer(Object=CastTo BP_Zombie_C#9.AsBP Zombie, FunctionName="攻击伤害检测")  #7
+      重置上伤害应用(self=CastTo BP_Zombie_C#9.AsBP Zombie)  #8
+  // exec nodes with no incoming exec (dead / disconnected): Return#11

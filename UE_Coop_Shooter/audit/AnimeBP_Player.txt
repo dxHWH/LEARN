@@ -1,0 +1,60 @@
+# /Game/Blueprints/Character/AnimeBP_Player  (AnimBlueprint)
+ParentClass: /Script/Engine.AnimInstance
+
+## Variables
+- 速度 : real
+- IsMoving : bool
+- As BP Player : object<BP_Player_C>
+- 武器摇摆过渡 : struct<Rotator>
+- 是否瞄准 : bool
+
+## AnimeBP_Player_C Default__AnimeBP_Player_C
+   __AnimBlueprintMutables = ('struct', 'AnimBlueprintGeneratedMutableData', {'__BoolProperty': False, '__FloatProperty_0': 0.0, '__BoolProperty_1': False})
+   AnimBlueprintExtension_PropertyAccess = ('struct', 'AnimSubsystemInstance', {})
+   AnimBlueprintExtension_Base = ('struct', 'AnimSubsystemInstance', {})
+   AnimGraphNode_Root = ('struct', 'AnimNode_Root', {'Result': ('struct', 'PoseLink', {'LinkID': 14, 'SourceLinkID': 0}), 'Name': 'AnimGraph', 'LayerGroup': 'DefaultSharedGroup', 'Init
+   AnimGraphNode_TransitionResult_1 = ('struct', 'AnimNode_TransitionResult', {'bCanEnterTransition': False, 'InitialUpdateFunction': ('struct', 'AnimNodeFunctionRef', {'ClassName': 'None', 'Functio
+   AnimGraphNode_TransitionResult = ('struct', 'AnimNode_TransitionResult', {'bCanEnterTransition': False, 'InitialUpdateFunction': ('struct', 'AnimNodeFunctionRef', {'ClassName': 'None', 'Functio
+   AnimGraphNode_SequencePlayer_1 = ('struct', 'AnimNode_SequencePlayer', {'GroupName': 'None', 'GroupRole': 'EAnimGroupRole::CanBeLeader', 'Method': 'EAnimSyncMethod::DoNotSync', 'bIgnoreForRelev
+   AnimGraphNode_BlendListByBool_1 = ('struct', 'AnimNode_BlendListByBool', {'bActiveValue': False, 'BlendPose': ('arr', 'StructProperty', [{'LinkID': 3, 'SourceLinkID': 4}, {'LinkID': 5, 'SourceLi
+   AnimGraphNode_BlendSpacePlayer = ('struct', 'AnimNode_BlendSpacePlayer', {'GroupName': 'None', 'GroupRole': 'EAnimGroupRole::CanBeLeader', 'Method': 'EAnimSyncMethod::DoNotSync', 'bIgnoreForRel
+   AnimGraphNode_StateResult_1 = ('struct', 'AnimNode_StateResult', {'StateIndex': 1, 'StateEntryFunction': ('struct', 'AnimNodeFunctionRef', {'ClassName': 'None', 'FunctionName': 'None', 'Clas
+   AnimGraphNode_SequencePlayer = ('struct', 'AnimNode_SequencePlayer', {'GroupName': 'None', 'GroupRole': 'EAnimGroupRole::CanBeLeader', 'Method': 'EAnimSyncMethod::DoNotSync', 'bIgnoreForRelev
+   AnimGraphNode_BlendListByBool = ('struct', 'AnimNode_BlendListByBool', {'bActiveValue': False, 'BlendPose': ('arr', 'StructProperty', [{'LinkID': 7, 'SourceLinkID': 8}, {'LinkID': 9, 'SourceLi
+   AnimGraphNode_RandomPlayer = ('struct', 'AnimNode_RandomPlayer', {'Entries': ('arr', 'StructProperty', [{'Sequence': ('@', -2), 'ChanceToPlay': 1.0, 'MinLoopCount': 0, 'MaxLoopCount': 0, 'M
+   AnimGraphNode_StateResult = ('struct', 'AnimNode_StateResult', {'StateIndex': 0, 'StateEntryFunction': ('struct', 'AnimNodeFunctionRef', {'ClassName': 'None', 'FunctionName': 'None', 'Clas
+   AnimGraphNode_StateMachine = ('struct', 'AnimNode_StateMachine', {'StateMachineIndexInClass': 0, 'MaxTransitionsPerFrame': 3, 'MaxTransitionsRequests': 32, 'bSkipFirstUpdateTransition': Tru
+   AnimGraphNode_ModifyBone = ('struct', 'AnimNode_ModifyBone', {'BoneToModify': ('struct', 'BoneReference', {'BoneName': 'root'}), 'Translation': ('bin', 'Vector', '000000000000000000000000
+   AnimGraphNode_LocalToComponentSpace = ('struct', 'AnimNode_ConvertLocalToComponentSpace', {'LocalPose': ('struct', 'PoseLink', {'LinkID': 18, 'SourceLinkID': 13}), 'InitialUpdateFunction': ('struct'
+   AnimGraphNode_ComponentToLocalSpace = ('struct', 'AnimNode_ConvertComponentToLocalSpace', {'ComponentPose': ('struct', 'ComponentSpacePoseLink', {'LinkID': 12, 'SourceLinkID': 14}), 'InitialUpdateFu
+   AnimGraphNode_Slot = ('struct', 'AnimNode_Slot', {'Source': ('struct', 'PoseLink', {'LinkID': 17, 'SourceLinkID': 15}), 'SlotName': 'DefaultSlot', 'bAlwaysUpdateSourcePose': False, 
+   AnimGraphNode_SaveCachedPose = ('struct', 'AnimNode_SaveCachedPose', {'Pose': ('struct', 'PoseLink', {'LinkID': 11, 'SourceLinkID': 16}), 'CachePoseName': '基础状态机', 'InitialUpdateFunction': ('
+   AnimGraphNode_UseCachedPose_1 = ('struct', 'AnimNode_UseCachedPose', {'LinkToCachingNode': ('struct', 'PoseLink', {'LinkID': 16, 'SourceLinkID': 17}), 'CachePoseName': '基础状态机', 'InitialUpdateF
+   AnimGraphNode_LayeredBoneBlend = ('struct', 'AnimNode_LayeredBoneBlend', {'BasePose': ('struct', 'PoseLink', {'LinkID': 15, 'SourceLinkID': 18}), 'BlendPoses': ('arr', 'StructProperty', [{'Link
+   AnimGraphNode_UseCachedPose = ('struct', 'AnimNode_UseCachedPose', {'LinkToCachingNode': ('struct', 'PoseLink', {'LinkID': 16, 'SourceLinkID': 19}), 'CachePoseName': '基础状态机', 'InitialUpdateF
+
+## Custom events / RPC
+
+## Graph AnimeBP_Player.AnimGraph
+
+## Graph AnimeBP_Player.AnimGraph.AnimGraphNode_StateMachine_0.基础状态机.AnimStateNode_0.Idle
+
+## Graph AnimeBP_Player.AnimGraph.AnimGraphNode_StateMachine_0.基础状态机.AnimStateNode_1.Move
+
+## Graph AnimeBP_Player.AnimGraph.AnimGraphNode_StateMachine_0.基础状态机.AnimStateTransitionNode_0.Transition
+
+## Graph AnimeBP_Player.AnimGraph.AnimGraphNode_StateMachine_0.基础状态机.AnimStateTransitionNode_2.Transition
+
+## Graph AnimeBP_Player.EventGraph
+
+Event BlueprintUpdateAnimation(DeltaTimeX):  #73
+  Macro IsValid(InputObject=TryGetPawnOwner())  #75
+    [Is Valid]:
+      速度(速度=VSize(A=GetVelocity(self=TryGetPawnOwner())))  -> Output_Get  #90
+      IsMoving(IsMoving=Greater_DoubleDouble(A=速度#90.Output_Get, B=1.000000))  #91
+      武器摇摆过渡(武器摇摆过渡=RInterpTo(Current=武器摇摆过渡, Target_Roll=As BP Player.MouseX, Target_Pitch=As BP Player.MouseY, Target_Yaw=As BP Player.MouseX, DeltaTime=GetWorldDeltaSeconds(), InterpSpeed=5.000000))  #93
+
+Event BlueprintInitializeAnimation():  #74
+  CastTo BP_Player_C(Object=TryGetPawnOwner())  -> AsBP Player  #72
+    [then]:
+      As BP Player(As BP Player=CastTo BP_Player_C#72.AsBP Player)  #92

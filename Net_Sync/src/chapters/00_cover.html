@@ -1,0 +1,114 @@
+<div class="cover">
+<div class="kicker">NETWORK SYNCHRONIZATION · FROM LOCKSTEP TO REPLICATION</div>
+<h1>网络同步全景<br><em>从 HOK 帧同步到 Unreal 状态同步</em></h1>
+<p class="sub">以《HOK 帧同步机制详解》为主线，把帧同步（Lockstep / 定频广播 / 回滚）与状态同步（快照插值 / 客户端预测 / 延迟补偿 / Unreal 复制系统）串成一条完整的知识脉络；每个关键结论都配一个 C++ 实测，每章收尾给面试追问。</p>
+<div class="meta">
+<span class="pill b">15 章 + 4 附录</span>
+<span class="pill o">HOK 帧同步全链路</span>
+<span class="pill p">Unreal 复制 / RPC / CMC / GAS 预测</span>
+<span class="pill g">12 组网络实测 + 7 组确定性实测（3 种编译选项）</span>
+<span class="pill">秋招 · 游戏客户端</span>
+</div>
+</div>
+
+<div class="part-head" data-toc="导读"><div class="no">PROLOGUE</div><h1>导读：一张图看懂网络同步</h1><p>先搞清楚这本书在讲什么、按什么顺序读、每个结论的可信度怎么标。</p></div>
+
+<section class="chapter" id="ch0">
+<div class="ch-head"><div class="no">CHAPTER 00</div><h1>导读：知识地图、阅读路线与事实等级</h1><p class="lead">网络同步只回答三个问题：谁说了算、网上传什么、什么时候往前走。帧同步和状态同步是这三个问题的两组不同答案，其余的技术都是在补各自的短板。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>记住网络同步的“三问”，用它给任何一种方案定位。</li>
+<li>看懂全书知识地图：HOK 帧同步一条线、Unreal 状态同步一条线、两条线在“预测 + 回滚”处汇合。</li>
+<li>知道书里每个结论的来源：HOK 文档、UE 源码 / 官方文档、公开资料、本书实测、推断。</li>
+</ul></div>
+
+<h2>30 秒说明：这本书怎么用</h2>
+<p>你给的《HOK 帧同步机制详解》已经把王者荣耀的帧同步讲得很完整：<strong>服务器定帧汇总 + 三层冗余抗丢包 + 900 帧滑动窗口定序 + 本地确定性模拟 + 逻辑与表现彻底解耦</strong>。这本书做三件事：</p>
+<ol>
+<li><strong>补原理</strong>：为什么这么设计？不这么设计会怎样？每个设计点都用一个可运行的 C++ 模型量化（例如“一包带 3 帧冗余能挡住多少丢包”“严格 Lockstep 下一个人断流全场卡多久”）。</li>
+<li><strong>补另一半</strong>：状态同步（尤其是 Unreal）——快照插值、客户端预测与和解、延迟补偿、Actor 复制管线、属性复制与 RPC、CharacterMovementComponent、GAS 预测、Iris / Mover / 网络物理。</li>
+<li><strong>补面试</strong>：每章都有 30 秒答案、面试注意、坑位清单和自测；第 15 章汇总 50 道追问。</li>
+</ol>
+
+<h2>0.1 网络同步的三问</h2>
+<div class="tbl"><table>
+<tr><th>问题</th><th>帧同步（Lockstep 家族）</th><th>状态同步（权威服务器家族）</th></tr>
+<tr><td><strong>谁说了算</strong>（权威在哪）</td><td>没有“权威状态”：每个客户端都跑完整逻辑，大家算得一样就是真相；服务器只定序</td><td>服务器的状态就是真相；客户端只是“播放器”，最多做预测</td></tr>
+<tr><td><strong>传什么</strong></td><td>输入（第 N 帧谁按了什么键）</td><td>状态（位置、血量、技能状态）+ 事件（RPC）</td></tr>
+<tr><td><strong>何时推进</strong></td><td>拿到第 N 帧的全部输入才推进（或先猜着推进，错了回滚）</td><td>服务器按自己的 tick 推进；客户端按收到的快照插值，按本地输入预测</td></tr>
+<tr><td>最难的事</td><td>确定性、抗丢包、断线追帧</td><td>带宽、手感（延迟）、命中判定公平</td></tr>
+</table></div>
+
+<h2>0.2 知识地图</h2>
+<p>全书分四部分。Part II 以 HOK 为主线讲帧同步，Part III 以 Unreal 为主线讲状态同步；第 9 章的“回滚”和第 10、13 章的“预测 + 和解”其实是同一个思想在两种架构里的投影——这是两条线的汇合点。</p>
+<!--flow {"w":900,"h":476,
+"rects":[{"x":8,"y":30,"w":212,"h":440,"c":"s","fill":"#F8FAFC","t":"PART I 原理"},
+{"x":228,"y":30,"w":212,"h":440,"c":"o","fill":"#FFFBF7","t":"PART II 帧同步（HOK 主线）"},
+{"x":448,"y":30,"w":212,"h":440,"c":"b","fill":"#F7F9FF","t":"PART III 状态同步（UE 主线）"},
+{"x":668,"y":30,"w":224,"h":440,"c":"p","fill":"#FBF9FF","t":"PART IV 选型与面试"}],
+"cols":[18,238,458,680],"colw":[192,192,192,200],"rows":[56,112,168,224,280,336,392],"bh":46,
+"boxes":[
+{"id":"c1","cr":[0,0],"t":"Ch1 同步问题与两大流派","s":"三问 · 带宽实测 · 谱系","c":"s","ts":12.5},
+{"id":"c2","cr":[0,1],"t":"Ch2 时间、网络与固定步长","s":"RTT · 抖动 · 插值 · 对时","c":"s","ts":12.5},
+{"id":"c3","cr":[1,0],"t":"Ch3 Lockstep 三条路线","s":"严格 · 定频不等人 · 回滚","c":"o","ts":12.5},
+{"id":"c4","cr":[1,1],"t":"Ch4 确定性工程","s":"浮点 · 定点 · 随机 · hash","c":"o","ts":12.5},
+{"id":"c5","cr":[1,2],"t":"Ch5 HOK 架构","s":"逻辑表现分离 · 共享内存","c":"o","ts":12.5},
+{"id":"c6","cr":[1,3],"t":"Ch6 HOK 下行","s":"冗余 · 900 窗口 · 补发 · 追帧","c":"o","ts":12.5},
+{"id":"c7","cr":[1,4],"t":"Ch7 HOK 上行","s":"命令冗余 · 技能保序","c":"o","ts":12.5},
+{"id":"c8","cr":[1,5],"t":"Ch8 质量 · 校验 · 录像","s":"ping · 卡顿 · hash · CS 模式","c":"o","ts":12.5},
+{"id":"c9","cr":[1,6],"t":"Ch9 回滚网络与混合","s":"GGPO · 输入延迟权衡","c":"o","ts":12.5,"hl":true},
+{"id":"c10","cr":[2,0],"t":"Ch10 状态同步通论","s":"插值 · 预测和解 · 延迟补偿","c":"b","ts":12.5,"hl":true},
+{"id":"c11","cr":[2,1],"t":"Ch11 UE 网络架构","s":"NetDriver · Role · 复制管线","c":"b","ts":12.5},
+{"id":"c12","cr":[2,2],"t":"Ch12 UE 属性复制与 RPC","s":"条件 · OnRep · 可靠性","c":"b","ts":12.5},
+{"id":"c13","cr":[2,3],"t":"Ch13 UE 移动与技能预测","s":"CMC · GAS · Mover · 物理","c":"b","ts":12.5,"hl":true},
+{"id":"c14","cr":[3,0],"t":"Ch14 选型、混合与案例","s":"全维对照 · UE 里做帧同步","c":"p","ts":12.5},
+{"id":"c15","cr":[3,1],"t":"Ch15 面试追问 50 题","s":"追问树 · 速记卡","c":"p","ts":12.5},
+{"id":"ap","cr":[3,2],"t":"附录 A–D","s":"协议 · API · 术语 · 勘误","c":"p","ts":12.5}],
+"arrows":[{"from":"c1","to":"c3"},{"from":"c2","to":"c10","p":[[210,135],[224,135],[224,24],[446,24],[446,79],[458,79]]},
+{"from":"c9","to":"c10","dash":true,"c":"r","p":[[430,415],[444,415],[444,99],[458,99]],"label":"同一思想","lx":372,"ly":462},
+{"from":"c13","to":"c14","p":[[650,247],[664,247],[664,79],[680,79]]}],
+"cap":"<b>图 0-1</b> 全书知识地图。★ 三章是两条线的汇合点：帧同步里的“回滚”和状态同步里的“预测 + 和解”本质相同——先按本地猜测推进，权威结果到达后回到分歧点重算。"} -->
+
+<h2>0.3 建议阅读路线</h2>
+<div class="cards">
+<div class="card"><div class="t">路线 A · 面试速通（半天）</div><p>Ch1 → Ch3（三条路线 + 实测）→ Ch6 / Ch7 前两节 → Ch10 → Ch11 / Ch12 的 30 秒答案 → Ch14 对照表 → Ch15 追问。</p></div>
+<div class="card"><div class="t">路线 B · 吃透 HOK（1~2 天）</div><p>Part II 顺序读，配合原文档；每章末尾的“对照原文档”看补充了什么。附录 A 是协议和参数速查，附录 D 是勘误。</p></div>
+<div class="card"><div class="t">路线 C · 吃透 UE（1~2 天）</div><p>Ch2 → Ch10 → Ch11 → Ch12 → Ch13 → Ch14 第 5 节（在 UE 里做帧同步）。附录 B 是 API / 宏 / CVar 速查。</p></div>
+</div>
+
+<h2>0.4 事实等级标签</h2>
+<p>网络同步是谣言重灾区（“帧同步不能防作弊”“状态同步天然防作弊”“回滚只影响自己”……）。为了让你答题时心里有底，书里的关键结论都带来源标签：</p>
+<div class="tbl"><table>
+<tr><th>标签</th><th>含义</th><th>可信度</th></tr>
+<tr><td><span class="tag hok">HOK 文档</span></td><td>来自你提供的《HOK 帧同步机制详解》（协议号、参数、类名、流程）</td><td>项目事实；对外面试时只讲机制，不讲内部细节</td></tr>
+<tr><td><span class="tag ue">UE 源码 / 文档</span></td><td>Unreal Engine 源码与官方文档中的类、函数、宏、CVar 与默认值</td><td>引擎事实；随版本变化的地方会标出版本</td></tr>
+<tr><td><span class="tag pub">公开资料</span></td><td>GDC 演讲、官方技术博客、开源库（GGPO、Valve 开发者文档、Riot 技术博客、Gaffer On Games 等）</td><td>业界事实；只引用能查证的结论</td></tr>
+<tr><td><span class="tag ex">实测 Ex</span></td><td>本书 <code>demos/</code> 下 C++ 模型的输出（数字由构建脚本从 JSON 读入，书和 md 同源）</td><td>模型结论；参数是假设的，趋势与量级可信，绝对值不代表线上</td></tr>
+<tr><td><span class="tag inf">推断</span></td><td>由以上事实推出、但没有直接证据的结论</td><td>需要你在项目里验证</td></tr>
+</table></div>
+
+<h2>0.5 实测程序一览</h2>
+<div class="tbl"><table>
+<tr><th>编号</th><th>实验</th><th>章节</th></tr>
+<tr><td>E1</td><td>带宽模型：只传输入 vs 全量快照 vs 增量快照 vs 增量 + 兴趣范围（AOI）</td><td>Ch1</td></tr>
+<tr><td>E2</td><td>15 Hz 逻辑、60 fps 渲染：直接画逻辑状态 / 插值 / 外推</td><td>Ch2</td></tr>
+<tr><td>E3</td><td>10 人对局、一人断流 2 秒：严格 Lockstep / 定频广播不等人 / 回滚，逐帧时间线</td><td>Ch3</td></tr>
+<tr><td>D1–D7</td><td>同一份源码用 <code>/fp:precise</code>、<code>/fp:fast /arch:AVX2</code>、<code>/fp:strict /Od</code> 编译：求和顺序、群体模拟逐帧 hash、Q16.16 定点、1 ulp 蝴蝶效应、unordered_map 顺序、浮点累加时间</td><td>Ch4</td></tr>
+<tr><td>E5</td><td>下行一包带 k 帧冗余：随机丢包 vs 突发丢包下仍需补发的比例（附闭式解）</td><td>Ch6</td></tr>
+<tr><td>E7</td><td>上行技能命令：单发 / 短冗余 / 全量冗余 + 序号</td><td>Ch7</td></tr>
+<tr><td>E8</td><td>ping：主线程取包时刻 vs 网络线程到达时间戳</td><td>Ch8</td></tr>
+<tr><td>E9</td><td>格斗游戏 2 人 60 fps：回滚深度 / 次数 与 输入延迟 d 的权衡，对照纯延迟型</td><td>Ch9</td></tr>
+<tr><td>E10</td><td>快照插值：插值延迟 × 网络抖动 → 外推比例与误差</td><td>Ch10</td></tr>
+<tr><td>E11</td><td>客户端预测：不预测 / 预测 + 直接覆盖 / 预测 + 和解（重放未确认移动）</td><td>Ch10 · Ch13</td></tr>
+<tr><td>E12</td><td>延迟补偿：不补偿 / 服务器回溯 / 回溯设上限</td><td>Ch10</td></tr>
+<tr><td>E13</td><td>带宽饱和时的复制调度：UE 式“优先级 × 等待时间” / 静态优先级 / 轮询</td><td>Ch11</td></tr>
+<tr><td>E14</td><td>属性复制（状态，最终一致）vs 可靠 / 不可靠 RPC（事件）</td><td>Ch12</td></tr>
+</table></div>
+<div class="co ver"><span class="h">关于 HOK 内容的使用边界</span><p>Part II 的 HOK 细节（协议号、类名、参数）来自内部文档，适合用来<strong>理解</strong>和在内部讨论；对外面试时建议只讲机制（“定频广播不等人”“冗余 + 补发 + 追帧三层兜底”“逻辑表现分离”），不要背协议号和内部类名。</p></div>
+
+<div class="recap"><div class="t">本章速记</div><ul>
+<li>三问：<strong>谁说了算 / 传什么 / 何时推进</strong>。帧同步 = 无权威状态 + 传输入 + 拿到输入才推进；状态同步 = 服务器权威 + 传状态 + 服务器自己推进。</li>
+<li>两条线的汇合点：<strong>预测 + 回滚重算</strong>（GGPO 的回滚 = UE CMC 的“纠正后重放 SavedMoves”）。</li>
+<li>每个结论看标签：<span class="tag ex">实测</span> 给趋势和量级，<span class="tag ue">UE</span> / <span class="tag pub">公开资料</span> 给事实。</li>
+</ul></div>
+</section>

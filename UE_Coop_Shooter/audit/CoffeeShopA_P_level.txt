@@ -1,0 +1,74 @@
+# /Game/Scene/CoffeeShopA/Maps/CoffeeShopA/CoffeeShopA_P  (LevelScriptBlueprint)
+ParentClass: /Script/Engine.LevelScriptActor
+
+## Variables
+- UMG_MainMenu : object<UserWidget>
+- BGM : object<AudioComponent>
+- BP_Player : object<BP_Player_C>
+- PlayerController : object<PlayerController>
+
+## CoffeeShopA_P_C Default__CoffeeShopA_P_C
+   CineCameraActor3_ExecuteUbergraph_CoffeeShopA_P_RefProperty = CineCameraActor3
+   CineCameraActor4_ExecuteUbergraph_CoffeeShopA_P_RefProperty = CineCameraActor4
+   CineCameraActor_0_ExecuteUbergraph_CoffeeShopA_P_RefProperty = CineCameraActor_0
+   CineCameraActor3_0_ExecuteUbergraph_CoffeeShopA_P_RefProperty = CineCameraActor3_0
+   CineCameraActor5_ExecuteUbergraph_CoffeeShopA_P_RefProperty = CineCameraActor5
+   CineCameraActor8_ExecuteUbergraph_CoffeeShopA_P_RefProperty = CineCameraActor8
+
+## Custom events / RPC
+- CustomEvent Server_SetStart  [RPC Net|Reliable|Server]   (graph CoffeeShopA_P.PersistentLevel.CoffeeShopA_P.EventGraph)
+- CustomEvent Start_Logic   (graph CoffeeShopA_P.PersistentLevel.CoffeeShopA_P.EventGraph)
+- CustomEvent Multi_SetStrat  [RPC Net|Multicast]   (graph CoffeeShopA_P.PersistentLevel.CoffeeShopA_P.EventGraph)
+
+## Graph CoffeeShopA_P.PersistentLevel.CoffeeShopA_P.EventGraph
+
+CustomEvent Server_SetStart  [RPC Net|Reliable|Server](NewParam):  #797
+  Multi_SetStrat(NewParam=CustomEvent Server_SetStart  [RPC Net|Reliable|Server]#797.NewParam)  #768
+
+CustomEvent Start_Logic():  #798
+  开始游戏(self=CreateWidget#796.ReturnValue)  #761
+  DisableInput(PlayerController=GetPlayerController(PlayerIndex=0))  #795
+  SetViewTargetWithBlend(self=GetPlayerController(PlayerIndex=0), NewViewTarget=CastTo BP_Player_C(Object=GetPlayerCharacter(PlayerIndex=0)).AsBP Player, BlendTime=1.000000, BlendFunc=VTBlend_Cubic, BlendExp=0.000000, bLockOutgoing=false)  #786
+  SetInputMode_GameOnly(PlayerController=GetPlayerController(PlayerIndex=0), bFlushInput=false)  #764
+  Delay(Duration=1.000000)  #772
+  开始游戏(self=CastTo BP_Player_C(Object=GetPlayerCharacter(PlayerIndex=0)).AsBP Player)  #793
+  Sound(Sound=WAV_Survival2_Heartbeat, self=BGM)  -> Output_Get  #823
+  Stop(self=BGM)  #777
+  PlaySound2D(Sound=Sound#823.Output_Get, VolumeMultiplier=1.000000, PitchMultiplier=1.000000, StartTime=0.000000, ConcurrencySettings=None, OwningActor=None, bIsUISound=true)  #776
+  Delay(Duration=2.000000)  #775
+  GetActorOfClass(ActorClass=BP_ZombieSpawn_C)  -> ReturnValue  #773
+  开始游戏(self=GetActorOfClass#773.ReturnValue)  #774
+  Server_SetStart(NewParam=true)  #789
+
+CustomEvent Multi_SetStrat  [RPC Net|Multicast](NewParam):  #799
+  游戏是否开始(游戏是否开始=CustomEvent Multi_SetStrat  [RPC Net|Multicast]#799.NewParam, self=CastTo BP_MyGameState_C(Object=GetGameState()).AsBP My Game State)  #824
+
+Event ReceiveBeginPlay():  #805
+  Branch(Condition=IsLocalController(self=GetPlayerController(PlayerIndex=0)))  #807
+    [true]:
+      CreateWidget(Class=UWB_MainMenu_C, OwningPlayer=∅)  -> ReturnValue  #796
+      设置文本(self=CreateWidget#796.ReturnValue, NewParam="按任意键确认开始游戏")  #782
+      UMG_MainMenu(UMG_MainMenu=CreateWidget#796.ReturnValue)  -> Output_Get  #821
+      AddToViewport(self=UMG_MainMenu#821.Output_Get, ZOrder=0)  #760
+      Delay(Duration=1.000000)  #780
+      SetViewTargetWithBlend(self=GetPlayerController(PlayerIndex=0), NewViewTarget=Select(Option 0=Literal(), Option 1=Literal(), Option 2=Literal(), Option 3=Literal(), Option 4=Literal(), Option 5=Literal(), Index=RandomIntegerInRange(Min=0, Max=5)), BlendTime=0.000000, BlendFunc=VTBlend_Linear, BlendExp=0.000000, bLockOutgoing=false)  #762
+      SetInputMode_GameAndUIEx(PlayerController=GetPlayerController(PlayerIndex=0), InWidgetToFocus=UMG_MainMenu, InMouseLockMode=LockAlways, bHideCursorDuringCapture=false, bFlushInput=false)  #785
+      SpawnSound2D(Sound=WAV_Survival2_Departure_Strings, VolumeMultiplier=1.000000, PitchMultiplier=1.000000, StartTime=0.000000, ConcurrencySettings=None, bPersistAcrossLevelTransition=false, bAutoDestroy=true)  -> ReturnValue  #792
+      BGM(BGM=SpawnSound2D#792.ReturnValue)  #822
+      Server_SetStart(NewParam=false)  #790
+      AddDelegate(self=CastTo BP_Player_C(Object=GetPlayerCharacter(PlayerIndex=0)).AsBP Player, Delegate=CustomEvent Start_Logic#798.OutputDelegate)  #759
+      清除队列(self=CastTo BP_MyGameState_C(Object=GetGameState()).AsBP My Game State)  #771
+
+Event ReceiveTick(DeltaSeconds):  #806
+
+InputKey AnyKey(Key):  #809
+  [Pressed]:
+    设置文本(self=CreateWidget#796.ReturnValue, NewParam="等待其他玩家确认...")  #783
+    Macro DoOnce(Start Closed=false)  #816
+    Branch(Condition=IsLocalController(self=GetPlayerController(PlayerIndex=0)))  #808
+      [true]:
+        CastTo BP_Player_C(Object=GetPlayerCharacter(PlayerIndex=0))  -> AsBP Player  #800
+          [then]:
+            DisableInput(self=GetPlayerCharacter(PlayerIndex=0), PlayerController=GetPlayerController(PlayerIndex=0))  #787
+            Server_ReportReady(self=CastTo BP_Player_C#800.AsBP Player)  #791
+  // node #806 Event ReceiveTick EnabledState=ENodeEnabledState::Disabled

@@ -1,0 +1,174 @@
+<div class="part-head" data-toc="第二部分 · A* 核心">
+  <div class="no">PART TWO</div>
+  <h1>第二部分　A* 核心：过程、启发函数、正确性</h1>
+  <p>这一部分回答三个问题：A* 每一步具体在做什么；h 应该怎么设计；为什么在 h 不高估的前提下，A* 找到的一定是最短路。</p>
+</div>
+
+<section class="chapter" id="ch2">
+  <div class="ch-head">
+    <div class="no">CHAPTER 02</div>
+    <h1>A* 逐步拆解</h1>
+    <p class="lead">open、closed、g、h、f、parent，六个概念，一个循环。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>准确说出 g、h、f 和 open / closed 的含义</li>
+    <li>能跟着一张 7×5 的小地图手算前几步，理解 f 为什么会逐步上升</li>
+    <li>写出 5 分钟能写完、没有经典 bug 的面试版 A*</li>
+  </ul></div>
+
+  <h2>2.1 六个概念</h2>
+  <div class="tbl"><table>
+    <tr><th>符号</th><th>含义</th><th>谁来维护</th></tr>
+    <tr><td><code>g(n)</code></td><td>从起点到 n <strong>目前找到的</strong>最小代价，是真实走出来的</td><td>每次发现更短的路就更新</td></tr>
+    <tr><td><code>h(n)</code></td><td>从 n 到终点代价的<strong>估计</strong>，由启发函数给出，不依赖搜索过程</td><td>第一次见到 n 时计算一次</td></tr>
+    <tr><td><code>f(n)</code></td><td><code>g(n) + h(n)</code>：经过 n 的整条路径的估计长度</td><td>g 变化时一起变</td></tr>
+    <tr><td><code>parent(n)</code></td><td>目前最短路径上 n 的前一个节点</td><td>与 g 同时更新；最后沿它回溯出路径</td></tr>
+    <tr><td><strong>open</strong></td><td>已发现、还没展开的节点（搜索的“边界”）</td><td>优先队列，按 f 取最小</td></tr>
+    <tr><td><strong>closed</strong></td><td>已展开、g 已确定为最优的节点</td><td>布尔数组或标记</td></tr>
+  </table></div>
+
+  <h2>2.2 算法主循环</h2>
+<!--code:text:A* · 伪代码-->
+A*(S, G):
+    g[S] = 0；parent[S] = 空
+    open = { S }，按 f = g + h 排序
+    while open 非空:
+        cur = open 中 f 最小的节点；从 open 移到 closed
+        if cur == G:                       // ① 出队时才判断终点
+            return 沿 parent 从 G 回溯到 S 的路径
+        for nb in cur 的每个邻居:
+            if nb 是障碍 或 nb 在 closed: continue
+            ng = g[cur] + cost(cur, nb)
+            if nb 不在 open 或 ng < g[nb]:  // ② 发现更短的路才更新
+                g[nb] = ng；parent[nb] = cur
+                f[nb] = ng + h(nb)
+                把 nb 放入 open（已在 open 中则更新它的 f）
+    return 无路径                          // ③ open 空了还没取出 G
+<!--/code-->
+  <p>三个标注点就是面试里最常被追问的细节：</p>
+  <ol>
+    <li><strong>为什么在出队时判断终点，而不是在入队时？</strong> G 第一次入队时的 g 可能来自一条较长的路径，之后还有机会被更短的路径更新。只有当 G 成为 open 里 f 最小的节点时，才能确定没有更短的路了（第 4 章证明）。</li>
+    <li><strong>为什么要比较 ng &lt; g[nb]？</strong> 同一个节点可以从多个方向被发现，只保留最短的那条。忘记这个判断会让 parent 被较差的路径覆盖。</li>
+    <li><strong>open 空了意味着什么？</strong> 起点所在连通块已经搜完了，终点不可达。这是 A* 的最坏情况，第 4 章会专门讨论。</li>
+  </ol>
+
+  <h2>2.3 手算一遍：7×5 地图，中间一堵墙</h2>
+  <p>8 方向、禁止切角，直走 10、斜走 14，启发函数用 Octile 距离 h = 10·max(dx, dy) + 4·min(dx, dy)。S 在 (1, 2)，G 在 (5, 2)，中间 x = 3 一列有三格墙。下图每个格子里：<strong>中间大字是 f，左下蓝字是 g，右下橙字是 h</strong>；小箭头指向 parent。</p>
+  <!--grid {"map":[
+    ".......",
+    "...#...",
+    ".S.#.G.",
+    "...#...",
+    "......."],
+    "per":2,"cell":54,
+    "panels":[
+      {"steps":1,"title":"第 1 步：展开 S，8 个邻居入 open"},
+      {"steps":2,"title":"第 2 步：展开 f 最小的 (2,2)，f = 40"},
+      {"steps":4,"title":"第 3～4 步：f = 48 的两个格子"},
+      {"steps":-1,"title":"完成：展开 {exp} 个节点，路径代价 {cost}"}],
+    "cap":"<b>图 2-1</b>　A* 在小地图上的完整过程（构建脚本真实运行生成）。Dijkstra 在这张图上要展开 30 个节点，A* 只展开 14 个"} -->
+  <h3>逐步解读</h3>
+  <ul>
+    <li><strong>第 1 步</strong>：S 的 g = 0，h = 40（离 G 横向 4 格），f = 40。展开后 8 个邻居入 open。正右方的 (2, 2) g = 10，h = 30，f = 40；斜向的 (2, 1) g = 14，h = 34，f = 48；左侧的 (0, 2) g = 10，h = 50，f = 60。<strong>朝着终点的方向 f 小，背离终点的方向 f 大</strong>，这就是 h 起的作用。</li>
+    <li><strong>第 2 步</strong>：取出 f = 40 的 (2, 2)。它右边就是墙，只能发现上下几个格子，它们都已经在 open 里了，而且经过 (2, 2) 并不会更短，所以不更新。</li>
+    <li><strong>第 3～4 步</strong>：open 里最小的 f 变成 48，是 (2, 1) 和 (2, 3)。它们的 f 和 h 都相同，谁先出队取决于平局决胜规则（这里按入队顺序）。注意 <strong>f 从 40 涨到了 48</strong>：墙挡住了直线，估计值 h 太乐观了，现实把 f 抬了上去。</li>
+    <li><strong>之后</strong>：f = 54、60、62……依次被展开，直到绕过墙的那条路的 f 达到 68，并取出 G。最终 f(G) = g(G) = 68：<strong>终点的 h = 0，所以它的 f 就是真实代价</strong>。</li>
+  </ul>
+  <div class="co deep"><span class="h">深入一层：被展开节点的 f 永远不减</span>
+    <p>回看第 1～4 步取出的 f：40, 40, 48, 48, 54, 54, 60, 62……从不下降。这不是巧合：当 h 满足一致性（第 3 章）时，沿着任何一条边走，f 都不会变小，所以 A* 是按 f 从小到大“一圈一圈”地展开节点，和 Dijkstra 按 g 一圈一圈展开完全对应。<strong>A* 就是在“修改过边权”的图上跑 Dijkstra</strong>，修改后的边权是 cost(u, v) − h(u) + h(v)。</p>
+  </div>
+  <p>同一张图上，最终路径可以从墙的上方或下方绕过，两条都是 68。上图走的是下方，而第 2.4 节的面试版代码在同一张图上走的是上方（<code>demos/interview_output.txt</code>）。<strong>代价相同时走哪条，完全取决于平局时谁先出队</strong>，这一点在第 7 章的帧同步部分会变得很重要。</p>
+
+  <h2>2.4 面试手写版 C++</h2>
+  <p>下面这份代码可以在 5 分钟内写完，覆盖了所有常见细节。它已在 MSVC 下编译通过，并用上面的地图测试过（<code>demos/astar_interview.cpp</code>）。</p>
+<!--code:cpp:astar_interview.cpp（面试版：二叉堆 + 惰性删除 + 禁止切角）-->
+struct Grid {
+    int w, h;
+    std::vector<uint8_t> blocked;
+    bool walkable(int x, int y) const { return x >= 0 && y >= 0 && x < w && y < h && !blocked[y * w + x]; }
+};
+
+struct Node { int f, g, idx; };
+struct Cmp {   // priority_queue 是大顶堆：返回 true 表示 a 的优先级更低
+    bool operator()(const Node& a, const Node& b) const { return a.f != b.f ? a.f > b.f : a.g < b.g; }   // f 小优先；f 相同 g 大优先
+};
+
+std::vector<int> astar(const Grid& grid, int sx, int sy, int tx, int ty) {
+    const int W = grid.w, H = grid.h;
+    auto id = [W](int x, int y) { return y * W + x; };
+    auto h = [&](int x, int y) {                               // Octile：8 方向、直走 10、斜走 14
+        int dx = std::abs(x - tx), dy = std::abs(y - ty);
+        return 10 * std::max(dx, dy) + 4 * std::min(dx, dy);
+    };
+    std::vector<int> g(W * H, INT_MAX), parent(W * H, -1);
+    std::vector<char> closed(W * H, 0);
+    std::priority_queue<Node, std::vector<Node>, Cmp> open;
+    g[id(sx, sy)] = 0;
+    open.push({h(sx, sy), 0, id(sx, sy)});
+    static const int DX[8] = {1, -1, 0, 0, 1, 1, -1, -1}, DY[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+    while (!open.empty()) {
+        Node cur = open.top(); open.pop();
+        if (closed[cur.idx]) continue;                         // 过期条目：该节点已用更小的 g 展开过
+        closed[cur.idx] = 1;
+        if (cur.idx == id(tx, ty)) break;                      // 出队时才判断终点
+        int x = cur.idx % W, y = cur.idx / W;
+        for (int d = 0; d < 8; ++d) {
+            int nx = x + DX[d], ny = y + DY[d];
+            if (!grid.walkable(nx, ny)) continue;
+            if (d >= 4 && (!grid.walkable(nx, y) || !grid.walkable(x, ny))) continue;   // 禁止切角
+            int j = id(nx, ny);
+            if (closed[j]) continue;
+            int ng = g[cur.idx] + (d < 4 ? 10 : 14);
+            if (ng >= g[j]) continue;                          // 没有变短：忽略
+            g[j] = ng; parent[j] = cur.idx;
+            open.push({ng + h(nx, ny), ng, j});                // 允许重复入队（惰性删除）
+        }
+    }
+    std::vector<int> path;
+    if (g[id(tx, ty)] == INT_MAX) return path;                 // 不可达
+    for (int i = id(tx, ty); i != -1; i = parent[i]) path.push_back(i);
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+<!--/code-->
+  <div class="term"><div class="bar">demos/interview_output.txt</div><pre>路径 7 个格子：(1,2) (2,1) (2,0) (3,0) (4,0) (5,1) (5,2)
+  ..***..
+  ..*#.*.
+  .S.#.G.
+  ...#...
+  .......
+封死以后：路径 0 个格子（空 = 不可达）</pre></div>
+  <h3>写完要主动说明的几个设计选择</h3>
+  <ul>
+    <li><strong>open 允许重复入队</strong>：<code>std::priority_queue</code> 不支持修改元素的 key。发现更短的 g 时直接再 push 一份，旧的那份出队时发现 <code>closed</code> 已置位就跳过。这叫惰性删除（lazy deletion），代价是堆里会有一些过期条目。</li>
+    <li><strong>整数代价</strong>：10 / 14 避免了浮点比较误差，平局判断是精确的。</li>
+    <li><strong>平局决胜</strong>：f 相同时优先 g 大（即 h 小）的节点，也就是更靠近终点的那个。开阔地上这个小改动能让展开节点数差一个数量级（E4：开阔地 3582 对 228）。</li>
+    <li><strong>这个版本每次调用都分配整图数组</strong>：面试足够了，但游戏里每帧可能有很多次短查询，要换成第 5 章的 generation 复位（E5：短查询 504 us 对 5.6 us）。</li>
+  </ul>
+
+  <h2>2.5 八个经典 bug</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>写法</th><th>后果</th></tr>
+    <tr><td>1</td><td>邻居<strong>入队时</strong>就判断是否为终点并返回</td><td>返回的不一定是最短路</td></tr>
+    <tr><td>2</td><td>出队后不检查 closed（惰性删除版）</td><td>同一节点被展开多次，结果仍对但变慢；若 parent 被过期条目覆盖，路径会错</td></tr>
+    <tr><td>3</td><td>发现更短的 g 时只改了 g 数组，没重新入队 / 更新堆</td><td>堆里还是旧的 f，展开顺序错误，可能得到非最短路</td></tr>
+    <tr><td>4</td><td>h 和移动规则不匹配（8 方向用曼哈顿）</td><td>h 高估，路径不是最短（E2：最多长 9.8%）</td></tr>
+    <tr><td>5</td><td>8 方向时斜走代价也写成 1（或 10）</td><td>路径莫名其妙地走锯齿斜线</td></tr>
+    <tr><td>6</td><td>允许切角，但角色的碰撞体积不允许</td><td>角色卡在墙角</td></tr>
+    <tr><td>7</td><td>用 <code>float</code> 做代价并用 <code>==</code> 比较 f</td><td>平局判断不稳定；不同平台结果不同</td></tr>
+    <tr><td>8</td><td>不处理不可达，或没有搜索上限</td><td>每次都把整个连通块搜完，卡一帧（E8：20.5 ms）</td></tr>
+  </table></div>
+
+  <h2>2.6 交互实验：寻路沙盒</h2>
+  <p>默认是 U 型陷阱地图上的 A*。可以拖动 S、G，在空格上拖动画墙；右侧伪代码会高亮当前执行的行，鼠标悬停在格子上能看到 g、h、f。试试把算法切到 Dijkstra 和贪心，再切回 A*，对比 open（绿）和 closed（蓝）的形状。</p>
+  <div class="lab gridlab" id="lab-sandbox" data-algo="astar" data-map="trap" data-w="40" data-h="24" data-speed="16"></div><!--/lab-->
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><strong>f = g + h</strong>：g 真实已走代价，h 估计剩余代价；每次展开 open 里 f 最小的节点。</li>
+    <li>三个细节：<strong>出队时判终点</strong>；<strong>ng &lt; g[nb] 才更新</strong>；open 空即不可达。</li>
+    <li>被展开节点的 f 单调不减；终点的 f = g = 真实最短代价。</li>
+    <li>工程写法：priority_queue + 惰性删除、整数代价、f 相同取 g 大。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：A* 找到的路径代价是 68，那么搜索过程中被展开的节点，f 的最大值是多少？</summary><p>当 h 一致时，被展开节点的 f 单调不减，而且都不超过最优代价 C* = 68。所以最大值就是 68（终点自己）。f &gt; 68 的节点不会被展开，这正是 A* 比 Dijkstra 省的地方。</p></details>
+  <details class="quiz"><summary>自测：closed 集合能不能不要？</summary><p>惰性删除版里 closed 用来识别过期条目，不能少。有些实现不用 closed，改为比较出队条目的 g 和 g[n]：不相等就是过期的。两者等价；但如果连这个判断也没有，同一节点会被展开很多次。</p></details>
+</section>

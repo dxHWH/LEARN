@@ -1,0 +1,109 @@
+<div class="part-head" data-toc="第四部分 · 性能与实战">
+  <div class="no">PART FOUR</div>
+  <h1>第四部分　性能与实战</h1>
+  <p>一个角色的动画只要几微秒，几百个角色就是几毫秒。动画优化的思路只有三条：算得快、少算、不算。</p>
+</div>
+
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>动画性能优化：并行、降频、减骨与共享</h1>
+    <p class="lead">先知道钱花在哪，再按“并行 → 降频 → 减骨 → 不可见不算 → 共享姿势”的顺序下手。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>知道动画开销分布在哪些线程、哪些环节，用什么工具看</li>
+    <li>理解 URO、Animation Budget Allocator、可见性 Tick 选项、LOD 减骨各自省了什么</li>
+    <li>区分 Leader Pose、Copy Pose From Mesh、Skeletal Mesh Merge、Animation Sharing 的适用场景</li>
+    <li>能给出一份大规模角色场景的动画优化清单</li>
+  </ul></div>
+
+  <h2>9.1 钱花在哪</h2>
+  <div class="tbl"><table>
+    <tr><th>阶段</th><th>线程</th><th>主要开销</th><th>优化方向</th></tr>
+    <tr><td>EventGraph / NativeUpdate</td><td>游戏线程</td><td>蓝图 VM、Cast、函数调用</td><td>挪到线程安全更新、Property Access、C++</td></tr>
+    <tr><td>AnimGraph Update</td><td>工作线程</td><td>节点遍历、引脚绑定、状态机规则</td><td>Fast Path、减少节点、权重为 0 的分支自动跳过</td></tr>
+    <tr><td>AnimGraph Evaluate</td><td>工作线程</td><td><strong>解压</strong>、混合、组件空间转换、IK</td><td>减少同时参与混合的动画数、惯性化、LOD 跳过 IK、减骨</td></tr>
+    <tr><td>Complete</td><td>游戏线程</td><td>Notify 派发、Socket / 子组件更新、物理同步</td><td>减少 Notify、少挂子组件</td></tr>
+    <tr><td>渲染</td><td>渲染线程 / GPU</td><td>骨骼矩阵上传、GPU 蒙皮、Morph Target</td><td>LOD、合并网格减少 Draw Call、远处用顶点动画贴图</td></tr>
+  </table></div>
+  <p>工具：<strong>Unreal Insights</strong>（打开 animation 相关 trace 通道看每个组件的 Update / Evaluate 耗时）、<code>stat anim</code>、<strong>Rewind Debugger</strong>（UE5，按帧回放动画蓝图的节点权重和状态机）、动画蓝图编辑器里的调试实例。</p>
+
+  <h2>9.2 并行：把求值摊到所有核上</h2>
+  <!--bars {"title":"实测 E10：300 个角色 × 68 骨骼（采样 2 条动画 → 混合 → FK → 蒙皮矩阵），每帧耗时","labw":250,"unit":"ms","items":[
+    ["单线程，满帧满骨骼",1.066,"r","1.066 ms"],["2 个工作线程",0.702,"o","0.702 ms（1.52x）"],["4 个工作线程",0.388,"a","0.388 ms（2.75x）"],
+    ["8 个工作线程",0.236,"b","0.236 ms（4.52x）"],["32 个工作线程",0.140,"g","0.140 ms（7.64x）"],["单线程，LOD 减骨 + URO 降频",0.426,"p","0.426 ms（39.9% 工作量）"]],
+    "cap":"<b>图 9-1</b>　E10：每个角色约 3.55 us。并行有效但远不是线性（32 线程只有 7.64x：任务粒度、同步开销、内存带宽）；单线程下“少算”的收益介于 2 线程与 4 线程并行之间，而且是真正减少了 CPU 总消耗"} -->
+  <p>UE 里每个 SkeletalMeshComponent 的求值是一个独立任务，天然可以并行。实测说明两点：</p>
+  <ul>
+    <li><strong>并行收益有上限</strong>：每个任务只有几微秒时，分发与等待的开销占比上升；而且游戏线程最终要等所有任务完成（Complete 阶段），最慢的那个角色决定等待时间。</li>
+    <li><strong>“少算”往往比“并行”更划算</strong>：并行只是把同样的工作摊开，CPU 总消耗不变（移动端还有发热和功耗问题）；降频和减骨是真正减少了工作量。</li>
+  </ul>
+
+  <h2>9.3 URO：远处的角色少更新几次</h2>
+  <p><strong>Update Rate Optimizations</strong>（SkeletalMeshComponent 的 <code>bEnableUpdateRateOptimizations</code>）按角色在屏幕上的大小（或 LOD 级别）决定更新频率：近处每帧更新，远处每 2、3、4 帧更新一次。</p>
+  <ul>
+    <li><strong>跳过的帧怎么办</strong>：可以开启跳帧插值（Interpolate Skipped Frames），在两次求值结果之间插值，画面仍然连续；不开的话远处角色动作会“一卡一卡”。插值本身有开销，所以有一个评估频率阈值，超过就不插值。</li>
+    <li><strong>时间不会丢</strong>：跳过的帧累积 DeltaTime，下次更新一次性推进，Notify 也不会丢（但可能集中在一帧触发）。</li>
+    <li><strong>调试</strong>：组件上的 <code>bDisplayDebugUpdateRateOptimizations</code> 会用颜色标出每个角色当前的更新频率。</li>
+  </ul>
+  <div class="co ver"><span class="h">实测 E10：LOD 减骨 + URO 降频</span>
+    <p>300 个角色中，近处 20% 满帧满骨；中间 30% 隔 1 帧更新；远处 50% 每 4 帧更新一次且只算 23 根主干骨骼（去掉手指、扭转骨、IK 骨）。单线程 <strong>0.426 ms/帧，是全量的 39.9%</strong>，与理论工作量 39.2% 吻合——这类优化的收益可以事先算出来。</p>
+  </div>
+
+  <h2>9.4 Animation Budget Allocator：给动画定预算</h2>
+  <p>URO 是“按距离 / 屏幕大小”的固定规则；<strong>Animation Budget Allocator</strong> 插件是“按总预算”的动态调度：设定动画每帧最多花多少毫秒，系统按每个角色的重要性（Significance，通常由距离、是否在视野、是否是玩家相关决定）给它们分配更新频率，超预算时自动降低次要角色的频率并插值。需要用 <code>USkeletalMeshComponentBudgeted</code> 替换普通组件。适合角色数量波动很大的场景（大逃杀、大型战场）。</p>
+
+  <h2>9.5 不可见就不算</h2>
+  <div class="tbl"><table>
+    <tr><th>VisibilityBasedAnimTickOption</th><th>不可见时</th><th>适用</th></tr>
+    <tr><td>AlwaysTickPoseAndRefreshBones</td><td>照常更新并刷新骨骼</td><td>玩家角色、需要精确 Socket / 碰撞的对象</td></tr>
+    <tr><td>AlwaysTickPose</td><td>推进动画时间（Notify、蒙太奇照常），但不刷新骨骼</td><td>不可见时仍需要动画事件的 AI</td></tr>
+    <tr><td>OnlyTickMontagesWhenNotRendered</td><td>只推进蒙太奇，其余不更新</td><td>依赖蒙太奇回调推进逻辑的角色</td></tr>
+    <tr><td><strong>OnlyTickPoseWhenRendered</strong></td><td>完全不更新</td><td>纯表现的 NPC、群众</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：不可见不更新带来的逻辑 bug</span>
+    <ul>
+      <li>技能逻辑依赖 Notify（例如“出手帧造成伤害”），角色在镜头外就<strong>永远不出伤害</strong>。关键玩法事件要么不依赖动画 Notify，要么对这类角色用 AlwaysTickPose。</li>
+      <li><strong>专用服务器</strong>上没有“渲染”，默认设置可能导致服务器上的骨骼从不刷新，命中检测用的是参考姿势。服务器端需要按骨骼做命中判定的角色要显式设置更新选项。</li>
+      <li>Root Motion 角色在服务器上必须推进蒙太奇，否则移动和客户端对不上。</li>
+    </ul>
+  </div>
+
+  <h2>9.6 LOD：减骨与跳过节点</h2>
+  <ul>
+    <li><strong>网格 LOD 减骨</strong>：低 LOD 去掉手指、扭转骨、面部骨骼，蒙皮权重转移到父骨骼。求值时 Required Bones 变少，所有逐骨骼的工作（解压、混合、FK、蒙皮矩阵）同比减少（第 1 章的拓扑序保证这是一个简单的过滤）。</li>
+    <li><strong>节点 LOD Threshold</strong>：AnimGraph 里很多节点（Two Bone IK、Apply Additive、Control Rig 等）有 LOD Threshold，超过该 LOD 就直接透传，不做计算。远处角色不需要脚贴地、不需要呼吸叠加。</li>
+    <li><strong>动画曲线 / Notify 的 LOD 过滤</strong>：低 LOD 不计算某些曲线、不触发某些 Notify（例如脚步声）。</li>
+  </ul>
+
+  <h2>9.7 共享姿势：一个求值，多处使用</h2>
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>做法</th><th>适用</th><th>注意</th></tr>
+    <tr><td><strong>Leader Pose Component</strong>（5.1 前叫 Master Pose）</td><td>子 Mesh 直接用主 Mesh 的骨骼变换，自己不求值</td><td>换装部件（头、身体、衣服）</td><td>子 Mesh 不能有自己的动画逻辑；骨骼必须是主骨架的子集</td></tr>
+    <tr><td>Copy Pose From Mesh</td><td>子 Mesh 跑自己的动画蓝图，第一步把主 Mesh 的姿势按骨骼名拷过来，之后还能叠加物理、IK</td><td>需要次级动画（布料骨骼、物理头发）的部件</td><td>比 Leader Pose 贵，但比完整求值便宜</td></tr>
+    <tr><td>Skeletal Mesh Merge</td><td>运行时把多个部件合并成一个 SkeletalMesh</td><td>换装组合固定后减少 Draw Call 和组件数</td><td>合并有一次性开销；材质要能合并</td></tr>
+    <tr><td>Animation Sharing 插件</td><td>大量 NPC 按“状态”共享少数几个求值实例的姿势</td><td>观众、群众、远处士兵</td><td>同状态的角色动作完全同步，需要加随机偏移</td></tr>
+    <tr><td>顶点动画贴图（VAT）</td><td>把动画烘焙成贴图，GPU 实例化绘制，CPU 不跑动画</td><td>成百上千的远景角色</td><td>不能交互、不能混合（或只能简单切换），UE5 有 AnimToTexture 插件</td></tr>
+  </table></div>
+
+  <h2>9.8 一份优化清单</h2>
+  <div class="tbl"><table>
+    <tr><th>类别</th><th>检查项</th></tr>
+    <tr><td>动画蓝图</td><td>开启多线程更新；逻辑放线程安全函数 + Property Access；引脚走 Fast Path（编译无性能警告）；不在 Update 里 Cast</td></tr>
+    <tr><td>图结构</td><td>Cached Pose 复用子图；过渡用惯性化；减少同时参与混合的动画数；远处 LOD 跳过 IK / 加性 / Control Rig</td></tr>
+    <tr><td>更新频率</td><td>开启 URO 并配置跳帧插值；大量角色用 Budget Allocator；不可见时按需选择 Tick 选项</td></tr>
+    <tr><td>数据</td><td>合理的压缩设置（ACL）；LOD 减骨；曲线数量受控；Notify 不滥用</td></tr>
+    <tr><td>组件</td><td>换装用 Leader Pose；必要时合并网格；少挂需要每帧更新 Transform 的子组件</td></tr>
+    <tr><td>群体</td><td>Animation Sharing；远景 VAT + 实例化</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>开销：游戏线程（EventGraph）+ 工作线程（Update/Evaluate，解压最贵）+ 渲染（蒙皮）。看 Insights、Rewind Debugger。</li>
+    <li>并行有上限（E10：32 线程 7.64x）；<strong>少算</strong>更划算（LOD+URO：39.9%，与理论吻合）。</li>
+    <li>URO 按屏幕大小降频 + 跳帧插值；Budget Allocator 按总预算动态调度。</li>
+    <li>VisibilityBasedAnimTickOption 四档；小心镜头外 Notify 不触发、服务器骨骼不刷新。</li>
+    <li>共享：<strong>Leader Pose</strong>（不求值）&lt; Copy Pose（部分求值）；Merge 减 Draw Call；Animation Sharing / VAT 做群体。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：URO 降到每 4 帧更新一次，角色的 Root Motion 会不会变慢？</summary><p>不会。跳过的帧的 DeltaTime 会累积，下次更新时一次推进 4 帧的时间，提取的 Root Motion 也是 4 帧的总量；但位移会集中在一帧发生，表现为一顿一顿的移动。因此 Root Motion 驱动的重要角色（玩家、Boss）一般不做降频，或者至少保证其移动帧率。</p></details>
+  <details class="quiz"><summary>自测：给换装部件用 Leader Pose 后，部件上的物理骨骼（披风）不动了，为什么？</summary><p>Leader Pose 让子组件完全复用主组件的骨骼变换，子组件自己的动画蓝图（包括 RigidBody 节点、AnimDynamics）不会运行；主骨架里也没有披风骨骼。需要次级动画的部件改用 Copy Pose From Mesh：先拷主姿势，再在自己的 AnimGraph 里跑物理节点。</p></details>
+</section>

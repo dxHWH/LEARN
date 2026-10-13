@@ -1,0 +1,138 @@
+<section class="chapter" id="ch12">
+<div class="ch-head"><div class="no">CHAPTER 12</div><h1>连续控制与最大熵 RL：DDPG / TD3 / SAC</h1><p class="lead">动作是连续的（转向角、瞄准偏移、油门）时，DQN 的 $\max_a$ 求不出来。DDPG 用一个确定性 actor 近似 argmax，并沿 critic 对动作的梯度更新它；TD3 修 DDPG 的高估和不稳定；SAC 在目标里加上熵，让探索和鲁棒性内建在优化目标里。这一章在游戏 AI 岗位里属于加分项：知道原理、能说清 SAC 和 PPO 怎么选即可。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>写出确定性策略梯度（DPG），说清它和随机策略梯度的关系、为什么天然 off-policy。</li>
+<li>说出 TD3 的三个技巧分别修什么问题，并用实测看 actor 如何“利用”critic 的误差。</li>
+<li>推出最大熵目标下的最优策略 $\pi^*\propto\exp(Q/\alpha)$、soft Bellman 方程，以及 tanh 压缩的雅可比修正。</li>
+<li>理解温度 α 的作用和自动调节；能回答“游戏 Bot 为什么多用 PPO 而不是 SAC”。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>DDPG 是连续动作版的 DQN：critic 学 $Q(s,a)$，actor 是确定性策略 $\mu_\theta(s)$，用确定性策略梯度 $\nabla_\theta J=\E_s[\nabla_aQ(s,a)|_{a=\mu(s)}\nabla_\theta\mu_\theta(s)]$ 更新，相当于让 actor 沿 critic 的“上坡方向”调整动作；配合回放、软更新的目标网络和动作噪声探索。DDPG 会高估：actor 专门找 critic 估得偏高的动作。TD3 用三招修它：两个 critic 取较小值做目标（截断双 Q）、actor 比 critic 更新得慢（延迟更新）、目标动作加小噪声（目标策略平滑）。SAC 最大化“回报 + α·熵”，最优策略是 $\pi^*(a\mid s)\propto\exp(Q^*(s,a)/\alpha)$，用 soft Bellman 方程学 Q，用重参数化训练 tanh 压缩的高斯策略（log-prob 要减去 $\sum\log(1-\tanh^2u)$），α 可以按目标熵自动调。SAC 样本效率高、鲁棒，适合连续控制和机器人；游戏 Bot 多是离散 / 多头动作、能大规模并行模拟，PPO 更稳定、更好调，所以更常用。</p></div>
+
+<h2>12.1 确定性策略梯度（DPG）</h2>
+<p>连续动作下 $\max_aQ(s,a)$ 本身就是一个优化问题，每一步都解一次太贵。DPG（Silver et al., 2014）的想法是：训练一个网络 $\mu_\theta(s)$ 直接输出“近似的 argmax”，用链式法则让它朝 Q 增大的方向走：</p>
+<!--deriv 确定性策略梯度定理
+J(\theta) & = \E_{s\sim\rho^\mu}\big[Q^\mu(s,\mu_\theta(s))\big] || 确定性策略：每个状态只输出一个动作
+\nabla_\theta J & \approx\E_{s\sim\mathcal D}\Big[\nabla_\theta Q\big(s,\mu_\theta(s)\big)\Big] || DDPG 的实用形式：状态从回放缓冲区采（off-policy 近似），忽略状态分布对 θ 的依赖（与第 9 章策略梯度定理同理，严格推导见 Silver 2014）
+* \nabla_\theta J & = \E_{s}\Big[\nabla_aQ(s,a)\big|_{a=\mu_\theta(s)}\ \nabla_\theta\mu_\theta(s)\Big] || 链式法则：critic 对动作的梯度 × actor 的雅可比。代码里就是 <code>actor_loss = -Q(s, actor(s)).mean()</code>
+# 与随机策略梯度的关系：
+\pi_\sigma(a\mid s) & = \mathcal N\big(\mu_\theta(s),\sigma^2\big),\quad\sigma\to0\ \Rightarrow\ \nabla J_{\text{随机}}\to\nabla J_{\text{确定}} || DPG 是高斯策略梯度在方差趋于 0 时的极限
+-->
+<p>两个重要后果：① 梯度里没有对动作求期望，也没有 $\nabla\log\pi$，所以<strong>不需要重要性采样就能用回放数据</strong>（critic 用 Q-learning 式的目标学，本来就 off-policy）；② 需要 critic 对动作可导，而且 actor 完全依赖 critic 的梯度质量——critic 哪里估高了，actor 就往哪里跑，这是 DDPG 不稳定的根源。</p>
+
+<h2>12.2 DDPG 与 TD3</h2>
+<p><strong>DDPG</strong>（Lillicrap et al., 2016）= DPG + DQN 的稳定技巧：回放缓冲区、目标网络（actor 和 critic 各一个，用软更新 $\bar w\leftarrow\tau w+(1-\tau)\bar w$）、给动作加探索噪声（高斯或 Ornstein–Uhlenbeck）。critic 目标 $y=r+\gamma(1-d)\,Q_{\bar w}(s',\mu_{\bar\theta}(s'))$。</p>
+<p>它的高估比 DQN 更隐蔽：DQN 是 max 挑中了噪声偏大的动作；DDPG 是 actor 通过梯度上升<strong>主动寻找</strong> critic 偏大的地方。用一个最小例子看：真实 $Q(a)=-(a-0.3)^2$，两个 critic 各自加上独立的光滑随机误差，actor 取 $Q_1$ 的 argmax（<code>demos/ch12_sac.cpp</code> E2，每个噪声水平 20000 次）：</p>
+<!--plot {"x":[0,0.42],"y":[-0.05,0.72],"h":260,"xlabel":"critic 误差的标准差","ylabel":"在 actor 选中的动作上的估值偏差","legend":"tl","hlines":[[0,"","s"]],
+"series":[{"path":"ch12.e2.single","n":"用同一个 critic 估值（DDPG）","c":"r","dots":true},{"path":"ch12.e2.other","n":"用另一个独立 critic 估值","c":"b","dots":true},{"path":"ch12.e2.min","n":"取两者较小值（TD3 截断双 Q）","c":"g","dots":true,"sw":2.6}],
+"cap":"<b>图 12-1</b>　actor 利用 critic 误差造成的高估（C++ 实测）。误差标准差 0.4 时，单 critic 的估值偏高 [[ch12.e2.s_last|.3f]]；独立 critic 几乎无偏（[[ch12.e2.o_last|+.3f]]）；取 min 略微低估（[[ch12.e2.m_last|+.3f]]）。"} -->
+<p>现实中两个 critic 用同样的数据和相近的目标训练，误差并不独立，单用 $Q_2$ 仍会高估，所以 TD3 取 min：宁可低估一点（低估不会被 actor 利用、不会通过自举放大），也不要高估。TD3（Fujimoto et al., 2018）的三个技巧：</p>
+<div class="tbl"><table>
+<tr><th>技巧</th><th>做法</th><th>修什么</th></tr>
+<tr><td>截断双 Q（clipped double Q）</td><td>$y=r+\gamma\min_{i=1,2}Q_{\bar w_i}(s',\tilde a')$</td><td>actor 利用 critic 误差导致的高估（图 12-1）</td></tr>
+<tr><td>延迟策略更新</td><td>critic 每更新 2 次，actor 和目标网络才更新 1 次</td><td>critic 还不准时 actor 就跟着跑，误差互相放大</td></tr>
+<tr><td>目标策略平滑</td><td>$\tilde a'=\clip\big(\mu_{\bar\theta}(s')+\clip(\varepsilon,-c,c),\,a_{\text{low}},a_{\text{high}}\big)$，$\varepsilon\sim\mathcal N(0,0.2^2)$</td><td>critic 在动作空间里出现尖峰，目标值被尖峰带偏；平滑相当于对邻域取平均</td></tr>
+</table></div>
+<p class="tcap"><b>表 12-1</b>　TD3 的三个技巧。面试问“TD3 的三个技巧分别解决什么”，按这张表答。</p>
+
+<h2>12.3 最大熵 RL：目标、soft Bellman 与最优策略</h2>
+<p>最大熵 RL 把目标改成“回报 + 每一步的策略熵”：</p>
+$$J(\pi)=\E_\pi\Big[\sum_t\gamma^t\big(r_t+\alpha\,\mathcal H(\pi(\cdot\mid s_t))\big)\Big],\qquad\mathcal H(\pi(\cdot\mid s))=-\E_{a\sim\pi}[\log\pi(a\mid s)]$$
+<p>α 是温度，权衡“拿奖励”和“保持随机”。好处：探索内建在目标里；会学到所有差不多好的做法（多峰），而不是只押一个；对扰动更鲁棒；目标更平滑、更好优化。</p>
+<!--deriv 最大熵最优策略：π*(a|s) ∝ exp(Q*(s,a)/α)
+V(s) & = \E_{a\sim\pi}\big[Q(s,a)-\alpha\log\pi(a\mid s)\big] || soft 价值：Q 的期望再加上熵奖励
+& = -\alpha\,\E_{a\sim\pi}\Big[\log\frac{\pi(a\mid s)}{\exp(Q(s,a)/\alpha)}\Big]=-\alpha\,\KL\Big(\pi\,\Big\Vert\,\frac{e^{Q/\alpha}}{Z}\Big)+\alpha\log Z(s) || 配方：$Z(s)=\int\exp(Q(s,a)/\alpha)\,da$ 是归一化常数
+* \pi^*(a\mid s) & = \frac{\exp\big(Q^*(s,a)/\alpha\big)}{Z(s)},\qquad V^*(s)=\alpha\log\int\exp\big(Q^*(s,a)/\alpha\big)\,da || KL ≥ 0，等于 0 当且仅当两个分布相同；$V^*$ 是“软最大”（log-sum-exp）
+Q^*(s,a) & = r(s,a)+\gamma\,\E_{s'}\big[V^*(s')\big] || soft Bellman 最优方程；α → 0 时 log-sum-exp → max，回到普通 Bellman 最优方程
+-->
+<!--plot {"x":[0.02,5],"logx":true,"y":[0,1],"h":250,"xlabel":"温度 α（对数刻度）","ylabel":"π(a) = softmax(Q/α)","legend":"tr",
+"series":[{"f":"1/(1+exp(-0.2/x)+exp(-0.8/x))","n":"Q = 1.0 的动作","c":"g","sw":2.4},{"f":"1/(exp(0.2/x)+1+exp(-0.6/x))","n":"Q = 0.8 的动作","c":"b","sw":2.4},{"f":"1/(exp(0.8/x)+exp(0.6/x)+1)","n":"Q = 0.2 的动作","c":"r","sw":2.4}],
+"cap":"<b>图 12-2</b>　温度对最大熵最优策略的影响（三个动作，构建时按公式计算）。α → 0 退化为贪心；α 很大时接近均匀分布；中间的 α 让“差不多好”的动作（Q = 0.8）保留可观的概率，而明显差的动作（Q = 0.2）概率很快变小。离散 SAC、玻尔兹曼探索、RLHF 的 KL 正则闭式解（第 13 章）都是这个形式。"} -->
+<h2>12.4 SAC：重参数化、tanh 修正与自动温度</h2>
+<p>SAC（Haarnoja et al., 2018）是最大熵框架下的 off-policy actor-critic：</p>
+<ul>
+<li><strong>critic</strong>：两个 Q 网络 + 各自的目标网络，目标 $y=r+\gamma(1-d)\big[\min_iQ_{\bar w_i}(s',a')-\alpha\log\pi(a'\mid s')\big]$，$a'\sim\pi(\cdot\mid s')$ 从<strong>当前</strong>策略采（不是缓冲区里的旧动作）。</li>
+<li><strong>actor</strong>：最小化 $\E_{s\sim\mathcal D,\,a\sim\pi}\big[\alpha\log\pi(a\mid s)-\min_iQ_i(s,a)\big]$，即让 π 靠近 $\exp(Q/\alpha)$（上一节推导中的 KL）。</li>
+<li><strong>重参数化</strong>：$u=\mu_\theta(s)+\sigma_\theta(s)\odot\varepsilon$，$\varepsilon\sim\mathcal N(0,I)$，$a=\tanh(u)$。梯度从 Q 经过 $a$ 流回 θ，方差比 score function 小得多（第 9 章工具箱）。</li>
+</ul>
+<!--deriv tanh 压缩后的 log-prob：变量替换要乘雅可比
+a & = \tanh(u),\qquad u\sim\mathcal N(\mu,\sigma^2) || 把无界的高斯样本压到动作范围 (−1, 1)
+\pi(a)\,|da| & = p_u(u)\,|du|\ \Rightarrow\ \pi(a)=p_u(u)\Big|\frac{da}{du}\Big|^{-1} || 概率质量守恒（一维变量替换）
+\frac{da}{du} & = 1-\tanh^2u || tanh 的导数
+* \log\pi(a\mid s) & = \log\mathcal N(u;\mu,\sigma^2)-\sum_{i}\log\big(1-\tanh^2u_i\big) || 多维动作各维独立，雅可比是对角阵，行列式的对数 = 各维相加
+-->
+<!--plot {"x":[-1,1],"y":[0,1.6],"h":260,"xlabel":"动作 a = tanh(u)","ylabel":"概率密度","legend":"tl",
+"series":[{"path":"ch12.e1.emp","n":"200 万样本的直方图","c":"s","only_dots":true},{"path":"ch12.e1.ana","n":"含雅可比修正的解析密度","c":"b","sw":2.4},{"path":"ch12.e1.naive","n":"忘了修正：直接用 N(atanh a; μ, σ)","c":"r","dash":true}],
+"cap":"<b>图 12-3</b>　tanh 压缩高斯的密度（μ = [[ch12.e1.mu]]，σ = [[ch12.e1.sd]]，C++ 实测）。含修正的解析式与直方图的最大相对误差 [[ch12.e1.maxrel|.3f]]，在 (−1, 1) 上积分为 [[ch12.e1.integ|.6f]]；不做修正的“密度”积分只有 [[ch12.e1.integ_naive|.3f]]，根本不是一个概率分布，熵和策略梯度都会算错。"} -->
+<p><strong>自动温度</strong>：α 很难手调，而且合适的值随训练变化（奖励尺度在变）。SAC v2 把它变成约束优化：在“平均熵不低于目标值 $\bar{\mathcal H}$”（连续动作常取 $-\dim(\mathcal A)$）的约束下最大化回报，对偶变量就是 α：</p>
+$$\min_{\alpha\ge0}\ \E_{a\sim\pi}\big[-\alpha\big(\log\pi(a\mid s)+\bar{\mathcal H}\big)\big]\qquad\Rightarrow\qquad\frac{\partial}{\partial\log\alpha}=-\alpha\,\E\big[\log\pi+\bar{\mathcal H}\big]$$
+<p>熵低于目标（$-\E\log\pi<\bar{\mathcal H}$，即 $\E[\log\pi+\bar{\mathcal H}]>0$）时梯度为负，梯度下降让 α 变大，加强熵奖励；反之 α 变小。</p>
+<p>用一个无状态的连续“老虎机”看熵的作用：奖励在 $a=0.6$ 处有一个高 1.0 的峰、在 $a=-0.5$ 处有一个高 0.8 的峰，策略是 tanh 高斯，用重参数化梯度直接优化 $\E[r(a)]+\alpha\mathcal H$（Q 就是已知的奖励函数，相当于只看 SAC 的 actor 部分；<code>demos/ch12_sac.cpp</code> E3，3000 步 Adam，每步 256 个样本）：</p>
+<!--plot {"x":[0,3000],"y":[-1,1],"h":270,"xlabel":"优化步数","ylabel":"tanh(μ)：策略的“中心动作”","legend":"bl","hlines":[[0.6,"右峰 a = 0.6（奖励 1.0）","g"],[-0.5,"左峰 a = −0.5（奖励 0.8）","o"]],
+"series":[{"path":"ch12.e3.runs.0.tmu","n":"α = 0","c":"r"},{"path":"ch12.e3.runs.1.tmu","n":"α = 0.05","c":"a"},{"path":"ch12.e3.runs.2.tmu","n":"α = 0.3","c":"b"},{"path":"ch12.e3.runs.3.tmu","n":"自动温度（目标熵 −1）","c":"p","sw":2.4}],
+"cap":"<b>图 12-4</b>　不同温度下策略中心的轨迹（C++ 实测）。"} -->
+<!--dtab {"rows":"ch12.e3.runs","cols":[["设置","name"],["最终 tanh(μ)","ftmu","+.3f"],["最终 σ","fsd",".3f"],["熵","fH",".3f"],["平均奖励","fR",".3f"],["最终 α","falpha",".3f"],["右峰 ±0.2 内的概率","pr",".2f"],["左峰 ±0.2 内的概率","pl",".2f"]],
+"cap":"<b>表 12-2</b>　四种温度设置的最终策略（E3）。"} -->
+<p>读法：α = 0 时 σ 塌缩到 [[ch12.e3.runs.0.fsd|.3f]]，变成确定性策略——这就是不加熵正则时 actor 的典型行为，一旦 critic 有误差就无法纠正；α = 0.3 从一开始就很大，策略宽到同时覆盖两个峰，平均奖励只有 [[ch12.e3.runs.2.fR|.2f]]；自动温度把熵稳定在目标值附近（[[ch12.e3.runs.3.fH|.2f]]），在右峰上保持一定宽度。注意自动温度最后的 α（[[ch12.e3.runs.3.falpha|.2f]]）与固定 0.3 很接近，结果却完全不同：最大熵目标在 (μ, σ) 上不是凸的，“先窄后宽”和“一直很宽”会停在不同的解，路径很重要。</p>
+
+<h2>12.5 离散 SAC，以及 SAC 和 PPO 怎么选</h2>
+<p><strong>离散 SAC</strong>：动作有限时不需要重参数化，策略输出 softmax，熵和 actor 损失可以对所有动作精确求和：actor 损失 $\sum_a\pi(a\mid s)\big[\alpha\log\pi(a\mid s)-Q(s,a)\big]$，critic 目标里的 $V(s')=\sum_{a'}\pi(a'\mid s')[Q(s',a')-\alpha\log\pi(a'\mid s')]$。实践中对超参比较敏感，目标熵常取 $0.98\log|\mathcal A|$ 的某个比例。</p>
+<div class="tbl"><table>
+<tr><th>维度</th><th>SAC / TD3（off-policy）</th><th>PPO（on-policy）</th></tr>
+<tr><td>样本效率</td><td>高（回放复用数据）</td><td>低（数据用完即扔）</td></tr>
+<tr><td>动作空间</td><td>连续最自然；离散需改造</td><td>离散、连续、多头组合都直接支持</td></tr>
+<tr><td>稳定性 / 调参</td><td>Q 学习的老问题（高估、发散）</td><td>更稳，超参鲁棒</td></tr>
+<tr><td>并行扩展</td><td>回放 + 多 actor 可以，但 learner 吞吐受限</td><td>天然适合成千上万个并行环境</td></tr>
+<tr><td>自博弈</td><td>旧数据来自旧对手，回放里混着过时的对局</td><td>只用最新数据，适合对手持续变化</td></tr>
+<tr><td>典型场景</td><td>机器人、真实交互代价高的连续控制</td><td>游戏 Bot（模拟便宜、动作是组合离散的）</td></tr>
+</table></div>
+<p class="tcap"><b>表 12-3</b>　SAC 与 PPO 的选型。</p>
+<div class="co tip"><span class="h">面试注意：游戏 Bot 为什么多用 PPO 而不是 SAC</span><p>① 游戏引擎可以加速、大规模并行（OpenAI Five 用了上万个 CPU 核），样本效率不是瓶颈，稳定性和吞吐才是；② MOBA / FPS 的动作是“技能类型 × 目标 × 方向”的多头离散组合，PPO 只要把各头的 log-prob 相加；③ 自博弈中对手一直在变，回放缓冲区里的旧对局分布会过时。反过来，如果是物理角色控制（动画角色的平衡、行走，第 20 章 Learning Agents 的场景）、或者模拟很贵，SAC 值得考虑。回答时给条件，不要只说结论。</p></div>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch12_sac.cpp</code> 配套的 <code>demos/ch12_interview.py</code> 逐字相同（tanh 修正用了数值稳定的写法 $\log(1-\tanh^2u)=2(\log2-u-\text{softplus}(-2u))$，避免 $|u|$ 大时 $1-\tanh^2u$ 下溢为 0）：</p>
+<!--code:py:tanh 高斯采样 / TD3 与 SAC 目标 / 软更新 / α 损失（Python，面试手撕版）-->
+{{demo:ch12_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch12_interview.py 的输出-->
+{{demo:ch12_interview_output.txt}}
+<!--/code-->
+
+<h2>12.6 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“DDPG 是 on-policy 的 actor-critic”</td><td>没理解 DPG</td><td>DPG 没有对动作的期望和 IS，critic 用 Q-learning 目标，可以用回放数据</td></tr>
+<tr><td>“TD3 的 min 是为了让 Q 更准”</td><td>min 会低估</td><td>宁可低估也不高估：低估不会被 actor 利用、不会通过自举放大（图 12-1）</td></tr>
+<tr><td>“SAC 的熵正则就是 PPO 的熵 bonus”</td><td>位置不同</td><td>SAC 的熵在回报里（进入 soft Bellman 目标，影响价值）；PPO 的熵只是损失里的正则项</td></tr>
+<tr><td>“tanh 之后的 log-prob 直接用高斯的”</td><td>漏了雅可比</td><td>要减去 $\sum\log(1-\tanh^2u)$，否则不是概率分布（图 12-3）</td></tr>
+<tr><td>“α 越大探索越好”</td><td>忽略回报</td><td>α 大到一定程度策略接近均匀、回报很差（表 12-2）；用目标熵自动调</td></tr>
+<tr><td>“SAC 目标里的 a′ 用缓冲区存的动作”</td><td>写错了</td><td>a′ 从当前策略重新采样，并带上 $-\alpha\log\pi(a'\mid s')$</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:DDPG / TD3 / SAC 常见追问链-->
+连续动作怎么做？
+├─ DDPG 原理？ → DPG：∇θJ = E[∇aQ · ∇θμ]；回放 + 软更新目标网络 + 动作噪声
+│   └─ 为什么会高估？ → actor 沿梯度主动寻找 critic 估高的动作（图 12-1）
+├─ TD3 三个技巧？ → 截断双 Q（取 min）/ 延迟策略更新 / 目标策略平滑
+├─ SAC 中熵的作用？ → 探索内建、多峰、鲁棒；最优策略 ∝ exp(Q/α)，soft Bellman
+│   ├─ tanh 怎么处理？ → log π = log N(u) − Σ log(1 − tanh²u)，数值稳定写法
+│   └─ α 怎么调？ → 目标熵约束的对偶：熵低于目标 → α 增大
+└─ 游戏 Bot 为什么多用 PPO？ → 并行模拟便宜、多头离散动作、自博弈数据会过时
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 12 章</div><ul>
+<li>DPG：$\nabla_\theta J=\E[\nabla_aQ(s,a)|_{a=\mu(s)}\nabla_\theta\mu_\theta(s)]$，可 off-policy；是高斯策略 σ→0 的极限。</li>
+<li>DDPG = DPG + 回放 + 软更新目标网络 + 噪声；会高估（actor 利用 critic 误差）。</li>
+<li>TD3：$\min(Q_1,Q_2)$ 目标、延迟 actor 更新、目标动作加截断噪声。</li>
+<li>最大熵：$\pi^*\propto\exp(Q/\alpha)$，$V^*=\alpha\log\int e^{Q/\alpha}$；soft Bellman：$Q=r+\gamma\E[V(s')]$。</li>
+<li>SAC：双 Q + 重参数化 + tanh 修正 $-\sum\log(1-\tanh^2u)$ + 自动温度（目标熵 $-\dim\mathcal A$）。</li>
+<li>选型：样本贵 / 连续控制 → SAC；模拟便宜 / 多头离散 / 自博弈 → PPO。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：为什么 DDPG 的探索要额外加噪声，而 SAC 不需要？</summary><p>DDPG 的 actor 是确定性的，不加噪声就永远只走同一个动作，critic 学不到其他动作的价值。SAC 的策略本身是随机的，而且熵在目标里，策略会主动保持一定的随机性；评估 / 部署时再取均值动作 $\tanh(\mu)$。</p></details>
+<details class="quiz"><summary>自测 2：soft Bellman 方程在 α → 0 时退化成什么？在 α → ∞ 时呢？</summary><p>α → 0：$\alpha\log\int e^{Q/\alpha}\to\max_aQ$，回到普通 Bellman 最优方程，最优策略变成贪心。α → ∞：熵项主导，最优策略趋于均匀分布，Q 主要由“未来能获得多少熵”决定，回报几乎被忽略。</p></details>
+<details class="quiz"><summary>自测 3：图 12-1 里，为什么“取 min”在独立误差下也会低估一点？</summary><p>$Q_1$ 在 actor 选中的点上偏高，$Q_2$ 无偏但有噪声，min 会在 $Q_2$ 噪声为负时取到 $Q_2$，在 $Q_2$ 噪声为正但仍小于 $Q_1$ 时也取 $Q_2$……总体上 $\E[\min(Q_1,Q_2)]\le\E[Q_2]=Q$，所以略微低估。TD3 接受这个代价。</p></details>
+<details class="quiz"><summary>自测 4：FPS Bot 的瞄准用连续动作（角度增量）还是离散动作？</summary><p>都有人用。连续动作（高斯 / tanh 高斯）表达精细，但方差大、和离散的“开火 / 换弹 / 切枪”组合时要用混合动作头；离散化（把角度增量分成若干档，大角度粗、小角度细）更稳定，PPO 直接支持，也便于加反应时间、抖动等拟人约束。第 18 章会展开。</p></details>
+</section>

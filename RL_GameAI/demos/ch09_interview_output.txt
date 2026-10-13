@@ -1,0 +1,5 @@
+[1] reward-to-go vs 定义：最大差 3.33e-16
+[2] REINFORCE logits 梯度 vs 有限差分：最大差 1.58e-09
+[3] 高斯策略 score（μ、log σ）vs 有限差分：最大差 3.58e-09
+[4] softmax 策略 E_a[∇ log π(a)] 各分量最大绝对值：4.51e-17
+全部通过

@@ -1,0 +1,37 @@
+# /Game/UI/UWB_MainMenu  (WidgetBlueprint)
+ParentClass: /Script/UMG.UserWidget
+
+## UWB_MainMenu_C Default__UWB_MainMenu_C
+   bHasScriptImplementedPaint = False
+
+## Custom events / RPC
+- CustomEvent 开始游戏   (graph UWB_MainMenu.EventGraph)
+- CustomEvent 设置文本   (graph UWB_MainMenu.EventGraph)
+
+## Graph UWB_MainMenu.EventGraph
+
+CustomEvent 开始游戏():  #33
+  PlayAnimation(InAnimation=淡出, StartAtTime=0.000000, NumLoopsToPlay=1, PlayMode=Forward, PlaybackSpeed=1.000000, bRestoreState=false)  #26
+  Delay(Duration=1.000000)  #28
+  RemoveFromParent()  #29
+  CollectGarbage()  #30
+  ClientStopCameraShake(self=GetPlayerController(PlayerIndex=0), Shake=CameraIdle_C, bImmediately=true)  #32
+
+CustomEvent 设置文本(NewParam):  #34
+  SetText(self=开始或等待, InText=CustomEvent 设置文本#34.NewParam)  #24
+
+Event PreConstruct(IsDesignTime):  #35
+
+Event Construct():  #36
+  PlayAnimation(InAnimation=黑屏淡出, StartAtTime=0.000000, NumLoopsToPlay=1, PlayMode=Forward, PlaybackSpeed=1.000000, bRestoreState=false)  #25
+  PlayAnimation(InAnimation=闪烁, StartAtTime=0.000000, NumLoopsToPlay=0, PlayMode=Forward, PlaybackSpeed=1.000000, bRestoreState=false)  #23
+
+Event Tick(MyGeometry, InDeltaTime):  #37
+  ClientStartCameraShake(self=GetPlayerController(PlayerIndex=0), Shake=CameraIdle_C, Scale=1.000000, PlaySpace=CameraLocal, UserPlaySpaceRot=0, 0, 0)  #22
+  // exec nodes with no incoming exec (dead / disconnected): PlayAnimation#27
+  // node #35 Event PreConstruct EnabledState=ENodeEnabledState::Disabled
+
+## Graph UWB_MainMenu.Get_开始或等待_Text
+
+FunctionEntry():  #38
+  Return(ReturnValue=∅)  #39

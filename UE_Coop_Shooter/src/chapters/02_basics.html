@@ -1,0 +1,98 @@
+<section class="chapter" id="ch2">
+  <div class="ch-head">
+    <div class="no">CHAPTER 02</div>
+    <h1>只讲用得到的 UE 网络基础</h1>
+    <p class="lead">四个问题：这个对象在哪几端存在？这段代码在哪一端执行？谁能调用这个 RPC？这个变量会发给谁？答清楚这四个，原 Demo 的问题就都能解释。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能画出 Listen Server 双人局里 GameMode / GameState / PlayerState / PC / Pawn / 武器 / UI 各在哪一端存在。</li>
+    <li>分清 Role（权限）和 Owner（所有权），背出 RPC 可达性表。</li>
+    <li>知道属性复制的四个性质：单向、只发最新值、按网络帧发、可以按条件发。</li>
+  </ul></div>
+
+  <h2>服务器权威，以及 Listen Server 的“主机也是玩家”</h2>
+  <p>UE 的联机是<strong>服务器权威</strong>：世界的真实状态只在服务器上；客户端看到的是服务器复制过来的近似值，客户端想改变世界只能通过 Server RPC <strong>请求</strong>服务器去改。双人合作最常用 <strong>Listen Server</strong>：主机进程既是服务器又有一个本地玩家；Dedicated Server 则没有本地玩家、不渲染。</p>
+  <div class="co warn"><span class="h">面试注意：主机玩家同时满足“有权限”和“本地控制”</span>
+    <p>很多人写 <code>if (HasAuthority()) { 服务器逻辑 } else { 本地表现 }</code>，在 Listen Server 上主机玩家永远走不到 else，于是主机看不到自己的开火表现、UI 不刷新。<strong>“要不要播本地表现”看 <code>IsLocallyControlled()</code>，“要不要改游戏状态”看 <code>HasAuthority()</code></strong>，两个判断互相独立。原 Demo 用了大量 SwitchHasAuthority，而几乎没用 IsLocallyControlled。</p>
+  </div>
+
+  <h2>每个对象在哪几端存在</h2>
+  <div class="tbl"><table>
+    <tr><th>对象</th><th>主机（服务器 + 玩家 1）</th><th>客户端（玩家 2）</th><th>放什么</th></tr>
+    <tr><td>GameMode</td><td class="yes">有</td><td class="no">没有</td><td>规则：刷怪、开局条件、胜负判定、重生。客户端拿到的是 nullptr</td></tr>
+    <tr><td>GameState</td><td class="yes">有</td><td class="yes">有（复制）</td><td>所有人都该知道的全局状态：比赛阶段、剩余时间、波次、PlayerArray</td></tr>
+    <tr><td>PlayerState ×2</td><td class="yes">两份</td><td class="yes">两份（复制）</td><td>跟“人”走的数据：名字、分数、是否准备、击杀数；Pawn 死了也不丢</td></tr>
+    <tr><td>PlayerController</td><td class="yes">两份</td><td class="mid">只有自己那份</td><td>输入、相机、UI、Client RPC 的落点；<strong>别人的 PC 在客户端不存在</strong></td></tr>
+    <tr><td>Pawn / Character ×2</td><td class="yes">两份</td><td class="yes">两份（复制）</td><td>身体：移动、血量、当前武器</td></tr>
+    <tr><td>武器 ×2</td><td class="yes">有</td><td class="yes">有（复制）</td><td>弹药、开火状态；Owner = 持有者的 Pawn</td></tr>
+    <tr><td>AIController / 行为树</td><td class="yes">有</td><td class="no">没有</td><td>僵尸的决策只在服务器</td></tr>
+    <tr><td>HUD / UMG / 音效 / 粒子</td><td class="mid">自己那份</td><td class="mid">自己那份</td><td>纯本地表现，从复制下来的数据里读</td></tr>
+    <tr><td>GameInstance</td><td class="mid">自己那份</td><td class="mid">自己那份</td><td>跨关卡的本地数据，不复制</td></tr>
+  </table></div>
+  <p class="tcap">Listen Server 双人局的对象分布。原 Demo 的 ReadyPlayersList 把 PlayerController 引用复制到 GameState——客户端上别人的 PC 不存在，复制下来就是空引用</p>
+
+  <h2>Role：这一端对这个 Actor 有多大权限</h2>
+  <div class="tbl"><table>
+    <tr><th>Actor</th><th>在主机上的 LocalRole</th><th>在客户端上的 LocalRole</th></tr>
+    <tr><td>主机玩家的角色</td><td>Authority（同时 IsLocallyControlled）</td><td>SimulatedProxy</td></tr>
+    <tr><td>客户端玩家的角色</td><td>Authority</td><td><strong>AutonomousProxy</strong>（本地控制、做移动预测）</td></tr>
+    <tr><td>客户端玩家的武器</td><td>Authority</td><td>SimulatedProxy（但 Owner 链属于这个客户端）</td></tr>
+    <tr><td>僵尸</td><td>Authority</td><td>SimulatedProxy</td></tr>
+    <tr><td>客户端自己 Spawn 的 Actor</td><td>不存在</td><td>Authority（只在这台机器上）</td></tr>
+  </table></div>
+  <p>最后一行就是原 Demo“幽灵僵尸”的来源：客户端执行到 SpawnActor，生成的 Actor 只存在于本地，而且在本地是 Authority，后面的 SwitchHasAuthority 也挡不住它（第 12 章）。</p>
+
+  <h2>Owner：谁能调用 Server RPC</h2>
+  <p>每个 Actor 可以有一个 Owner，Owner 的 Owner……一路往上，如果最终是某个 <code>PlayerController</code>，这个 Actor 就“属于”那个 PC 背后的<strong>网络连接</strong>。Possess 时 Pawn 的 Owner 被设成 PC；武器的 Owner 设成 Pawn，就挂在同一条链上。</p>
+  <div class="tbl"><table>
+    <tr><th>RPC 类型</th><th>从服务器调用</th><th>从拥有该 Actor 的客户端调用</th><th>从其他客户端调用</th></tr>
+    <tr><td>Server</td><td>在服务器本地执行</td><td class="yes">发到服务器执行</td><td class="no">丢弃（日志：No owning connection）</td></tr>
+    <tr><td>Client</td><td>发到拥有者客户端执行；没有拥有者时在服务器执行</td><td>在本地执行</td><td>在本地执行</td></tr>
+    <tr><td>NetMulticast</td><td>服务器 + 所有相关的客户端执行</td><td class="mid">只在本地执行</td><td class="mid">只在本地执行</td></tr>
+  </table></div>
+  <p class="tcap">RPC 可达性（与 Role 无关，只看调用端和 Owner 连接）。原 Demo：关卡蓝图的 Server_SetStart 由客户端调用 → 关卡脚本 Actor 不属于任何客户端连接 → 被丢弃；客户端本地扣血后调用 Multicast_Death → 只在本地执行</p>
+
+  <div class="co deep"><span class="h">Reliable 与 Unreliable</span>
+    <ul>
+      <li><strong>Reliable</strong>：保证到达、按顺序执行。丢包时后面的 Reliable 要等前面的重传成功（队头阻塞）；发得太快会把可靠缓冲区塞满，引擎会直接断开连接。适合低频且必须到达的事：开始 / 停止开火、换弹请求、准备就绪。</li>
+      <li><strong>Unreliable</strong>：可能丢、可能被合并，Multicast 还会受相关性影响（不相关的客户端收不到）。适合高频且“丢一个无所谓”的事：开火特效、脚步声。</li>
+      <li>两者共同的问题：<strong>RPC 只对当时在线且相关的客户端生效，晚加入的人收不到</strong>。持续存在的状态（是否死亡、是否在换弹、比赛阶段）必须用复制属性表示。</li>
+    </ul>
+  </div>
+
+  <h2>属性复制的四个性质</h2>
+  <ol>
+    <li><strong>单向</strong>：只从服务器到客户端。客户端改复制变量只改了自己的副本；服务器不会因此重发，直到服务器端的值再次变化（原 Demo 在客户端写 <code>MouseY</code>、在多播里写 <code>正在攻击 = false</code>，都是这种“只改了本地”）。</li>
+    <li><strong>只发最新值</strong>：服务器在一个网络帧里把值从 10 改成 9 再改成 8，客户端只会收到 8。所以“状态”适合复制，“事件”不适合——要用复制属性表达事件，就用一个只增不减的计数器（如 BurstCounter），客户端在 OnRep 里看增量。</li>
+    <li><strong>按网络帧发</strong>：服务器网络 Tick 默认 30 Hz（<code>NetServerMaxTickRate</code>），每个 Actor 再按 <code>NetUpdateFrequency</code> 决定多久检查一次。本机改了变量，最快也要等到下一个网络帧才发出去（E1 中 RTT=0 时仍有约 {{v:E1[s=0,rtt=0].own:.0f}} ms 的反馈延迟，就是在等网络帧）。</li>
+    <li><strong>可以按条件发</strong>：<code>COND_OwnerOnly</code>（只发给拥有者，适合弹药）、<code>COND_SkipOwner</code>（除了拥有者都发，适合拥有者已经本地预测过的表现计数器）、<code>COND_InitialOnly</code>、<code>COND_SimulatedOnly</code> 等。</li>
+  </ol>
+  <div class="co net"><span class="h">RepNotify：蓝图和 C++ 不一样</span>
+    <p>C++ 的 <code>ReplicatedUsing=OnRep_X</code> 只在<strong>客户端收到新值</strong>时调用，服务器改值不会调用，需要的话手动调一次。蓝图的 RepNotify 变量在服务器上用 Set 节点赋值时，服务器自己也会调用 OnRep 函数。从蓝图迁到 C++ 时常因为这点导致主机玩家的 UI 不刷新。</p>
+  </div>
+
+  <h2>一条总规则：状态用属性，瞬时事件用 RPC，表现各端本地做</h2>
+  <div class="tbl"><table>
+    <tr><th>要同步的东西</th><th>推荐方式</th><th>原 Demo 的做法</th></tr>
+    <tr><td>血量、是否死亡、是否在换弹、当前武器</td><td>复制属性 + OnRep</td><td>血量复制但 OnRep 为空；死亡、换弹动画靠 Multicast（晚加入看不到）</td></tr>
+    <tr><td>开火（另一端要看到）</td><td>复制计数器 BurstCounter（SkipOwner）或 Unreliable Multicast</td><td>Unreliable Multicast，但排在弹药检查之前</td></tr>
+    <tr><td>客户端的操作请求</td><td>Server RPC（低频用 Reliable）</td><td>每发一条 Reliable</td></tr>
+    <tr><td>只给某个玩家的反馈</td><td>Client RPC</td><td>Client_PlayHitFX ✓</td></tr>
+    <tr><td>移动速度相关的状态</td><td>放进 CharacterMovement 的预测（SavedMove）</td><td>Server RPC 改一个不复制的布尔</td></tr>
+    <tr><td>弹孔、音效、粒子、UI</td><td>各端本地，读复制下来的数据</td><td>弹孔 ✓；UI 每帧 Cast GetPlayerPawn(0)</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>GameMode 只在服务器；别人的 PlayerController 在客户端不存在；跟人走的数据放 PlayerState。</li>
+    <li><strong>Role 决定能不能改状态，Owner 决定能不能调 Server RPC</strong>；能否调 Server RPC 不看 Role。</li>
+    <li>客户端调用 Multicast 只在本地执行；客户端调用不属于自己的 Actor 的 Server RPC 会被丢弃。</li>
+    <li>复制属性：单向、只发最新值、按网络帧发、可按条件发；事件用计数器表达。</li>
+    <li>主机玩家既 HasAuthority 又 IsLocallyControlled，两个判断要分开用。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：客户端玩家的武器在客户端上是 SimulatedProxy，为什么还能在武器上调用 Server RPC？</summary>
+    能不能发 Server RPC 只看这个 Actor 的 Owner 链是否最终连到这个客户端的 PlayerController（即属于这条网络连接），与 LocalRole 无关。武器 Owner = Pawn，Pawn Owner = PC，所以可以。反过来，关卡里摆放的 Actor、僵尸、关卡蓝图都不属于任何客户端，在上面调 Server RPC 会被丢弃。
+  </details>
+  <details class="quiz"><summary>自测：为什么“死亡”不能只用一个 Reliable Multicast 通知？</summary>
+    RPC 只对当时相关的客户端执行一次：晚加入、或者当时因为距离不相关的客户端永远收不到，看到的僵尸会一直站着。死亡是持续状态，应该是复制属性 <code>bIsDead</code>（OnRep 里播倒地 / 布娃娃），或者用 <code>TearOff()</code> 让各端接管尸体；Multicast 最多用来补一个一次性的音效。
+  </details>
+</section>

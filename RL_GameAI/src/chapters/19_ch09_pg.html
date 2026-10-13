@@ -1,0 +1,155 @@
+<section class="chapter" id="ch9">
+<div class="ch-head"><div class="no">CHAPTER 09</div><h1>策略梯度</h1><p class="lead">不学价值函数再取 argmax，而是直接把策略写成带参数的分布 $\pi_\theta(a\mid s)$，沿着期望回报的梯度往上爬。策略梯度定理说明：这个梯度里不需要环境模型，只要“$\nabla\log\pi$ × 回报”。本章推出定理，再用 reward-to-go 和基线把方差压下来，这是第 10、11 章 Actor-Critic 与 PPO 的直接前身。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>脱稿推出策略梯度定理：轨迹形式（动力学项求导后消失）和状态分布形式。</li>
+<li>证明 reward-to-go 合法、基线不引入偏差，并写出方差最小的基线。</li>
+<li>在小 MDP 上用有限差分验证定理，量化四种梯度估计量的偏差与方差；在 CartPole 上实测基线的作用。</li>
+<li>说清“去掉 $\gamma^t$”的常见实现为什么严格来说不是梯度，以及为什么大家照用不误。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>目标是 $J(\theta)=\E_{\tau\sim\pi_\theta}[R(\tau)]$。用对数导数技巧 $\nabla p=p\nabla\log p$，轨迹概率 $p_\theta(\tau)=\rho(s_0)\prod_t\pi_\theta(a_t\mid s_t)p(s_{t+1}\mid s_t,a_t)$ 取对数后，初始分布和转移概率都与 θ 无关、求导为 0，所以 $\nabla J=\E\big[\sum_t\nabla\log\pi_\theta(a_t\mid s_t)\,R(\tau)\big]$，不需要模型。因为“未来的动作影响不了过去的奖励”，$R(\tau)$ 可以换成 reward-to-go $G_t$；又因为 $\E_{a\sim\pi}[\nabla\log\pi(a\mid s)]=0$，减掉任何只依赖状态的基线 $b(s)$ 都不改变期望、只降方差，常用 $b=V(s)$，于是权重变成优势 $G_t-V(s_t)$。直观上就是：<strong>好于预期的动作，提高它的概率；差于预期的，降低它的概率</strong>。它本质上是“按优势加权的极大似然”，必须用当前策略采的数据，所以是 on-policy。</p></div>
+
+<h2>9.1 为什么要直接优化策略</h2>
+<p>第 6、8 章的价值派方法是“先学 Q，再贪心”。它有三个难以绕开的问题：</p>
+<ol>
+<li><strong>最优策略可能是随机的</strong>。石头剪刀布的纳什均衡是各 1/3（第 15 章）；部分可观测时，同一个观测背后可能是不同状态，确定性策略会被卡住。贪心策略做不到“按概率出招”。</li>
+<li><strong>连续 / 组合动作</strong>。$\max_aQ(s,a)$ 在连续动作上本身就是一个优化问题；参数化策略直接输出高斯分布的均值和方差，或者多个离散头（第 18 章）。</li>
+<li><strong>平滑性</strong>。Q 值的微小变化可能让 argmax 突然跳到另一个动作，策略不连续；参数化策略的概率随 θ 平滑变化，收敛性质更好（策略梯度至少收敛到局部最优）。</li>
+</ol>
+<p>代价是：梯度估计方差大、样本效率低（on-policy，数据用一次就扔），而且只保证局部最优。后面几章基本都是在想办法降方差（基线、critic、GAE）和提高数据利用率（PPO 的多 epoch、重要性采样）。</p>
+
+<h2>9.2 目标函数与对数导数技巧</h2>
+<p>回合制任务的目标是期望回报 $J(\theta)=\E_{\tau\sim p_\theta}[R(\tau)]$，$R(\tau)=\sum_{t=0}^{T-1}\gamma^tr_{t+1}$。困难在于期望所依赖的分布本身含 θ，不能把梯度直接搬进期望里。<strong>对数导数技巧</strong>（score function / likelihood ratio）解决这个问题：</p>
+<!--deriv 策略梯度（轨迹形式）：环境动力学在求导后消失
+\nabla_\theta J & = \nabla_\theta\int p_\theta(\tau)R(\tau)\,d\tau=\int\nabla_\theta p_\theta(\tau)\,R(\tau)\,d\tau || $R(\tau)$ 与 θ 无关；积分和求导交换（正则条件下成立）
+& = \int p_\theta(\tau)\,\nabla_\theta\log p_\theta(\tau)\,R(\tau)\,d\tau=\E_{\tau\sim p_\theta}\big[\nabla_\theta\log p_\theta(\tau)\,R(\tau)\big] || 对数导数技巧 $\nabla p=p\,\nabla\log p$：梯度又写回了期望，可以采样估计
+\log p_\theta(\tau) & = \log\rho(s_0)+\sum_{t=0}^{T-1}\Big[\log\pi_\theta(a_t\mid s_t)+\log p(s_{t+1}\mid s_t,a_t)\Big] || 轨迹概率 = 初始分布 × 每一步（策略 × 转移）
+\nabla_\theta\log p_\theta(\tau) & = \sum_{t=0}^{T-1}\nabla_\theta\log\pi_\theta(a_t\mid s_t) || $\rho$ 和 $p(s'\mid s,a)$ 与 θ 无关，导数为 0：<strong>不需要知道环境模型</strong>
+* \nabla_\theta J & = \E_{\tau\sim p_\theta}\Big[\Big(\sum_{t=0}^{T-1}\nabla_\theta\log\pi_\theta(a_t\mid s_t)\Big)R(\tau)\Big] || 采样 N 条轨迹求平均就是无偏估计（这就是最原始的 REINFORCE）
+-->
+<p>$\nabla_\theta\log\pi_\theta(a\mid s)$ 叫 <strong>score function</strong>，它指向“让这个动作概率变大”的参数方向。上式的直观含义：把这条轨迹里每个动作的概率都往上推，推的力度正比于整条轨迹的回报——回报高的轨迹被强化，回报低（或为负）的轨迹被削弱。</p>
+<div class="co tip"><span class="h">工具箱：两种梯度估计器</span><p>对 $\E_{x\sim p_\theta}[f(x)]$ 求梯度有两种办法。<strong>score function（REINFORCE）</strong>：$\E[f(x)\nabla\log p_\theta(x)]$，只需要能算 $\log p$，$f$ 可以不可导（游戏胜负、不可导的模拟器都行），但方差大。<strong>重参数化</strong>：$x=g_\theta(\varepsilon)$，$\E_\varepsilon[\nabla_\theta f(g_\theta(\varepsilon))]$，方差小，但要求 $f$ 对 $x$ 可导（VAE、SAC，第 12 章）。RL 里环境回报对动作不可导，所以策略梯度用前者。</p></div>
+
+<h2>9.3 策略梯度定理（状态分布形式）</h2>
+<p>轨迹形式适合推导 REINFORCE，状态分布形式则把梯度和价值函数联系起来，是 Actor-Critic 的出发点。</p>
+<!--deriv 策略梯度定理：∇J = Σ_s d^γ(s) Σ_a ∇π(a|s) Q_π(s,a)
+\nabla V_\pi(s) & = \nabla\sum_a\pi(a\mid s)Q_\pi(s,a)=\sum_a\Big[\nabla\pi(a\mid s)\,Q_\pi(s,a)+\pi(a\mid s)\,\nabla Q_\pi(s,a)\Big] || 乘积求导
+\nabla Q_\pi(s,a) & = \nabla\sum_{s',r}p(s',r\mid s,a)\big[r+\gamma V_\pi(s')\big]=\gamma\sum_{s'}p(s'\mid s,a)\,\nabla V_\pi(s') || $p$ 和 $r$ 与 θ 无关
+\nabla V_\pi(s) & = \phi(s)+\gamma\sum_{s'}P_\pi(s'\mid s)\,\nabla V_\pi(s'),\qquad\phi(s)\doteq\sum_a\nabla\pi(a\mid s)Q_\pi(s,a) || 代回；$P_\pi(s'\mid s)=\sum_a\pi(a\mid s)p(s'\mid s,a)$。这是一个关于 $\nabla V$ 的“Bellman 方程”
+& = \sum_{x}\sum_{k=0}^{\infty}\gamma^k\Pr(s\to x,k,\pi)\,\phi(x) || 反复展开：$k$ 步后到达 $x$ 的概率加权，就像第 3 章的 $V=\sum_k\gamma^kP_\pi^kr$
+\nabla J & = \sum_{s_0}\rho(s_0)\nabla V_\pi(s_0)=\sum_s\underbrace{\sum_{k}\gamma^k\Pr(s_0\to s,k)}_{d^\gamma_\pi(s)}\,\phi(s) || $d^\gamma_\pi$ 是<strong>折扣访问分布</strong>（未归一化，总和 $\frac1{1-\gamma}$）
+* \nabla J & = \sum_sd^\gamma_\pi(s)\sum_a\pi(a\mid s)\,\nabla\log\pi(a\mid s)\,Q_\pi(s,a)=\E_{s\sim d^\gamma_\pi,\,a\sim\pi}\big[\nabla\log\pi(a\mid s)\,Q_\pi(s,a)\big] || 再用一次对数导数技巧。注意：<strong>梯度里没有“状态分布对 θ 的导数”</strong>，这是定理最妙的地方
+-->
+<p>状态分布 $d^\gamma_\pi$ 显然依赖 θ（策略变了，去的地方就变了），但定理告诉我们不用对它求导。在 5 状态 × 3 动作的随机 MDP 上（γ = 0.9，表格 softmax 策略，参数随机初始化），用有限差分 $\frac{J(\theta+h e_i)-J(\theta-h e_i)}{2h}$ 和定理右边逐分量对比：$\lVert\nabla J\rVert$ = [[ch09.e1.gnorm|.4f]]，15 个分量的最大差为 [[ch09.e1.maxdiff|.1e]]（<code>demos/ch09_pg.cpp</code> E1，$J$ 和 $Q$ 都用线性方程精确求解）。</p>
+<div class="co warn"><span class="h">面试注意：实现里几乎都“丢掉了 $\gamma^t$”</span><p>按定理，第 $t$ 步的样本应乘 $\gamma^t$（$d^\gamma$ 里的折扣），但 PPO / A2C 等主流实现都没有这一项，等价于用<strong>未折扣</strong>的访问分布加权。严格说这样得到的向量<strong>不是任何目标函数的梯度</strong>（Nota &amp; Thomas, 2020）。为什么照用不误？① γ 在实践中更多是降方差的手段，真正关心的是未折扣的回报，后面的状态同样重要；② 方向通常很接近：在上面的小 MDP 上，用平稳分布代替折扣访问分布，与真梯度的夹角余弦为 [[ch09.e1.cos_prac|.4f]]。面试能说出“有偏但方向接近、而且符合真实目标”就很加分。</p></div>
+
+<h2>9.4 REINFORCE 与 reward-to-go</h2>
+<p>轨迹形式里，每个动作都乘了整条轨迹的回报 $R(\tau)$，包括这个动作<strong>之前</strong>的奖励。直觉上，$t$ 时刻的动作不可能影响 $t$ 之前的奖励，那部分只是噪声：</p>
+<!--deriv reward-to-go 的合法性：过去的奖励与未来动作的 score 乘积期望为 0
+\E\big[\nabla\log\pi(a_t\mid s_t)\,r_{k+1}\big] & = \E\Big[r_{k+1}\,\E\big[\nabla\log\pi(a_t\mid s_t)\,\big|\,s_0,a_0,\dots,s_t\big]\Big]\quad(k<t) || 塔式法则；$k<t$ 时 $r_{k+1}$ 在 $s_t$ 之前就已确定，可以提到内层期望外面
+\E_{a\sim\pi(\cdot\mid s)}\big[\nabla\log\pi(a\mid s)\big] & = \sum_a\pi(a\mid s)\frac{\nabla\pi(a\mid s)}{\pi(a\mid s)}=\nabla\sum_a\pi(a\mid s)=\nabla1=0 || <strong>score 的期望为 0</strong>（全书最常用的一个引理）
+\E\big[\nabla\log\pi(a_t\mid s_t)\,r_{k+1}\big] & = 0\quad(k<t) || 所以过去的奖励项期望为 0，删掉不改变梯度的期望，只减少方差
+* \nabla J & = \E\Big[\sum_{t=0}^{T-1}\gamma^t\,\nabla\log\pi_\theta(a_t\mid s_t)\,G_t\Big],\qquad G_t=\sum_{k=t}^{T-1}\gamma^{k-t}r_{k+1} || $\gamma^t$ 来自 $R(\tau)$ 里 $\gamma^k=\gamma^t\gamma^{k-t}$；$G_t$ 就是第 5 章的回报
+-->
+<p>REINFORCE 算法：用当前策略跑完若干回合 → 倒序算出每一步的 $G_t$ → 损失 $L=-\frac1N\sum\log\pi_\theta(a_t\mid s_t)\,G_t$ 反传 → 更新 → 扔掉数据重新采样。“扔掉”是因为数据必须来自当前策略（梯度公式里的期望是对 $\pi_\theta$ 取的）。</p>
+
+<h2>9.5 基线：无偏性与最优基线</h2>
+<p>CartPole 每一步奖励都是 +1，$G_t$ 永远是正的：每个动作都被“强化”，只是强化多少的区别，梯度靠这些正数之间的差异间接体现，方差很大。减掉一个基线 $b(s_t)$ 让权重有正有负：</p>
+<!--deriv 基线不引入偏差；方差最小的基线
+\E_{a\sim\pi}\big[\nabla\log\pi(a\mid s)\,b(s)\big] & = b(s)\,\E_{a\sim\pi}\big[\nabla\log\pi(a\mid s)\big]=0 || $b$ 不依赖动作，可以提出来；再用“score 期望为 0”
+\nabla J & = \E\Big[\sum_t\gamma^t\nabla\log\pi(a_t\mid s_t)\big(G_t-b(s_t)\big)\Big] || 对任何只依赖状态（不依赖当前动作）的 $b$ 都成立
+# 单个状态、记 $g=\nabla\log\pi(a\mid s)$（取一个分量），估计量 $g(G-b)$ 的方差：
+\Var\big[g(G-b)\big] & = \E\big[g^2(G-b)^2\big]-\big(\E[gG]\big)^2 || 第二项与 $b$ 无关（期望不变）
+\frac{\partial}{\partial b}\E\big[g^2(G-b)^2\big] & = -2\,\E\big[g^2(G-b)\big]=0 || 对 $b$ 求导令其为 0
+* b^* & = \frac{\E\big[g^2\,G\big]}{\E\big[g^2\big]}\ \approx\ \E[G\mid s]=V_\pi(s) || 按 score 平方加权的平均回报；实际中忽略加权，直接用 $V(s)$，权重变成优势 $A=G-V$
+-->
+<p>用同一个 5 状态 MDP、视界 100 步、[[ch09.e1.N]] 条轨迹，比较四种估计量（偏差 = 样本均值与有限差分真梯度的距离；总方差 = 15 个分量方差之和）：</p>
+<!--dtab {"rows":"ch09.e1.est","cols":[["估计量","name"],["‖偏差‖","bias",".4f"],["偏差的标准误","se",".4f"],["总方差","var",".2f"],["与真梯度余弦","cos",".4f"]],
+"cap":"<b>表 9-1</b>　四种梯度估计量（<code>demos/ch09_output.txt</code> E2）。前三种的偏差都在一个标准误以内（无偏，偏差只是采样误差）；第四种去掉 $\\gamma^t$ 后偏差远超标准误——它估计的是另一个向量，方向接近但长度不同。"} -->
+<!--gbars {"groups":{"path":"ch09.e1.short"},"series":[{"n":"总方差（越小越好）","v":{"path":"ch09.e1.vars"},"c":"b"}],"h":250,"fmt":".1f","ymax":230,"gname":"梯度估计量",
+"cap":"<b>图 9-1</b>　四种估计量的总方差（构建时读取 C++ 实测）。整条回报 → reward-to-go 方差降到约二十分之一，再加基线又减半。“去掉 $\\gamma^t$”的方差变大，是因为后面的步不再被折扣压小。"} -->
+<h2>9.6 实测：CartPole 上的 REINFORCE</h2>
+<p>策略网络 4-32-2（softmax），每次更新用 5 个完整回合，Adam 学习率 0.01，共 300 次更新（1500 个回合）；基线版本另训练一个 4-32-1 的价值网络回归 $G_t$。到 500 步截断时，基线版用 $V(s_T)$ 自举剩余回报（截断不是终止）。三种权重各 5 个种子，全部在 C++ 里并行（<code>demos/ch09_pg.cpp</code> E3）。</p>
+<!--plot {"x":[0,1500],"y":[0,520],"h":300,"xlabel":"回合数","ylabel":"训练回合平均长度（5 种子平均）","legend":"br",
+"series":[{"path":"ch09.e3.runs.0.mean","n":"整条回报 G₀","c":"o","dash":true},{"path":"ch09.e3.runs.1.mean","n":"reward-to-go","c":"b"},{"path":"ch09.e3.runs.2.mean","n":"reward-to-go + V 基线","c":"g","sw":2.6}],
+"cap":"<b>图 9-2</b>　REINFORCE 的三种权重（C++ 实测）。加基线后 5 个种子全部接近满分，而且最稳定。"} -->
+<div class="tbl"><table>
+<tr><th>权重 ψₜ</th><th>最后 250 回合平均</th><th>5 个种子</th><th>平均首次 ≥ 195 的回合</th></tr>
+<tr><td>整条回报 $G_0$</td><td>[[ch09.e3.runs.0.final|.1f]]</td><td>[[ch09.e3.runs.0.fin.0|.0f]] / [[ch09.e3.runs.0.fin.1|.0f]] / [[ch09.e3.runs.0.fin.2|.0f]] / [[ch09.e3.runs.0.fin.3|.0f]] / [[ch09.e3.runs.0.fin.4|.0f]]</td><td>[[ch09.e3.runs.0.hit]]</td></tr>
+<tr><td>reward-to-go $G_t$</td><td>[[ch09.e3.runs.1.final|.1f]]</td><td>[[ch09.e3.runs.1.fin.0|.0f]] / [[ch09.e3.runs.1.fin.1|.0f]] / [[ch09.e3.runs.1.fin.2|.0f]] / [[ch09.e3.runs.1.fin.3|.0f]] / [[ch09.e3.runs.1.fin.4|.0f]]</td><td>[[ch09.e3.runs.1.hit]]</td></tr>
+<tr><td>$G_t-V(s_t)$</td><td>[[ch09.e3.runs.2.final|.1f]]</td><td>[[ch09.e3.runs.2.fin.0|.0f]] / [[ch09.e3.runs.2.fin.1|.0f]] / [[ch09.e3.runs.2.fin.2|.0f]] / [[ch09.e3.runs.2.fin.3|.0f]] / [[ch09.e3.runs.2.fin.4|.0f]]</td><td>[[ch09.e3.runs.2.hit]]</td></tr>
+</table></div>
+<p class="tcap"><b>表 9-2</b>　CartPole REINFORCE 汇总（满分 500）。三者的期望梯度方向相同（表 9-1 的前三行），差别完全来自方差。</p>
+<p>注意整条回报版本的种子之间差异极大：同样的算法、同样的超参，有的种子学到 400 多，有的停在 100 左右。<strong>方差大不仅意味着学得慢，还意味着结果不可复现</strong>。这也是论文和面试里都强调“报告多个种子的均值和区间”的原因。</p>
+
+<h2>9.7 常见参数化：softmax 与高斯策略</h2>
+<!--deriv 两种策略的 score function
+\pi_\theta(a\mid s) & = \frac{e^{z_a}}{\sum_be^{z_b}},\quad z=f_\theta(s) || 离散动作：网络输出 logits $z$
+\frac{\partial\log\pi(a\mid s)}{\partial z_k} & = \mathbb 1[k=a]-\pi(k\mid s) || 和 softmax + 交叉熵的梯度 $p-y$ 只差一个符号：<strong>策略梯度 = 以采到的动作为标签、以 ψ 为样本权重的分类</strong>
+\log\pi_\theta(a\mid s) & = -\frac{(a-\mu)^2}{2\sigma^2}-\log\sigma-\tfrac12\log2\pi || 连续动作：网络输出 $\mu_\theta(s)$，$\log\sigma$ 常作为独立参数
+* \frac{\partial\log\pi}{\partial\mu}=\frac{a-\mu}{\sigma^2},\qquad\frac{\partial\log\pi}{\partial\log\sigma} & = \frac{(a-\mu)^2}{\sigma^2}-1 || 优势为正时 μ 向 $a$ 移动；采到的 $a$ 偏离超过 1σ 且优势为正时 σ 变大（多探索），反之变小
+-->
+<p>多维动作通常假设各维独立，联合 log-prob 是各维相加；多个离散头（技能类型、目标、方向）也是把各头的 log-prob 相加（第 18 章会讲自回归头的写法）。用 $\log\sigma$ 而不是 $\sigma$ 作参数，是为了保证 σ 为正、而且梯度尺度更合理。</p>
+
+<h2>9.8 与监督学习的关系，以及选型</h2>
+<p>代码里的策略梯度损失通常写成</p>
+$$L(\theta)=-\frac1N\sum_{i}\log\pi_\theta(a_i\mid s_i)\,\hat A_i\qquad(\hat A_i\ \text{视为常数，不求导})$$
+<p>这就是<strong>按优势加权的极大似然</strong>：如果所有 $\hat A_i=1$，它就是行为克隆（第 14 章）。差别有两点：① 标签 $a_i$ 是策略自己采的，不是专家给的；② 数据分布依赖 θ，所以这个“损失”的数值没有意义（不会单调下降），只有它的梯度有意义，这也是策略梯度必须 on-policy、数据用完就扔的根本原因。第 11 章 PPO 用重要性采样把数据多用几遍，就是在放宽这一点。</p>
+<div class="tbl"><table>
+<tr><th>对比项</th><th>价值派（DQN 家族）</th><th>策略派（PG / PPO）</th></tr>
+<tr><td>学什么</td><td>$Q(s,a)$，策略是 argmax</td><td>$\pi_\theta(a\mid s)$ 本身（通常还配一个 critic）</td></tr>
+<tr><td>动作空间</td><td>离散、不能太大</td><td>离散 / 连续 / 多头组合都可以</td></tr>
+<tr><td>随机策略</td><td>只能靠 ε-greedy</td><td>天然支持，熵正则可调</td></tr>
+<tr><td>数据</td><td>off-policy，可回放，样本效率高</td><td>on-policy（PPO 可小幅复用），样本效率低</td></tr>
+<tr><td>稳定性</td><td>致命三角，靠技巧</td><td>方差大，但更新平滑</td></tr>
+<tr><td>游戏里的典型用途</td><td>卡牌、离散小动作空间</td><td>MOBA / FPS / 体育 Bot（配合大规模并行采样）</td></tr>
+</table></div>
+<p class="tcap"><b>表 9-3</b>　价值派与策略派的选型对比。</p>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch09_interview.py</code> 逐字相同，运行时用有限差分对拍（梯度对 logits、高斯参数），并验证 score 期望为 0：</p>
+<!--code:py:reward-to-go / REINFORCE 对 logits 的梯度 / 高斯策略 score（Python，面试手撕版）-->
+{{demo:ch09_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch09_interview.py 的输出-->
+{{demo:ch09_interview_output.txt}}
+<!--/code-->
+
+<h2>9.9 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“策略梯度需要对环境求导”</td><td>没理解定理的核心</td><td>$\log p_\theta(\tau)$ 中转移概率与 θ 无关，求导为 0；只需要 $\nabla\log\pi$</td></tr>
+<tr><td>“基线可以是 $Q(s,a)$”</td><td>基线依赖了动作</td><td>基线只能依赖状态（或更早的信息）；依赖当前动作就引入偏差</td></tr>
+<tr><td>“加基线是为了让梯度更准”</td><td>“准”说法含糊</td><td>期望不变（无偏），只降方差（表 9-1）</td></tr>
+<tr><td>“策略梯度的 loss 下降说明训练正常”</td><td>伪损失没有意义</td><td>数据分布随 θ 变，loss 数值不可比；看回报、熵、KL 等指标（第 11 章）</td></tr>
+<tr><td>“REINFORCE 是 off-policy 的，因为用了采样数据”</td><td>概念混淆</td><td>期望是对当前策略取的，旧数据要乘重要性比值才能用</td></tr>
+<tr><td>“PPO 代码里的梯度就是策略梯度定理的梯度”</td><td>忽略 $\gamma^t$</td><td>实现普遍丢掉 $\gamma^t$，严格说不是梯度，但方向接近且更贴近未折扣目标</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:策略梯度常见追问链-->
+手推策略梯度定理？
+├─ 为什么不需要环境模型？ → log p(τ) 里转移项与 θ 无关，求导为 0
+│   └─ 状态分布也依赖 θ，为什么不用求导？ → 定理的结论：∇J = E_{d^γ}[∇log π · Q]，递推展开后自然消掉
+├─ reward-to-go 为什么合法？ → 过去奖励 × 未来 score 的期望为 0（塔式法则 + E[∇log π] = 0）
+├─ 基线为什么无偏？ → b(s) 提出期望，E[∇log π] = 0；最优 b = E[g²G]/E[g²] ≈ V(s)
+│   └─ 那用 Q 当基线行吗？ → 不行，依赖动作会有偏；用 Q 当“权重”是 QAC（第 10 章）
+├─ 为什么是 on-policy？ → 期望对 π_θ 取；旧数据要 IS 修正 → PPO（第 11 章）
+└─ 连续动作怎么办？ → 高斯策略，∂log π/∂μ = (a−μ)/σ²；或确定性策略梯度 DPG（第 12 章）
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 9 章</div><ul>
+<li>对数导数技巧：$\nabla\E_{p_\theta}[f]=\E_{p_\theta}[f\nabla\log p_\theta]$；轨迹里只有 $\log\pi$ 含 θ。</li>
+<li>策略梯度定理：$\nabla J=\E_{s\sim d^\gamma_\pi,a\sim\pi}[\nabla\log\pi(a\mid s)Q_\pi(s,a)]$，不需要对状态分布求导。</li>
+<li>score 期望为 0：$\E_{a\sim\pi}[\nabla\log\pi(a\mid s)]=0$ ⇒ reward-to-go 合法、基线无偏。</li>
+<li>最优基线 $b^*=\E[g^2G]/\E[g^2]\approx V(s)$；权重变成优势 $A=G-V$。</li>
+<li>softmax：$\partial\log\pi/\partial z_k=\mathbb 1[k=a]-\pi_k$；高斯：$\partial/\partial\mu=(a-\mu)/\sigma^2$。</li>
+<li>策略梯度 = 按优势加权的极大似然；伪损失数值无意义；on-policy。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：如果所有动作的优势都是正数（比如没有基线、奖励恒正），策略还能学到正确的偏好吗？</summary><p>期望上可以：每个动作的概率都被往上推，但推的力度正比于回报，好动作推得更多；softmax 归一化后，差动作的相对概率下降。问题在于方差：采到哪个动作就推哪个，没采到的被动地下降，结果高度依赖采样运气（表 9-2 第一行的种子差异）。</p></details>
+<details class="quiz"><summary>自测 2：基线能不能依赖时间步 t？能不能依赖未来的状态？</summary><p>依赖时间步、过去的状态和动作都可以（它们在 $a_t$ 之前确定，不影响“提出期望”这一步）。依赖未来状态 $s_{t+1}$ 不行：$s_{t+1}$ 受 $a_t$ 影响，提不出来，会引入偏差。GAE 里出现 $V(s_{t+1})$ 是作为回报估计的一部分，不是基线。</p></details>
+<details class="quiz"><summary>自测 3：高斯策略的 σ 如果被学得越来越小，会发生什么？怎么防？</summary><p>σ → 0 时探索消失，策略过早收敛到局部最优，而且 $\partial\log\pi/\partial\mu=(a-\mu)/\sigma^2$ 会变得很大、数值不稳定。常见做法：对 $\log\sigma$ 设下限、加熵正则（高斯熵 $=\log\sigma+\text{常数}$，第 10 章）、或用状态无关的 $\log\sigma$ 参数缓慢学习。</p></details>
+<details class="quiz"><summary>自测 4：为什么 REINFORCE 在 CartPole 上用 5 个回合一个 batch，而不是 1 个？</summary><p>单个回合的梯度估计方差极大，Adam 会被噪声带着走；多个回合平均后方差按 $1/N$ 降低。代价是每次更新要采更多数据。基线、critic、GAE 和 PPO 的大 batch 都是在“方差”和“样本数”之间找平衡。</p></details>
+</section>

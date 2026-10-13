@@ -1,0 +1,343 @@
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>框架层事件图表：GameInstance / GameMode / GameState / PlayerState / PlayerController</h1>
+    <p class="lead">先把三件事讲清楚：<strong>每个事件在哪台机器上执行、哪些变量勾了复制（以及发给谁）、哪些调用是 RPC / 组播</strong>。然后看一局完整时序，再逐个类打开“网络规格面板 + 事件图表”。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>读懂本书的蓝图风格事件图表：执行端标签、复制标注条、每张图下方的“网络摘要”。</li>
+    <li>给出任意一个事件，能判断它在服务器、拥有者客户端还是所有端执行；给出任意一个 Set，能说出它会不会、发给谁。</li>
+    <li>按时间顺序说出一局里框架类之间的调用与复制。</li>
+    <li>写出 5 个框架类的事件图表，并说出原 Demo 对应逻辑错在哪。</li>
+  </ul></div>
+
+  <h2>1. 怎么读本书的事件图表</h2>
+<!--bpgraph {"cols":4,"title":"示例：一个“请求 → 校验 → 改状态 → 广播”的最小闭环","nodes":[
+ {"id":"a","k":"event","x":0,"y":0,"t":"IA_Fire (Started)","s":"引擎事件（红）","net":"L"},
+ {"id":"b","k":"cevent","x":1,"y":0,"t":"Server_DoThing","s":"自定义事件 + RPC 标志","net":"SR","o":["Param"]},
+ {"id":"c","k":"flow","x":2,"y":0,"t":"Branch","s":"流程控制（灰）","i":["Condition ← 校验结果"],"ex":["True","False"]},
+ {"id":"d","k":"set","x":3,"y":0,"t":"Set State","s":"变量赋值（紫）","i":["← 新值"],"rep":"RN:→ 各端 OnRep_State"},
+ {"id":"e","k":"func","x":0,"y":1,"t":"Call Function","s":"函数调用（蓝）","i":["Target ← self"]},
+ {"id":"f","k":"pure","x":1,"y":1,"t":"Get Value","s":"纯函数（绿）：无执行引脚","o":["Return"]},
+ {"id":"g","k":"call","x":2,"y":1,"t":"Call OnChanged","s":"事件分发器 / 调别的对象（橙）","i":["Value ← Return"],"ex":[]},
+ {"id":"h","k":"set","x":3,"y":1,"t":"Set LocalCache","s":"本地变量（灰条 = 不复制）","i":["← 新值"],"rep":"L:只在本端"}
+],"l":[["a","e"],["b","c"],["c:True","d"],["e","g"]],"d":[["f.o0","g.i0"]],"g":[{"ids":["b","c","d"],"t":"注释框 = 蓝图里的 Comment，标出这一段在哪端、做什么","c":"b"}],"cap":"<b>图 9-1</b>　图例。① 节点右上角的小标签 = <b>执行端</b>；② Set 节点底部的条 = <b>复制标注</b>（紫：RepNotify，蓝：Replicated，灰虚线：不复制），箭头后写“发给谁、触发哪个 OnRep”；③ 图下方的<b>网络摘要</b>由图中节点自动汇总：执行端、写了哪些复制变量、有哪些 RPC 和组播"} -->
+  <div class="co tip"><span class="h">读图四步</span>
+    <p>① 先看<strong>红色事件节点的执行端标签</strong>：它决定整条执行线在哪台机器上跑（执行线上的普通节点都跟着它）；② 再看<strong>橙色调用节点上有没有 RPC 标签</strong>，执行线到这里“跳”到另一台机器；③ 再看<strong>Set 节点底部的复制标注</strong>，它们是这段逻辑对其他端的“输出”——下一个网络帧发出，对方在 OnRep 里接住；④ 最后对一遍<strong>网络摘要</strong>。</p>
+  </div>
+
+  <h3>1.1 执行端标签：这个节点在哪台机器上跑</h3>
+  <div class="tbl"><table>
+    <tr><th>标签</th><th>含义（Listen Server 双人局）</th><th>蓝图里从哪看出来</th><th>本书例子</th></tr>
+    <tr><td><span class="tag p0" style="background:#EAF0FD;color:#2F5BD3">仅服务器</span></td><td>只在服务器执行；Listen Server 下就是主机进程</td><td>GameMode / AIController 的所有事件；Event Possessed；Switch Has Authority 的 Authority 分支之后；只被服务器代码调用的普通自定义事件</td><td>GM.StartMatch、HandleDeath、FinishReload</td></tr>
+    <tr><td><span class="tag" style="background:#EAF0FD;color:#2F5BD3">Run on Server · Reliable</span></td><td>拥有者客户端调用 → 送到服务器执行；在服务器上调用 → 直接执行；非拥有者调用 → <strong>被丢弃</strong></td><td>自定义事件 Details → Graph → <strong>Replicates = Run on Server</strong>，Reliable 勾选</td><td>Server_FireShot、Server_SetReady</td></tr>
+    <tr><td><span class="tag" style="background:#FEF6E4;color:#B45309">Run on owning Client</span></td><td>在服务器上调用 → 送到这个 Actor 的拥有者客户端执行（拥有者是主机时就在主机本地执行）；没有拥有者时在服务器执行</td><td>Replicates = Run on owning Client</td><td>Client_StartSpectating、Client_CancelReload</td></tr>
+    <tr><td><span class="tag" style="background:#FFF4EC;color:#C2410C">Multicast · Unreliable</span></td><td><strong>组播</strong>：在服务器上调用 → 服务器自己执行一次 + 每个与该 Actor 相关的客户端各执行一次；在客户端上调用 → 只在本地执行一次</td><td>Replicates = Multicast</td><td>Multicast_Growl、Multicast_DeathCry（僵尸的一次性音效）</td></tr>
+    <tr><td><span class="tag" style="background:#F3EEFE;color:#6D28D9">RepNotify · 各端</span></td><td>OnRep_X 函数：客户端收到 X 的新值时执行；<strong>蓝图里服务器 Set X 时也立即执行</strong></td><td>变量 Details → Replication = RepNotify，引擎自动生成 OnRep_X</td><td>OnRep_Phase、OnRep_Ammo</td></tr>
+    <tr><td><span class="tag" style="background:#F3F4F6;color:#6B7280">所有端</span></td><td>这个 Actor 在几台机器上有副本，就在几台各执行一次</td><td>BeginPlay、Tick、EndPlay、Construction Script</td><td>Character.BeginPlay</td></tr>
+    <tr><td><span class="tag" style="background:#FEF6E4;color:#B45309">服务器 + 拥有者客户端</span></td><td>只有服务器和拥有者客户端触发，别人的机器不触发</td><td>Receive Controller Changed</td><td>角色添加输入映射</td></tr>
+    <tr><td><span class="tag" style="background:#EAF7EF;color:#15803D">本地控制端</span></td><td>只在“控制这个 Pawn 的玩家”所在的机器触发</td><td>Enhanced Input 事件（IA_*）</td><td>IA_Fire、IA_Reload</td></tr>
+    <tr><td><span class="tag" style="background:#E6F6F5;color:#0F766E">本机 / 本机 UI</span></td><td>不联网的本地逻辑：谁调用就在谁那里执行，没有网络含义</td><td>GameInstance、Widget、纯表现函数</td><td>HostGame、HandlePhase、PlayFireCosmetics</td></tr>
+  </table></div>
+<!--tree {"cols":["按顺序问（命中即停）","结论：在哪端执行","例子"],"x":[12,290,640],"root":{"n":"这个事件在哪端执行？","col":"s","d":"","w":"","c":[
+ {"n":"① Replicates = Run on Server？","col":"b","d":"服务器（只有拥有者客户端或服务器自己能调用成功）","w":"Server_FireShot"},
+ {"n":"② Replicates = Run on owning Client？","col":"a","d":"拥有者客户端（应由服务器调用）","w":"Client_CancelReload"},
+ {"n":"③ Replicates = Multicast？","col":"o","d":"服务器调用：服务器 + 所有相关客户端；客户端调用：仅本地","w":"Multicast_DeathCry"},
+ {"n":"④ 是 OnRep_X 函数？","col":"p","d":"收到复制的客户端 +（蓝图）服务器 Set 时","w":"OnRep_Phase"},
+ {"n":"⑤ 是引擎事件？","col":"g","d":"查下表：BeginPlay 所有端、Possessed 仅服务器…","w":"Event Possessed"},
+ {"n":"⑥ 都不是：普通事件 / 函数","col":"s","d":"调用它的代码在哪端，它就在哪端","w":"StartMatch（GM 调用 → 服务器）"}
+]},"cap":"<b>图 9-1a</b>　判断一个事件在哪端执行。普通自定义事件（Replicates = Not Replicated）本身没有“端”的属性，它跟随调用者——这是最容易被忽略的一条"} -->
+  <div class="tbl"><table>
+    <tr><th>引擎事件 / 节点</th><th>服务器</th><th>拥有者客户端</th><th>其他客户端</th><th>备注</th></tr>
+    <tr><td>BeginPlay / Tick / EndPlay / Construction Script</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>每个副本各一次</td></tr>
+    <tr><td>Event Possessed / Unpossessed</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>Possess 只在服务器发生</td></tr>
+    <tr><td>Receive Controller Changed</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td><td>客户端在 Controller 复制到达时触发</td></tr>
+    <tr><td>Enhanced Input 事件（IA_*）</td><td class="mid">仅主机自己的角色</td><td class="yes">✓</td><td class="no">✗</td><td>输入只在本地处理</td></tr>
+    <tr><td>Event AnyDamage / PointDamage</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>在调用 ApplyDamage 的那一端触发；本书只在服务器调用</td></tr>
+    <tr><td>计时器事件（Set Timer by Event）</td><td colspan="3">在<strong>设置计时器的那一端</strong>触发</td><td>本地开火循环在本机；换弹计时在服务器</td></tr>
+    <tr><td>Switch Has Authority → Authority</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>对服务器生成的复制 Actor 成立；客户端自己生成的 Actor 在本地也是 Authority</td></tr>
+    <tr><td>Switch Has Authority → Remote</td><td class="no">✗</td><td class="yes">✓</td><td class="yes">✓</td><td>—</td></tr>
+    <tr><td>Widget 事件（Construct、按钮 OnClicked）</td><td colspan="3">只在创建它的那台机器</td><td>UI 永远不复制</td></tr>
+  </table></div>
+  <p class="tcap">表 9-1　常见引擎事件的执行端</p>
+
+  <h3>1.2 复制标注：这个 Set 会不会、发给谁</h3>
+  <div class="co deep"><span class="h">复制标注条的读法：“⇄ 复制 · RepNotify · Owner Only → 拥有者 OnRep_Ammo”</span>
+    <ul>
+      <li><strong>⇄ 复制 · RepNotify</strong>：这个变量在 Details → Replication 里选了 RepNotify。服务器 Set 之后，引擎在<strong>下一个网络帧</strong>把新值发出去；收到的客户端执行 OnRep_X；<strong>蓝图里服务器这次 Set 本身也会立即执行一次 OnRep_X</strong>（C++ 不会）。</li>
+      <li><strong>⇄ 复制 · Replicated</strong>：只复制、没有回调。适合“UI 每隔一会儿读一次”的值，例如结束时刻、僵尸数。</li>
+      <li><strong>○ 不复制</strong>：Replication = None，只改本端的这一份。服务器上的不复制变量（如 GameMode 的 SpawnPoints）客户端永远看不到；客户端上的（如 LocalShotSeq）服务器永远看不到。</li>
+      <li><strong>Owner Only / Skip Owner / Initial Only</strong>：Replication Condition，决定<strong>发给哪些客户端</strong>（表 8-4 给出了双人局里每个变量的接收方）。</li>
+      <li>三个前提：① 只有<strong>服务器</strong>上的写入会被复制，客户端 Set 复制变量只改了自己的副本；② 所属 Actor 必须勾 <strong>Replicates</strong>（组件还要勾 Component Replicates）；③ 只发最新值，一个网络帧里改多次只发最后一次。</li>
+    </ul>
+  </div>
+  <div class="co warn"><span class="h">组播在重做版里只剩 2 个</span>
+    <p>原 Demo 有 8 个 Multicast（开局、开火、换弹、受击、攻击、死亡…），重做后只有僵尸的两个一次性音效还用组播；其余全部换成 RepNotify。原因和逐一对照见<a href="#ch8-mc">第 8 章 5.1“组播去哪了”</a>（表 8-5）。每张图下方的网络摘要都有一行“组播”，没有就写“无”。</p>
+  </div>
+
+  <h2>2. 一局完整时序</h2>
+<!--seq {"p":["客户端玩家\n（PC / 角色 / 武器）","主机玩家\n（PC / 角色 / 武器）","服务器\nGM_Coop / GS_Coop","僵尸\n（AI 在服务器）"],"pc":["o","g","b","r"],"grp":[[0,0,"客户端进程","o"],[1,3,"主机进程（Listen Server：服务器 + 玩家 1 + AI）","b"]],"s":[
+ [1,1,"主菜单：HostGame → Create Session → Open Level ?listen"],
+ [0,0,"主菜单：FindGames → Join Session"],
+ [0,2,"连接 → PreLogin / Login / PostLogin","net"],
+ [2,2,"HandleStartingNewPlayer → RestartPlayer → Possess（Phase = Waiting）"],
+ [2,0,"初始复制：GameState、两个 PlayerState、两个角色、两把武器","rep"],
+ ["—","大厅：两人准备"],
+ [1,2,"主机：PC.Server_SetReady（Run on Server 在服务器上调用 = 本进程直接执行）","call"],
+ [0,2,"客户端：PC.Server_SetReady（Run on Server · Reliable）","net"],
+ [2,2,"Set PS.bReady（RepNotify）→ CheckAllReady → StartMatch：Set GS.Phase = Playing"],
+ [2,1,"同进程：Set 时 OnRep_Phase 立即在服务器执行 → 主机 UI 切换（不走网络）","local"],
+ [2,0,"复制 Phase（无条件）→ 客户端执行 OnRep_Phase → UI 切换","rep"],
+ ["—","对局：客户端开火打中僵尸"],
+ [3,3,"BTS_FindTarget → MoveTo → BTT_Attack（行为树只在服务器）"],
+ [0,0,"本机预测：播 1P 开火、显示弹数 −1","g"],
+ [0,2,"Server_FireShot（Run on Server · Reliable）","net"],
+ [2,3,"校验 → 扣弹、BurstCounter + 1 → ApplyPointDamage → 扣血","call"],
+ [2,1,"同进程：OnRep_BurstCounter / Health / LastHit 在服务器执行 → 主机看到开火与受击","local"],
+ [2,0,"复制：Ammo（Owner Only → 拥有者收到）· Health、LastHit（收到）· BurstCounter（Skip Owner → 不发）","rep"],
+ [3,2,"僵尸死亡：HandleDeath → GM.OnZombieKilled；调用 Multicast_DeathCry","call"],
+ [2,0,"Multicast_DeathCry（Unreliable）：服务器本地播一次 + 发给客户端播一次","net"],
+ ["—","客户端玩家阵亡"],
+ [3,2,"攻击命中 → 玩家 AC_Health：Set bIsDead = true（RepNotify）→ GM.OnPlayerDied","call"],
+ [2,0,"复制 bIsDead → OnRep：布娃娃、关本地输入","rep"],
+ [2,0,"Client_StartSpectating（Run on owning Client · Reliable）","net"],
+ ["—","结算与重开"],
+ [2,2,"OnTimeUp → EndMatch(Won)：Set GS.Phase = Won"],
+ [2,1,"同进程：OnRep_Phase → 结算界面（主机多一个“重开”按钮）","local"],
+ [2,0,"复制 Phase → OnRep_Phase → 结算界面","rep"],
+ [1,2,"主机：PC.Server_RequestRestart（本进程执行）→ RestartMatch → servertravel","call"],
+ [2,0,"ClientTravel：客户端跟随换图（重新 Login）","net"]
+],"cap":"<b>图 9-2</b>　一局完整时序。左边一列是客户端进程，右边三列同属主机进程（顶部色条）。只有<b>蓝虚线（RPC）和紫点线（属性复制）</b>真正走网络；主机列收到的都是绿线——同一进程里，服务器 Set 时蓝图 OnRep 直接执行，<b>没有“复制给主机”这回事</b>"} -->
+
+  <h2>3. BP_CoopGameInstance：主持、加入、断线</h2>
+  <div class="tbl kv"><table>
+    <tr><th>项</th><th>内容</th></tr>
+    <tr><td>父类</td><td>GameInstance（项目设置 → Maps &amp; Modes → Game Instance Class）</td></tr>
+    <tr><td>存在于</td><td>每个进程各一份；切地图不销毁；<strong>不复制</strong></td></tr>
+    <tr><td>职责</td><td>会话：主持 / 查找 / 加入 / 离开；网络错误后回主菜单并提示</td></tr>
+    <tr><td>关键变量</td><td>LastError（Text，本地）——回到主菜单后由菜单读取显示</td></tr>
+    <tr><td>依赖</td><td>Online Subsystem（局域网测试用 Null：DefaultEngine.ini 中 <code>[OnlineSubsystem] DefaultPlatformService=Null</code>）</td></tr>
+  </table></div>
+<!--bpnet {"cls":"BP_CoopGameInstance","parent":"GameInstance（UObject，不是 Actor）","where":"每个进程各一份，不复制","defaults":[["Replicates","✗ 不适用：UObject 不能复制、也不能有 RPC"]],
+"vars":[["LastError","Text","None","—","本机","断线原因，回到主菜单后显示一次"]],
+"events":[["HostGame","自定义事件","Not Replicated","—","P","主菜单“主持”按钮"],["FindGames","自定义事件","Not Replicated","—","P","主菜单“加入”按钮"],["JoinGame","自定义事件","Not Replicated","—","P","房间列表点击"],["LeaveGame","自定义事件","Not Replicated","—","P","结算 / 暂停菜单"],["Event NetworkError / TravelError","引擎事件","引擎事件","—","P","引擎：断线、换图失败"]],
+"cap":"<b>图 9-3a</b>　BP_CoopGameInstance 的网络规格：没有任何复制变量和 RPC，所有事件只在本机执行"} -->
+<!--bpgraph {"cols":4,"rg":56,"title":"BP_CoopGameInstance · 事件图表","nodes":[
+ {"id":"h0","k":"cevent","x":0,"y":0,"t":"HostGame","s":"主菜单按钮调用","net":"P"},
+ {"id":"h1","k":"func","x":1,"y":0,"t":"Create Session","i":["Player Controller ← PC(0)","Public Connections ← 2","Use LAN ← true"],"ex":["On Success","On Failure"]},
+ {"id":"h2","k":"func","x":2,"y":0,"t":"Open Level (by Name)","i":["Level Name ← L_CoffeeShop","Options ← listen"],"ex":[]},
+ {"id":"h3","k":"func","x":2,"y":1,"t":"ShowError","i":["Text ← 创建会话失败"],"ex":[]},
+ {"id":"f0","k":"cevent","x":0,"y":2,"t":"FindGames","s":"主菜单按钮调用","net":"P"},
+ {"id":"f1","k":"func","x":1,"y":2,"t":"Find Sessions","i":["Max Results ← 10","Use LAN ← true"],"ex":["On Success","On Failure"],"o":["Results"]},
+ {"id":"f2","k":"call","x":2,"y":2,"t":"Menu.ShowResults","i":["Results"],"ex":[]},
+ {"id":"j0","k":"cevent","x":0,"y":3,"t":"JoinGame","s":"点击某个房间","net":"P","o":["Result"]},
+ {"id":"j1","k":"func","x":1,"y":3,"t":"Join Session","i":["Search Result ← Result"],"ex":["On Success","On Failure"]},
+ {"id":"j2","k":"func","x":2,"y":3,"t":"ShowError","i":["Text ← 加入失败"],"ex":[]},
+ {"id":"e0","k":"event","x":0,"y":4,"t":"Event NetworkError","s":"TravelError 同样处理","net":"P","o":["Failure Type","Error String"]},
+ {"id":"e1","k":"func","x":1,"y":4,"t":"Destroy Session","i":["Player Controller ← PC(0)"]},
+ {"id":"e2","k":"set","x":2,"y":4,"t":"Set LastError","i":["← Error String"],"rep":"L:GameInstance 不复制"},
+ {"id":"e3","k":"func","x":3,"y":4,"t":"Open Level (by Name)","i":["Level Name ← L_Menu"],"ex":[]}
+],"l":[["h0","h1"],["h1:On Success","h2"],["h1:On Failure","h3"],["f0","f1"],["f1:On Success","f2"],["j0","j1"],["j1:On Failure","j2"],["e0","e1"],["e1","e2"],["e2","e3"]],
+"d":[["f1.o0","f2.i0"]],
+"g":[{"ids":["h0","h1","h2","h3"],"t":"主持：只在主机进程调用","c":"g"},{"ids":["f0","f1","f2","j0","j1","j2"],"t":"查找与加入：只在客户端进程调用（加入成功后引擎自动 ClientTravel）","c":"o"},{"ids":["e0","e1","e2","e3"],"t":"断线 / 主机退出：任一进程","c":"r"}],
+"cap":"<b>图 9-3</b>　BP_CoopGameInstance。这里用 GetPlayerController(0) 是<b>对的</b>：GameInstance 只服务于本机，0 号就是本机玩家——同一个节点放在服务器逻辑里才是错的"} -->
+  <div class="co warn"><span class="h">面试注意：原 Demo 根本没有“联机入口”</span>
+    <p>原工程只在 PIE 里用“Play As Listen Server”跑过，没有任何会话节点，GameMode 里两个 <code>servertravel</code> 节点也没接线。打包后两台机器无法互联。合格的 Demo 至少要能“主持 → 局域网查找 → 加入 → 断线回菜单”。会话测试建议用两个 Standalone 进程或打包版本，PIE 单进程下的会话行为与真实情况不完全一致。</p>
+  </div>
+
+  <h2>4. GM_Coop：规则只在这里</h2>
+  <div class="tbl kv"><table>
+    <tr><th>项</th><th>内容</th></tr>
+    <tr><td>父类</td><td>GameModeBase（想用自带比赛阶段可换成 GameMode，见下方提示）</td></tr>
+    <tr><td>存在于</td><td><strong>仅服务器</strong>；客户端上 Get Game Mode 返回 None</td></tr>
+    <tr><td>类默认值</td><td>DefaultPawnClass = BP_CoopCharacter · PlayerControllerClass = PC_Coop · PlayerStateClass = PS_Coop · GameStateClass = GS_Coop · HUD = None</td></tr>
+    <tr><td>关键变量</td><td>MatchDuration = 180 · MaxAlive = 10 · MinPlayers = 2（单人测试改 1）· RespawnDelay = 3 · SpawnPoints（数组）· MatchTimer（句柄）</td></tr>
+    <tr><td>对外接口</td><td>CheckAllReady · OnZombieKilled(Zombie, Killer) · OnPlayerDied(PC) · RestartMatch——都只会被服务器上的对象调用</td></tr>
+  </table></div>
+<!--bpnet {"cls":"GM_Coop","parent":"GameModeBase","where":"仅服务器（客户端上 Get Game Mode = None）","defaults":[["Replicates","✗ GameMode 从不复制，变量勾了 Replicated 也发不出去"]],
+"vars":[["MatchDuration","Float","None","—","配置","180 s"],["MaxAlive / MinPlayers","Integer","None","—","配置","10 / 2"],["RespawnDelay","Float","None","—","配置","3 s"],["SpawnPoints","BP_SpawnPoint[]","None","—","服务器","StartMatch 时收集一次"],["MatchTimer / SpawnTimer","Timer Handle","None","—","服务器","EndMatch 时清除"]],
+"events":[["HandleStartingNewPlayer","覆写事件","引擎事件","—","S","引擎：玩家登录后"],["Event OnLogout","引擎事件","引擎事件","—","S","引擎：玩家断开"],["CheckAllReady","函数","函数","—","S","PC.Server_SetReady"],["StartMatch / EndMatch","自定义事件","Not Replicated","—","S","CheckAllReady / OnTimeUp"],["SpawnZombie","自定义事件","Not Replicated","—","S","StartMatch、计时器"],["OnZombieKilled","自定义事件","Not Replicated","—","S","BP_Zombie.HandleDeath"],["OnPlayerDied","自定义事件","Not Replicated","—","S","角色 HandleDeath、OnLogout"],["OnTimeUp","自定义事件","Not Replicated","—","S","MatchTimer"],["RestartMatch","自定义事件","Not Replicated","—","S","PC.Server_RequestRestart"]],
+"cap":"<b>图 9-4a</b>　GM_Coop 的网络规格：全部变量不复制、全部事件只在服务器——它对外的唯一“输出”是去写 GameState / PlayerState 上的复制变量"} -->
+<!--bpgraph {"cols":3,"rg":56,"title":"GM_Coop · 出生与退出","nodes":[
+ {"id":"b0","k":"event","x":0,"y":0,"t":"HandleStartingNewPlayer","s":"Event（覆写）","net":"S","o":["New Player"]},
+ {"id":"b1","k":"flow","x":1,"y":0,"t":"Branch","i":["Condition ← GS.Phase == Waiting"],"ex":["True","False"]},
+ {"id":"b2","k":"func","x":2,"y":0,"t":"Parent: HandleStartingNewPlayer","s":"默认 → RestartPlayer → Possess","i":["New Player"],"ex":[]},
+ {"id":"b3","k":"call","x":2,"y":1,"t":"Client_StartSpectating","s":"调用目标：New Player（PC_Coop）","i":["Target ← 存活的队友"],"ex":[],"net":"CR"},
+ {"id":"c0","k":"event","x":0,"y":2,"t":"Event OnLogout","net":"S","o":["Exiting Controller"]},
+ {"id":"c1","k":"call","x":1,"y":2,"t":"OnPlayerDied","s":"离开 = 视为阵亡，触发全灭判定","i":["PC ← Exiting Controller"],"ex":[]}
+],"l":[["b0","b1"],["b1:True","b2"],["b1:False","b3"],["c0","c1"]],
+"g":[{"ids":["b0","b1","b2","b3"],"t":"出生：覆写时必须调用父类，否则不会生成 Pawn；对局中途加入的人先观战","c":"b"},{"ids":["c0","c1"],"t":"有人退出","c":"s"}],
+"cap":"<b>图 9-4</b>　GM_Coop：出生与退出。HandleStartingNewPlayer 是 BlueprintNativeEvent，覆写后默认实现不再执行，需要显式调用 Parent 节点"} -->
+<!--bpgraph {"cols":4,"rg":56,"title":"GM_Coop · 准备与开局","nodes":[
+ {"id":"r0","k":"cevent","x":0,"y":0,"t":"CheckAllReady（函数）","s":"由 PC.Server_SetReady 调用","net":"S"},
+ {"id":"r1","k":"flow","x":1,"y":0,"t":"For Each Loop","i":["Array ← GS.PlayerArray"],"ex":["Loop Body","Completed"],"o":["Element"]},
+ {"id":"r2","k":"flow","x":2,"y":0,"t":"Branch","i":["Element(PS_Coop).bReady"],"ex":["True","False"]},
+ {"id":"r3","k":"ret","x":3,"y":0,"t":"Return","s":"有人没准备 → 不开局","nin":true},
+ {"id":"r4","k":"flow","x":2,"y":1,"t":"Branch","i":["PlayerArray.Num ≥ MinPlayers"],"ex":["True","False"]},
+ {"id":"r5","k":"call","x":3,"y":1,"t":"StartMatch","ex":[]},
+ {"id":"s0","k":"cevent","x":0,"y":2,"t":"StartMatch","s":"只执行一次","net":"S"},
+ {"id":"s1","k":"set","x":1,"y":2,"t":"Set GS.Phase","s":"写 GameState 上的变量","i":["← Playing"],"rep":"RN:→ 各端 OnRep_Phase"},
+ {"id":"s2","k":"set","x":2,"y":2,"t":"Set MatchEndTime","s":"GS.MatchEndServerTime","i":["← ServerWorldTime + 180"],"rep":"R:→ 各端，HUD 定时读","var":"GS.MatchEndServerTime"},
+ {"id":"s3","k":"timer","x":3,"y":2,"t":"Set Timer by Event","i":["Event ← OnTimeUp","Time ← MatchDuration"],"o":["Handle → MatchTimer"]},
+ {"id":"s4","k":"func","x":0,"y":3,"t":"GetAllActorsOfClass","i":["Class ← BP_SpawnPoint"],"o":["Out Actors"]},
+ {"id":"s5","k":"set","x":1,"y":3,"t":"Set SpawnPoints","i":["← Out Actors"],"rep":"L:GameMode 变量"},
+ {"id":"s6","k":"flow","x":2,"y":3,"t":"For Loop","i":["First ← 1","Last ← MaxAlive（10）"],"ex":["Loop Body","Completed"]},
+ {"id":"s7","k":"call","x":3,"y":3,"t":"SpawnZombie","ex":[]}
+],"l":[["r0","r1"],["r1:Loop Body","r2"],["r2:False","r3"],["r1:Completed","r4"],["r4:True","r5"],["s0","s1"],["s1","s2"],["s2","s3"],["s3","s4"],["s4","s5"],["s5","s6"],["s6:Loop Body","s7"]],
+"d":[["s4.o0","s5.i0"]],
+"g":[{"ids":["r0","r1","r2","r3","r4","r5"],"t":"CheckAllReady：每次有人准备都检查一遍，全部就绪才开局","c":"b"},{"ids":["s0","s1","s2","s3","s4","s5","s6","s7"],"t":"StartMatch：改状态（自动复制）+ 计时 + 刷怪，全部在服务器","c":"g"}],
+"cap":"<b>图 9-5</b>　GM_Coop：准备与开局。只写 GameState 上的复制变量，不直接碰任何 UI——各端的界面会因为 OnRep_Phase 自己切换"} -->
+<!--bpgraph {"cols":3,"rg":56,"title":"GM_Coop · 刷怪与击杀","nodes":[
+ {"id":"z0","k":"cevent","x":0,"y":0,"t":"SpawnZombie","net":"S"},
+ {"id":"z1","k":"flow","x":1,"y":0,"t":"Branch","i":["AliveZombies < MaxAlive","AND Phase == Playing"],"ex":["True","False"]},
+ {"id":"z2","k":"func","x":2,"y":0,"t":"GetRandomReachablePointInRadius","i":["Origin ← 随机 SpawnPoint","Radius ← 200"],"o":["Random Location"]},
+ {"id":"z3","k":"func","x":0,"y":1,"t":"SpawnActor BP_Zombie","i":["Location ← Random Location","Collision ← 尽量调整，总是生成"]},
+ {"id":"z4","k":"set","x":1,"y":1,"t":"Set GS.AliveZombies","i":["← AliveZombies + 1"],"ex":[],"rep":"R:→ 各端 HUD"},
+ {"id":"k0","k":"cevent","x":0,"y":2,"t":"OnZombieKilled","s":"僵尸死亡时（服务器）调用","net":"S","o":["Zombie","Killer"]},
+ {"id":"k1","k":"set","x":1,"y":2,"t":"Set GS.AliveZombies","i":["← AliveZombies − 1"],"rep":"R:→ 各端 HUD"},
+ {"id":"k2","k":"call","x":2,"y":2,"t":"Killer.PlayerState.AddKill","i":["Cast ← PS_Coop"]},
+ {"id":"k3","k":"timer","x":0,"y":3,"t":"Set Timer by Event","i":["Event ← SpawnZombie","Time ← RespawnDelay（3 s）"],"ex":[]}
+],"l":[["z0","z1"],["z1:True","z2"],["z2","z3"],["z3","z4"],["k0","k1"],["k1","k2"],["k2","k3"]],
+"g":[{"ids":["z0","z1","z2","z3","z4"],"t":"SpawnZombie：刷怪只在服务器（原 Demo 的补刷在每一端都执行）","c":"r"},{"ids":["k0","k1","k2","k3"],"t":"OnZombieKilled：计数、加分、延迟补刷","c":"g"}],
+"cap":"<b>图 9-6</b>　GM_Coop：刷怪与击杀。僵尸不再自己调用“重新生成”，只把“我死了、谁杀的”报告给 GameMode，补不补刷由规则决定"} -->
+<!--bpgraph {"cols":4,"rg":56,"title":"GM_Coop · 死亡、胜负与重开","nodes":[
+ {"id":"d0","k":"cevent","x":0,"y":0,"t":"OnPlayerDied","net":"S","o":["Dead PC"]},
+ {"id":"d1","k":"set","x":1,"y":0,"t":"Set PS.bIsAlive","i":["← false"],"rep":"R:→ 各端"},
+ {"id":"d2","k":"flow","x":2,"y":0,"t":"Branch","i":["还有存活的玩家？"],"ex":["True","False"]},
+ {"id":"d3","k":"call","x":3,"y":0,"t":"Client_StartSpectating","s":"目标：Dead PC","i":["Target ← 存活的队友"],"ex":[],"net":"CR"},
+ {"id":"d4","k":"call","x":3,"y":1,"t":"EndMatch","i":["Result ← Lost"],"ex":[]},
+ {"id":"t0","k":"cevent","x":0,"y":2,"t":"OnTimeUp","s":"MatchTimer 到点","net":"S"},
+ {"id":"t1","k":"call","x":1,"y":2,"t":"EndMatch","i":["Result ← Won"],"ex":[]},
+ {"id":"m0","k":"cevent","x":0,"y":3,"t":"EndMatch","net":"S","o":["Result"]},
+ {"id":"m1","k":"set","x":1,"y":3,"t":"Set GS.Phase","s":"各端弹结算","i":["← Result"],"rep":"RN:→ 各端 OnRep_Phase"},
+ {"id":"m2","k":"func","x":2,"y":3,"t":"Clear Timer by Handle","i":["MatchTimer、SpawnTimer"]},
+ {"id":"m3","k":"call","x":3,"y":3,"t":"StopAllZombies","s":"各僵尸 StopLogic","ex":[]},
+ {"id":"q0","k":"cevent","x":0,"y":4,"t":"RestartMatch","s":"由 Server_RequestRestart 调用","net":"S"},
+ {"id":"q1","k":"func","x":1,"y":4,"span":2,"t":"Execute Console Command","i":["Command ← servertravel L_CoffeeShop"],"ex":[]}
+],"l":[["d0","d1"],["d1","d2"],["d2:True","d3"],["d2:False","d4"],["t0","t1"],["m0","m1"],["m1","m2"],["m2","m3"],["q0","q1"]],
+"g":[{"ids":["d0","d1","d2","d3","d4"],"t":"玩家死亡：全灭才失败，否则死者观战","c":"r"},{"ids":["t0","t1"],"t":"时间到：坚持住 = 胜利","c":"g"},{"ids":["m0","m1","m2","m3"],"t":"EndMatch：只改状态，不碰任何人的输入","c":"b"},{"ids":["q0","q1"],"t":"重开：服务器带所有客户端一起换图","c":"p"}],
+"cap":"<b>图 9-7</b>　GM_Coop：死亡、胜负与重开。注意 EndMatch 里没有 DisableInput——服务器上禁用远端玩家的输入是无效的（输入在客户端处理）；“能不能再开火”由服务器在 Server_FireShot 里校验 Phase 决定，客户端界面由 OnRep_Phase 切换"} -->
+  <div class="co tip"><span class="h">GameModeBase 还是 GameMode？</span>
+    <p><code>AGameMode</code>（不是 Base）自带一套比赛阶段 MatchState（WaitingToStart → InProgress → WaitingPostMatch），配合 <code>AGameState</code> 复制，有 <code>ReadyToStartMatch</code>、<code>StartMatch</code>、<code>EndMatch</code> 可以覆写，还提供断线玩家的 PlayerState 暂存（InactivePlayerArray）。本 Demo 用 GameModeBase + 自定义 Phase，是为了把流程画得一目了然；面试时提一句“正式项目可以直接用 AGameMode 的 MatchState”是加分项。</p>
+  </div>
+
+  <h2>5. GS_Coop 与 PS_Coop：只存状态、只广播</h2>
+  <div class="tbl kv"><table>
+    <tr><th>项</th><th>GS_Coop</th><th>PS_Coop</th></tr>
+    <tr><td>父类</td><td>GameStateBase</td><td>PlayerState</td></tr>
+    <tr><td>存在于</td><td>所有端（Always Relevant）</td><td>所有端（每个玩家一份，GameState.PlayerArray 在每端都维护）</td></tr>
+    <tr><td>复制变量</td><td>Phase（RepNotify）· MatchEndServerTime · AliveZombies</td><td>bReady（RepNotify）· Kills（RepNotify）· bIsAlive</td></tr>
+    <tr><td>事件分发器</td><td>OnPhaseChanged(Phase) · OnPlayersChanged()</td><td>OnInfoChanged(Self)</td></tr>
+    <tr><td>谁写</td><td>只有 GM_Coop</td><td>只有服务器（GM 或 PC 的 Server RPC）</td></tr>
+  </table></div>
+<!--bpnet {"cls":"GS_Coop","parent":"GameStateBase","where":"所有端（复制）","defaults":[["Replicates","✓ 引擎默认"],["Always Relevant","✓ 每个客户端都收"]],
+"vars":[["Phase","E_MatchPhase","RepNotify","None","服务器（GM）","OnRep_Phase → OnPhaseChanged → 各端 UI 切换"],["MatchEndServerTime","Float","Replicated","None","服务器（GM）","HUD 每 0.25 s 读一次算剩余时间"],["AliveZombies","Integer","Replicated","None","服务器（GM）","HUD 显示"],["PlayerArray（引擎）","PlayerState[]","None","—","引擎","不复制：每端的 PlayerState 自己加进来"]],
+"events":[["OnRep_Phase","RepNotify 函数","RepNotify 函数","—","R","Phase 变化"],["GetRemainingTime","纯函数","函数","—","X","HUD"],["OnPhaseChanged / OnPlayersChanged","事件分发器","事件分发器","—","X","OnRep_Phase / PS 的 BeginPlay、EndPlay"]],
+"cap":"<b>图 9-8a</b>　GS_Coop 的网络规格"} -->
+<!--bpnet {"cls":"PS_Coop","parent":"PlayerState","where":"所有端（每个玩家一份）","defaults":[["Replicates","✓"],["Always Relevant","✓ PlayerState 默认"],["Owner","PlayerController（这个玩家的）"]],
+"vars":[["bReady","Boolean","RepNotify","None","服务器（PC.Server_SetReady）","OnRep → OnInfoChanged → 大厅打勾"],["Kills","Integer","RepNotify","None","服务器（GM → AddKill）","OnRep → 记分板"],["bIsAlive","Boolean","Replicated","None","服务器（GM.OnPlayerDied）","僵尸选目标、HUD 队友状态"],["PlayerName（引擎）","String","Replicated","None","引擎","大厅、记分板显示"]],
+"events":[["OnRep_bReady / OnRep_Kills","RepNotify 函数","RepNotify 函数","—","R","变量变化"],["AddKill","自定义事件","Not Replicated","—","S","GM.OnZombieKilled"],["Event BeginPlay / End Play","引擎事件","引擎事件","—","A","→ GS.OnPlayersChanged（名单刷新）"]],
+"cap":"<b>图 9-8b</b>　PS_Coop 的网络规格。PlayerState 的 Owner 是 PlayerController，所以理论上可以在它上面定义 Server RPC；本书统一放在 PC 上，避免请求入口分散"} -->
+<!--bpgraph {"cols":4,"rg":56,"title":"GS_Coop / PS_Coop · 事件图表","nodes":[
+ {"id":"g0","k":"event","x":0,"y":0,"t":"OnRep_Phase","s":"RepNotify 函数","net":"R"},
+ {"id":"g1","k":"call","x":1,"y":0,"t":"Call OnPhaseChanged","i":["Phase ← Phase"],"ex":[]},
+ {"id":"g2","k":"pure","x":2,"y":0,"span":2,"t":"GetRemainingTime（纯函数）","i":["Max(0, MatchEndServerTime","　　 − GetServerWorldTimeSeconds())"],"o":["Seconds"]},
+ {"id":"p0","k":"event","x":0,"y":1,"t":"OnRep_bReady","net":"R"},
+ {"id":"p2","k":"event","x":0,"y":2,"t":"OnRep_Kills","net":"R"},
+ {"id":"p1","k":"call","x":1,"y":1,"t":"Call OnInfoChanged","i":["Player ← self"],"ex":[]},
+ {"id":"p3","k":"cevent","x":2,"y":1,"t":"AddKill","s":"由 GM 调用","net":"S"},
+ {"id":"p4","k":"set","x":3,"y":1,"t":"Set Kills","i":["← Kills + 1"],"ex":[],"rep":"RN:→ 各端 OnRep_Kills"},
+ {"id":"p5","k":"event","x":2,"y":2,"t":"Event BeginPlay / End Play","s":"PlayerState 在每一端都会触发","net":"A"},
+ {"id":"p6","k":"call","x":3,"y":2,"t":"GS.Call OnPlayersChanged","s":"大厅名单刷新","ex":[]}
+],"l":[["g0","g1"],["p0","p1"],["p2","p1"],["p3","p4"],["p5","p6"]],
+"g":[{"ids":["g0","g1","g2"],"t":"GS_Coop：Phase 一变，所有人的 UI 一起变","c":"b"},{"ids":["p0","p1","p2","p3","p4","p5","p6"],"t":"PS_Coop：跟人走的数据","c":"p"}],
+"cap":"<b>图 9-8</b>　GS_Coop / PS_Coop。三个 OnRep 都标“RepNotify · 各端”：客户端在收到新值时执行，主机在服务器 Set 的那一刻执行——所以主机的 UI 和客户端走同一条路径刷新，不需要额外通知"} -->
+  <div class="co deep"><span class="h">为什么复制“结束时刻”而不是“剩余秒数”</span>
+    <p>GetServerWorldTimeSeconds 由 GameState 周期性复制服务器时间（ServerWorldTimeSecondsUpdateFrequency，默认 0.1 s）得到差值估计，各端用同一条时间轴，显示平滑、只需复制一次结束时刻。它<strong>没有扣除单程延迟</strong>，客户端估计会偏慢约半个 RTT 并随抖动波动——用来显示倒计时足够，“时间到”的判定由服务器计时器决定；如果要拿它做命中回溯这种精度要求高的事，需要自己做带 RTT 补偿的时钟同步。</p>
+  </div>
+
+  <h2>6. PC_Coop：本地界面与请求的出口</h2>
+  <div class="tbl kv"><table>
+    <tr><th>项</th><th>内容</th></tr>
+    <tr><td>父类</td><td>PlayerController</td></tr>
+    <tr><td>存在于</td><td>服务器（每个玩家一份）+ 它自己的客户端；<strong>BeginPlay 在服务器上的远端 PC 也会执行</strong></td></tr>
+    <tr><td>职责</td><td>本机 UI 的创建与切换；暂停菜单；把 UI 的操作变成 Server RPC；接收观战等 Client RPC</td></tr>
+    <tr><td>关键变量（都不复制）</td><td>HUD、Lobby、Result、PauseMenu（Widget 引用）</td></tr>
+    <tr><td>RPC</td><td>Server_SetReady · Server_RequestRestart · Client_StartSpectating · Client_ShowHitMarker · Client_ShowDamageFeedback</td></tr>
+  </table></div>
+<!--bpnet {"cls":"PC_Coop","parent":"PlayerController","where":"服务器（每个玩家一份）+ 它自己的客户端","defaults":[["Replicates","✓"],["Only Relevant to Owner","✓ PC 默认：只复制给自己的客户端"]],
+"vars":[["HUD · Lobby · Result · Pause","Widget 引用","None","—","本机","只有本地 PC 创建；服务器上的远端 PC 里永远是空"]],
+"events":[["Event BeginPlay","引擎事件","引擎事件","—","A","服务器上的远端 PC 也执行 → 先判断 Is Local Controller"],["HandlePhase","自定义事件","Not Replicated","—","U","GS.OnPhaseChanged"],["IA_Pause","输入事件","引擎事件","—","L","本机玩家按 Esc"],["Server_SetReady","自定义事件","Run on Server","✓","S","WBP_Lobby（Get Owning Player）"],["Server_RequestRestart","自定义事件","Run on Server","✓","S","WBP_Result"],["Client_StartSpectating","自定义事件","Run on owning Client","✓","C","GM（服务器）"],["Client_ShowHitMarker","自定义事件","Run on owning Client","✗","C","武器 Server_FireShot 命中后"],["Client_ShowDamageFeedback","自定义事件","Run on owning Client","✗","C","服务器上玩家受伤后"]],
+"cap":"<b>图 9-9a</b>　PC_Coop 的网络规格：所有“客户端 → 服务器”的 UI 请求从这里出（PC 一定属于这个客户端的连接）；所有“服务器 → 某个玩家”的通知也落在这里"} -->
+<!--bpgraph {"cols":4,"rg":56,"title":"PC_Coop · BeginPlay 与阶段切换","nodes":[
+ {"id":"c0","k":"event","x":0,"y":0,"t":"Event BeginPlay","s":"服务器上的远端 PC 也执行","net":"A"},
+ {"id":"c1","k":"flow","x":1,"y":0,"t":"Branch","i":["Is Local Controller"],"ex":["True","False"]},
+ {"id":"c2","k":"set","x":2,"y":0,"t":"Set HUD","s":"Create Widget(WBP_HUD)","i":["Owning Player ← self"],"rep":"L:Widget 引用，只在本机"},
+ {"id":"c3","k":"func","x":3,"y":0,"t":"Add to Viewport","i":["Target ← HUD"]},
+ {"id":"c4","k":"func","x":0,"y":1,"span":2,"t":"Bind Event to OnPhaseChanged","s":"Get Game State → Cast To GS_Coop","i":["Event ← HandlePhase"]},
+ {"id":"c5","k":"call","x":2,"y":1,"t":"HandlePhase","s":"按当前 Phase 先刷新一次","i":["Phase ← GS.Phase"],"ex":[]},
+ {"id":"h0","k":"cevent","x":0,"y":2,"t":"HandlePhase","net":"U","o":["Phase"]},
+ {"id":"h1","k":"flow","x":1,"y":2,"t":"Switch on Phase","ex":["Waiting","Playing","Won","Lost"]},
+ {"id":"h2","k":"func","x":2,"y":2,"t":"Show WBP_Lobby","s":"Input Mode：Game and UI","ex":[]},
+ {"id":"h3","k":"func","x":2,"y":3,"t":"Hide Lobby","s":"Input Mode：Game Only","ex":[]},
+ {"id":"h4","k":"func","x":2,"y":4,"t":"Show WBP_Result","s":"Input Mode：UI Only，显示鼠标","i":["bWon ← Phase == Won"],"ex":[]}
+],"l":[["c0","c1"],["c1:True","c2"],["c2","c3"],["c3","c4"],["c4","c5"],["h0","h1"],["h1:Waiting","h2"],["h1:Playing","h3"],["h1:Won","h4"],["h1:Lost","h4"]],
+"g":[{"ids":["c0","c1","c2","c3","c4","c5"],"t":"BeginPlay：只有本地 PC 建界面（False = 远端玩家在服务器上的 PC，什么都不做）","c":"t"},{"ids":["h0","h1","h2","h3","h4"],"t":"HandlePhase：UI 只读 GameState","c":"t"}],
+"cap":"<b>图 9-9</b>　PC_Coop：界面创建与阶段切换。客户端 PC 的 BeginPlay 发生在 World 开始游戏之后，GameState 已经到达，可以直接绑定；保险起见在 Cast 失败分支加一个短延迟重试"} -->
+<!--bpgraph {"cols":4,"rg":56,"title":"PC_Coop · 请求、观战与暂停菜单","nodes":[
+ {"id":"r0","k":"cevent","x":0,"y":0,"t":"Server_SetReady","net":"SR"},
+ {"id":"r1","k":"flow","x":1,"y":0,"t":"Branch","i":["GS.Phase == Waiting"],"ex":["True","False"]},
+ {"id":"r2","k":"set","x":2,"y":0,"t":"Set PS.bReady","s":"PlayerState(PS_Coop)","i":["← true"],"rep":"RN:→ 各端 OnRep_bReady"},
+ {"id":"r3","k":"call","x":3,"y":0,"t":"GM.CheckAllReady","s":"GetGameMode 只在服务器有效","ex":[]},
+ {"id":"q0","k":"cevent","x":0,"y":1,"t":"Server_RequestRestart","net":"SR"},
+ {"id":"q1","k":"flow","x":1,"y":1,"t":"Branch","s":"服务器上 = 主机本人","i":["Phase 是 Won / Lost","AND Is Local Controller"],"ex":["True","False"]},
+ {"id":"q2","k":"call","x":2,"y":1,"t":"GM.RestartMatch","ex":[]},
+ {"id":"v0","k":"cevent","x":0,"y":2,"t":"Client_StartSpectating","net":"CR","o":["Target"]},
+ {"id":"v1","k":"func","x":1,"y":2,"span":2,"t":"Set View Target with Blend","i":["New View Target ← Target","Blend Time ← 0.5"]},
+ {"id":"v2","k":"call","x":3,"y":2,"t":"HUD.ShowSpectating","ex":[]},
+ {"id":"p0","k":"event","x":0,"y":3,"t":"IA_Pause (Started)","s":"PC 自己的输入映射","net":"L"},
+ {"id":"p1","k":"flow","x":1,"y":3,"t":"Branch","i":["IsValid(PauseMenu)"],"ex":["True","False"]},
+ {"id":"p2","k":"func","x":2,"y":3,"t":"Remove PauseMenu","s":"清空引用；Input Mode：Game Only","ex":[]},
+ {"id":"p3","k":"func","x":2,"y":4,"t":"Create + Add WBP_Pause","s":"不调用 Set Game Paused","ex":[]}
+],"l":[["r0","r1"],["r1:True","r2"],["r2","r3"],["q0","q1"],["q1:True","q2"],["v0","v1"],["v1","v2"],["p0","p1"],["p1:True","p2"],["p1:False","p3"]],
+"g":[{"ids":["r0","r1","r2","r3"],"t":"请求准备：客户端 → 服务器，服务器再校验一次阶段","c":"b"},{"ids":["q0","q1","q2"],"t":"请求重开：只允许主机","c":"b"},{"ids":["v0","v1","v2"],"t":"观战：服务器通知拥有者客户端","c":"a"},{"ids":["p0","p1","p2","p3"],"t":"暂停菜单：只是 UI，世界不停","c":"t"}],
+"cap":"<b>图 9-10</b>　PC_Coop：请求、观战与暂停。所有 Server RPC 第一个节点就是校验；Client RPC 只做本机表现"} -->
+
+  <h2>7. 对照：原 Demo 的开局链路为什么“能跑”</h2>
+<!--code:text:原 Demo：从按任意键到开始（关卡蓝图 + GameMode + BP_Player）-->
+关卡蓝图 BeginPlay（每一端）
+  IsLocalController(GetPlayerController(0)) → 创建主菜单、随机机位、播 BGM
+  Server_SetStart(false)                         // 关卡脚本不属于客户端连接：客户端调用被丢弃
+  BP_Player(GetPlayerCharacter(0)).OnGameStart_Dispatch += Start_Logic
+InputKey AnyKey（本地）→ DoOnce → DisableInput → BP_Player.Server_ReportReady()   // 角色上的 Server RPC ✓
+BP_Player.Server_ReportReady [Server] → GM_MyGame.AddReadyPlayer(GetController())
+GM_MyGame.AddReadyPlayer → GameState.ReadyPlayersList.AddUnique(PC)          // 复制数组里存 PC 引用
+  人数到齐 → for PS in PlayerArray: Cast<BP_Player>(PS.GetPawn()).Multicast_StartGame()
+BP_Player.Multicast_StartGame（每端、每个 Pawn 各一次）→ OnGameStart_Dispatch → 关卡蓝图 Start_Logic
+Start_Logic（每一端）：切相机、建 InGame / Pause UI、刷怪点.开始游戏（内部 SwitchHasAuthority）、Server_SetStart(true)
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>原 Demo 的做法</th><th>为什么“能跑”</th><th>哪里会坏</th><th>重做</th></tr>
+    <tr><td>准备 RPC 放在角色上</td><td>角色属于客户端连接 ✓</td><td>—</td><td>放到 PC（不依赖 Pawn 是否存在）</td></tr>
+    <tr><td>GameMode 上的 AddReadyPlayer 标成 Server RPC</td><td>在服务器上调用 = 普通函数</td><td>无意义的标志，误导读者</td><td>普通函数 CheckAllReady</td></tr>
+    <tr><td>“游戏是否开始”是 GameState 上的非复制布尔，由关卡蓝图多播设置</td><td>关卡脚本在客户端能收到多播</td><td>晚加入的人永远是 false，开不了火</td><td>GS.Phase 复制 + OnRep</td></tr>
+    <tr><td>开局表现靠每个 Pawn 一次 Multicast + 委托</td><td>本地角色恰好只绑定了一次</td><td>依赖“哪个 Pawn 绑了委托”，难以推理</td><td>各端 PC 监听 OnPhaseChanged</td></tr>
+    <tr><td>倒计时在 UMG 里 SetTimer 自减</td><td>两端各自能显示</td><td>两端结束时刻不同，各自判定胜利</td><td>复制结束时刻，服务器计时判定</td></tr>
+    <tr><td>任一玩家死亡：Multi_Death 在每端弹“失败”并暂停</td><td>—</td><td>活着的那个人也被判负</td><td>GM 判全灭，死者观战</td></tr>
+    <tr><td>重开：OpenLevel</td><td>单机能用</td><td>客户端点了就断开联机，主机点了踢掉客户端</td><td>servertravel</td></tr>
+    <tr><td>暂停：SetGamePaused</td><td>单机能用</td><td>客户端调用无效（SetPause 在客户端直接返回），主机调用冻结所有人</td><td>只开菜单，世界不停</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>GameInstance：会话与断线，本机专用，这里用 PC(0) 是对的。</li>
+    <li>GM_Coop：HandleStartingNewPlayer（覆写要调父类）、CheckAllReady → StartMatch、SpawnZombie / OnZombieKilled、OnPlayerDied（全灭才输）、EndMatch（只改状态）、RestartMatch（servertravel）。</li>
+    <li>GS / PS：只存复制状态、OnRep 里广播分发器；倒计时复制结束时刻。</li>
+    <li>PC_Coop：BeginPlay 判断 IsLocalController 再建 UI；UI 操作 → Server RPC（先校验）；观战 → Client RPC。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么 EndMatch 里不写“禁用所有玩家输入”？那玩家结算后还能开枪吗？</summary>
+    在服务器上对远端玩家的 Pawn 调 DisableInput 改的是服务器那份的标志，客户端的输入照常处理，等于没写。正确的分工是：服务器在 Server_FireShot 等请求里校验 Phase == Playing（结算后一律拒绝）；客户端在 OnRep_Phase 里切到 UI Only 输入模式、弹出结算界面——本地输入由本地关，结果由服务器挡。
+  </details>
+  <details class="quiz"><summary>自测：Server_RequestRestart 里为什么判断 IsLocalController 就能识别“主机”？</summary>
+    这个 RPC 在服务器上执行，self 是发起请求的那个玩家在服务器上的 PC。主机玩家的 PC 在服务器上是本地的（Player 是 ULocalPlayer），客户端玩家的 PC 在服务器上不是（Player 是 UNetConnection）。所以 IsLocalController 为 true 就说明请求来自主机本人。
+  </details>
+</section>

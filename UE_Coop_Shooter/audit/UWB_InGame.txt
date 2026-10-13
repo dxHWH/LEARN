@@ -1,0 +1,84 @@
+# /Game/UI/UWB_InGame  (WidgetBlueprint)
+ParentClass: /Script/UMG.UserWidget
+
+## Variables
+- 分钟 : int
+- 秒 : int
+
+## UWB_InGame_C Default__UWB_InGame_C
+   分钟 = 3
+   秒 = 1
+   bHasScriptImplementedTick = False
+   bHasScriptImplementedPaint = False
+
+## Custom events / RPC
+- CustomEvent 计算剩余时间   (graph UWB_InGame.EventGraph)
+- CustomEvent 游戏结束   (graph UWB_InGame.EventGraph)
+
+## Graph UWB_InGame.EventGraph
+
+CustomEvent 计算剩余时间():  #70
+  Macro DecrementInt(Value=秒) < >  -> Result  #94
+  Branch(Condition=EqualEqual_IntInt(A=Macro DecrementInt#94.Result, B=0))  #91
+    [true]:
+      Macro DecrementInt(Value=分钟) < >  -> Result  #95
+      秒(秒=59)  #115
+      Branch(Condition=Less_IntInt(A=Macro DecrementInt#95.Result, B=0))  #92
+        [true]:
+          秒(秒=0)  #116
+          分钟(分钟=0)  #117
+          SetGamePaused(bPaused=true)  #55
+          SetGamePaused(bPaused=true)  #51
+          游戏结束()  #52
+          CreateWidget(Class=UWB_WinOrFail_C, OwningPlayer=∅)  -> ReturnValue  #69
+          AddToViewport(self=CreateWidget#69.ReturnValue, ZOrder=0)  #53
+          游戏结果(self=CreateWidget#69.ReturnValue, 游戏是否成功=true)  #54
+
+CustomEvent 游戏结束():  #71
+  K2_ClearTimer(Object=∅, FunctionName="计算剩余时间")  #57
+  PlayAnimation(InAnimation=淡入, StartAtTime=0.000000, NumLoopsToPlay=1, PlayMode=Reverse, PlaybackSpeed=1.000000, bRestoreState=false)  #58
+  Delay(Duration=0.500000)  #59
+  RemoveFromParent()  #60
+
+Event PreConstruct(IsDesignTime):  #77
+
+Event Construct():  #78
+  PlayAnimation(InAnimation=淡入, StartAtTime=0.000000, NumLoopsToPlay=1, PlayMode=Forward, PlaybackSpeed=1.000000, bRestoreState=false)  #50
+  K2_SetTimer(Object=∅, FunctionName="计算剩余时间", Time=1.000000, bLooping=true, bMaxOncePerFrame=false, InitialStartDelay=0.000000, InitialStartDelayVariance=0.000000)  #56
+
+Event Tick(MyGeometry, InDeltaTime):  #79
+  // node #77 Event PreConstruct EnabledState=ENodeEnabledState::Disabled
+  // node #79 Event Tick EnabledState=ENodeEnabledState::Disabled
+
+## Graph UWB_InGame.GetFillColorAndOpacity
+
+FunctionEntry():  #80
+  CastTo BP_Player_C(Object=GetPlayerPawn(PlayerIndex=0))  -> AsBP Player  #72
+    [then]:
+      Return(ReturnValue=LinearColorLerp(A=(R=1.000000,G=0.000000,B=0.000000,A=0.701961), B=(R=0.104616,G=0.296138,B=0.158961,A=0.701961), Alpha=Divide_DoubleDouble(A=CastTo BP_Player_C#72.AsBP Player.HP, B=100.000000)))  #85
+
+## Graph UWB_InGame.GetPercent
+
+FunctionEntry():  #81
+  CastTo BP_Player_C(Object=GetPlayerPawn(PlayerIndex=0))  -> AsBP Player  #73
+    [then]:
+      Return(ReturnValue=Divide_DoubleDouble(A=CastTo BP_Player_C#73.AsBP Player.HP, B=100.000000))  #86
+
+## Graph UWB_InGame.子弹剩余数量绑定
+
+FunctionEntry():  #82
+  Return(ReturnValue=Conv_IntToText(Value=CastTo BP_Player_C(Object=GetPlayerPawn(PlayerIndex=0)).AsBP Player.WeaponRef.总子弹数, bAlwaysSign=false, bUseGrouping=true, MinimumIntegralDigits=1, MaximumIntegralDigits=324))  #87
+
+## Graph UWB_InGame.当前子弹数量绑定
+
+FunctionEntry():  #83
+  Return(ReturnValue=Conv_IntToText(Value=CastTo BP_Player_C(Object=GetPlayerPawn(PlayerIndex=0)).AsBP Player.WeaponRef.当前子弹数量, bAlwaysSign=false, bUseGrouping=true, MinimumIntegralDigits=1, MaximumIntegralDigits=324))  #88
+
+## Graph UWB_InGame.颜色
+
+FunctionEntry():  #84
+  Branch(Condition=Less_IntInt(A=CastTo BP_Player_C(Object=GetPlayerPawn(PlayerIndex=0)).AsBP Player.WeaponRef.当前子弹数量, B=10))  #93
+    [true]:
+      Return(ReturnValue=MakeSlateColor(SpecifiedColor=(R=1.000000,G=0.000000,B=0.000000,A=1.000000), ColorUseRule=UseColor_Specified))  #89
+    [false]:
+      Return(ReturnValue=MakeSlateColor(SpecifiedColor=(R=0.651406,G=0.617207,B=0.473532,A=1.000000), ColorUseRule=UseColor_Specified))  #90

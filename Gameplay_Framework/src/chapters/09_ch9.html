@@ -1,0 +1,425 @@
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>TimerSystem（上）：Slot Map 与 generation 句柄</h1>
+    <p class="lead">从“为什么 List&lt;Timer&gt; 不够”开始，一步步推出 dense 数组、稀疏映射、swap-and-pop、free list 和 generation；再用实测找出这套句柄的四个漏洞。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>不看代码画出 5 个数组的关系，并手推“删除中间元素”后每个数组的变化</li>
+    <li>用具体例子讲清 stale handle、ABA 式槽位复用，以及为什么只有 index 不够</li>
+    <li>知道当前实现的四个句柄漏洞：默认句柄、残留映射/伪造句柄、跨实例、代数溢出</li>
+    <li>能用实测数据回答“数组一定比链表快吗”“swap-and-pop 比 RemoveAt 快多少”</li>
+    <li>能对比 UE 的 FTimerManager / FTimerHandle，并说出 production 版本的设计</li>
+  </ul></div>
+
+  <h2>9.1 这一章解决什么问题</h2>
+  <p>Gameplay 里到处是“过一会儿再做”：技能冷却、Buff 持续时间、刷怪间隔、UI 倒计时、延迟销毁。一个计时器系统至少要满足五个要求：</p>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>要求</th><th>为什么</th></tr>
+    <tr><td>R1</td><td>创建、删除都是 O(1)</td><td>技能和 Buff 会在一帧里大量增删</td></tr>
+    <tr><td>R2</td><td>每帧遍历要快</td><td>所有计时器每帧都要累加时间</td></tr>
+    <tr><td>R3</td><td>外部持有一个“票据”，可以随时暂停、查询、停止</td><td>UI 要查剩余时间，Pawn 死亡要取消自己的计时器</td></tr>
+    <tr><td>R4</td><td>票据过期后不能误操作别人的计时器</td><td>计时器结束后，持有方往往还留着那张票据</td></tr>
+    <tr><td>R5</td><td>回调里可以安全地增删计时器</td><td>回调里停止自己、开启下一个计时器非常常见（第 10 章）</td></tr>
+  </table></div>
+
+  <h2>9.2 从 List&lt;Timer&gt; 出发：朴素方案为什么不够</h2>
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>删除</th><th>遍历</th><th>外部票据</th><th>问题</th></tr>
+    <tr><td><code>List&lt;TimerData&gt;</code> + 下标当票据</td><td>RemoveAt O(n)</td><td>连续，快</td><td>下标</td><td>删一个元素，后面所有元素的下标都变了，票据全部失效</td></tr>
+    <tr><td><code>List&lt;Timer&gt;</code>（class）+ 对象引用当票据</td><td>Remove O(n)</td><td>指针数组，元素散在堆上</td><td>引用</td><td>每个计时器一次堆分配；删除后持有方的引用依然“能用”，只能靠标志位判断；一旦为了省 GC 把 Timer 对象池化，旧引用就会指向别人的计时器（ABA）</td></tr>
+    <tr><td><code>Dictionary&lt;int, TimerData&gt;</code> + 自增 id</td><td>O(1) 均摊</td><td>遍历哈希桶，且 struct 值不能原地修改</td><td>id</td><td>每帧修改 elapsed 都要“读出—改—写回”；遍历中不能修改字典</td></tr>
+    <tr><td><b>Slot Map（本项目）</b></td><td>O(1)</td><td>dense 连续数组 + <code>ref</code> 原地修改</td><td>(index, generation)</td><td>需要维护三份映射；删除打乱顺序</td></tr>
+  </table></div>
+  <p>Slot Map 的核心思路是<strong>一次间接寻址</strong>：外部拿到的不是数据的位置，而是一个“槽位号”；槽位号通过一张表找到数据当前在哪。数据可以随便搬家（为了保持紧凑），只要更新这张表即可。</p>
+  <!--code:text:Handle → 稀疏映射 → 紧凑数组-->
+TimerHandle(Index=1, Generation=0)            ← 外部持有，永远不变
+      │  _generations[1] == 0 ?               ← 版本校验：不相等就是过期票据
+      ▼
+_handleToIndex[1] = 3                         ← 稀疏映射：槽位 1 的数据现在在 dense[3]
+      │
+      ▼
+_timers[3] = { duration, timeElapsed, ... }   ← 紧凑数组：每帧从 0 线性遍历到 _timerCount-1
+      ▲
+_indexToHandle[3] = 1                         ← 反向映射：搬家时用来找到“它属于哪个槽位”
+<!--/code-->
+
+  <h2>9.3 当前项目怎么做：5 个数组 + 3 个辅助结构</h2>
+  <!--code:cs:TimerSystem.cs:14-35 / 44-63 / 80-105（节选）-->
+public readonly struct TimerHandle : IEquatable<TimerHandle> {
+    public readonly int Index;       // 槽位号（不是 dense 下标！）
+    public readonly int Generation;  // 槽位的代数
+    public static readonly TimerHandle Invalid = new TimerHandle(-1, -1);
+}
+public struct TimerData {
+    public float duration, timeElapsed, interval, intervalElapsed;
+    public Action onTrigger, onComplete;              // ← 两个引用类型字段
+    public bool isLoop, isPaused, isUnScaled, isChase;
+    public int timerId;                               // 名字的 hash，0 = 匿名
+}
+private TimerData[] _timers = new TimerData[128];     // ① dense：热数据
+private int _timerCount = 0;
+private readonly List<int> _handleToIndex;            // ② 槽位 → dense 下标
+private readonly List<int> _indexToHandle;            // ③ dense 下标 → 槽位
+private readonly List<int> _generations;              // ④ 槽位 → 当前代数
+private readonly Queue<int> _freeIndices;             // ⑤ 空闲槽位（FIFO）
+private readonly Dictionary<int, TimerHandle> _idToHandle;   // 名字 hash → 句柄
+private readonly List<TimerHandle> _expiredTimersCache;      // 本帧到期
+private readonly List<TimerHandle> _intervalTimersCache;     // 本帧 interval 触发
+<!--/code-->
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="16" class="b sm">外部（Pawn / UI / GameMode）持有</text>
+    <rect x="20" y="36" width="170" height="44" rx="8" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="105" y="63" text-anchor="middle" class="mono b">Handle(1, 0)</text>
+    <text x="250" y="16" class="b sm">稀疏侧：按“槽位号”索引（只增不减）</text>
+    <g class="mono">
+      <text x="444" y="58" class="sm">_generations</text>
+      <text x="444" y="98" class="sm">_handleToIndex</text>
+      <text x="444" y="138" class="sm">_freeIndices</text>
+    </g>
+    <g>
+      <rect x="250" y="40" width="44" height="28" rx="4" fill="#fff" stroke="#94A3B8"/><text x="272" y="59" text-anchor="middle" class="mono">0</text>
+      <rect x="296" y="40" width="44" height="28" rx="4" fill="#FFF4EC" stroke="#C2410C" stroke-width="1.6"/><text x="318" y="59" text-anchor="middle" class="mono b">0</text>
+      <rect x="342" y="40" width="44" height="28" rx="4" fill="#fff" stroke="#94A3B8"/><text x="364" y="59" text-anchor="middle" class="mono">0</text>
+      <rect x="388" y="40" width="44" height="28" rx="4" fill="#fff" stroke="#94A3B8"/><text x="410" y="59" text-anchor="middle" class="mono">0</text>
+      <rect x="250" y="80" width="44" height="28" rx="4" fill="#fff" stroke="#94A3B8"/><text x="272" y="99" text-anchor="middle" class="mono">0</text>
+      <rect x="296" y="80" width="44" height="28" rx="4" fill="#FFF4EC" stroke="#C2410C" stroke-width="1.6"/><text x="318" y="99" text-anchor="middle" class="mono b">1</text>
+      <rect x="342" y="80" width="44" height="28" rx="4" fill="#fff" stroke="#94A3B8"/><text x="364" y="99" text-anchor="middle" class="mono">2</text>
+      <rect x="388" y="80" width="44" height="28" rx="4" fill="#fff" stroke="#94A3B8"/><text x="410" y="99" text-anchor="middle" class="mono">3</text>
+      <text x="250" y="142" class="xs">（空）</text>
+      <g class="xs mono"><text x="272" y="32" text-anchor="middle">0</text><text x="318" y="32" text-anchor="middle">1</text><text x="364" y="32" text-anchor="middle">2</text><text x="410" y="32" text-anchor="middle">3</text></g>
+    </g>
+    <text x="250" y="190" class="b sm">紧凑侧：按“dense 下标”索引（每帧 0..count-1 线性遍历）</text>
+    <g class="mono"><text x="444" y="224" class="sm">_timers</text><text x="444" y="264" class="sm">_indexToHandle</text></g>
+    <g>
+      <rect x="250" y="206" width="44" height="28" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="272" y="225" text-anchor="middle" class="mono b">A</text>
+      <rect x="296" y="206" width="44" height="28" rx="4" fill="#FFF4EC" stroke="#C2410C" stroke-width="1.6"/><text x="318" y="225" text-anchor="middle" class="mono b">B</text>
+      <rect x="342" y="206" width="44" height="28" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="364" y="225" text-anchor="middle" class="mono b">C</text>
+      <rect x="388" y="206" width="44" height="28" rx="4" fill="#EAF0FD" stroke="#2F5BD3"/><text x="410" y="225" text-anchor="middle" class="mono b">D</text>
+      <rect x="250" y="246" width="44" height="28" rx="4" fill="#fff" stroke="#94A3B8"/><text x="272" y="265" text-anchor="middle" class="mono">0</text>
+      <rect x="296" y="246" width="44" height="28" rx="4" fill="#FFF4EC" stroke="#C2410C" stroke-width="1.6"/><text x="318" y="265" text-anchor="middle" class="mono b">1</text>
+      <rect x="342" y="246" width="44" height="28" rx="4" fill="#fff" stroke="#94A3B8"/><text x="364" y="265" text-anchor="middle" class="mono">2</text>
+      <rect x="388" y="246" width="44" height="28" rx="4" fill="#fff" stroke="#94A3B8"/><text x="410" y="265" text-anchor="middle" class="mono">3</text>
+    </g>
+    <path d="M190,54 H242" fill="none" stroke="#C2410C" stroke-width="1.4" marker-end="url(#ao)"/>
+    <text x="196" y="48" class="xs" style="fill:#C2410C">① 比代数</text>
+    <path d="M190,72 C240,74 300,72 316,78" fill="none" stroke="#C2410C" stroke-width="1.4" marker-end="url(#ao)"/>
+    <text x="150" y="100" class="xs" style="fill:#C2410C">② 取 dense 下标</text>
+    <path d="M318,110 V202" fill="none" stroke="#C2410C" stroke-width="1.6" marker-end="url(#ao)"/>
+    <text x="326" y="170" class="xs" style="fill:#C2410C">③ 访问数据</text>
+    <rect x="590" y="40" width="250" height="236" rx="10" fill="#F9FAFB" stroke="#E5E7EB"/>
+    <text x="604" y="64" class="b sm">两套下标，务必分清</text>
+    <text x="604" y="90" class="xs">• 槽位号 Handle.Index：发给外部，</text>
+    <text x="604" y="106" class="xs">  终生不变；复用时代数 +1</text>
+    <text x="604" y="132" class="xs">• dense 下标 realIndex：内部用，</text>
+    <text x="604" y="148" class="xs">  删除别人时会被搬家而改变</text>
+    <text x="604" y="174" class="xs">• 不变式：</text>
+    <text x="604" y="192" class="xs mono">  h2i[i2h[k]] == k  (k &lt; count)</text>
+    <text x="604" y="210" class="xs mono">  i2h[h2i[s]] == s  (s 在用)</text>
+    <text x="604" y="236" class="xs">• 外部只能拿到槽位号，</text>
+    <text x="604" y="252" class="xs">  所以搬家对外部透明</text>
+  </svg>
+  <figcaption><b>图 9-1</b>　Slot Map 的结构：外部句柄 → 比对代数 → 稀疏映射拿到 dense 下标 → 访问紧凑数组。橙色是访问 Handle(1,0) 时经过的格子</figcaption>
+  </figure>
+  <div class="co deep"><span class="h">为什么 dense 用数组 TimerData[] 而不是 List&lt;TimerData&gt;</span>
+    <p>【源码事实】Tick 里写的是 <code>ref TimerData timer = ref _timers[i];</code>，直接改数组里的那一份。如果换成 <code>List&lt;TimerData&gt;</code>，索引器返回的是<strong>副本</strong>，<code>list[i].timeElapsed += dt</code> 连编译都过不了（修改的是临时值）；只能“读出、改、写回”，多两次 40 字节的拷贝。Unity 2022 的 .NET Standard 2.1 里也没有 <code>CollectionsMarshal.AsSpan</code> 可以拿到 List 内部数组。这是“用数组”最实在的理由，比“数组更快”更站得住。</p>
+    <p>【问题】同一个文件里 <code>SetPaused</code> 却用了“读出—改—写回”，风格不统一（功能没错）。</p>
+  </div>
+
+  <h2>9.4 CreateTimer：逐行看分配一个计时器</h2>
+  <!--code:cs:TimerSystem.cs:156-223（节选）-->
+if (!string.IsNullOrEmpty(timerName)) {
+    timerId = timerName.GetHashCode();                       // ① 名字 → int hash
+    if (_idToHandle.TryGetValue(timerId, out var oldHandle)) {
+        if (IsHandleValid(oldHandle)) StopTimer(oldHandle);  // ② 同名覆盖：停掉旧的
+        _idToHandle.Remove(timerId);
+    }
+}
+int handleIndex;
+if (_freeIndices.Count > 0) handleIndex = _freeIndices.Dequeue();   // ③ 优先复用空闲槽
+else {
+    handleIndex = _handleToIndex.Count;                    //    否则新开一个槽
+    _handleToIndex.Add(-1); _indexToHandle.Add(-1); _generations.Add(0);  // ← 代数从 0 开始
+}
+TimerHandle handle = new TimerHandle(handleIndex, _generations[handleIndex]); // ④ 代数在创建时不变
+EnsureCapacity(_timerCount + 1);                          // ⑤ 不够就翻倍 Array.Resize
+_timers[_timerCount] = data; int realIndex = _timerCount; _timerCount++;    // ⑥ 追加到 dense 末尾
+_handleToIndex[handleIndex] = realIndex;                  // ⑦ 建立双向映射
+if (realIndex >= _indexToHandle.Count) _indexToHandle.Add(handleIndex);
+else _indexToHandle[realIndex] = handleIndex;
+if (timerId != 0) _idToHandle[timerId] = handle;          // ⑧ 登记名字
+<!--/code-->
+  <ul>
+    <li><b>③④</b>：代数在<strong>停止时</strong>加一（StopTimer 里），创建时只读取。所以一个从没被回收过的槽位，代数永远是初始值 0——这是 9.8 节默认句柄漏洞的根源。</li>
+    <li><b>⑦</b>【源码事实】<code>_indexToHandle</code> 在新开槽位时就已经 <code>Add(-1)</code>，它的长度永远等于槽位数，而 <code>realIndex &lt; _timerCount ≤ 槽位数</code>，所以 <code>Add</code> 分支实际上<strong>不可达</strong>。这是一个隐含不变式，写成断言比写成分支更清楚。</li>
+    <li><b>②</b>【问题】同名覆盖是<strong>静默</strong>的：调用方不知道旧计时器被停了，也拿不到任何回调；加上 hash 碰撞（9.8.5），两个不同名字也可能互相覆盖。</li>
+  </ul>
+
+  <h2>9.5 StopTimer：Swap-and-Pop 的完整推导</h2>
+  <!--code:cs:TimerSystem.cs:243-283（节选）-->
+if (!IsHandleValid(handle)) return;
+int handleIndex = handle.Index;
+int realIndex = _handleToIndex[handleIndex];              // 要删的数据在哪
+int lastRealIndex = _timerCount - 1;
+if (realIndex != lastRealIndex) {
+    _timers[realIndex] = _timers[lastRealIndex];          // ① 末尾数据填洞（40 字节结构体拷贝）
+    int lastHandleIndex = _indexToHandle[lastRealIndex];  // ② 末尾数据属于哪个槽位
+    _indexToHandle[realIndex] = lastHandleIndex;          // ③ 修反向映射
+    _handleToIndex[lastHandleIndex] = realIndex;          // ④ 修正向映射
+}
+_timerCount--;                                            // ⑤ 逻辑删除末尾（数组不清空）
+_generations[handleIndex]++;                              // ⑥ 旧句柄失效
+_freeIndices.Enqueue(handleIndex);                        // ⑦ 槽位进入 free list
+<!--/code-->
+  <p>下面用构建脚本<strong>按源码逐行复刻</strong> CreateTimer/StopTimer，画出 [A][B][C][D] 删除 B、再新建 E、最后用 B 的旧句柄访问的真实状态：</p>
+  <!--slotmap {"ops":[["c","A"],["c","B"],["c","C"],["c","D"],["s","B"],["c","E"],["old","B"]],"show":[3,4,5,6],"cap":"<b>图 9-2</b>　Swap-and-Pop + free list + generation 的完整过程（构建时由 Python 逐行复刻 TimerSystem.cs 计算）。注意第 5 步：E 复用了 B 的槽位 1，但代数已经是 1，B 的旧句柄 (1,0) 被拒绝"} -->
+  <p>逐步解释第 5 步“Stop B(1,0)”：</p>
+  <ol>
+    <li><code>realIndex = _handleToIndex[1] = 1</code>，<code>last = 3</code>，不是末尾，需要搬家。</li>
+    <li><code>_timers[1] = _timers[3]</code>：D 的数据被拷到 1 号位置。</li>
+    <li><code>_indexToHandle[3] = 3</code>：D 属于槽位 3；于是 <code>_indexToHandle[1] = 3</code>、<code>_handleToIndex[3] = 1</code>。<strong>D 的句柄 (3,0) 没有变，但它现在能找到 dense[1]。</strong></li>
+    <li><code>_timerCount = 3</code>；<code>_generations[1] = 1</code>；槽位 1 入队。</li>
+    <li>灰色格子：<code>_timers[3]</code> 还留着 D 的副本、<code>_handleToIndex[1]</code> 还留着 1——它们<strong>逻辑上无效，但内存里还在</strong>，9.8.2 和第 10 章的 GC 审计都会用到这两个“残留”。</li>
+  </ol>
+  <div class="tbl"><table>
+    <tr><th>对比</th><th>List.RemoveAt（保序）</th><th>Swap-and-Pop</th></tr>
+    <tr><td>时间复杂度</td><td>O(n − i)：后面的元素整体前移</td><td>O(1)：一次拷贝 + 两次映射修改</td></tr>
+    <tr><td>顺序</td><td>保持插入顺序</td><td><strong>打乱</strong>：末尾元素跳到中间</td></tr>
+    <tr><td>映射维护</td><td>后面所有元素的 dense 下标都变了，要改 n − i 条映射</td><td>只改被搬动的那一个元素的两条映射</td></tr>
+    <tr><td>内存行为</td><td>memmove 一大段，大 n 时会扫过很多 cache line</td><td>只碰两个位置</td></tr>
+    <tr><td>什么时候选它</td><td>需要稳定的执行顺序（例如按创建顺序回调、帧同步要求确定顺序且直观）</td><td>顺序无所谓、删除频繁</td></tr>
+  </table></div>
+  <!--bars {"title":"B2 · 随机位置删除一个 40 字节元素（C++ /O2，ns/次）","items":[["N=100 保序 erase",25.7,"o"],["N=100 swap-and-pop",2.6,"g"],["N=1000 保序 erase",82.1,"o"],["N=1000 swap-and-pop",2.7,"g"],["N=10000 保序 erase",1035.2,"o"],["N=10000 swap-and-pop",2.7,"g"],["N=100000 保序 erase",48680.9,"o","48680.9（超出图幅）"],["N=100000 swap-and-pop",4.3,"g"]],"labw":200,"max":2000,"cap":"<b>图 9-3</b>　实测 B2（demos/bench_output.txt）。横轴截断在 2000 ns，N=100000 的保序删除远超图幅。客户端常见的几十到几百个计时器下，二者差距只有几十纳秒——<b>swap-and-pop 的价值在规模上去之后才明显</b>"} -->
+  <div class="co warn"><span class="h">面试注意：swap-and-pop 打乱顺序的后果</span>
+    <p>【实测 E4】按 1、2、3、0（重建）的顺序创建、同一帧到期的四个计时器，回调顺序是 <code>0 1 2 3</code>——和创建顺序不同，因为删除/重建把元素搬到了别的位置。如果业务依赖“先创建先回调”（例如两个 Buff 同帧到期，先移除哪个决定了最终属性），就必须显式排序（例如按 <code>(到期时间, 创建序号)</code>），不能依赖 dense 顺序。</p>
+  </div>
+
+  <h2>9.6 Free List：为什么需要它，为什么是队列</h2>
+  <p>没有 free list，每次 CreateTimer 都要新开槽位，<code>_generations</code> 等三张表只增不减，一个跑了一小时的战斗会积累成千上万个空槽。free list 让槽位被复用，三张稀疏表的长度等于“历史上同时存在的计时器数量峰值”。</p>
+  <p>它和 generation 是一对：<strong>free list 负责复用，generation 负责让复用安全</strong>。复用意味着同一个槽位号先后属于不同的计时器，必须有东西区分“这是第几任主人”。</p>
+  <div class="tbl"><table>
+    <tr><th>空闲结构</th><th>复用顺序</th><th>对句柄安全的影响</th><th>本项目</th></tr>
+    <tr><td>Queue（FIFO）</td><td>最早释放的槽最先复用</td><td>同一槽位两次复用间隔更长；代数自增被分摊到更多槽位，单个槽位回绕更慢</td><td class="yes">✔</td></tr>
+    <tr><td>Stack（LIFO）</td><td>刚释放的槽立刻复用</td><td>热点槽位代数涨得快；但稀疏表访问更集中（cache 友好）</td><td>ObjectPool 用的是它</td></tr>
+    <tr><td>侵入式链表（槽位里存下一个空闲槽号）</td><td>任意</td><td>不需要额外容器，零分配</td><td>常见于 C++ 的 slot map</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">【实测 E5】FIFO 让测试用例变得“依赖执行顺序”</span>
+    <p>仓库里的 <code>Test_GenerationIncrement</code> 和 <code>Test_IndexReuse</code> 断言“停止后再创建，会拿到同一个槽位、代数 +1”。这只在 free list 里<strong>恰好没有其他空闲槽</strong>时成立：预留 0 或 1 个空闲槽时两个用例 PASS，预留 2 个时<strong>都 FAIL</strong>（新计时器拿到的是更早释放的槽）。它们在当前测试顺序下能过，是因为前面的用例恰好没有留下多余的空闲槽——这是“测试依赖全局状态”的典型反面教材（第 20 章）。</p>
+  </div>
+
+  <h2>9.7 Index + Generation：它到底解决了什么</h2>
+  <h3>9.7.1 用 (5,3) → (5,4) 讲清 stale handle</h3>
+  <!--code:text:一个槽位的三任主人-->
+时刻 t0  Timer A 创建     → 拿到槽位 5，_generations[5] = 3 → 句柄 Handle(5, 3)
+         Pawn 把 Handle(5,3) 存进字段 _decayTimer
+时刻 t1  A 到期 / 被停止   → _generations[5]++ → 4，槽位 5 进 free list
+         Pawn 不知道，字段里还是 Handle(5,3)          ← 这就是 stale handle（过期句柄）
+时刻 t2  Timer B 创建     → 从 free list 取到槽位 5 → 句柄 Handle(5, 4)
+时刻 t3  Pawn 死亡，调用 StopTimer(Handle(5,3))
+         IsHandleValid: _generations[5] = 4 ≠ 3 → false → 直接 return，B 安然无恙
+如果没有 generation（句柄只有 Index=5）：
+         StopTimer(5) → 找到槽位 5 → 删掉的是 B ！ —— A 的主人误杀了 B 的计时器
+<!--/code-->
+  <p>这类问题叫做<strong>ABA 式槽位复用</strong>：持有方看到的“槽位 5”从 A 变成了 B（中间经历了“空”），但只看槽位号无法察觉变化。名字借自无锁编程里的 ABA 问题：CAS 只比较值，值从 A 变 B 再变回 A，CAS 以为什么都没发生。两者的共同解法都是<strong>给值附加一个只增不减的版本号</strong>。</p>
+  <div class="tbl"><table>
+    <tr><th>只用这个当票据</th><th>为什么不够</th></tr>
+    <tr><td>dense 下标</td><td>swap-and-pop 一次，别人的 dense 下标就变了</td></tr>
+    <tr><td>槽位号 Index</td><td>槽位会被复用，旧票据会指向新主人（上面的例子）</td></tr>
+    <tr><td>对象引用（C#）</td><td>不会悬垂（GC 保证对象还活着），但会“逻辑过期”：对象已被移出系统，持有方仍可调用它；一旦为了省 GC 池化对象，就退化成槽位复用问题</td></tr>
+    <tr><td>原生指针（C++）</td><td>对象释放后成为悬垂指针（use-after-free）；内存被重新分配给同类对象时还是 ABA</td></tr>
+    <tr><td><b>Index + Generation</b></td><td>Index 定位，Generation 确认“还是不是同一任主人”；代价是每次访问多一次比较</td></tr>
+  </table></div>
+
+  <h3>9.7.2 IsHandleValid 只做了两件事</h3>
+  <!--code:cs:TimerSystem.cs:349-355-->
+public bool IsHandleValid(TimerHandle handle) {
+    if (handle.Index < 0 || handle.Index >= _generations.Count) return false;  // 越界
+    return _generations[handle.Index] == handle.Generation;                    // 代数相等
+}
+<!--/code-->
+  <p>注意它<strong>没有</strong>检查“这个槽位现在是不是正在被使用”。正常情况下这两件事等价：槽位被释放时代数已经 +1，旧句柄的代数必然对不上。但只要能构造出“空闲槽位的当前代数”，校验就会通过——下一节的漏洞 2 就是这个。</p>
+
+  <h2>9.8 这套句柄的四个漏洞（实测）</h2>
+  <h3>9.8.1 漏洞 1：default(TimerHandle) = (0,0) 是合法句柄</h3>
+  <p>C# 的结构体字段默认值是全零。<code>CombatPawn</code> 里写的是 <code>private TimerHandle _decayTimer;</code>，没有初始化为 <code>Invalid</code>。只有被<strong>玩家</strong>附身时才会创建寿命计时器，所以 <strong>AI 肉体的 _decayTimer 一直是 (0,0)</strong>。而代数从 0 开始，第一个被创建的计时器恰好也是 (0,0)。</p>
+  <!--slotmap {"ops":[["c","P"],["c","S"],["h",0,0,"AI 肉体死亡时的 StopTimer(_decayTimer)，_decayTimer = default"]],"show":[2],"cap":"<b>图 9-4</b>　SoulDecay 开局顺序：先为玩家肉体创建寿命计时器 P=(0,0)，再创建刷怪器 S=(1,0)。任意一只 AI 肉体死亡时调用 StopTimer(default)，删掉的是玩家的寿命计时器——UI 显示 DIE，而玩家永远不会因寿命耗尽而死（实测 E1-A）"} -->
+  <p>【实测 E1】三种情况：</p>
+  <ul>
+    <li><b>A（当前 Demo 顺序）</b>：玩家寿命计时器 (0,0) 被 AI 的死亡停掉 → UI 显示 DIE，玩家永不爆炸。</li>
+    <li><b>B（如果先创建刷怪器）</b>：刷怪器变成 (0,0)，任意 AI 死亡后刷怪停止。</li>
+    <li><b>C（槽位 0 被复用过一次之后）</b>：代数已经变成 1，(0,0) 永久失效——<strong>这就是当前 Demo 能侥幸跑通的原因</strong>：玩家第一具肉体寿命 5 秒，第一只 AI 3 秒出现、第二只 6 秒出现，5 秒内不可能发生 AI 之间的碰撞；而玩家一旦夺舍或爆炸，槽位 0 就被回收过了。</li>
+  </ul>
+  <!--slotmap {"ops":[["c","P"],["c","S"],["h",0,0,"default(TimerHandle)"]],"gen0":1,"show":[2],"cap":"<b>图 9-5</b>　最小修复：让代数从 1 开始（构建脚本把初始代数改为 1 重新计算）。此时第一个计时器是 (0,1)，default (0,0) 永远不合法——这也是 UE 的做法：FTimerHandle 的 Handle 为 0 表示“从未被初始化”"} -->
+  <div class="co tip"><span class="h">【改进方案】两层防线</span>
+    <p>① 系统侧：代数从 1 开始，让“全零”永远无效（也可以把 Index 存成 index+1）。② 使用侧：句柄字段一律显式初始化为 <code>TimerHandle.Invalid</code>，停止后立刻重置（CombatPawn.OnUnPossess 里已经这样做了，但声明处漏了）。只改使用侧不够——任何一个新写的类忘了初始化，问题就会回来。</p>
+  </div>
+
+  <h3>9.8.2 漏洞 2：残留映射 + 不检查槽位在用 → 伪造句柄能删掉别人</h3>
+  <p>StopTimer 之后，<code>_handleToIndex[槽位]</code> 没有被重置为 −1（图 9-2 的灰色格子）。如果有人构造出 (空闲槽位, 当前代数) 的句柄，IsHandleValid 会通过，StopTimer 会顺着残留映射去删一个<strong>不属于它</strong>的 dense 元素：</p>
+  <!--slotmap {"ops":[["c","A"],["c","B"],["c","C"],["s","B"],["h",1,1,"伪造：空闲槽位 1 的当前代数"],["c","D"]],"show":[3,4,5],"cap":"<b>图 9-6</b>　实测 E2 的逐步状态：第 5 步伪造句柄 (1,1) 通过校验，按残留映射删掉了 dense[1]（C 的数据），C 的句柄 (2,0) 仍“有效”却指向 count 之外，成了僵尸；同时槽位 1 被第二次压入 free list。第 6 步新建 D 落在 dense[1]，此后用 C 的句柄查询剩余时间读到的是 D 的数据；free list 里还剩一个重复的 1，下一次 Create 会再次拿到槽位 1——两个活着的计时器共用一个槽位"} -->
+  <p>正常使用拿不到这样的句柄，所以这是一个<strong>“防御深度”问题</strong>而不是日常 bug。但它会在两种情况下自然出现：代数回绕（9.8.4）之后，以及跨实例使用句柄（9.8.3）时。面试里说清“IsHandleValid 只比代数，不检查槽位是否在用，停止后也不清映射”，再给出修复——停止时把映射置 −1，校验时额外检查 <code>h2i[index] &gt;= 0 &amp;&amp; h2i[index] &lt; count</code>——就足够了。</p>
+
+  <h3>9.8.3 漏洞 3：句柄不知道自己属于哪个 TimerSystem</h3>
+  <p>TimerSystem 是场景级的懒单例，切场景时会被销毁、在新场景里重新创建，新实例的槽位和代数又从 0 开始。【实测 E10】旧场景里保存下来的句柄 (0,0)，在新场景的 TimerSystem 上 <code>IsHandleValid = true</code>，读到的是新场景第一个计时器的剩余时间；用它 StopTimer 会把新计时器停掉。谁会跨场景持有句柄？挂了 DontDestroyOnLoad 的对象——比如以后真正有职责的 GameInstance。</p>
+  <p>【改进方案】句柄里带一个“系统实例 id”（或者每个实例的代数起点随机化 / 全局递增），校验时一起比较。UE 的做法是序列号由 TimerManager 全局递增分配（<code>LastAssignedSerialNumber</code>），不同槽位之间也不会重号。</p>
+
+  <h3>9.8.4 漏洞 4：generation 溢出</h3>
+  <p>C# 的 <code>int++</code> 默认是 unchecked，到 <code>int.MaxValue</code> 之后回绕成 <code>int.MinValue</code>【实测 E6：-2147483648】。同一个槽位要复用 2³² 次，代数才会回到原值：</p>
+  <div class="tbl"><table>
+    <tr><th>同一槽位每秒复用</th><th>回到同一代数所需时间（实测 E6）</th><th>判断</th></tr>
+    <tr><td>1 次</td><td>约 4.97 万天（136 年）</td><td>可忽略</td></tr>
+    <tr><td>60 次（每帧一次）</td><td>约 829 天</td><td>客户端可忽略；7×24 服务器需要考虑</td></tr>
+    <tr><td>1000 次</td><td>约 49.7 天</td><td>需要处理</td></tr>
+  </table></div>
+  <p>而且回绕后要真出事，还需要“某个持有方恰好在 2³² 次复用之前拿了句柄、一直没用、刚好在回绕那一刻使用”。所以正确的面试回答是：<strong>先估算，再说明风险窗口，最后给方案</strong>——64 位代数；或者像 UE 那样 64 位句柄拆成 24 位下标 + 40 位序列号（2⁴⁰ 次分配才回绕）；或者代数到达上限的槽位直接“退役”不再复用。</p>
+
+  <h3>9.8.5 附：名字 → string.GetHashCode() 的问题</h3>
+  <ul>
+    <li><b>碰撞</b>：32 位 hash 必然有碰撞。两个不同名字 hash 相同时，第二次 CreateTimer 会把第一个“同名覆盖”掉，<code>StopTimer("X")</code> 可能停掉 Y。</li>
+    <li><b>不稳定</b>：.NET 文档明确说字符串 hash 不保证跨进程、跨运行时版本一致（.NET Core 默认按进程随机化）；Mono / IL2CPP 下碰巧稳定，也不能拿去持久化或网络同步。</li>
+    <li><b>0 的歧义</b>：<code>timerId == 0</code> 表示匿名，若某个名字的 hash 恰好是 0，它就无法按名查找。</li>
+    <li><b>注释不符</b>：注释说“使用 Unity 内置的高效 Hash”，代码用的是 <code>string.GetHashCode()</code>。</li>
+  </ul>
+  <p>【改进方案】<code>Dictionary&lt;string, TimerHandle&gt;</code> 直接以字符串为键（字典内部会处理碰撞）；或者把名字收敛成编译期常量 / 枚举 / 预先注册的 id 表。</p>
+
+  <h2>9.9 Dense Array 与 cache：什么时候“数组更快”才成立</h2>
+  <!--bars {"title":"B1 · 每帧 Tick 遍历，单个计时器耗时（C++ /O2，ns）","items":[["N=1000 dense 数组",0.37,"g"],["N=1000 指针·按序分配",0.48,"b"],["N=1000 指针·打乱",0.44,"o"],["N=100000 dense 数组",0.37,"g"],["N=100000 指针·按序分配",0.61,"b"],["N=100000 指针·打乱",1.00,"o","1.00"],["N=1000000 dense 数组",0.90,"g"],["N=1000000 指针·按序分配",3.66,"b"],["N=1000000 指针·打乱",6.07,"o","6.07（6.7×）"]],"labw":200,"cap":"<b>图 9-7</b>　实测 B1（demos/bench_output.txt）：结构体 40 字节，与 C# TimerData 字段一致。1000 个计时器（39 KB，装得进 L2）时三种布局几乎没差别；10 万个（3.9 MB）开始拉开；100 万个（39 MB，超出缓存）时打乱的指针数组慢 6.7 倍"} -->
+  <p>所以“数组一定比链表快”是错的说法。正确的说法有三个前提：</p>
+  <ol>
+    <li><b>访问模式是顺序遍历</b>：Tick 从 0 扫到 count−1，硬件预取器能提前把下一批 cache line 拉进来。随机按句柄访问单个计时器时，dense 数组和指针数组都是一次（或两次）随机访问，差别不大。</li>
+    <li><b>数据量超过缓存</b>：数据全部在 L1/L2 时，指针追逐（pointer chasing）的代价被缓存掩盖了。几百个计时器的客户端场景，布局带来的差异是纳秒级的。</li>
+    <li><b>对象确实是散的</b>：C# 的 class 对象分配在托管堆上，刚分配时往往是连续的（“按序”那一列）；长时间运行、分配释放交错后才会散开。Unity 用的 Boehm GC <strong>不压缩（non-moving）</strong>，散开之后不会被整理回来——这是“托管语言里也要关心数据布局”的理由。</li>
+  </ol>
+  <div class="co deep"><span class="h">更进一步：热冷分离</span>
+    <p>每帧 Tick 真正要读写的只有 <code>timeElapsed / duration / isPaused / interval...</code>，两个委托引用只在触发时才用到，却占了 40 字节里的 16 字节。把回调挪到另一个按 dense 下标对齐的数组（Structure of Arrays 的思路），Tick 每个 cache line 能装下更多计时器；顺带让热数据数组不含引用，GC 标记时可以跳过（第 10 章）。</p>
+  </div>
+
+  <h2>9.10 交互实验：自己操作一次 Slot Map</h2>
+  <p>建议操作：新建 A、B、C、D → 选中 B 停止（看 swap-and-pop）→ 再新建 E（看槽位复用、代数 +1）→ 用 B 的旧句柄再停一次（被拒绝）→ 点“StopTimer(default)”（删掉了 A！）→ 勾选“generation 从 1 开始”后重复一遍。</p>
+  <div class="lab slotlab glab" id="lab-slot"></div><!--/lab-->
+
+  <h2>9.11 替代方案：为什么不是堆、时间轮或协程</h2>
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>插入</th><th>删除</th><th>每帧 Tick</th><th>适合</th></tr>
+    <tr><td><b>Slot Map + 线性扫描（本项目）</b></td><td>O(1)</td><td>O(1)</td><td>O(N)：所有计时器都累加一次</td><td>计时器数量中等（几百～几千）、需要逐帧累加 elapsed、需要暂停/scaled 混用</td></tr>
+    <tr><td>小顶堆（按到期时间）</td><td>O(log N)</td><td>O(log N)（需要句柄→堆位置的映射）</td><td>O(K log N)：只处理到期的 K 个</td><td>大量长计时器，大多数帧没有到期；UE FTimerManager 就是这种</td></tr>
+    <tr><td>（分层）时间轮</td><td>O(1)</td><td>O(1)</td><td>O(当前格子里的计时器)</td><td>海量、精度固定（按 tick 粒度）的计时器：Linux 内核定时器、Netty HashedWheelTimer、服务器</td></tr>
+    <tr><td>协程 <code>WaitForSeconds</code></td><td>分配 IEnumerator 对象</td><td>StopCoroutine</td><td>由 Unity 调度</td><td>写起来简单；但绑定 MonoBehaviour 生命周期（物体失活即停止），没有统一暂停/查询剩余时间</td></tr>
+    <tr><td><code>Invoke / InvokeRepeating</code></td><td>按方法名字符串</td><td>CancelInvoke</td><td>由 Unity 调度</td><td>原型；没有句柄、不能传参、拼写错误到运行时才暴露</td></tr>
+  </table></div>
+  <p>线性扫描的另一个好处常被忽略：<strong>scaled / unscaled、暂停这些“时间流速不同”的计时器可以放在一起</strong>。堆按绝对到期时间排序，一旦某个计时器暂停或时间缩放改变，它的到期时间就要重算并调整堆。UE 的做法是把暂停的计时器移到单独的 <code>PausedTimerSet</code>。</p>
+
+  <h2>9.12 与 Unreal 的 FTimerManager / FTimerHandle 对比</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>本项目 TimerSystem</th><th>UE FTimerManager【扩展知识】</th></tr>
+    <tr><td>数据存储</td><td>dense 数组 + 三张稀疏表</td><td><code>TSparseArray&lt;FTimerData&gt; Timers</code>（带空洞的数组 + 空闲链表）</td></tr>
+    <tr><td>调度</td><td>每帧线性扫描所有计时器</td><td><code>ActiveTimerHeap</code>：按 ExpireTime 排序的堆，只弹出到期的；另有 <code>PendingTimerSet</code>（本帧新加的）、<code>PausedTimerSet</code></td></tr>
+    <tr><td>句柄</td><td>(int Index, int Generation)，代数从 0 开始</td><td><code>uint64 Handle</code> = 24 位下标 + 40 位序列号；序列号由管理器全局递增；Handle == 0 表示无效</td></tr>
+    <tr><td>时间</td><td>每个计时器累加 float elapsed</td><td>管理器维护 double <code>InternalTime</code>，计时器存绝对到期时间，不累加误差</td></tr>
+    <tr><td>循环计时器掉帧</td><td>每帧最多补 1 次（第 10 章）</td><td>默认会在一帧里连续补调多次；UE 5.4 起可设 <code>bMaxOncePerFrame</code></td></tr>
+    <tr><td>回调对象销毁</td><td>不感知，回调照样调用</td><td>委托绑定 UObject 时，对象失效后计时器不会再执行；还有 <code>ClearAllTimersForObject</code></td></tr>
+  </table></div>
+  <p>对比的落点：<strong>思想一致（间接句柄 + 版本号），工程取舍不同</strong>。UE 需要支撑成千上万的计时器和长时间运行的服务器，所以用堆 + 64 位句柄 + 绝对时间；本项目面向单机 Demo，线性扫描简单直观。</p>
+
+  <h2>9.13 Production 版本会怎么设计（只讲思路）</h2>
+  <ol>
+    <li><b>句柄</b>：64 位，包含“系统实例 id + 槽位 + 代数”，代数从 1 开始；停止时清空映射；校验时同时检查“槽位在用”。</li>
+    <li><b>名字</b>：用 <code>Dictionary&lt;string, Handle&gt;</code> 或预注册 id，绝不用 hash 当唯一键；同名覆盖要么报错、要么返回旧句柄让调用方决定。</li>
+    <li><b>存储</b>：热冷分离；停止时清掉回调引用（第 10 章 E13）。</li>
+    <li><b>调度</b>：少量计时器线性扫描；数量大时按“到期时间”建堆或用时间轮；暂停的计时器移出活动集合。</li>
+    <li><b>所有者</b>：创建时登记 owner，owner 销毁时批量取消（对应 UE 的 ClearAllTimersForObject），避免回调到已销毁的 MonoBehaviour。</li>
+    <li><b>时机</b>：由 World / GameLoop 显式调用 Tick，固定在 Actor Tick 之前或之后，而不是自己 Update。</li>
+  </ol>
+
+  <h2>9.14 面试追问树</h2>
+  <!--code:text:追问树 · TimerSystem 数据结构（模拟真实面试的连续追问）-->
+Q9-1 计时器为什么不用 List<Timer>？
+ └── Q9-2 删除复杂度是多少？
+      └── Q9-3 你说 O(1)，但 TimerHandle 怎么找到实际元素？
+           └── Q9-4 Swap-and-Pop 以后，被搬走那个元素的 Handle 不就失效了吗？
+                └── Q9-5 那你怎么维护映射？
+                     └── Q9-6 slot 被新 Timer 复用怎么办？
+                          ├── Q9-7 为什么 generation 能解决？这是不是 ABA？
+                          │    └── Q9-8 generation 溢出怎么办？
+                          └── Q9-9 default(TimerHandle) 是合法句柄吗？        ← 压力题：项目里的真 bug
+                               └── Q9-10 还有别的方式能骗过 IsHandleValid 吗？
+Q9-11 数组一定比链表快吗？                                                     ← 性能题
+ └── Q9-12 那你为什么不用 Dictionary<int, Timer>？                            ← 替代设计
+Q9-13 为什么不用小顶堆？UE 用的是什么？                                        ← 替代设计 / UE 对比
+Q9-14 string.GetHashCode 能当唯一 ID 吗？                                      ← 质疑
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q9-1 → Q9-5　为什么不用 List&lt;Timer&gt;？句柄怎么找到元素？搬家后怎么维护？</div>
+    <p><b>L1 · 30 秒</b>　List 删除中间元素是 O(n)，而且下标会变，没法当票据。我用 Slot Map：外部拿“槽位号 + 代数”，槽位号经稀疏映射找到 dense 数组位置；删除时把末尾元素搬进空洞，只改被搬那个元素的两条映射，整体 O(1)。</p>
+    <p><b>L2 · 正常回答</b>　有三张表：<code>_handleToIndex</code>（槽位 → dense 下标）、<code>_indexToHandle</code>（dense 下标 → 槽位）、<code>_generations</code>（槽位 → 代数）。删除 B 时：用 B 的槽位查到它在 dense[1]；把 dense[3] 的 D 拷过来；用反向表查到 D 属于槽位 3，于是把 <code>_handleToIndex[3]</code> 改成 1、<code>_indexToHandle[1]</code> 改成 3；count 减一。D 的句柄 (3,0) 没变，但现在指向 dense[1]——外部完全无感。</p>
+    <p><b>L3 · 深入</b>　反向表是 swap-and-pop 必需的：没有它，搬动末尾元素时不知道该改哪个槽位的映射，只能 O(n) 搜索。维护的不变式是 <code>h2i[i2h[k]] == k</code>（k 在 count 内）。代价是删除会打乱顺序，同帧回调顺序不再等于创建顺序（实测 E4）。</p>
+    <p><b>L4 · 面试官攻击</b>　“你这三张表都是 List&lt;int&gt;，每次访问都有边界检查和间接寻址，真的比直接 List.RemoveAt 快吗？” → <b>修正回答</b>：几十个计时器时确实差不多（实测 N=100 时两者分别约 26 ns 和 3 ns，都可以忽略）；swap-and-pop 的价值在规模上去之后——N=1 万时保序删除约 1 µs、N=10 万时约 49 µs，而 swap-and-pop 始终约 3～4 ns。更重要的是语义：RemoveAt 会让所有后续元素的位置改变，句柄体系要么跟着改 n 条映射，要么根本做不了。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q9-6 / Q9-7　槽位被复用怎么办？generation 为什么能解决？是不是 ABA？</div>
+    <p><b>L1</b>　槽位回收时代数加一；句柄里存着创建时的代数，校验时不相等就拒绝。比如 A 的句柄是 (5,3)，A 停止后槽位 5 的代数变成 4，B 复用槽位 5 拿到 (5,4)；A 的主人再用 (5,3) 访问会被拒绝，不会误伤 B。</p>
+    <p><b>L2</b>　这和无锁编程里的 ABA 是同一类问题：只比较“位置/值”无法察觉中间发生过的变化，所以给它附加一个单调递增的版本号。区别在于：无锁 ABA 是并发下的竞态，这里是单线程里“持有方的信息过期”。</p>
+    <p><b>L3</b>　严格说，generation 防住的是“旧句柄访问新主人”；它不能防住“伪造句柄”，因为 IsHandleValid 只比代数、不检查槽位是否在用，停止后映射也没清（实测 E2）。</p>
+    <p><b>L4 攻击</b>　“那为什么不直接用自增的全局 id 当句柄，再用 Dictionary 找？” → 也可以，这就是“id + 哈希表”方案：id 全局唯一天然没有 ABA，代价是每次访问一次哈希查找、遍历时要走哈希桶。Slot Map 用数组下标代替哈希，用代数代替“全局唯一”，是用一点安全余量换常数级性能。UE 的 FTimerHandle 其实是两者结合：下标 + 全局递增的序列号。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q9-8　generation 溢出怎么办？</div>
+    <p><b>L2</b>　先估算：32 位代数要同一个槽位复用 2³² 次才回绕，每帧复用一次也要约 829 天；然后指出风险窗口——还需要有人恰好持有一个 2³² 次之前的句柄。所以客户端可以接受。</p>
+    <p><b>L3</b>　要彻底解决有三种做法：64 位代数；UE 式 24 位下标 + 40 位序列号；代数到上限的槽位退役不再进入 free list（代价是槽位数缓慢增长）。另外要注意 C# 默认 unchecked，<code>int.MaxValue + 1</code> 会静默变成负数，不会抛异常。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q9-9　default(TimerHandle) 是合法句柄吗？（压力题）</div>
+    <p><b>L1</b>　在我的实现里是，这是我复盘时发现的 bug。代数从 0 开始，第一个计时器的句柄就是 (0,0)，而结构体字段的默认值也是 (0,0)。</p>
+    <p><b>L2</b>　Demo 里正好踩到：CombatPawn 的 <code>_decayTimer</code> 没初始化成 Invalid，AI 肉体从不创建计时器，死亡时 <code>StopTimer(_decayTimer)</code> 实际是 StopTimer(0,0)，会停掉槽位 0 上的计时器。我把逻辑移植出来测过：按 Demo 的创建顺序，被停掉的是玩家的寿命计时器。当前参数下不会触发，是因为槽位 0 在第一次碰撞前一定已经被回收过一次。</p>
+    <p><b>L3</b>　修复分两层：系统侧代数从 1 开始，让全零永远无效（UE 的 FTimerHandle 也是 0 表示无效）；使用侧句柄字段显式初始化为 Invalid。</p>
+    <p><b>L4 攻击</b>　“那你的测试为什么没发现？” → 测试里的句柄都来自 CreateTimer 的返回值，没有“从未赋值的句柄”这种用例；而且测试是运行时脚本，没有覆盖 Demo 的组合流程。这类 bug 需要“默认值 / 未初始化”的边界用例，我会补成 EditMode 单元测试。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q9-11　数组一定比链表快吗？</div>
+    <p><b>L1</b>　不一定。顺序遍历、数据量超过缓存、对象在堆上分散，这三个条件同时成立时，连续数组才明显更快。</p>
+    <p><b>L2</b>　我用 C++ 按 TimerData 的布局测过：1000 个计时器时，dense 数组、按序分配的指针数组、打乱的指针数组每个元素都是 0.4 ns 左右，没有区别；100 万个时分别是 0.9、3.7、6.1 ns。客户端里同时存在的计时器一般是几百个，布局不是瓶颈，选数组更多是为了 <code>ref</code> 原地修改、零额外分配和 swap-and-pop。</p>
+    <p><b>L3</b>　C# 里还要加一层：class 对象之间是引用，Unity 的 Boehm GC 不压缩堆，长时间运行后对象会越来越散；而 struct 数组天然连续，并且只占一次分配。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q9-13　为什么不用小顶堆？</div>
+    <p><b>L2</b>　堆的优势是 Tick 只处理到期的计时器，适合“很多长计时器、大多数帧没有到期”的场景，UE 就是按到期时间建堆。我的场景计时器少、每帧都要累加 elapsed（因为支持暂停、scaled/unscaled 混用、interval），线性扫描更简单。</p>
+    <p><b>L4 攻击</b>　“那如果计时器多到 10 万个呢？” → 那我会把“绝对到期时间”作为存储方式（不再逐个累加），按时间流速分组（scaled 一组、unscaled 一组，暂停的移出），每组一个堆或时间轮；句柄体系不用变，堆里存句柄即可。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“数组肯定比 List 快，因为数组是连续内存。”</p>
+    <p><b>问题</b>：C# 的 <code>List&lt;T&gt;</code> 内部就是数组，也是连续的；真正的差别在于 List 的索引器返回副本，不能 <code>ref</code> 原地修改 struct。至于“连续内存更快”，要看访问模式和数据规模（实测 B1）。</p>
+    <p><b>更好的回答</b>：“在每帧线性遍历、需要原地修改 struct 的场景下，裸数组可以用 ref 直接改元素，避免 List 索引器的副本拷贝；连续布局在数据量超过缓存时能减少 pointer chasing，但几百个计时器的规模下这个收益很小。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“generation 解决了所有句柄安全问题。”</p>
+    <p><b>问题</b>：它只防“旧句柄访问新主人”。默认句柄、伪造句柄、跨实例句柄、代数回绕都不在它的防御范围内（9.8 节四个漏洞）。</p>
+    <p><b>更好的回答</b>：“generation 解决的是槽位复用带来的 stale handle；另外还需要让全零句柄无效、停止时清映射并检查槽位在用、句柄带系统实例 id，才能覆盖其他边界。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ③</span>
+    <p><b>错误</b>：“C# 有 GC，不会有悬垂引用，所以不需要 generation。”</p>
+    <p><b>问题</b>：GC 只保证内存不被提前释放，不保证“逻辑上它还是你的那个计时器”。本项目的句柄是值（槽位号），不是引用，复用后照样指向新主人；就算用 class 引用，一旦池化也是同样的问题。</p>
+  </div>
+
+  <h2>9.15 发散：同一个思想在别处的样子</h2>
+  <div class="cards">
+    <div class="card"><div class="t">ECS 的 Entity</div><p>Unity Entities 的 Entity 是 (Index, Version)；实体销毁后 Version+1，旧 Entity 查询组件会失败。EnTT 把版本号编码在 32 位 id 的高位。和 TimerHandle 一模一样。</p></div>
+    <div class="card"><div class="t">UE 的弱指针</div><p><code>FWeakObjectPtr</code> 存的是 ObjectIndex + ObjectSerialNumber：对象数组的槽位被复用后序列号不同，弱指针就失效。面试问“TWeakObjectPtr 怎么知道对象没了”，答案就是 generation。</p></div>
+    <div class="card"><div class="t">渲染资源句柄</div><p>纹理、缓冲区、渲染目标常放在资源池里，上层只拿“池下标 + 代数”的句柄；资源被异步释放、槽位复用后，旧句柄不会误用新资源。</p></div>
+    <div class="card"><div class="t">操作系统：fd 与 PID 复用</div><p>close 一个文件描述符后，下一次 open 会拿到最小的空闲号——持有旧 fd 的线程会写错文件。PID 回绕复用导致“kill 错进程”，Linux 后来引入 pidfd 解决。都是“只有 index 没有 generation”的事故。</p></div>
+    <div class="card"><div class="t">无锁编程的 ABA</div><p>无锁栈 pop 时 CAS 比较栈顶指针，若栈顶节点被弹出又被重新压入，CAS 误以为没变。解法：指针旁边带一个计数（tagged pointer / 双字 CAS），本质就是 generation。</p></div>
+    <div class="card"><div class="t">数据库乐观锁</div><p>行上带 version 字段，更新时 <code>WHERE version = 旧值</code>，被别人改过就失败重试。也是“用版本号检测中间发生过的变化”。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>五个数组：<strong>dense _timers</strong>、<strong>_handleToIndex</strong>、<strong>_indexToHandle</strong>、<strong>_generations</strong>、<strong>_freeIndices（FIFO）</strong>；两套下标：槽位号对外不变，dense 下标对内会变。</li>
+    <li>删除 = 末尾填洞 + 修被搬元素的两条映射 + count−1 + 代数+1 + 槽位入队；O(1)，<strong>不保序</strong>（实测 E4）。</li>
+    <li>generation 防的是<strong>旧句柄访问新主人</strong>（ABA 式复用）；防不住：<strong>默认句柄 (0,0)</strong>（E1）、<strong>残留映射 + 伪造句柄</strong>（E2）、<strong>跨实例</strong>（E10）、<strong>回绕</strong>（E6，829 天/每帧复用）。</li>
+    <li>“数组更快”有前提：顺序遍历 + 超出缓存 + 对象分散；1000 个时无差别，100 万个时打乱指针慢 6.7×（B1）。用数组的实在理由是 <strong>ref 原地改 struct</strong>。</li>
+    <li>UE：TSparseArray + 按到期时间的堆 + 64 位句柄（24 位下标 + 40 位序列号，0 = 无效）+ double 绝对时间。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：dense = [A,B,C,D]（槽位 0..3，代数全 0），依次 Stop(C)、Stop(A)、Create(E)，写出最后的 dense、_handleToIndex、_generations、_freeIndices 和 E 的句柄。</summary><p>Stop(C)：C 在 dense[2]，末尾 D 填过来 → dense=[A,B,D]，h2i[3]=2，gen[2]=1，free=[2]。Stop(A)：A 在 dense[0]，末尾 D(dense[2]) 填过来 → dense=[D,B]，h2i[3]=0，i2h=[3,1]，gen[0]=1，free=[2,0]。Create(E)：从队头取槽位 2，代数 1 → 句柄 (2,1)，放到 dense[2] → dense=[D,B,E]，h2i=[0(残留),1,2,0]，gen=[1,0,1,0]，free=[0]。</p></details>
+  <details class="quiz"><summary>自测 2：为什么 swap-and-pop 必须有反向映射 _indexToHandle？</summary><p>搬动末尾元素时，需要知道它属于哪个槽位，才能改那个槽位的 _handleToIndex。没有反向映射只能遍历所有槽位查找，删除退化为 O(槽位数)。</p></details>
+  <details class="quiz"><summary>自测 3：只把 CombatPawn 的 _decayTimer 初始化为 Invalid，算不算修好了默认句柄问题？</summary><p>只修了这一个调用点。任何其他类声明 TimerHandle 字段时忘记初始化，问题都会重现；根本修复是系统侧让代数从 1 开始，使全零句柄永远无效。两层都做才稳妥。</p></details>
+</section>

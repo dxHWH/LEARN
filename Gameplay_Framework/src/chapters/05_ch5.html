@@ -1,0 +1,252 @@
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>GameMode / GameState：规则、权威与可观察状态</h1>
+    <p class="lead">裁判和计分板为什么要分成两个对象；“Authority”在一个单机项目里到底意味着什么；为什么场景里放两个 GameMode 并不会“忽略后注册的裁判”；以及名叫 ServerWorldTimeSeconds 的字段，离“服务器世界时间”有多远。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清 GameModeBase / GameMode / GameStateBase / GameState 四个类各自负责什么，以及与 UE 的对应关系</li>
+    <li>逐步讲出开局流程：注册裁判 → 反射生成计分板 → 担保注册 → 比赛状态机</li>
+    <li>区分“注册时的权威校验”和“写入路径的权威收口”，并列出项目里绕过 GameMode 的写入口</li>
+    <li>用实测说明两个 GameMode 并存时会发生什么、ServerWorldTimeSeconds 会偏多少</li>
+    <li>回答“为什么 UI 读 GameState 不读 GameMode”，并延伸到状态同步、帧同步与 PlayerState</li>
+  </ul></div>
+
+  <h2>5.1 这一章解决什么问题</h2>
+  <p>“GameMode 和 GameState 的区别”是 UE 面试的高频题，标准答案是“GameMode 只在服务器、管规则；GameState 复制给所有人、存状态”。但这个项目是单机，面试官一定会追问：<strong>单机里为什么还要分？你说 GameMode 是“权威”，权威体现在哪里？</strong>本章用源码回答：分开的价值是真实的，但当前实现里“权威”只体现在注册环节，写入路径并没有收口。</p>
+
+  <h2>5.2 四个类的分工</h2>
+  <div class="tbl"><table>
+    <tr><th>类</th><th>职责（源码事实）</th><th>UE 对应</th></tr>
+    <tr><td><code>AGameModeBase</code></td><td>BeginPlay 时向 World 注册为裁判 → InitGameState → StartPlay；持有 DefaultPawnClass / DefaultControllerClass；空的 EndMatch</td><td>AGameModeBase：只在服务器，负责生成玩家、选择 Pawn 类、登录流程</td></tr>
+    <tr><td><code>AGameMode</code></td><td>用 <code>GameStateClass</code>（Type）反射生成 GameState 并担保注册；StartPlay → WaitingToStart；StartMatch → InProgress；EndMatch → WaitingPostMatch</td><td>AGameMode：在 GameModeBase 上增加比赛状态机</td></tr>
+    <tr><td><code>AGameStateBase</code></td><td>每帧累加 <code>ServerWorldTimeSeconds</code></td><td>AGameStateBase：复制给所有客户端；提供与服务器同步的世界时间</td></tr>
+    <tr><td><code>AGameState</code></td><td><code>EMatchState</code> 四个状态；<code>SetMatchState</code> 改状态并通过 EventSystem 广播；OnDestroy 时向 World 注销</td><td>AGameState：复制 MatchState，客户端据此切换 UI</td></tr>
+  </table></div>
+  <p>UE 的 MatchState 有六个：EnteringMap、WaitingToStart、InProgress、WaitingPostMatch、LeavingMap、Aborted。项目实现了前四个，没有“离开地图”和“异常中止”。两个 Demo 的用法：</p>
+  <div class="tbl"><table>
+    <tr><th>Demo</th><th>GameMode 子类做了什么</th><th>GameState 子类</th></tr>
+    <tr><td>GamePlayTest2</td><td>StartPlay 里建 3 秒热身计时器 → StartMatch 生成灰色方块 → 收到 UI 请求事件后 Possess</td><td>直接用 AGameState；DemoMatchUI 监听 MatchStateChanged 显示阶段</td></tr>
+    <tr><td>SoulDecay</td><td>BeginPlay 里直接 StartMatch、生成玩家并 Possess、建循环刷怪计时器；EndMatch 停刷怪</td><td>SurvivalGameState：三个阵营的分数 + AddScore + 开局广播 0 分；<strong>没有人监听 MatchStateChanged</strong></td></tr>
+  </table></div>
+
+  <h2>5.3 开局流程逐步看</h2>
+  <!--code:cs:AGameModeBase.cs:18-26 + AGameMode.cs:16-35（节选）-->
+// AGameModeBase
+public override void BeginPlay()
+{
+    base.BeginPlay();
+    World.RegisterGameMode(this);   // “一定要先注册自身，再去注册 GameState”
+    InitGameState();
+    StartPlay();
+}
+// AGameMode
+override protected void InitGameState()
+{
+    Type stateType = GameStateClass;                                   // 子类 override：typeof(SurvivalGameState)
+    GameObject gsObj = new GameObject($"GameState_{GetType().Name}");
+    base.GameState = gsObj.AddComponent(stateType) as AGameState;      // 反射版 AddComponent
+    if (World.HasInstance) World.Instance.RegisterGameState(this, GameState);   // 裁判亲自担保
+}
+<!--/code-->
+  <!--code:text:SoulDecay 开局（帧 0，World.Update 里 SurvivalGameMode.BeginPlay）-->
+SurvivalGameMode.BeginPlay
+ └ AGameModeBase.BeginPlay
+    ├ World.RegisterGameMode(this)          → AuthorityGameMode = this
+    ├ AGameMode.InitGameState               → new GameObject + AddComponent(SurvivalGameState)（Awake 立即执行）
+    │   └ World.RegisterGameState(this, gs) → authority == AuthorityGameMode ✓ → World.GameState = gs
+    └ AGameMode.StartPlay                   → gs.SetMatchState(WaitingToStart) → Trigger(MatchStateChanged)
+ ├ StartMatch()                             → gs.SetMatchState(InProgress)     → Trigger(MatchStateChanged)
+ ├ 生成玩家肉体 + 灵魂，Possess
+ └ CreateTimer("AISpawner", 3 s, loop)
+帧 1：SurvivalGameState 才 BeginPlay（广播三个阵营 0 分），才开始累加 ServerWorldTimeSeconds
+<!--/code-->
+  <p>三个容易被问到的细节：</p>
+  <ul>
+    <li><b>为什么“先注册自己”</b>：RegisterGameState 会检查 <code>authority == AuthorityGameMode</code>，裁判没登记，计分板就会被当成越权注册而销毁。顺序依赖写在注释里，没有写在代码结构里。</li>
+    <li><b>GameState 在 BeginPlay 之前就被改了状态</b>：EnteringMap → WaitingToStart → InProgress 都发生在帧 0，而 GameState 自己的 BeginPlay 在帧 1。和第 2 章的“先 Possess 后 BeginPlay”是同一个现象。</li>
+    <li><b>同一帧连发两次状态事件</b>：如果有 UI 监听，它会在派发时依次收到 WaitingToStart 和 InProgress，中间状态只停留了“零帧”。SoulDecay 没有监听者，EventSystem 的 Trigger 在找不到监听者时直接 return，这两个事件根本没进队列。</li>
+  </ul>
+
+  <h2>5.4 GameStateClass：Type + 反射，以及三个同名属性</h2>
+  <h3>5.4.1 用 Type 指定类，没有编译期约束</h3>
+  <p><code>public virtual Type GameStateClass =&gt; typeof(AGameState);</code> 返回的是任意 <code>System.Type</code>。如果子类写成了一个不继承 AGameState 的类型，<code>AddComponent(stateType) as AGameState</code> 会得到 null（不是 MonoBehaviour 的类型则直接抛异常），随后 RegisterGameState 在打印日志时访问 <code>newGameState.GetType()</code> 抛空引用。<strong>错误要到运行时才暴露</strong>。</p>
+  <div class="tbl"><table>
+    <tr><th>写法</th><th>约束发生在</th><th>例子</th></tr>
+    <tr><td><code>Type</code> + 反射（本项目）</td><td>运行时</td><td><code>override Type GameStateClass =&gt; typeof(SurvivalGameState)</code></td></tr>
+    <tr><td>泛型参数 + where 约束</td><td>编译期</td><td>GameMode 带一个“TState : AGameState”的类型参数</td></tr>
+    <tr><td>UE 的 <code>TSubclassOf&lt;AGameStateBase&gt;</code></td><td>编辑器选择时 + 编译期</td><td>GameMode 的 GameStateClass 属性，只能选派生类</td></tr>
+  </table></div>
+  <h3>5.4.2 三个同名属性：<code>new</code> 隐藏而不是 override</h3>
+  <!--code:cs:三层 GameState 属性-->
+AGameModeBase      public AGameStateBase      GameState { get; protected set; }
+AGameMode          public new AGameState      GameState => base.GameState as AGameState;
+SurvivalGameMode   public new SurvivalGameState GameState => base.GameState as SurvivalGameState;
+<!--/code-->
+  <p><code>new</code> 是“隐藏”：调用哪个属性取决于引用的<strong>静态类型</strong>，不是对象的实际类型。<code>World.Instance.AuthorityGameMode.GameState</code> 的静态类型是 AGameModeBase，拿到的永远是 AGameStateBase。项目里大家都改用 <code>World.Instance.GameState is SurvivalGameState gs</code> 来取，这又引出了第二个问题：World 和 GameMode 各存了一份 GameState 引用（5.5 节）。UE 用模板函数 <code>GetGameState&lt;T&gt;()</code> 解决“按需向下转型”，只有一份存储。</p>
+
+  <h2>5.5 “Authority”：校验了注册，没有收口写入</h2>
+  <p>World 的字段名是 <code>AuthorityGameMode</code>，RegisterGameState 里有“越权警告”。但看一下 SoulDecay 里所有改变比赛结果的地方：</p>
+  <div class="tbl"><table>
+    <tr><th>改了什么</th><th>谁改的</th><th>代码位置</th><th>经过 GameMode 吗</th></tr>
+    <tr><td>玩家夺舍得分</td><td>SoulPlayerController</td><td><code>gameState.AddScore(EFaction.Player, 1)</code>（SoulPlayerController.cs:59-63）</td><td class="no">否</td></tr>
+    <tr><td>碾压得分</td><td>CombatPawn</td><td><code>gameState.AddScore(mySoul.FactionId, 1)</code>（CombatPawn.cs:145-148）</td><td class="no">否</td></tr>
+    <tr><td>结束比赛</td><td>CombatPawn</td><td><code>World.Instance.AuthorityGameMode.EndMatch()</code>（CombatPawn.cs:164）</td><td class="mid">调用了，但“该不该结束”是 Pawn 决定的</td></tr>
+    <tr><td>比赛阶段</td><td>任何人</td><td><code>AGameState.SetMatchState</code> 是 public（注释：“供裁判调用的唯一修改接口”）</td><td class="no">没有限制</td></tr>
+    <tr><td>World 的计分板引用</td><td>任何人</td><td><code>World.GameState { get; set; }</code>（World.cs:21）</td><td class="no">setter 是 public，可绕过担保注册</td></tr>
+  </table></div>
+  <p>结果就是第 15 章 15.8 节记录的现象：玩家死亡、比赛进入 WaitingPostMatch 之后，AI 之间仍然在碾压、仍然在加分——因为“比赛结束后不再计分”这条规则<strong>没有地方可以写</strong>：AddScore 不校验阶段，加分的决定也不是 GameMode 做的。</p>
+  <div class="co tip"><span class="h">面试注意：单机里的 Authority 该怎么说</span>
+    <p>不要说成“网络权威”。准确的说法：“在单机里，GameMode 的 Authority 指它是<strong>规则的唯一裁决者</strong>：其它对象只上报事实（我撞到了谁、我的寿命到了），由 GameMode 判断要不要加分、要不要结束比赛，再写入 GameState。我的实现里只做到了注册环节的校验，写入路径还散在 Pawn 和 Controller 里，这是我复盘时最想改的设计问题。”——同时承认现状、给出原则，面试官通常会接着问“那联网之后呢”，正好进入 5.9 节。</p>
+  </div>
+
+  <h2>5.6 实测：场景里放了两个 GameMode</h2>
+  <p>RegisterGameMode 里写着“场景中存在多个裁判！将忽略后注册的裁判！”。但它只是 <code>return</code> 了自己，<strong>调用它的 BeginPlay 并没有停下来</strong>。移植版 F4 复刻了 AGameModeBase / AGameMode / World 的注册逻辑和 SurvivalGameMode.BeginPlay 的后续步骤：</p>
+  <!--code:text:实测 F4 · 两个 SurvivalGameMode-->
+GM_A.BeginPlay
+  World.RegisterGameMode：成为 AuthorityGameMode
+  World.RegisterGameState：注册 GameState_GM_A
+  GameState_GM_A：EnteringMap → WaitingToStart → EventSystem.Trigger
+  GameState_GM_A：WaitingToStart → InProgress → EventSystem.Trigger
+  生成玩家肉体 + SoulPlayerController 并 Possess
+  CreateTimer("AISpawner")：新建
+GM_B.BeginPlay
+  World.RegisterGameMode：已有裁判 → Log.E 并 return（但 BeginPlay 继续执行）
+  World.RegisterGameState：越权 → Destroy(GameState_GM_B)（延迟），return
+  GameState_GM_B：EnteringMap → WaitingToStart（已被拒绝，帧末才消失）→ EventSystem.Trigger
+  GameState_GM_B：WaitingToStart → InProgress（已被拒绝，帧末才消失）→ EventSystem.Trigger
+  生成玩家肉体 + SoulPlayerController 并 Possess
+  CreateTimer("AISpawner")：同名计时器仍有效 → 先 Stop 旧的（属于 GM_A）再新建
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>“被忽略”的 GM_B 实际造成了</th><th>原因</th></tr>
+    <tr><td>MatchStateChanged 多 Trigger 2 次（共 4 次）</td><td>被拒绝的 GameState 因为 Destroy 延迟，本帧仍能 SetMatchState 并发事件</td></tr>
+    <tr><td>多出一具玩家肉体和一个 SoulPlayerController</td><td>BeginPlay 照常执行；两个 Controller 读同一份输入，两具肉体同步移动</td></tr>
+    <tr><td>AISpawner 的回调换成了 GM_B 的</td><td>同名 CreateTimer 会停掉旧的再新建（第 10 章 10.2 #7）</td></tr>
+    <tr><td>GM_B 的“比赛结束就不刷怪”检查永远不成立</td><td>它的 GameState 帧末已销毁，<code>base.GameState != null</code> 为 false，跳过了阶段判断（好在 EndMatch 按名字停掉了 AISpawner）</td></tr>
+  </table></div>
+  <p>这说明“拒绝注册”和“让这个对象停止工作”是两回事。拒绝之后至少要让 BeginPlay 停止执行（返回一个是否成功的结果），或者直接禁用 / 销毁多余的 GameMode。</p>
+
+  <h2>5.7 为什么 UI 读 GameState，而不读 GameMode</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>GameMode（规则）</th><th>GameState（可观察状态）</th></tr>
+    <tr><td>回答的问题</td><td>“该怎么办”：何时开始、谁得分、何时结束、生成什么</td><td>“现在怎样”：第几阶段、几分、过了多久</td></tr>
+    <tr><td>谁需要它</td><td>只有做决策的一方</td><td>所有要显示或响应状态的一方（UI、音效、AI）</td></tr>
+    <tr><td>联网时</td><td>只在服务器存在，客户端拿不到</td><td>复制给所有客户端</td></tr>
+    <tr><td>本项目里 UI 怎么拿</td><td>不读</td><td>SurvivalUIController 监听分数事件（push）；寿命则拿到句柄后每帧向 TimerSystem 拉取（pull）</td></tr>
+  </table></div>
+  <p>单机里分开的价值是<strong>依赖方向</strong>：UI 只依赖“状态”，规则怎么改都不影响 UI；以后改成联网，UI 代码不用动。项目的 SoulDecay UI 确实只依赖 GameState 发出的事件和 TimerSystem，这一点是做对了的。</p>
+  <div class="co warn"><span class="h">【问题】计分板的“状态”其实不完整</span>
+    <p>寿命剩余时间不在 GameState 里，UI 要先从事件里拿到计时器句柄，再每帧问 TimerSystem；比赛结束（WaitingPostMatch）SoulDecay 的 UI 也没有监听，界面上只能靠寿命文字变成“DIE”间接看出来。“所有 UI 需要的状态都在 GameState 上”这个原则只做到了一半。</p>
+  </div>
+
+  <h2>5.8 实测：ServerWorldTimeSeconds 离“服务器时间”有多远</h2>
+  <p><code>AGameStateBase.Tick</code> 里只有一行：<code>ServerWorldTimeSeconds += deltaTime;</code>。名字借自 UE（那里是服务器通过复制同步给客户端的世界时间），这里却是：本地的、scaled 的、被 maximumDeltaTime 截断的、从 GameState BeginPlay 才开始的 float 累加。移植版 F5：</p>
+  <!--code:text:实测 F5-->
+真实经过 120.017 s → ServerWorldTimeSeconds = 109.476 s
+    （差 10.541 s：暂停 10 s + 两次 0.6 s 卡顿各被截断成 0.333 s + 少算第 1 帧）
+连续    1 小时 60fps：float 累加 = 3597.21 s，double = 3600.00 s，误差 2.79 s（0.078%）
+连续   10 小时 60fps：float 累加 = 36544.82 s，double = 36000.00 s，误差 −544.82 s（−1.513%）
+连续  100 小时 60fps：float 累加 = 418445.66 s，double = 360000.00 s，误差 −58445.66 s（−16.235%）
+<!--/code-->
+  <p>这里有两类偏差：<b>语义偏差</b>（暂停、截断、晚一帧开始），这是选择了 scaled 时间的结果，作为“游戏内时间”可能正是想要的，但名字会误导；<b>数值偏差</b>，float 有效位只有 24 位，数值越大，每次加 1/60 被舍入得越厉害，而且误差方向随数值所在区间变化（10 小时时反而多算了 545 秒）。第 10 章 E14 的计时器在约 6 天处“停止前进”，是同一个原因。</p>
+  <div class="co deep"><span class="h">【扩展知识】UE 的做法</span>
+    <p>UE 的 GameStateBase 在服务器上取世界时间，周期性地复制给客户端，客户端记录本地与服务器的时间差，<code>GetServerWorldTimeSeconds()</code> 返回“本地时间 + 差值”。时间本身由引擎用 double 维护（UE5 的世界时间是 double），不是每帧 float 累加。</p>
+  </div>
+
+  <h2>5.9 延伸：做成联网之后，GameMode / GameState 怎么变</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>状态同步（服务器权威，UE 默认）</th><th>帧同步（lockstep，许多 MOBA 采用）</th></tr>
+    <tr><td>规则在哪里执行</td><td>只在服务器的 GameMode</td><td>每个客户端都执行同一份确定性逻辑，服务器只转发输入</td></tr>
+    <tr><td>GameState 怎么到达客户端</td><td>属性复制（变化时同步）</td><td>不同步状态，每端自己算出来，靠校验和检查是否一致</td></tr>
+    <tr><td>Authority 的含义</td><td>服务器</td><td>“确定性模拟”本身；作弊靠校验和与服务器复算发现</td></tr>
+    <tr><td>对本项目的要求</td><td>规则写入收口到 GameMode（5.5 节），Pawn 只发请求</td><td>逻辑用整数帧和定点数；不能依赖 Unity 物理回调和 float deltaTime；同帧回调顺序必须确定</td></tr>
+    <tr><td>需要补的</td><td>PlayerState、RPC、复制属性</td><td>输入帧缓冲、确定性的计时器和随机数（第 10 章 Q10-14）</td></tr>
+  </table></div>
+  <p>两种方案都要求同一件事：<strong>规则只能有一个执行入口</strong>。所以 5.5 节的“写入路径没有收口”，在单机里是代码组织问题，到了联网就是正确性问题。</p>
+
+  <h2>5.10 Code Review：GameMode / GameState 相关问题</h2>
+  <div class="tbl"><table>
+    <tr><th>当前设计</th><th>问题</th><th>影响</th><th>改进方向（不写代码）</th></tr>
+    <tr><td>AddScore / SetMatchState 是 public，Pawn 和 Controller 直接调用</td><td>规则散落，权威只体现在注册时</td><td>比赛结束后仍计分；联网时无法收口</td><td>Pawn / Controller 只上报事实（事件或调用 GameMode 的接口），GameMode 裁决后写入；GameState 的写方法只对 GameMode 开放</td></tr>
+    <tr><td><code>World.GameState</code> 的 setter 是 public</td><td>可以绕过 RegisterGameState</td><td>“担保注册”形同虚设</td><td>setter 私有，只能经注册接口修改</td></tr>
+    <tr><td>RegisterGameMode 失败只 return</td><td>调用方不知道失败</td><td>多余的 GameMode 照常生成玩家、发事件、接管计时器（F4）</td><td>返回结果，失败时中止 BeginPlay 并禁用自己</td></tr>
+    <tr><td>GameStateClass 用 Type</td><td>无编译期约束</td><td>类型写错到运行时才报空引用</td><td>泛型约束，或至少在注册前校验类型</td></tr>
+    <tr><td>三层 <code>new GameState</code></td><td>结果取决于静态类型</td><td>同一个对象在不同引用下拿到不同类型的属性</td><td>只保留一份存储 + 泛型取值方法</td></tr>
+    <tr><td>World 和 GameMode 各存一份 GameState</td><td>两个真相来源</td><td>可能指向不同对象</td><td>只由一方持有，另一方转发</td></tr>
+    <tr><td>ServerWorldTimeSeconds 是 scaled float 累加</td><td>名不副实，长时间运行精度下降</td><td>暂停 10 秒就差 10 秒；10 小时误差 545 秒（F5）</td><td>改名为游戏时间，或改用 double / 引擎提供的时间源</td></tr>
+    <tr><td>没有 LeavingMap / Aborted、SoulDecay 无人监听比赛阶段</td><td>结束流程不完整</td><td>结算界面只能间接判断</td><td>补全状态，UI 监听 MatchState</td></tr>
+  </table></div>
+
+  <h2>5.11 面试追问树</h2>
+  <!--code:text:追问树 · GameMode / GameState-->
+Q5-1 GameMode 和 GameState 有什么区别？单机里为什么还要分？
+ ├── Q5-2 UI 为什么不直接读 GameMode？                              ← 依赖方向
+ └── Q5-3 PlayerState 是干什么的？你为什么没有？
+Q5-4 你的 World 里叫 AuthorityGameMode，权威体现在哪？              ← 本章核心
+ ├── Q5-5 那 Pawn 直接 AddScore 算不算越权？                        ← 规则散落
+ └── Q5-6 比赛结束后还会加分吗？为什么？                            ← 15.8
+Q5-7 场景里放了两个 GameMode 会怎样？                              ← F4
+Q5-8 GameStateClass 为什么用 Type？有没有更好的写法？              ← 反射 vs 泛型 vs TSubclassOf
+Q5-9 ServerWorldTimeSeconds 准吗？                                  ← F5
+Q5-10 做成联网之后，这套结构哪里要改？状态同步和帧同步有什么不同？  ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q5-1 → Q5-3　区别？单机为什么还要分？</div>
+    <p><b>L1 · 30 秒</b>　GameMode 是裁判，决定规则：何时开始、谁得分、何时结束；GameState 是计分板，存所有人都需要看到的状态：阶段、分数、时间。</p>
+    <p><b>L2 · 正常回答</b>　我的实现里 GameMode 在 BeginPlay 时先向 World 注册为裁判，再用 GameStateClass 反射生成 GameState 并亲自去 World 担保注册，然后驱动比赛状态机；GameState 的状态变化通过 EventSystem 广播给 UI。单机里分开的价值是依赖方向：UI 只依赖状态，不依赖规则，规则改了 UI 不用动。</p>
+    <p><b>L3 · 深入</b>　在 UE 里这还关系到网络：GameMode 只在服务器存在，客户端根本没有，所以 UI 只能读复制下来的 GameState；每个玩家的个人数据放在 PlayerState，也复制给所有人。我的项目是单机，分数按阵营存在 GameState，阵营存在 Controller，所以没有 PlayerState；扩展到多人对战时需要补上。</p>
+    <p><b>L4 · 面试官攻击</b>　“单机里分开就是过度设计吧？” → 如果只看 SoulDecay 的规模，确实可以合在一起。但我分开的目的是验证这套结构能不能承载“规则可替换”：GamePlayTest2 和 SoulDecay 用的是同一个 AGameMode 基类，只换了子类和 GameStateClass，UI 都不依赖 GameMode。代价是多了注册流程和两份引用，这部分我承认还不够干净。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q5-4 → Q5-6　权威体现在哪？</div>
+    <p><b>L1</b>　目前只体现在注册：World 只接受当前裁判担保的 GameState。</p>
+    <p><b>L2</b>　写入路径没有收口：玩家夺舍得分是 Controller 直接调 AddScore，碾压得分是 Pawn 直接调，比赛结束是 Pawn 判断“死的是玩家”后调 EndMatch；SetMatchState 和 World.GameState 的 setter 也都是 public。所以比赛结束后 AI 之间还在加分——“结束后不计分”这条规则没有地方写。</p>
+    <p><b>L3</b>　改法是让 Pawn 和 Controller 只上报事实：“我撞碎了谁”“我的寿命到了”“我夺舍了谁”，GameMode 根据当前阶段和规则决定是否加分、是否结束，再写 GameState；GameState 的写接口只对 GameMode 开放。这样联网时只要把“上报”换成发给服务器的请求，结构不用变。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q5-7　场景里放了两个 GameMode？</div>
+    <p><b>L2</b>　注释说会忽略后注册的，但实测不是：RegisterGameMode 只是 return，BeginPlay 继续执行。第二个 GameMode 生成的 GameState 会被 World 拒绝并 Destroy，但 Destroy 是延迟的，它本帧照样切了两次状态、发了两次事件；然后它还生成了第二个玩家、第二个 PlayerController，两个 Controller 读同一份输入，两具肉体一起动；它还用同名 CreateTimer 把刷怪计时器的回调换成了自己的。拒绝注册不等于让它停止工作，至少要让注册返回失败、BeginPlay 停止并禁用自己。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q5-8　GameStateClass 为什么用 Type？</div>
+    <p><b>L2</b>　为了像 UE 的 GameStateClass 那样“子类只声明类型，父类负责生成”。代价是没有编译期约束：写一个不继承 AGameState 的类型，要到运行时 <code>as</code> 出 null、注册时空引用才发现。更好的写法是泛型基类加 where 约束，编译期就能检查；UE 用 TSubclassOf，在编辑器里只能选派生类。另外我有三层用 new 隐藏的 GameState 属性，拿到哪个取决于引用的静态类型，这也是想合并成一份存储加泛型取值方法的原因。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q5-9 → Q5-10　世界时间准吗？联网怎么改？</div>
+    <p><b>L2</b>　不准，而且名字有误导性：它是本地 scaled deltaTime 的 float 累加，暂停时不走、卡顿被截断、从 GameState BeginPlay 才开始；我用移植版测过，真实 120 秒里有 10 秒暂停和两次卡顿，它只走了 109.5 秒；连续跑 10 小时 float 累加会差 545 秒。UE 的服务器世界时间是服务器用 double 维护、复制给客户端再补偿时间差。</p>
+    <p><b>L3</b>　联网方面：状态同步下，规则只在服务器 GameMode 执行，GameState 和 PlayerState 复制给客户端，客户端只发请求；帧同步下，每个客户端都执行同一份确定性逻辑，GameState 不同步而是各自算出来，所以逻辑必须用整数帧和定点数，不能依赖 float deltaTime 和物理回调。两种都要求规则只有一个执行入口，这正是我现在缺的那一步。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“GameMode 是权威，所以所有规则都由它执行。”</p>
+    <p><b>问题</b>：与源码不符——加分和结束比赛的决定都在 Pawn / Controller 里，被追问一行代码就会露馅。</p>
+    <p><b>更好的回答</b>：“设计上 GameMode 是规则的唯一裁决者；当前实现只在注册环节做了校验，写入路径还散在 Pawn 和 Controller，我知道怎么收口。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“GameState 存的是服务器时间，所以可以用来做倒计时同步。”</p>
+    <p><b>问题</b>：本项目的 ServerWorldTimeSeconds 只是本地 scaled 时间的 float 累加，没有服务器，也不同步（实测 F5）。</p>
+    <p><b>更好的回答</b>：“它目前是本地游戏时间，名字借自 UE；真要做同步倒计时，应该由服务器下发开始时刻，客户端用对时后的时间计算剩余量。”</p>
+  </div>
+
+  <h2>5.12 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">命令-查询分离</div><p>“改状态的方法”和“读状态的方法”分开，并且只给特定的一方改的权限。GameState 只读暴露给所有人、写接口只给 GameMode，就是这个原则。为什么会追过去：规则散落本质上是“谁都能写”。</p></div>
+    <div class="card"><div class="t">MVC / MVVM</div><p>GameState 像 Model，UI 像 View，事件是变更通知。UI 只观察 Model，不调用 Controller 的逻辑——和“UI 不读 GameMode”是同一个依赖方向。</p></div>
+    <div class="card"><div class="t">属性复制与 RepNotify</div><p>UE 里 GameState 的属性标记为复制，变化时客户端收到并触发 OnRep 回调更新 UI。它和本项目“SetMatchState 后 Trigger 事件”是同一个模式，只是事件来源从本地变成了网络。</p></div>
+    <div class="card"><div class="t">对时</div><p>客户端发出请求时记下本地时间 t0，服务器回复它的时间 ts，客户端收到时是 t1，估算偏移 ts + (t1 − t0)/2 − t1；多次采样取延迟最小的一次。NTP 用的是同一思路。</p></div>
+    <div class="card"><div class="t">帧同步的确定性</div><p>浮点运算在不同 CPU / 编译选项下可能不同，所以逻辑层常用定点数；随机数用同一个种子的伪随机；遍历容器的顺序也必须确定（哈希表遍历顺序就不能依赖）。</p></div>
+    <div class="card"><div class="t">反射与类型系统</div><p>C# 的 <code>AddComponent(Type)</code> 依赖运行时反射；C++ 没有内建反射，UE 靠 UHT 生成的 UClass 信息实现 <code>TSubclassOf</code> 和按类生成对象。为什么会追过去：GameStateClass 一问就会问到“C++ 里怎么按类型名创建对象”。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>GameMode = 规则（何时开始、谁得分、何时结束），GameState = 可观察状态（阶段、分数、时间）；单机里分开的价值是<strong>依赖方向</strong>，联网里还关系到“GameMode 只在服务器”。</li>
+    <li>开局：<strong>RegisterGameMode → 反射生成 GameState → 担保注册 → WaitingToStart → InProgress</strong>，都在 GameState 的 BeginPlay 之前。</li>
+    <li>Authority <strong>只校验了注册，没有收口写入</strong>：AddScore / SetMatchState / World.GameState 都是 public，加分和结束比赛由 Pawn / Controller 决定 → 比赛结束后仍计分。</li>
+    <li>两个 GameMode（F4）：后注册的<strong>没有被忽略</strong>——多发 2 次事件、多一个玩家、接管刷怪计时器。</li>
+    <li>ServerWorldTimeSeconds（F5）：120 s 里只走 <strong>109.5 s</strong>；10 小时 float 累加误差 <strong>545 s</strong>。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么 AGameModeBase.BeginPlay 里必须先 RegisterGameMode 再 InitGameState？调换顺序会怎样？</summary><p>RegisterGameState 会检查 <code>authority == AuthorityGameMode</code>。先 InitGameState 的话，AuthorityGameMode 还是 null，校验失败，World 会打印越权警告并 Destroy 刚生成的 GameState，GameMode 自己的 GameState 引用指向一个帧末就会销毁的对象。</p></details>
+  <details class="quiz"><summary>自测 2：<code>World.Instance.AuthorityGameMode.GameState</code> 在 SoulDecay 里拿到的是什么类型？为什么？</summary><p>静态类型是 AGameStateBase。AuthorityGameMode 的声明类型是 AGameModeBase，而 AGameMode / SurvivalGameMode 的 GameState 属性是用 new 隐藏的，不是 override，编译器按静态类型选择 AGameModeBase.GameState。对象实际是 SurvivalGameState，需要再向下转型。</p></details>
+  <details class="quiz"><summary>自测 3：把“比赛结束后不再计分”这条规则加进当前代码，最小的改动放在哪里？为什么这仍然不是好的设计？</summary><p>最小改动是在 SurvivalGameState.AddScore 开头判断 MatchState 是否为 InProgress。它能让行为正确，但规则写在了计分板里：计分板开始“决定”什么时候可以加分，而 Pawn 和 Controller 仍然直接调用它。好的设计是让 GameMode 接收事实、根据阶段裁决后再写 GameState。</p></details>
+</section>

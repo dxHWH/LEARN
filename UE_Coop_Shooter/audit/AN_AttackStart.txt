@@ -1,0 +1,20 @@
+# /Game/Blueprints/Zombie/AN_AttackStart  (Blueprint)
+ParentClass: /Script/Engine.AnimNotify
+
+## Variables
+- 开始骨骼 : name
+- 结束骨骼 : name
+
+## AN_AttackStart_C Default__AN_AttackStart_C
+
+## Custom events / RPC
+
+## Graph AN_AttackStart.Received_Notify
+
+FunctionEntry(MeshComp, Animation, EventReference):  #10
+  CastTo BP_Zombie_C(Object=GetOwner(self=FunctionEntry#10.MeshComp))  -> AsBP Zombie  #9
+    [then]:
+      开始骨骼(开始骨骼=开始骨骼, self=CastTo BP_Zombie_C#9.AsBP Zombie)  #14
+      结束骨骼(结束骨骼=结束骨骼, self=CastTo BP_Zombie_C#9.AsBP Zombie)  #15
+      K2_SetTimer(Object=CastTo BP_Zombie_C#9.AsBP Zombie, FunctionName="攻击伤害检测", Time=GetWorldDeltaSeconds(), bLooping=true, bMaxOncePerFrame=false, InitialStartDelay=0.000000, InitialStartDelayVariance=0.000000)  #8
+  // exec nodes with no incoming exec (dead / disconnected): Return#11

@@ -1,0 +1,70 @@
+<section class="chapter" id="appA">
+  <div class="ch-head">
+    <div class="no">APPENDIX · A</div>
+    <h1>原 Demo 问题全清单、审计方法与实测总表</h1>
+    <p class="lead">每条问题都能在 audit/*.txt 中按节点编号查到；“推断”类给出在编辑器里验证的方法。</p>
+  </div>
+
+  <h2>A.1 问题全清单（23 条）</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>级别</th><th>位置</th><th>问题</th><th>修复</th><th>如何验证</th></tr>
+    <tr><td>1</td><td><span class="tag p0">P0</span></td><td>BP_Weapon.剩余子弹计算</td><td>false 分支未连 Return，返回 0，换弹吞弹匣</td><td>一次性 take = min(空位, 备弹)</td><td><span class="tag ex">E4</span>；PIE 备弹 7 时换弹</td></tr>
+    <tr><td>2</td><td><span class="tag p0">P0</span></td><td>BP_Bullet.ReceiveHit / 给丧尸伤害</td><td>每端都 ApplyDamage</td><td>伤害前 Switch Has Authority；改命中扫描</td><td>客户端打僵尸，对比两端 血量（Print）</td></tr>
+    <tr><td>3</td><td><span class="tag p0">P0</span></td><td>BP_Zombie.Multicast_Death → BP_ZombieSpawn.重新生成</td><td>补刷在每端执行，且跳过了 SwitchHasAuthority</td><td>服务器通知 GameMode 补刷</td><td>客户端打死一只后，在客户端世界大纲里数 BP_Zombie</td></tr>
+    <tr><td>4</td><td><span class="tag p0">P0</span></td><td>BP_Player.ReceiveAnyDamage</td><td>在服务器上 DisableInput(GetPlayerController(0)) / PlaySound2D：客户端玩家死时 DisableInput 只报 LogPawn 错误不生效，死者仍能操作；惨叫在主机响</td><td>服务器只改 bIsDead + 校验请求；拥有者客户端在 OnRep 里关输入、播音效</td><td>让客户端玩家先死，看它能否继续移动 / 开火，日志里搜 LogPawn</td></tr>
+    <tr><td>5</td><td><span class="tag p0">P0</span></td><td>BP_Player.冲刺 / 瞄准 / 速度计算</td><td>IsRunning 仅服务器、是否瞄准 仅本机；Tick 里各自写 MaxWalkSpeed</td><td>标志进 SavedMove，GetMaxSpeed 统一</td><td><span class="tag ex">E6</span>；p.NetShowCorrections 1</td></tr>
+    <tr><td>6</td><td><span class="tag p0">P0</span></td><td>UWB_InGame.计算剩余时间</td><td>倒计时与胜利在每端 UI 自算</td><td>GameState 复制结束时刻，GameMode 判定</td><td>网络模拟下对比两端结算时刻</td></tr>
+    <tr><td>7</td><td><span class="tag p0">P0</span></td><td>BP_Player.Multi_Death</td><td>任一玩家死亡，每端都弹“失败”并暂停</td><td>GameMode 判全灭；死者观战</td><td>客户端先死，看主机界面</td></tr>
+    <tr><td>8</td><td><span class="tag p0">P0</span></td><td>UWB_Pause / UWB_WinOrFail</td><td>SetGamePaused 客户端无效、主机冻结全员；OpenLevel 重开断线</td><td>暂停只开 UI；重开 ServerTravel</td><td>客户端按 Esc / 点重开</td></tr>
+    <tr><td>9</td><td><span class="tag p1">P1</span></td><td>BP_Weapon.Server_Fire</td><td>本机表现等多播（≈ RTT + 网络帧）</td><td>本机预测播表现</td><td><span class="tag ex">E1</span></td></tr>
+    <tr><td>10</td><td><span class="tag p1">P1</span></td><td>BP_Weapon.Server_Fire</td><td>Multicast_Fire 在 CheckCanFire 之前：空放、打断换弹</td><td>服务器接受后才 BurstCounter+1</td><td><span class="tag ex">E1</span>；换弹时按住开火</td></tr>
+    <tr><td>11</td><td><span class="tag p1">P1</span></td><td>BP_Weapon.Server_Fire</td><td>逐发 Reliable，丢包时队头阻塞</td><td>表现不依赖它；高射速时合并</td><td><span class="tag ex">E2</span></td></tr>
+    <tr><td>12</td><td><span class="tag p1">P1</span></td><td>BP_Bullet</td><td>每发一个复制 Actor：远端突现、消息量大</td><td>命中扫描 + 本地曳光</td><td><span class="tag ex">E1 / E7</span>；Networking Insights</td></tr>
+    <tr><td>13</td><td><span class="tag p1">P1</span></td><td>BP_Weapon.后坐力 / 子弹发射位置旋转</td><td>后坐力在服务器调用 AddControllerInput（客户端无效）；散布读服务器 AnimBP 的 是否瞄准</td><td>后坐力本地；瞄准状态进移动预测或随开火请求上报</td><td>客户端开镜连射，对比散布与镜头</td></tr>
+    <tr><td>14</td><td><span class="tag p1">P1</span></td><td>BP_Zombie.Multicast_Death</td><td>ClearTimer("追逐玩家") 名字不存在；FindClosestTarget / 攻击范围检测 仍在跑</td><td>ClearAllTimersForObject + StopLogic</td><td>站在尸体前 5 s 内看是否掉血</td></tr>
+    <tr><td>15</td><td><span class="tag p1">P1</span></td><td>关卡蓝图 Server_SetStart</td><td>客户端调用被丢弃；游戏是否开始 非复制，晚加入者永远 false</td><td>GameState.Phase 复制</td><td>日志 “No owning connection”；Allow Late Joining</td></tr>
+    <tr><td>16</td><td><span class="tag p1">P1</span></td><td>关卡蓝图 BeginPlay / BP_Player BeginPlay</td><td>绑定 GetPlayerCharacter(0)、Cast GetGameState 依赖复制时序</td><td>在 OnRep_PlayerState / PawnClientRestart / OnRep_Phase 里做</td><td>独立进程 + 网络模拟启动多次</td></tr>
+    <tr><td>17</td><td><span class="tag p2">P2</span></td><td>BP_Player 组件</td><td>只有 1P 手臂；bUseControllerRotationPitch 让胶囊俯仰</td><td>1P + 3P 网格；身体只跟 Yaw</td><td>看对方模型</td></tr>
+    <tr><td>18</td><td><span class="tag p2">P2</span></td><td>BP_MyGameState.ReadyPlayersList / GM.AddReadyPlayer</td><td>复制 PC 引用（客户端为空）；GameMode 上标 Server RPC</td><td>PlayerState.bReady</td><td>客户端打印数组内容</td></tr>
+    <tr><td>19</td><td><span class="tag p2">P2</span></td><td>BP_Bullet / BP_Zombie ApplyDamage</td><td>Instigator / Causer 为空</td><td>填 Controller 与武器</td><td>—</td></tr>
+    <tr><td>20</td><td><span class="tag p2">P2</span></td><td>BP_Weapon 复制变量；BP_Player.MouseY</td><td>弹药无条件复制给所有人；MouseY 在客户端写复制变量</td><td>OwnerOnly；本地变量</td><td>Networking Insights 看属性流量</td></tr>
+    <tr><td>21</td><td><span class="tag p1">P1</span></td><td>BP_Zombie.初始化速度和动画</td><td>速度与动画变体只在服务器随机并设置（SwitchHasAuthority 之后），AnimBP 变量不复制</td><td>服务器复制 VariantSeed（Initial Only），各端用同一 Random Stream</td><td>两端并排看冲刺僵尸：客户端是默认跑姿</td></tr>
+    <tr><td>22</td><td><span class="tag p2">P2</span></td><td>BP_Zombie.Multicast_PlayAttackAnim / Multicast_HitReact</td><td>多播里 RandomIntegerInRange 选蒙太奇：各端各自随机，动作不一致；On Completed 里各端写复制变量 正在攻击</td><td>服务器选 Index 放进 AttackInfo 复制；bAttacking 只在服务器由计时器复位</td><td>两端并排看同一只僵尸的攻击动作</td></tr>
+    <tr><td>23</td><td><span class="tag p3">P3</span></td><td>多处</td><td>for_server 补丁、空 OnRep、未连接的 servertravel / 计算子弹数量 节点、重复变量 As BP Player_0</td><td>清理；生成时传 Owner</td><td>—</td></tr>
+  </table></div>
+
+  <h2>A.2 没有 UE 编辑器，怎么读蓝图</h2>
+  <p>仓库里的蓝图是 Git LFS 管理的 .uasset。为了只看逻辑、不下载几百 MB 的美术资源，做法是：</p>
+<!--code:bash:只取逻辑资产（不整体拉取 LFS）-->
+$ git clone --filter=blob:none --no-checkout --depth 1 https://github.com/dxHWH/-demo.git repo
+$ git sparse-checkout init --no-cone
+#   只检出 /Config/、/Content/Blueprints/、/Content/UI/UWB_*、主地图
+$ GIT_LFS_SKIP_SMUDGE=1 git checkout HEAD           # 得到的是 LFS 指针（几十字节的文本）
+#   逐个按指针里的 size 从 media.githubusercontent.com 下载实体，校验大小一致后替换
+$ python tools/bpdump.py repo/Content/Blueprints/Weapon/BP_Weapon.uasset audit/BP_Weapon.txt
+<!--/code-->
+  <p><code>tools/uasset.py</code> 实现了 UE 5.5 编辑器包的最小读取：包头、名称表、导入 / 导出表、带类型名的属性流（5.4 起的完整类型名标签）、以及 <code>UEdGraphNode</code> 在属性之后序列化的引脚数组（引脚名、方向、类型、默认值、连线）。<code>tools/bpdump.py</code> 在此之上：</p>
+  <ul>
+    <li>从 Blueprint 对象读出父类、变量（复制标志、RepNotify、复制条件）；从 CDO 和组件模板读出 bReplicates、碰撞、网格等设置；</li>
+    <li>从 CustomEvent 的 FunctionFlags 读出 RPC 类型（Net / Reliable / Server / Client / Multicast）；</li>
+    <li>从每个事件入口沿执行引脚追踪，把数据引脚还原成嵌套表达式，输出缩进伪代码；标出未连接的执行节点、被禁用的节点。</li>
+  </ul>
+  <div class="co warn"><span class="h">这种静态审计的边界</span>
+    <p>能确定“节点怎么连、在哪个事件里、标了什么 RPC”，不能确定运行时的时序（例如 BeginPlay 时 GameState 是否已到达）。所以书里把“UE 运行规则 + 连线”推出的结论标为<span class="tag inf">推断</span>，并在 A.1 给出在 PIE 里验证的方法；需要定量的结论用 <code>demos/coop_net_demo.cpp</code> 模拟。</p>
+  </div>
+
+  <h2>A.3 实测总表（demos/run_output.txt）</h2>
+  <div class="tbl"><table>
+    <tr><th>实验</th><th>内容</th><th>关键数字</th><th>用在</th></tr>
+    <tr><td>E1</td><td>开火链路时序：原方案 / 预测 + 覆盖 / 预测 + 对账，RTT 0~200</td><td>RTT 200：本机反馈 {{v:E1[s=0,rtt=200].own:.0f}} → 0 ms；另一端 {{v:E1[s=2,rtt=200].rem:.0f}} ms 不变；子弹突现 {{v:E1[s=0,rtt=200].pop:.1f}} m</td><td>第 4 章</td></tr>
+    <tr><td>E2</td><td>逐发 Reliable 在丢包下的处理延迟</td><td>RTT 200 / 10%：P99 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms，最大 {{v:E2[rtt=200,loss=0.1].max:.0f}} ms；Unreliable 会丢 {{v:E2[rtt=200,loss=0.1].ulost:.1f}}%</td><td>第 4、6 章</td></tr>
+    <tr><td>E3</td><td>延迟补偿命中率（目标横移、随机折返）</td><td>480 cm/s、RTT 200：不补偿 {{v:E3[v=480,rtt=200].none:.1f}}%，回溯 {{v:E3[v=480,rtt=200].rew:.1f}}%，容差 {{v:E3[v=480,rtt=200].lee:.1f}}%</td><td>第 6 章</td></tr>
+    <tr><td>E4</td><td>换弹逻辑逐节点移植 vs 修正版</td><td>3/7 → 0/0（丢 {{v:E4.cases.2.4}}）；整局 {{v:E4.session.0.2}}/40 vs {{v:E4.session.1.2}}/40</td><td>第 5 章</td></tr>
+    <tr><td>E5</td><td>弹药 UI 的三种显示方式</td><td>直接覆盖回跳 {{v:E5.1.rb:.2f}} 次 / 连射，对账 {{v:E5.2.rb:.2f}} 次</td><td>第 5 章</td></tr>
+    <tr><td>E6</td><td>CMC 纠正：MaxWalkSpeed 两端不一致</td><td>冲刺只在服务器：{{v:E6[c=0,rtt=100].cps:.1f}} 次/秒、平均 {{v:E6[c=0,rtt=100].avg:.1f}} cm；半修复 10% 丢包 {{v:E6[c=2,rtt=200,loss=0.1].cps:.2f}} 次/秒；正确 0</td><td>第 6 章</td></tr>
+    <tr><td>E7</td><td>每秒消息量估算</td><td>{{v:E7.0.4}} vs {{v:E7.1.4}} B/s（量级）</td><td>第 6 章</td></tr>
+  </table></div>
+  <div class="co ver"><span class="h">模拟的假设</span>
+    <p>服务器网络 Tick 30 Hz，属性与 Unreliable 多播在下一个网络帧发出；Reliable 有序，丢包后约 1 RTT + 1 帧重传；客户端 60 Hz；纠正阈值 √3 cm、最小间隔 0.1 s（大误差 0.05 s）；E1 / E5 的抖动为 20 / 30 ms 均匀分布，乱序到达的旧属性包丢弃；E3 的模拟代理按“最新快照 + 速度 × 收到后经过的时间”外推，服务器回溯在相邻两个网络帧之间线性插值，上限 200 ms。E6 把原蓝图的 FInterpTo 速度渐变简化为直接切换。所有实验固定随机种子，带参数运行（如 <code>coop_net_demo.exe E3</code>）只跑指定实验。</p>
+  </div>
+</section>

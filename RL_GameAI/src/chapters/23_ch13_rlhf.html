@@ -1,0 +1,137 @@
+<section class="chapter" id="ch13">
+<div class="ch-head"><div class="no">CHAPTER 13</div><h1>RLHF、DPO 与 GRPO：大模型时代的策略优化</h1><p class="lead">同一套策略优化理论用在大语言模型上：“状态”是提示加已生成的 token，“动作”是下一个 token，“回合”是一整条回答。RLHF 先学一个奖励模型再用 PPO 加 KL 惩罚去优化；DPO 发现 KL 正则目标有闭式解，可以把奖励模型消掉，变成一个分类损失；GRPO 用同一提示下多个回答的平均分代替 critic。面经原题“讲一下 PPO 和 GRPO”就在这一章。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>写出 RLHF 三阶段，推出 Bradley-Terry 奖励模型的极大似然损失。</li>
+<li>推出 KL 正则目标的闭式最优解 $\pi^*\propto\pi_{\text{ref}}\exp(r/\beta)$，并由它一步推出 DPO 损失。</li>
+<li>讲清 GRPO 的组内标准化优势、为什么能去掉 critic、代价是什么，以及 k3 KL 项。</li>
+<li>在一个可以精确求解的玩具任务上，对比 RLHF-PPO / GRPO / DPO 的奖励–KL 轨迹。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>RLHF 分三步：SFT 得到参考模型 $\pi_{\text{ref}}$；用人类偏好对训练奖励模型，损失是 Bradley-Terry 的 $-\log\sigma(r(x,y_w)-r(x,y_l))$；再用 PPO 最大化 $\E[r]-\beta\KL(\pi\Vert\pi_{\text{ref}})$，KL 防止模型跑偏、钻奖励模型的空子。这个 KL 正则目标的最优解是 $\pi^*\propto\pi_{\text{ref}}\exp(r/\beta)$，反过来奖励可以写成 $r=\beta\log\frac{\pi^*}{\pi_{\text{ref}}}+\beta\log Z$，代回 BT 模型时 $Z$ 抵消，得到 <strong>DPO</strong>：直接在偏好对上最小化 $-\log\sigma\big(\beta\log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)}-\beta\log\frac{\pi_\theta(y_l)}{\pi_{\text{ref}}(y_l)}\big)$，不需要奖励模型和采样。<strong>GRPO</strong> 仍是在线 RL，但去掉了 critic：对同一个提示采 G 个回答，用组内标准化的奖励 $(r_i-\bar r)/\sigma_r$ 当优势，配合 PPO 的 clip，再把 KL 用 k3 估计直接写进损失。好处是省掉一个和策略一样大的价值模型、特别适合“答案可验证”的结果奖励；代价是每个提示要采多个回答，组内全对或全错时没有学习信号。</p></div>
+
+<h2>13.1 RLHF 三阶段</h2>
+<!--flow {"w":900,"h":220,
+"boxes":[
+{"id":"a","x":20,"y":30,"w":240,"h":76,"t":"① 监督微调（SFT）","s":"人写的示范回答","s2":"得到 π_SFT = π_ref","c":"b"},
+{"id":"b","x":330,"y":30,"w":240,"h":76,"t":"② 奖励模型（RM）","s":"同一提示的两个回答，人标哪个好","s2":"Bradley-Terry 极大似然","c":"a"},
+{"id":"c","x":640,"y":30,"w":240,"h":76,"t":"③ 强化学习（PPO）","s":"max E[r̂] − β·KL(π‖π_ref)","s2":"策略 / 参考 / 奖励 / 价值 四个模型","c":"o"}],
+"arrows":[
+{"p":[[260,68],[330,68]],"c":"s","label":"采样回答对","lx":266,"ly":60},
+{"p":[[570,68],[640,68]],"c":"s","label":"r̂(x, y)","lx":584,"ly":60},
+{"p":[[140,106],[140,160],[760,160],[760,106]],"c":"p","dash":true,"label":"π_ref 作为 KL 锚点和初始化","lx":380,"ly":152}],
+"texts":[{"x":450,"y":200,"a":"middle","cls":"sm","t":"DPO 把 ② ③ 合成一步（直接用偏好对训练策略）；GRPO 保留 ③ 的在线采样，但去掉价值模型"}],
+"cap":"<b>图 13-1</b>　RLHF 流水线（InstructGPT，Ouyang et al., 2022）。"} -->
+<p>在 token 级别看，生成一条回答就是一个回合：状态 = 提示 + 已生成的前缀，动作 = 下一个 token，奖励通常只在最后一个 token 给出（奖励模型打分），中间每个 token 只有 KL 惩罚。所以 RLHF-PPO 就是第 11 章的 PPO，只是“环境”是确定性的拼接，难点在规模（四个大模型同时在显存里）。</p>
+
+<h2>13.2 Bradley-Terry 奖励模型</h2>
+<!--deriv 偏好数据的极大似然 = 二分类交叉熵
+P(y_w\succ y_l\mid x) & = \frac{e^{r(x,y_w)}}{e^{r(x,y_w)}+e^{r(x,y_l)}}=\sigma\big(r(x,y_w)-r(x,y_l)\big) || Bradley-Terry 模型：每个回答有一个“实力分”，胜率只取决于分差（和第 15 章 Elo 是同一个模型）
+\mathcal L_{\text{RM}}(\phi) & = -\E_{(x,y_w,y_l)\sim\mathcal D}\Big[\log\sigma\big(r_\phi(x,y_w)-r_\phi(x,y_l)\big)\Big] || 负对数似然；等价于以“哪个更好”为标签的 logistic 回归
+* \frac{\partial\mathcal L}{\partial r_w} & = -\big(1-\sigma(r_w-r_l)\big)=-\sigma(r_l-r_w) || 模型越是排错（$r_l>r_w$），梯度越大；排对且分差大时梯度接近 0
+-->
+<p>注意奖励只确定到“每个提示加一个常数”：给某个提示的所有回答同时加 c，偏好概率不变。实践中常对奖励做归一化。在本章的玩具任务里（4 个提示 × 8 个候选回答，偏好标签按真实奖励的 BT 概率随机生成），用 2000 对数据拟合的奖励模型与真实奖励（每个提示内去中心后）的相关系数为 [[ch13.e1.corr|.3f]]；训练集准确率 [[ch13.e1.acc|.3f]]，而真实奖励本身也只能解释 [[ch13.e1.acc_true|.3f]] 的标签——偏好标签天然有噪声，奖励模型准确率 70% 出头在真实 RLHF 里也很常见（<code>demos/ch13_rlhf.cpp</code> E1）。</p>
+
+<h2>13.3 KL 正则目标的闭式最优解</h2>
+<!--deriv max_π E_π[r] − β·KL(π ‖ π_ref) 的最优解
+\E_{y\sim\pi}[r(x,y)]-\beta\KL(\pi\Vert\pi_{\text{ref}}) & = -\beta\,\E_{y\sim\pi}\Big[\log\frac{\pi(y\mid x)}{\pi_{\text{ref}}(y\mid x)\,e^{r(x,y)/\beta}}\Big] || 把 $r$ 写成 $\beta\log e^{r/\beta}$ 后合并成一个对数
+& = -\beta\,\KL\Big(\pi\,\Big\Vert\,\frac{1}{Z(x)}\pi_{\text{ref}}\,e^{r/\beta}\Big)+\beta\log Z(x) || 配方：$Z(x)=\sum_y\pi_{\text{ref}}(y\mid x)e^{r(x,y)/\beta}$ 与 π 无关
+* \pi^*(y\mid x) & = \frac{1}{Z(x)}\,\pi_{\text{ref}}(y\mid x)\exp\big(r(x,y)/\beta\big) || KL ≥ 0，取等号时最优；最优目标值就是 $\beta\log Z(x)$（手撕脚本数值验证）
+-->
+<p>这和第 12 章最大熵 RL 的 $\pi^*\propto\exp(Q/\alpha)$ 是同一个结构：把熵换成了“对参考策略的 KL”。β 控制偏离程度：β → ∞ 时 $\pi^*=\pi_{\text{ref}}$；β → 0 时变成只选奖励最高的回答。扫一遍 β 就得到“奖励–KL 前沿”：</p>
+<!--gbars {"groups":{"path":"ch13.e1.labels"},"series":[{"n":"参考策略 π_ref","v":{"path":"ch13.e1.pref0"},"c":"s"},{"n":"闭式最优 π*（β = 0.5）","v":{"path":"ch13.e1.pstar0"},"c":"b"},{"n":"无限数据 DPO 的最优解","v":{"path":"ch13.e1.pinf0"},"c":"g"}],"h":260,"fmt":".2f","ymax":1.25,"gname":"提示 0 的 8 个候选回答",
+"cap":"<b>图 13-2</b>　提示 0 上的三个分布（构建时读取 C++ 计算结果）。8 个回答的真实奖励依次为 [[ch13.e1.r0.0|.2f]]、[[ch13.e1.r0.1|.2f]]、[[ch13.e1.r0.2|.2f]]、[[ch13.e1.r0.3|.2f]]、[[ch13.e1.r0.4|.2f]]、[[ch13.e1.r0.5|.2f]]、[[ch13.e1.r0.6|.2f]]、[[ch13.e1.r0.7|.2f]]。π* 把概率转移到奖励高、且参考策略本来就不太排斥的回答上；DPO 在无限数据下的最优解与 π* 的 $\\lvert\\log\\pi\\rvert$ 最大差 [[ch13.e1.dpo_inf_err|.0e]]（优化残差），印证了下一节的推导。"} -->
+<div class="co warn"><span class="h">面试注意：KL 惩罚到底防什么</span><p>① <strong>奖励过优化</strong>（reward hacking / Goodhart 定律）：奖励模型只在参考策略附近的分布上训练过，策略跑远之后，奖励模型的打分不再可靠，策略会找到“奖励模型给高分但人不喜欢”的回答（比如越写越长、重复讨好的句式）；② 保留 SFT 学到的语言能力和多样性，避免模式坍缩。β 太大学不动，太小会过优化。工程上 InstructGPT 把 $-\beta\log\frac{\pi}{\pi_{\text{ref}}}$ 作为每个 token 的奖励；GRPO 把 KL 作为损失项（13.5 节）。</p></div>
+
+<h2>13.4 DPO：把奖励模型“消掉”</h2>
+<!--deriv 从闭式解推出 DPO 损失
+r(x,y) & = \beta\log\frac{\pi^*(y\mid x)}{\pi_{\text{ref}}(y\mid x)}+\beta\log Z(x) || 把闭式解反过来解出奖励：奖励由“最优策略相对参考策略的对数比”决定
+r(x,y_w)-r(x,y_l) & = \beta\log\frac{\pi^*(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)}-\beta\log\frac{\pi^*(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)} || 同一个提示的两个回答相减，<strong>难算的配分函数 $Z(x)$ 抵消了</strong>
+* \mathcal L_{\text{DPO}}(\theta) & = -\E_{(x,y_w,y_l)}\Big[\log\sigma\Big(\beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)}-\beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big)\Big] || 代入 BT 的负对数似然，把 $\pi^*$ 换成待训练的 $\pi_\theta$：拟合偏好的同时，隐式地就得到了 KL 正则问题的最优策略
+\nabla_\theta\mathcal L & = -\beta\,\E\Big[\sigma\big(\hat r_l-\hat r_w\big)\big(\nabla\log\pi_\theta(y_w)-\nabla\log\pi_\theta(y_l)\big)\Big],\quad\hat r=\beta\log\frac{\pi_\theta}{\pi_{\text{ref}}} || 提高好回答、压低坏回答的概率；隐式奖励排错得越厉害，权重越大
+-->
+<p>DPO 的优点：没有奖励模型、没有在线采样、没有价值模型，训练就是一个分类任务，稳定、便宜。局限：① 完全离线，数据只覆盖参考策略附近，策略能改进的范围受限于数据；② 不能利用“可验证奖励”（数学题对错、代码能否通过测试）这类在线信号；③ 训练中“好回答”的绝对概率也可能下降（只要坏回答降得更多），出现过拟合偏好数据的现象，因此有 IPO、KTO、SimPO 等改进。</p>
+
+<h2>13.5 GRPO：用组内平均代替 critic</h2>
+<p>GRPO（Group Relative Policy Optimization，DeepSeekMath，Shao et al., 2024；DeepSeek-R1 沿用）的目标：</p>
+$$\mathcal J(\theta)=\E_{x,\{y_i\}_{i=1}^G\sim\pi_{\text{old}}}\Bigg[\frac1G\sum_{i=1}^G\frac{1}{|y_i|}\sum_{t=1}^{|y_i|}\Big(\min\big(\rho_{i,t}\hat A_i,\ \clip(\rho_{i,t},1-\epsilon,1+\epsilon)\hat A_i\big)-\beta\,\hat{\mathbb D}_{i,t}\Big)\Bigg],\qquad\hat A_i=\frac{r_i-\text{mean}(r_{1..G})}{\text{std}(r_{1..G})}$$
+<p>其中 $\rho_{i,t}$ 是第 i 个回答第 t 个 token 的概率比，$\hat{\mathbb D}_{i,t}=\frac{\pi_{\text{ref}}}{\pi_\theta}-\log\frac{\pi_{\text{ref}}}{\pi_\theta}-1$ 是第 11 章的 k3 估计（这里估计 $\KL(\pi_\theta\Vert\pi_{\text{ref}})$，按 $\pi_\theta$ 采样，无偏且非负）。和 RLHF-PPO 的区别：</p>
+<div class="tbl"><table>
+<tr><th>组件</th><th>RLHF-PPO</th><th>GRPO</th></tr>
+<tr><td>优势</td><td>价值模型 + GAE，逐 token</td><td>同一提示 G 个回答的组内标准化奖励，回答内所有 token 共享</td></tr>
+<tr><td>模型数</td><td>策略、参考、奖励、价值 4 个</td><td>策略、参考、奖励（或规则判分器）3 个</td></tr>
+<tr><td>KL</td><td>作为每个 token 的负奖励</td><td>作为损失项（k3），不进入优势</td></tr>
+<tr><td>适合的奖励</td><td>奖励模型打分</td><td>结果奖励、可验证奖励（对 / 错）</td></tr>
+</table></div>
+<p class="tcap"><b>表 13-1</b>　RLHF-PPO 与 GRPO 的结构差异。</p>
+<p><strong>为什么可以不要 critic？</strong>① 大模型的价值模型和策略一样大，训练、显存开销翻倍，而且只有最后一个 token 有奖励时，逐 token 的价值很难学准（第 10 章：critic 不准时优势有偏）；② 同一提示下 G 个回答的平均分就是 $V(x)$ 的蒙特卡洛估计，用它当基线是无偏的（第 9 章：基线只依赖状态），只是方差比学好的 critic 大，所以要多采几个；③ 再除以组标准差，让不同难度的题目梯度尺度一致。<strong>代价</strong>：每个提示要采 G 个（常用 8~64）；组内全对或全错时优势全为  0，这道题完全不提供信号；除以标准差会让“几乎都对 / 都错”的题权重变大，按长度平均会引入长度偏差（Dr. GRPO 等工作讨论了这些问题）。</p>
+<h2>13.6 实测：同一份偏好数据上的三种方法</h2>
+<p>玩具任务把“大模型”缩成一张表：4 个提示，每个提示 8 个候选回答，策略是每个提示一组 softmax logits（相当于只有一个 token 的回答），β = [[ch13.e1.beta]]。这样闭式最优解 $\pi^*_\beta$、真实期望奖励和 KL 都能精确算出，方便比较。三种方法共用同一份 2000 对偏好数据：RLHF-PPO 和 GRPO 先拟合奖励模型 $\hat r$ 再在线采样优化，DPO 直接在偏好对上训练；各 300 步、5 个随机世界（<code>demos/ch13_rlhf.cpp</code> E3）。</p>
+<!--plot {"x":[0,2.5],"y":[0,1.9],"h":300,"xlabel":"KL(π ‖ π_ref)","ylabel":"真实期望奖励 E_π[r]","legend":"br",
+"series":[{"path":"ch13.e3.front_avg","n":"闭式最优 π*_β（扫 β 得到的前沿，5 个世界平均）","c":"k","dash":true,"sw":1.6},{"path":"ch13.e3.runs.0.traj","n":"RLHF-PPO（5 种子平均）","c":"o","dots":true},{"path":"ch13.e3.runs.1.traj","n":"GRPO","c":"p","dots":true},{"path":"ch13.e3.runs.2.traj","n":"DPO","c":"g","dots":true}],
+"cap":"<b>图 13-3</b>　训练过程中的奖励–KL 轨迹（每 10 步一个点，从原点出发）。所有方法都沿着“多花 KL 换奖励”的方向前进；黑色虚线是用真实奖励在同样 5 个世界上算出的最优前沿（同一 β 下取平均），对每个世界而言，同样 KL 下不可能有比它更高的期望奖励。"} -->
+<!--dtab {"rows":"ch13.e3.runs","cols":[["方法","name"],["第 300 步 KL","kl",".3f"],["真实 E[r]","er",".3f"],["达到闭式 π*_β 提升量的比例（%）","gain_f",".0f"]],
+"cap":"<b>表 13-2</b>　三种方法的终点（5 个随机世界平均）。参考策略的期望奖励约为 0，闭式最优解 $\\pi^*_\\beta$ 的提升量记为 100%。"} -->
+<p>在这个小任务上三者都能拿到闭式解 85% 以上的提升，差别不大——它们优化的本来就是同一个目标（GRPO 因为对优势做了标准化，隐含的奖励尺度不同，KL 和 β 的对应关系也跟着变）。大模型上的差别主要来自这里看不到的因素：DPO 受离线数据覆盖范围限制、RLHF-PPO 的 critic 难训、GRPO 的采样成本。所以选型更多是工程问题：</p>
+<div class="tbl"><table>
+<tr><th>方法</th><th>需要什么</th><th>优点</th><th>缺点 / 风险</th><th>适合</th></tr>
+<tr><td>RLHF-PPO</td><td>偏好数据 + RM + 价值模型 + 在线采样</td><td>在线探索，上限高</td><td>4 个模型、超参多、不稳定</td><td>资源充足的通用对齐</td></tr>
+<tr><td>DPO</td><td>偏好对</td><td>简单、稳定、便宜</td><td>离线，受数据覆盖限制；可能过拟合偏好</td><td>风格 / 偏好对齐、资源有限时</td></tr>
+<tr><td>GRPO</td><td>奖励函数（RM 或规则）+ 在线采样</td><td>不用价值模型；适合可验证奖励</td><td>每个提示采 G 次；全对 / 全错无信号</td><td>推理、数学、代码、游戏规则可判定的任务</td></tr>
+</table></div>
+<p class="tcap"><b>表 13-3</b>　PPO / DPO / GRPO 的选型。</p>
+
+<h2>13.7 游戏中的用法</h2>
+<ul>
+<li><strong>按人的偏好微调游戏 Bot</strong>：强化学习训出来的 Bot 往往很强但“不像人”或者“不好玩”。让策划 / 玩家对 Bot 的行为片段做两两比较（哪个更像真人、哪个更有趣），训练偏好奖励模型，再用 PPO + 对原 Bot 策略的 KL 约束微调——KL 保证不丢掉原有的强度。这与第 14 章的“RL + 模仿学习、KL 约束到人类策略”是同一思路。</li>
+<li><strong>LLM 驱动的 NPC / AI 陪伴</strong>：用 DPO 对齐人设、语气和安全边界（“不剧透”“不出戏”）；偏好数据来自玩家反馈或人工标注。资源有限时 DPO 是首选。</li>
+<li><strong>可验证奖励</strong>：解谜、关卡生成是否可通关、技能连招是否合法，都能用规则判定对错，适合 GRPO 式的组采样——同一个关卡需求让模型生成 G 个方案，用模拟器验证后组内比较。</li>
+<li><strong>评估</strong>：奖励模型本身就是一个“玩家偏好预测器”，可以作为 Bot 风格的自动评估指标，但要警惕被过优化（13.3 节）。</li>
+</ul>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch13_interview.py</code> 逐字相同（输入里的 <code>logp_*</code> 在大模型中是整条回答各 token 的 log-prob 之和），脚本还数值验证了闭式最优解的最优性和 k3 的无偏性：</p>
+<!--code:py:BT 奖励模型损失 / DPO 损失 / GRPO 优势 / k3 KL 惩罚（Python，面试手撕版）-->
+{{demo:ch13_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch13_interview.py 的输出-->
+{{demo:ch13_interview_output.txt}}
+<!--/code-->
+
+<h2>13.8 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“DPO 不需要奖励，所以和 RL 无关”</td><td>没看到推导</td><td>DPO 优化的正是 KL 正则 RL 目标，只是利用闭式解把奖励模型和采样消掉了</td></tr>
+<tr><td>“GRPO 没有基线”</td><td>基线换了形式</td><td>组均值就是 $V(x)$ 的蒙特卡洛估计，起基线作用；去掉的是学出来的 critic</td></tr>
+<tr><td>“GRPO 的 KL 和 PPO-RLHF 一样放在奖励里”</td><td>位置不同</td><td>GRPO 把 k3 KL 作为损失项，不参与优势计算</td></tr>
+<tr><td>“KL 惩罚是为了训练稳定”</td><td>只说了一半</td><td>主要是防奖励过优化（RM 在分布外不可靠）、保留 SFT 能力</td></tr>
+<tr><td>“奖励模型准确率 70% 太低了”</td><td>忽略标签噪声</td><td>人的偏好本身就有噪声，真实奖励也只能解释部分标签（E1）</td></tr>
+<tr><td>“β 越小越好，奖励更高”</td><td>忽略过优化</td><td>β 小时 KL 大，奖励模型分数上升但真实质量可能下降</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:RLHF / DPO / GRPO 常见追问链-->
+讲一下 PPO 和 GRPO？（面经原题）
+├─ PPO 在 RLHF 里怎么用？ → RM 打分 + 每 token KL 惩罚，GAE 需要价值模型，clip 限制更新
+├─ GRPO 改了什么？ → 同一提示采 G 个回答，优势 = 组内标准化奖励；去掉 critic；KL(k3) 进损失
+│   ├─ 为什么可以不要 critic？ → 组均值是 V(x) 的 MC 估计（无偏基线）；大模型 critic 贵且难学
+│   └─ 代价？ → 采样成本 ×G；全对 / 全错无信号；std 归一化与长度平均带来的偏差
+├─ DPO 为什么不需要奖励模型？ → max E[r] − βKL 的解 π* ∝ π_ref·e^{r/β}，反解 r 代入 BT，Z 抵消
+│   └─ DPO 的局限？ → 离线、受数据覆盖限制；好回答概率也可能下降
+└─ KL 的作用？β 大小？ → 防过优化、保能力；β 大学不动，β 小易 hacking
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 13 章</div><ul>
+<li>RLHF：SFT → RM（$-\log\sigma(r_w-r_l)$）→ PPO 最大化 $\E[r]-\beta\KL(\pi\Vert\pi_{\text{ref}})$。</li>
+<li>闭式解：$\pi^*\propto\pi_{\text{ref}}e^{r/\beta}$，最优值 $\beta\log Z$；与最大熵 RL 同构。</li>
+<li>DPO：$-\log\sigma\big(\beta\log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)}-\beta\log\frac{\pi_\theta(y_l)}{\pi_{\text{ref}}(y_l)}\big)$，Z 抵消。</li>
+<li>GRPO：$\hat A_i=(r_i-\bar r)/\sigma_r$，PPO-clip + β·k3 KL 损失，无 critic。</li>
+<li>k3：$\frac{\pi_{\text{ref}}}{\pi}-\log\frac{\pi_{\text{ref}}}{\pi}-1$，按 π 采样无偏、非负。</li>
+<li>选型：资源足 → PPO；离线偏好 → DPO；可验证奖励 → GRPO。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：DPO 的 β 和 RLHF 的 β 是同一个东西吗？</summary><p>是。DPO 的推导从 KL 正则目标 $\E[r]-\beta\KL$ 出发，损失里的 β 就是 KL 系数：β 大，隐式奖励 $\beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$ 的尺度大，同样的偏好差异只需要很小的概率比就能拟合，策略离参考模型更近。</p></details>
+<details class="quiz"><summary>自测 2：GRPO 中一组 8 个回答有 7 个对、1 个错，正确和错误回答的优势分别是多少？</summary><p>均值 0.875，标准差 $\sqrt{0.875\times0.125}\approx0.331$。正确的 $(1-0.875)/0.331\approx+0.378$，错误的 $(0-0.875)/0.331\approx-2.65$。错误回答被强烈压低，正确回答只被轻微提升：“几乎都会”的题主要在纠错。</p></details>
+<details class="quiz"><summary>自测 3：为什么 RLHF 的 KL 惩罚要相对于 π_ref，而不是相对于上一轮策略？</summary><p>相对上一轮策略的约束（PPO 的 clip / TRPO 的 KL）只限制每一步走多远，累积起来仍可能离 SFT 模型很远；相对 π_ref 的惩罚限制的是总的偏离程度，对应“奖励模型只在 π_ref 附近可信”。两者在 RLHF-PPO 里同时存在、作用不同。</p></details>
+<details class="quiz"><summary>自测 4：想让 MOBA Bot“更像人”，用 DPO 还是 GRPO 风格的方法？</summary><p>“像不像人”没有规则能判定，只能靠人的偏好标注，适合先训练偏好奖励模型再 PPO 微调（在线，可以探索新行为），或者直接 DPO（离线，便宜，但只能在已有片段附近调整）。GRPO 适合有明确判定规则的目标（比如“这波团战是否赢”“连招是否合法”）。</p></details>
+</section>

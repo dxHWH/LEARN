@@ -1,0 +1,246 @@
+<div class="part-head" data-toc="第三部分 · 动画蓝图">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　动画蓝图：把混合组织成一张图</h1>
+  <p>动画蓝图决定“这一帧用哪些动画、按什么权重混”。它的线程模型、状态机与过渡、蒙太奇和 IK，是面试官区分“用过”和“懂”的地方。</p>
+</div>
+
+<section class="chapter" id="ch6">
+  <div class="ch-head">
+    <div class="no">CHAPTER 06</div>
+    <h1>动画蓝图的架构与线程模型</h1>
+    <p class="lead">EventGraph 和 AnimGraph 分别跑在哪个线程？Proxy 为什么存在？一个动画节点从初始化到输出姿势经历了什么？</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清动画蓝图编译后是什么，EventGraph 与 AnimGraph 的分工</li>
+    <li>按顺序讲出一帧里 SkeletalMeshComponent 的动画调用链，并标出线程</li>
+    <li>理解 FAnimInstanceProxy、Property Access、线程安全函数、Fast Path 各自解决什么问题</li>
+    <li>能写一个最小的自定义动画节点，知道 Initialize / CacheBones / Update / Evaluate 的职责</li>
+  </ul></div>
+
+  <h2>6.1 动画蓝图编译后是什么</h2>
+  <p>动画蓝图编译生成一个 <code>UAnimInstance</code> 的子类（<code>UAnimBlueprintGeneratedClass</code>）。AnimGraph 里的每个节点变成这个类里的一个 <code>FAnimNode_*</code> 结构体成员（如 <code>FAnimNode_SequencePlayer</code>、<code>FAnimNode_LayeredBoneBlend</code>），节点之间用 <code>FPoseLink</code> 连起来；EventGraph 和函数编译成普通蓝图字节码。</p>
+  <div class="tbl"><table>
+    <tr><th></th><th>EventGraph</th><th>AnimGraph</th></tr>
+    <tr><td>做什么</td><td>读角色 / 移动组件的状态，算出变量（速度、方向、是否在空中、瞄准角）</td><td>用这些变量驱动节点树，输出最终姿势</td></tr>
+    <tr><td>入口</td><td><code>Event Blueprint Update Animation</code>（C++：<code>NativeUpdateAnimation</code>）</td><td>Output Pose 节点向下拉取</td></tr>
+    <tr><td>线程</td><td><strong>游戏线程</strong></td><td>开启多线程更新后在<strong>工作线程</strong></td></tr>
+    <tr><td>能否访问 UObject</td><td>可以（Cast、调函数）</td><td>不能随意访问，只能读 Proxy 里的数据或线程安全的属性</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">UE5 推荐写法</span>
+    <p>把 EventGraph 里的逻辑搬到 <strong>Blueprint Thread Safe Update Animation</strong>（C++：<code>NativeThreadSafeUpdateAnimation</code>）里，在工作线程执行；需要读角色数据时用 <strong>Property Access</strong>（属性访问）节点，它由引擎在安全的时机把数据拷贝过来。Lyra 的动画蓝图几乎没有 EventGraph 逻辑，就是这么做的。</p>
+  </div>
+
+  <h2>6.2 一帧的调用链</h2>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm b"><text x="12" y="34">游戏线程</text><text x="12" y="214">工作线程</text><text x="12" y="350">游戏线程</text></g>
+    <g stroke="#E5E7EB"><line x1="90" y1="180" x2="850" y2="180"/><line x1="90" y1="300" x2="850" y2="300"/></g>
+    <g class="sm mono">
+      <rect x="96" y="14" width="336" height="148" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="108" y="36" class="b" style="font-family:var(--font)">① USkeletalMeshComponent::TickComponent</text>
+      <text x="120" y="58">TickAnimation()</text>
+      <text x="132" y="78">UAnimInstance::UpdateAnimation()</text>
+      <text x="144" y="98">PreUpdateAnimation（Proxy 拷数据）</text>
+      <text x="144" y="118">NativeUpdateAnimation / EventGraph</text>
+      <text x="144" y="138">（不开多线程：在这里 Update 整张图）</text>
+      <text x="120" y="156">RefreshBoneTransforms() → 派发任务</text>
+    </g>
+    <g class="sm mono">
+      <rect x="250" y="192" width="380" height="96" rx="8" fill="#F3EEFE" stroke="#6D28D9"/>
+      <text x="262" y="214" class="b" style="font-family:var(--font)">② ParallelAnimationEvaluation（TaskGraph）</text>
+      <text x="274" y="236">Proxy: UpdateAnimation  → 各节点 Update_AnyThread</text>
+      <text x="274" y="256">Proxy: EvaluateAnimation → 各节点 Evaluate_AnyThread</text>
+      <text x="274" y="276">FillComponentSpaceTransforms（局部 → 组件空间）</text>
+    </g>
+    <g class="sm mono">
+      <rect x="470" y="312" width="380" height="80" rx="8" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="482" y="334" class="b" style="font-family:var(--font)">③ CompleteParallelAnimationEvaluation</text>
+      <text x="494" y="356">交换缓冲、PostAnimEvaluation：派发 Notify</text>
+      <text x="494" y="376">更新物理 / Socket、通知渲染线程（蒙皮矩阵）</text>
+    </g>
+    <g fill="none" stroke="#4B5563" stroke-width="1.5">
+      <line x1="300" y1="162" x2="300" y2="188" marker-end="url(#a)"/>
+      <path d="M630,240 H660 V308" marker-end="url(#a)"/>
+    </g>
+    <rect x="444" y="20" width="406" height="138" rx="8" fill="#FFFFFF" stroke="#E5E7EB"/>
+    <g class="sm">
+      <text x="456" y="42" class="b">这期间游戏线程不闲着</text>
+      <text x="456" y="64">· 派发任务后，游戏线程继续 Tick 其他 Actor</text>
+      <text x="456" y="84">· 结果在本帧稍后（或下一次需要骨骼时）收回</text>
+      <text x="456" y="104">· 需要立刻拿骨骼时会等待任务完成（阻塞点）</text>
+      <text x="456" y="124">· 相关 CVar：a.ParallelAnimUpdate、a.ParallelAnimEvaluation</text>
+      <text x="456" y="144">· 开关：项目设置 + 每个 AnimBP 的“使用多线程动画更新”</text>
+    </g>
+    <text x="96" y="230" class="xs">工作线程里只能碰：</text>
+    <text x="96" y="246" class="xs">Proxy 的拷贝、节点自身</text>
+    <text x="96" y="262" class="xs">数据、线程安全函数</text>
+  </svg>
+  <figcaption><b>图 6-1</b>　一个 SkeletalMeshComponent 每帧的动画调用链。① 在游戏线程准备，② 在工作线程计算（多线程开启时），③ 回到游戏线程收尾。Notify 在 ③ 派发，所以比姿势晚一步</figcaption>
+  </figure>
+  <div class="co deep"><span class="h">深入：Root Motion 让调用顺序变了</span>
+    <p>角色播放带 Root Motion 的蒙太奇时，<code>UCharacterMovementComponent</code> 需要在<strong>移动之前</strong>就知道这一帧动画位移了多少。所以它会在自己的 Tick 里主动调用 <code>TickCharacterPose</code>，先推进动画时间并提取 Root Motion，再用这段位移执行移动；之后 SkeletalMeshComponent 的 Tick 不会再重复推进时间。这也是“Root Motion 角色的动画和移动是强耦合的”的含义（第 7 章）。</p>
+  </div>
+
+  <h2>6.3 为什么要有 Proxy</h2>
+  <p>工作线程计算姿势时，游戏线程可能正在改 Actor 的属性、销毁对象、跑 GC。如果动画节点直接读 <code>Character-&gt;GetVelocity()</code>，就是数据竞争。UE 的解法是 <strong>FAnimInstanceProxy</strong>：</p>
+  <ul>
+    <li>动画实例里真正参与计算的状态（节点树、同步组、蒙太奇评估数据、要读的变量）放在 Proxy 里。</li>
+    <li>游戏线程在 <code>PreUpdateAnimation</code> 阶段把需要的数据<strong>拷贝</strong>进 Proxy；工作线程只读写 Proxy。</li>
+    <li>收尾阶段再把结果（Notify 队列、曲线值等）交还游戏线程。</li>
+  </ul>
+<!--code:cpp:C++ 动画实例：游戏线程拷数据，工作线程算-->
+UCLASS()
+class UMyAnimInstance : public UAnimInstance
+{
+    GENERATED_BODY()
+protected:
+    UPROPERTY(BlueprintReadOnly) float GroundSpeed = 0.f;
+    UPROPERTY(BlueprintReadOnly) float Direction = 0.f;
+    UPROPERTY(BlueprintReadOnly) bool  bIsInAir = false;
+
+    UPROPERTY(Transient) TObjectPtr<ACharacter> OwnerCharacter;   // 只缓存一次，不要每帧 Cast
+
+    virtual void NativeInitializeAnimation() override
+    {
+        OwnerCharacter = Cast<ACharacter>(TryGetPawnOwner());
+    }
+    // 游戏线程：只做“读取 + 拷贝”，不做重计算
+    virtual void NativeUpdateAnimation(float DeltaSeconds) override
+    {
+        if (!OwnerCharacter) return;
+        Velocity  = OwnerCharacter->GetVelocity();
+        ActorRot  = OwnerCharacter->GetActorRotation();
+        bIsInAir  = OwnerCharacter->GetCharacterMovement()->IsFalling();
+    }
+    // 工作线程：只用上面拷好的值算派生量
+    virtual void NativeThreadSafeUpdateAnimation(float DeltaSeconds) override
+    {
+        GroundSpeed = FVector(Velocity.X, Velocity.Y, 0.f).Size();
+        Direction   = UKismetAnimationLibrary::CalculateDirection(Velocity, ActorRot);
+    }
+private:
+    FVector  Velocity = FVector::ZeroVector;
+    FRotator ActorRot = FRotator::ZeroRotator;
+};
+<!--/code-->
+  <div class="co warn"><span class="h">面试注意：EventGraph 里的性能坑</span>
+    <ul>
+      <li><strong>每帧 Cast</strong>：<code>Try Get Pawn Owner → Cast To Character</code> 放在 Update 事件里，每帧每个角色都做一次。应在 Initialize 时缓存。</li>
+      <li><strong>蓝图 VM 开销</strong>：EventGraph 里的每个节点都走蓝图虚拟机，几十个角色乘起来就是游戏线程的大头。能挪到线程安全函数或 C++ 的就挪。</li>
+      <li><strong>在动画蓝图里做射线检测、生成 Actor</strong>：这些属于游戏逻辑，应该在角色或组件里做，动画蓝图只读结果。</li>
+    </ul>
+  </div>
+
+  <h2>6.4 Fast Path、Property Access 与线程安全函数</h2>
+  <div class="tbl"><table>
+    <tr><th>机制</th><th>解决什么</th><th>怎么用</th></tr>
+    <tr><td><strong>Fast Path</strong></td><td>AnimGraph 节点引脚的值如果来自蓝图逻辑，每次 Update 都要跑一段蓝图字节码</td><td>引脚直接连成员变量（或只做 Break Struct、取反 Bool 等简单操作），编译器把它变成直接内存拷贝，节点右上角出现闪电图标；否则编译时给出性能警告</td></tr>
+    <tr><td><strong>Property Access</strong></td><td>工作线程里需要读游戏线程对象的属性</td><td>用属性访问节点 / 绑定写路径（如 <code>TryGetPawnOwner.CharacterMovement.Velocity</code>），引擎在安全时机批量拷贝</td></tr>
+    <tr><td><strong>Thread Safe 函数</strong></td><td>自定义计算放到工作线程</td><td>函数标记为 Thread Safe，编译器检查里面不调用非线程安全的东西；可在 Blueprint Thread Safe Update Animation 或 Anim Node Functions 里调用</td></tr>
+    <tr><td><strong>Anim Node Functions</strong></td><td>节点级的初始化 / 更新逻辑</td><td>节点的 On Initial Update / On Become Relevant / On Update 绑定线程安全函数，例如进入状态时重置播放时间</td></tr>
+  </table></div>
+
+  <h2>6.5 一个动画节点的一生</h2>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <rect x="30" y="110" width="110" height="44" rx="8" fill="#111827"/><text x="85" y="137" text-anchor="middle" class="b sm wt">Output Pose</text>
+    <rect x="200" y="110" width="130" height="44" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/><text x="265" y="137" text-anchor="middle" class="b sm">Layered Blend</text>
+    <rect x="390" y="50" width="130" height="44" rx="8" fill="#F3EEFE" stroke="#6D28D9"/><text x="455" y="77" text-anchor="middle" class="b sm">State Machine</text>
+    <rect x="390" y="170" width="130" height="44" rx="8" fill="#EAF7EF" stroke="#15803D"/><text x="455" y="197" text-anchor="middle" class="b sm">Slot</text>
+    <rect x="580" y="50" width="130" height="44" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="645" y="77" text-anchor="middle" class="b sm">Blend Space</text>
+    <rect x="580" y="170" width="130" height="44" rx="8" fill="#FFF4EC" stroke="#C2410C"/><text x="645" y="197" text-anchor="middle" class="b sm">Sequence Player</text>
+    <g fill="none" stroke="#2F5BD3" stroke-width="1.6">
+      <path d="M140,124 H196" marker-end="url(#ab)"/><path d="M330,122 C360,122 360,72 386,72" marker-end="url(#ab)"/>
+      <path d="M330,132 C360,132 360,192 386,192" marker-end="url(#ab)"/><path d="M520,66 H576" marker-end="url(#ab)"/><path d="M520,186 H576" marker-end="url(#ab)"/>
+    </g>
+    <g fill="none" stroke="#C2410C" stroke-width="1.6" stroke-dasharray="5 3">
+      <path d="M196,144 H144" marker-end="url(#ao)"/><path d="M386,84 C350,84 350,140 334,142" marker-end="url(#ao)"/>
+      <path d="M386,204 C356,204 344,150 334,148" marker-end="url(#ao)"/><path d="M576,82 H524" marker-end="url(#ao)"/><path d="M576,202 H524" marker-end="url(#ao)"/>
+    </g>
+    <text x="740" y="74" class="sm b" style="fill:#2F5BD3">Update：自顶向下</text>
+    <text x="740" y="92" class="xs">传 DeltaTime 和权重</text>
+    <text x="740" y="110" class="xs">推进时间、算子权重</text>
+    <text x="740" y="170" class="sm b" style="fill:#C2410C">Evaluate：自底向上</text>
+    <text x="740" y="188" class="xs">叶子采样出姿势</text>
+    <text x="740" y="206" class="xs">逐级混合返回</text>
+    <g class="xs"><text x="30" y="244" class="b sm">偶发</text>
+      <text x="80" y="244">Initialize_AnyThread：首次运行、重新变得相关时 · CacheBones_AnyThread：所需骨骼变化（LOD 切换）时解析 FBoneReference</text>
+      <text x="30" y="268" class="b sm">每帧</text>
+      <text x="80" y="268">Update_AnyThread(FAnimationUpdateContext) → Evaluate_AnyThread(FPoseContext)</text>
+      <text x="80" y="286">组件空间节点（IK 等）用 EvaluateComponentSpace_AnyThread(FComponentSpacePoseContext)</text></g>
+  </svg>
+  <figcaption><b>图 6-2</b>　AnimGraph 节点的生命周期。Update 从 Output 往叶子传权重（权重为 0 的子图被跳过），Evaluate 由 Output 向下拉取、叶子先算出姿势再逐级混合返回</figcaption>
+  </figure>
+<!--code:cpp:一个最小的自定义动画节点：给脊柱加侧倾（局部空间）-->
+USTRUCT(BlueprintInternalUseOnly)
+struct FAnimNode_SpineLean : public FAnimNode_Base
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, Category = Links)
+    FPoseLink Source;                                   // 输入姿势
+
+    UPROPERTY(EditAnywhere, Category = Settings)
+    FBoneReference SpineBone;                           // 按名字引用骨骼，运行时解析成 Compact 下标
+
+    UPROPERTY(EditAnywhere, Category = Settings, meta = (PinShownByDefault))
+    float LeanDegrees = 0.f;                            // 暴露成引脚，最好用 Fast Path 绑定变量
+
+    virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override
+    {
+        FAnimNode_Base::Initialize_AnyThread(Context);
+        Source.Initialize(Context);
+    }
+    virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override
+    {
+        Source.CacheBones(Context);
+        SpineBone.Initialize(Context.AnimInstanceProxy->GetRequiredBones());   // LOD 变化时会重新调用
+    }
+    virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override
+    {
+        GetEvaluateGraphExposedInputs().Execute(Context);  // 刷新引脚绑定的值
+        Source.Update(Context);                            // 继续往下传
+    }
+    virtual void Evaluate_AnyThread(FPoseContext& Output) override
+    {
+        Source.Evaluate(Output);                           // 先拿到输入姿势
+        const FCompactPoseBoneIndex Idx = SpineBone.GetCompactPoseIndex(Output.Pose.GetBoneContainer());
+        if (Idx.IsValid())                                 // 当前 LOD 可能没有这根骨骼
+        {
+            FTransform& T = Output.Pose[Idx];
+            const FQuat Lean(FVector::ForwardVector, FMath::DegreesToRadians(LeanDegrees));
+            T.SetRotation((Lean * T.GetRotation()).GetNormalized());
+        }
+    }
+};
+// 编辑器里还需要一个 UAnimGraphNode_SpineLean（放在 Editor 模块）提供节点外观和标题
+<!--/code-->
+  <div class="co warn"><span class="h">面试注意：自定义节点的三条铁律</span>
+    <ol>
+      <li><strong>函数名带 _AnyThread 的都可能在工作线程跑</strong>：不能访问 UObject 的可变状态、不能 Spawn、不能调非线程安全的引擎函数。</li>
+      <li><strong>必须把调用往下传</strong>：Initialize / CacheBones / Update / Evaluate 都要调用输入 <code>FPoseLink</code> 的对应函数，否则子图不会运行。</li>
+      <li><strong>骨骼下标只能用 Compact Pose Index</strong>，并在 CacheBones 里重新解析（第 1 章）。</li>
+    </ol>
+  </div>
+
+  <h2>6.6 拆分动画蓝图：Linked Anim Graph 与 Anim Layer</h2>
+  <p>一个角色要支持十几种武器时，把所有逻辑塞进一个动画蓝图会变得不可维护。UE 提供两种拆分方式：</p>
+  <ul>
+    <li><strong>Linked Anim Graph</strong>：在 AnimGraph 里放一个节点，运行另一个动画蓝图的 AnimGraph，像调用子函数一样。</li>
+    <li><strong>Anim Layer + Anim Layer Interface</strong>：主动画蓝图只定义“接口”（例如 FullBody_Idle、UpperBody_Aim 这些层），具体实现放在各个武器的动画蓝图里，运行时用 <code>LinkAnimClassLayers</code> 切换。Lyra 的“每种武器一个动画层蓝图”就是这么做的。</li>
+    <li><strong>Animation Blueprint Template</strong>：不绑定具体 Skeleton 的模板，可以被不同角色复用，具体的动画资产作为变量传入。</li>
+  </ul>
+  <div class="co net"><span class="h">游戏客户端实战：切换武器层时的注意点</span>
+    <p>链接新的动画层会让新子图“重新变得相关”，序列时间和状态机状态都会重置，可能出现一帧的姿势跳变。通常在切换时配合一次惯性化（Inertialization）请求，并且把运动同步组放在主蓝图里，让新层的循环动画接上原来的脚步相位。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>动画蓝图 = UAnimInstance 子类；<strong>EventGraph 在游戏线程</strong>读状态写变量，<strong>AnimGraph</strong> 可在工作线程更新与求值。</li>
+    <li>调用链：TickComponent → TickAnimation（UpdateAnimation，NativeUpdate）→ RefreshBoneTransforms 派发 → 工作线程 Update + Evaluate + 组件空间 → Complete（派发 Notify、通知渲染）。</li>
+    <li><strong>Proxy</strong> 隔离数据；UE5 用 <strong>Property Access + Thread Safe Update</strong> 取代 EventGraph；<strong>Fast Path</strong> 让引脚绑定免跑蓝图 VM。</li>
+    <li>节点四件套：Initialize / CacheBones（解析骨骼）/ Update（时间、权重，自顶向下）/ Evaluate（姿势，自底向上）；记得往下传。</li>
+    <li>大型角色用 Linked Anim Graph / Anim Layer 拆分，切层时注意状态重置。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：关闭“多线程动画更新”后，动画还会在工作线程上算吗？</summary><p>Update（包括 AnimGraph 节点的 Update_AnyThread）会回到游戏线程执行；但 Evaluate 通常仍可以并行（由 a.ParallelAnimEvaluation 等控制），因为求值只依赖 Update 之后的节点数据。两者是分开的开关。调试时常把并行关掉，以便在游戏线程上断点和复现问题。</p></details>
+  <details class="quiz"><summary>自测：为什么普通 Notify 不在工作线程直接触发？</summary><p>Notify 的回调通常会做游戏逻辑：播声音、生成特效、修改 Actor 状态、调用蓝图函数，这些都必须在游戏线程执行。所以求值阶段只记录“本帧扫过了哪些 Notify”，Complete 阶段在游戏线程统一派发。代价是触发时间比姿势晚一点；需要精确时机的用蒙太奇的 Branching Point。</p></details>
+</section>

@@ -1,0 +1,87 @@
+# /Game/Blueprints/Weapon/BP_Bullet  (Blueprint)
+ParentClass: /Script/Engine.Actor
+
+## Variables
+- 命中结果 : bool
+
+## BP_Bullet_C Default__BP_Bullet_C
+   bReplicateMovement = True
+   bReplicates = True
+
+## ProjectileMovementComponent BP_Bullet_C.ProjectileMovement_GEN_VARIABLE
+   InitialSpeed = 20000.0
+   MaxSpeed = 20000.0
+
+## SceneComponent BP_Bullet_C.DefaultSceneRoot_GEN_VARIABLE
+   bVisualizeComponent = True
+
+## SCS_Node BP_Bullet_C.SimpleConstructionScript_0.SCS_Node_0
+   ComponentClass = SceneComponent
+   ComponentTemplate = DefaultSceneRoot_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = DefaultSceneRoot
+
+## SCS_Node BP_Bullet_C.SimpleConstructionScript_0.SCS_Node_1
+   ComponentClass = SphereComponent
+   ComponentTemplate = Sphere_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = Sphere
+
+## SCS_Node BP_Bullet_C.SimpleConstructionScript_0.SCS_Node_2
+   ComponentClass = ProjectileMovementComponent
+   ComponentTemplate = ProjectileMovement_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = ProjectileMovement
+
+## SCS_Node BP_Bullet_C.SimpleConstructionScript_0.SCS_Node_3
+   ComponentClass = StaticMeshComponent
+   ComponentTemplate = 自发光模型_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = 自发光模型
+
+## SphereComponent BP_Bullet_C.Sphere_GEN_VARIABLE
+   AreaClass = NavArea_Obstacle
+
+## StaticMeshComponent BP_Bullet_C.自发光模型_GEN_VARIABLE
+   StaticMesh = Sphere
+   OverrideMaterials = ('arr', 'ObjectProperty', [('@', -62)])
+
+## Custom events / RPC
+
+## Graph BP_Bullet.EventGraph
+
+Event ReceiveBeginPlay():  #27
+  SetLifeSpan(InLifespan=1.000000)  #18
+
+Event ReceiveHit(MyComp, Other, OtherComp, bSelfMoved, HitLocation, HitNormal, NormalImpulse, Hit):  #28
+  SpawnDecalAttached(DecalMaterial=Select(Option 0=Bullet_Impact_Decal, Option 1=blood_Mat, Index=CastTo BP_Zombie_C(Object=Event ReceiveHit#28.Other).bSuccess), DecalSize=7.000000,7.000000,7.000000, AttachToComponent=Event ReceiveHit#28.OtherComp, AttachPointName=BreakHitResult(Hit=Event ReceiveHit#28.Hit).HitBoneName, Location=BreakHitResult(Hit=Event ReceiveHit#28.Hit).ImpactPoint, Rotation=Conv_VectorToRotator(InVec=BreakHitResult(Hit=Event ReceiveHit#28.Hit).ImpactNormal), LocationType=KeepWorldPosition, LifeSpan=15.000000)  -> ReturnValue  #11
+  Macro IsValid(InputObject=SpawnDecalAttached#11.ReturnValue)  #35
+    [Is Valid]:
+      SetFadeScreenSize(self=SpawnDecalAttached#11.ReturnValue, NewFadeScreenSize=0.0)  #22
+      SpawnSoundAtLocation(Sound=Select(Option 0=bullet_impact_concrete_brick_08_Cue, Option 1=bullet_impact_body_flesh_08_Cue, Index=CastTo BP_Zombie_C(Object=Event ReceiveHit#28.Other).bSuccess), Location=BreakHitResult(Hit=Event ReceiveHit#28.Hit).ImpactPoint, Rotation=0, 0, 0, VolumeMultiplier=1.000000, PitchMultiplier=1.000000, StartTime=0.000000, AttenuationSettings=None, ConcurrencySettings=None, bAutoDestroy=true)  #15
+      SpawnEmitterAtLocation(EmitterTemplate=Select(Option 0=VFX_Impact_Concrete, Option 1=VFX_Impact_Flesh, Index=CastTo BP_Zombie_C(Object=Event ReceiveHit#28.Other).bSuccess), Location=BreakHitResult(Hit=Event ReceiveHit#28.Hit).ImpactPoint, Rotation=Conv_VectorToRotator(InVec=BreakHitResult(Hit=Event ReceiveHit#28.Hit).ImpactNormal), Scale=1.000000,1.000000,1.000000, bAutoDestroy=true, PoolingMethod=None, bAutoActivateSystem=true)  #16
+      给丧尸伤害(命中结果=Event ReceiveHit#28.Hit)  #13
+      Macro IsValid(InputObject=Event ReceiveHit#28.OtherComp)  #34
+        [Is Valid]:
+          Sequence()  #29
+            [then_0]:
+              Branch(Condition=IsSimulatingPhysics(self=Event ReceiveHit#28.OtherComp, BoneName="None"))  #32
+                [true]:
+                  AddImpulse(self=Event ReceiveHit#28.OtherComp, Impulse=Multiply_VectorVector(A=GetVelocity(), B=25.000000), BoneName=BreakHitResult(Hit=Event ReceiveHit#28.Hit).HitBoneName, bVelChange=false)  #20
+            [then_1]:
+              K2_DestroyActor()  #17
+    [Is Not Valid]:
+      goto SpawnSoundAtLocation #15
+
+## Graph BP_Bullet.UserConstructionScript
+
+FunctionEntry():  #30
+
+## Graph BP_Bullet.给丧尸伤害
+
+FunctionEntry(命中结果):  #31
+  Branch(Condition=EqualEqual_NameName(A=BreakHitResult(Hit=FunctionEntry#31.命中结果).HitBoneName, B="head"))  #33
+    [true]:
+      ApplyDamage(DamagedActor=BreakHitResult(Hit=FunctionEntry#31.命中结果).HitActor, BaseDamage=100.000000, EventInstigator=∅, DamageCauser=∅, DamageTypeClass=∅)  #25
+    [false]:
+      ApplyDamage(DamagedActor=BreakHitResult(Hit=FunctionEntry#31.命中结果).HitActor, BaseDamage=40.000000, EventInstigator=∅, DamageCauser=∅, DamageTypeClass=∅)  #24

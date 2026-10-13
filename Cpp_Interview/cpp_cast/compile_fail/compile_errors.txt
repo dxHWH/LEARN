@@ -1,0 +1,61 @@
+### cf1_static_cast_unrelated.cpp  (cl /std:c++latest /EHsc /utf-8)
+cf1_static_cast_unrelated.cpp
+cf1_static_cast_unrelated.cpp(8): error C2440: “static_cast”: 无法从“IRenderable *”转换为“ITickable *”
+cf1_static_cast_unrelated.cpp(8): note: 指向的类型不相关; 转换需要 reinterpret_cast、C 样式强制转换或带圆括号的函数样式强制转换
+cf1_static_cast_unrelated.cpp(10): error C2440: “static_cast”: 无法从“float *”转换为“int *”
+cf1_static_cast_unrelated.cpp(10): note: 指向的类型不相关; 转换需要 reinterpret_cast、C 样式强制转换或带圆括号的函数样式强制转换
+exit=2
+
+### cf2_static_cast_virtual_base.cpp  (cl /std:c++latest /EHsc /utf-8)
+cf2_static_cast_virtual_base.cpp
+cf2_static_cast_virtual_base.cpp(7): error C2635: 不能将“VBase*”转换为“VDerived*”；暗含了从虚拟基类的转换
+cf2_static_cast_virtual_base.cpp(2): note: 参见“VBase”的声明
+cf2_static_cast_virtual_base.cpp(3): note: 参见“VDerived”的声明
+cf2_static_cast_virtual_base.cpp(7): error C2440: “初始化”: 无法从“VBase *”转换为“VDerived *”
+cf2_static_cast_virtual_base.cpp(7): note: 从基类型到派生类型的强制转换需要 dynamic_cast 或 static_cast
+exit=2
+
+### cf3_dynamic_cast_non_polymorphic.cpp  (cl /std:c++latest /EHsc /utf-8)
+cf3_dynamic_cast_non_polymorphic.cpp
+cf3_dynamic_cast_non_polymorphic.cpp(7): error C2683: “dynamic_cast”:“Base”不是多态类型
+cf3_dynamic_cast_non_polymorphic.cpp(2): note: 参见“Base”的声明
+exit=2
+
+### cf4_cast_away_const.cpp  (cl /std:c++latest /EHsc /utf-8)
+cf4_cast_away_const.cpp
+cf4_cast_away_const.cpp(4): error C2440: “static_cast”: 无法从“const int *”转换为“int *”
+cf4_cast_away_const.cpp(4): note: 转换丢失限定符
+cf4_cast_away_const.cpp(6): error C2440: “reinterpret_cast”: 无法从“const float *”转换为“int *”
+cf4_cast_away_const.cpp(6): note: 转换丢失限定符
+cf4_cast_away_const.cpp(8): error C2440: “const_cast”: 无法从“int *”转换为“double *”
+cf4_cast_away_const.cpp(8): note: 指向的类型不相关; 转换需要 reinterpret_cast、C 样式强制转换或带圆括号的函数样式强制转换
+exit=2
+
+### cf5_static_cast_private_base.cpp  (cl /std:c++latest /EHsc /utf-8)
+cf5_static_cast_private_base.cpp
+cf5_static_cast_private_base.cpp(6): error C2243: “static_cast”: 从“Secret *”到“Unit *”的转换存在，但无法访问
+exit=2
+
+### cf6_reinterpret_value.cpp  (cl /std:c++latest /EHsc /utf-8)
+cf6_reinterpret_value.cpp
+cf6_reinterpret_value.cpp(4): error C2440: “reinterpret_cast”: 无法从“int”转换为“float”
+cf6_reinterpret_value.cpp(4): note: 强制转换是有效的标准强制转换，可以隐式执行或通过使用 static_cast、C 样式强制转换或函数样式强制转换执行
+cf6_reinterpret_value.cpp(6): error C2440: “reinterpret_cast”: 无法从“double”转换为“int”
+cf6_reinterpret_value.cpp(6): note: 强制转换是有效的标准强制转换，可以隐式执行或通过使用 static_cast、C 样式强制转换或函数样式强制转换执行
+exit=2
+
+### cf7_rtti_off.cpp  (cl /std:c++latest /EHsc /utf-8 /GR-)
+cf7_rtti_off.cpp
+cf7_rtti_off.cpp(10): warning C4541: “dynamic_cast”用在了带 /GR- 的多态类型“Base”上；可能导致不可预知的行为
+exit=0
+--- 运行 cf7_rtti_off.exe ---
+运行期抛出异常: Access violation - no RTTI data!
+run exit=0x0
+
+### cf8_typeid_rtti_off.cpp  (cl /std:c++latest /EHsc /utf-8 /GR-)
+cf8_typeid_rtti_off.cpp
+cf8_typeid_rtti_off.cpp(11): warning C4541: “typeid”用在了带 /GR- 的多态类型“Base”上；可能导致不可预知的行为
+exit=0
+--- 运行 cf8_typeid_rtti_off.exe ---
+run exit=0xC0000005
+

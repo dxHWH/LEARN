@@ -1,0 +1,190 @@
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>问 ④：子弹同步与换弹</h1>
+    <p class="lead">“子弹同步”其实是三件事：弹药数怎么同步、别人怎么看到你开枪、子弹（命中）怎么同步。换弹则是一个必须由服务器驱动的小状态机。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>弹药的复制条件、预测与对账：为什么直接用 OnRep 覆盖会让 UI 回跳（E5）。</li>
+    <li>逐节点复现原 Demo 的换弹 bug，并给出守恒的写法（E4）。</li>
+    <li>换弹状态机：本机预测、服务器计时、别人看到动画、打断与取消。</li>
+  </ul></div>
+
+  <div class="ans">
+    <div class="q">30 秒版</div>
+    <p>弹药服务器权威，<code>COND_OwnerOnly</code> 只发给持枪者；本机预测扣弹，显示 = 服务器弹数 − 未确认发数，被拒的发数会自动纠正。别人看到开枪靠 <code>COND_SkipOwner</code> 的 BurstCounter，命中靠服务器的伤害结果复制。换弹：本机立刻播动画并预测状态 → <code>ServerStartReload</code> → 服务器校验后 <code>bPendingReload=true</code>（SkipOwner 给别人播动画）→ 计时器到点一次性 <code>take = min(空位, 备弹)</code> → 复位；期间开火被拒，切枪 / 死亡取消计时器且不改弹药。</p>
+  </div>
+
+  <h2>原 Demo 的换弹：逐节点移植后跑一遍</h2>
+  <p>把第 1 章的 <code>Server_Change</code> 与 <code>剩余子弹计算</code> 按节点一一翻译成 C++（包括“false 分支没有 Return 时返回 0”的蓝图语义），与修正版对比：</p>
+<!--code:cpp:E4：原蓝图逻辑（逐节点移植）与修正版-->
+// 原蓝图 BP_Weapon.剩余子弹计算（#120~#187）
+int origRemain(Gun& g) {
+    int need = g.maxMag - g.saved;
+    if (g.total - need > 0) { g.total -= need; g.saved = g.maxMag; return g.saved; }   // #123 Return
+    g.saved = g.saved + g.total; g.total = 0;
+    return 0;                     // 没经过 Return 节点：输出参数保持默认值 0
+}
+// 原蓝图 BP_Weapon.Server_Change（#105）
+bool origReload(Gun& g) {
+    if (!(g.total > 0) || g.maxMag == g.cur || g.reloading) return false;
+    g.saved = g.cur; g.cur = 0; g.reloading = true;     // 一开始就把弹匣清零
+    /* Multicast_Change + Delay(蒙太奇时长) */
+    g.reloading = false; g.cur = origRemain(g);
+    return true;
+}
+// 修正版：一次性计算转移量，总数守恒
+bool fixedReload(Gun& g) {
+    if (g.total <= 0 || g.cur >= g.maxMag || g.reloading) return false;
+    int take = std::min(g.maxMag - g.cur, g.total);
+    g.cur += take; g.total -= take;
+    return true;
+}
+<!--/code-->
+<!--dtab {"src":"E4.cases","cols":[["换弹前 弹匣 / 备弹","={0} / {1}"],["原蓝图 → 弹匣 / 备弹","={2} / {3}"],["原蓝图丢失","4"],["修正版 → 弹匣 / 备弹","={5} / {6}"]],"hl":{"原蓝图丢失":[">",0]},"cap":"表 5-1　E4：弹匣容量 10。只要“备弹 ≤ 需要补的数量”，原蓝图就把弹匣清零；最后一行弹匣已满，两者都不换"} -->
+<!--dtab {"src":"E4.session","cols":[["打法","map:0:打空再换:剩 3 发就换"],["版本","map:1:原蓝图:修正版"],["整局打出","={2} / 40 发"],["换弹次数","3"]],"cap":"表 5-2　E4：一整局（初始 10 / 30）。原蓝图在最后一次换弹时吞掉弹匣——打空再换少打 10 发，剩 3 发就换少打 5 发"} -->
+  <div class="co warn"><span class="h">面试注意：这是逻辑 bug，不是网络 bug</span>
+    <p>被问到“换弹怎么实现”时，如果拿原 Demo 举例，要主动说出这一点：它在单机里也会发生，只是联机后 UI 本来就会跳，把它掩盖了。顺带还有两个设计问题：① 换弹一开始就把 <code>当前子弹数量</code> 置 0，换弹被打断（死亡）时子弹凭空消失；② 换弹中客户端仍可能发出 <code>Server_Fire</code>（它读的 <code>正在换弹</code> 是晚一个 RTT 的复制值），服务器先多播开火动画（<code>bStopAllMontages = true</code>）把换弹动画打断，然后才发现没子弹。</p>
+  </div>
+
+  <h2>弹药怎么复制：条件、预测、对账</h2>
+  <h3>复制条件</h3>
+  <p>原 Demo 的 5 个弹药变量全部无条件复制给所有人，但另一个玩家根本不需要知道你还剩几发。弹药只对持枪者有意义：<code>COND_OwnerOnly</code>。需要给别人看的只有“他在开枪”和“他在换弹”，分别用 <code>COND_SkipOwner</code> 的 BurstCounter 和 bPendingReload（拥有者自己已经本地预测过了）。</p>
+<!--code:cpp:ACoopWeapon：复制设置-->
+USTRUCT() struct FAmmoState {
+    GENERATED_BODY()
+    UPROPERTY() int16  InClip = 10;
+    UPROPERTY() int16  Reserve = 30;
+    UPROPERTY() uint16 AckSeq = 0;          // 服务器已处理到的开火序号（接受或拒绝都会推进）
+};
+UPROPERTY(ReplicatedUsing = OnRep_Ammo) FAmmoState Ammo;              // 一个结构体：三者同一次到达，不会撕裂
+UPROPERTY(ReplicatedUsing = OnRep_BurstCounter) uint8 BurstCounter;  // 只增不减，OnRep 里看增量
+UPROPERTY(ReplicatedUsing = OnRep_PendingReload) bool bPendingReload;
+
+void ACoopWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out) const {
+    Super::GetLifetimeReplicatedProps(Out);
+    DOREPLIFETIME_CONDITION(ACoopWeapon, Ammo,           COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(ACoopWeapon, BurstCounter,   COND_SkipOwner);
+    DOREPLIFETIME_CONDITION(ACoopWeapon, bPendingReload, COND_SkipOwner);
+}
+
+int32 ACoopWeapon::GetDisplayedAmmo() const {          // UI 和本机开火判断都用它
+    const uint16 Unacked = LocalShotSeq - Ammo.AckSeq;   // uint16 回绕也正确
+    return FMath::Max(0, Ammo.InClip - (int32)Unacked);
+}
+<!--/code-->
+  <h3>为什么不能让 OnRep 直接覆盖本地预测值</h3>
+  <p>本机按下就扣一发（预测），但服务器的弹数要一个 RTT 后才回来，回来的是“服务器处理完<strong>某一发</strong>时”的值。如果 OnRep 直接 <code>LocalAmmo = 服务器值</code>，此时本机往往已经又多打了一两发，显示会先往回跳一下再继续减：</p>
+<!--plot {"x":[0,1.5],"y":[0,10],"step":true,"xticks":6,"yticks":5,"xlab":"时间（秒）","ylab":"UI 显示的弹匣弹数","marks":"E5.2.inputs","series":[["原蓝图：只显示服务器值","E5.0.pts","s"],["预测 + 直接覆盖","E5.1.pts","r","dash"],["预测 + 序号对账","E5.2.pts","g"]],"cap":"<b>图 5-1</b>　E5：RTT 150 ms、抖动 30 ms，一次连射打空时 UI 上的弹数（底部蓝色刻度 = 每次按下开火）。灰线整体晚约一个 RTT；红色虚线在第一次复制到达时回跳 +1；绿线始终单调递减"} -->
+  <div class="tbl"><table>
+    <tr><th>显示方式</th><th>每次连射平均回跳次数（20 个种子）</th><th>最大回跳</th><th>本机空放</th></tr>
+    <tr><td>原蓝图：只显示服务器值</td><td>{{v:E5.0.rb:.2f}}</td><td>{{v:E5.0.mj}}</td><td>{{v:E5.0.go:.2f}}</td></tr>
+    <tr><td>预测 + 直接覆盖</td><td class="no">{{v:E5.1.rb:.2f}}</td><td>{{v:E5.1.mj}}</td><td>{{v:E5.1.go:.2f}}</td></tr>
+    <tr><td>预测 + 序号对账</td><td class="yes">{{v:E5.2.rb:.2f}}</td><td>{{v:E5.2.mj}}</td><td>{{v:E5.2.go:.2f}}</td></tr>
+  </table></div>
+  <p class="tcap">表 5-3　E5 汇总。原蓝图“不回跳”是因为它根本不预测——代价是整条曲线晚一个 RTT，而且打空后还会多发一次请求</p>
+
+  <h2>别人怎么看到你开枪：BurstCounter</h2>
+  <p>另一端需要的不是弹数，而是“他又开了一枪”。复制属性只发最新值，所以不能用布尔 <code>bFiring</code>（同一网络帧里开两枪会被合并成一次），而是用一个只增不减的计数器：</p>
+<!--code:cpp:OnRep_BurstCounter：另一端播开火表现-->
+void ACoopWeapon::OnRep_BurstCounter(uint8 OldValue) {
+    const uint8 Shots = BurstCounter - OldValue;          // 一个网络帧内可能有多发（uint8 回绕也正确）
+    for (uint8 i = 0; i < FMath::Min<uint8>(Shots, 3); ++i)
+        PlayFireCosmetics(/*bFirstPerson*/ false);        // 3P 蒙太奇、枪口火焰、声音、沿枪口方向画一条曳光
+}
+// 晚加入的客户端第一次收到 BurstCounter 时 OldValue = 0，会误播几次：
+// 用 COND_SkipOwner + “首次复制不播放”（记录一个 bHasReceivedFirst 标志）即可。
+<!--/code-->
+  <p>ShooterGame 就是这么做的；Lyra 走 GAS，开火是一个 Gameplay Ability，表现用 Gameplay Cue 在各端播放。原 Demo 的 <code>Multicast_Fire</code>（Unreliable）也能达到“另一端看到”的效果，问题只在于它排在弹药检查之前，而且开火者自己也要等它。</p>
+
+  <h2>换弹：服务器状态机 + 本机预测</h2>
+  <figure>
+  <svg viewBox="0 0 860 320" xmlns="http://www.w3.org/2000/svg">
+    <rect x="30" y="110" width="150" height="70" rx="35" fill="#EAF7EF" stroke="#15803D" stroke-width="1.8"/>
+    <text x="105" y="140" text-anchor="middle" class="b">Idle</text><text x="105" y="160" text-anchor="middle" class="xs">可开火</text>
+    <rect x="330" y="110" width="200" height="70" rx="35" fill="#FFF4EC" stroke="#C2410C" stroke-width="1.8"/>
+    <text x="430" y="138" text-anchor="middle" class="b">Reloading</text><text x="430" y="156" text-anchor="middle" class="xs">bPendingReload = true</text><text x="430" y="170" text-anchor="middle" class="xs">开火请求被拒</text>
+    <rect x="664" y="110" width="190" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="1.8"/>
+    <text x="760" y="136" text-anchor="middle" class="b">ReloadWeapon()</text><text x="760" y="154" text-anchor="middle" class="xs">take = min(空位, 备弹)</text><text x="760" y="168" text-anchor="middle" class="xs">InClip += take; Reserve −= take</text>
+    <g fill="none" stroke="#4B5563" stroke-width="1.6">
+      <path d="M180,130 H326" marker-end="url(#a)"/>
+      <path d="M530,130 H660" marker-end="url(#a)"/>
+      <path d="M760,180 V280 H105 V184" marker-end="url(#ag)" stroke="#15803D"/>
+      <path d="M400,180 C 400,206 220,206 170,184" stroke="#B91C1C" stroke-dasharray="5 3" marker-end="url(#ar)"/>
+    </g>
+    <text x="253" y="96" text-anchor="middle" class="sm b">ServerStartReload</text>
+    <text x="253" y="112" text-anchor="middle" class="xs">备弹 &gt; 0 且 弹匣未满 且 存活</text>
+    <text x="253" y="146" text-anchor="middle" class="xs">本机：立即播 1P 换弹动画</text>
+    <text x="596" y="112" text-anchor="middle" class="sm b">计时器到点</text>
+    <text x="596" y="146" text-anchor="middle" class="xs">ReloadDuration</text><text x="596" y="160" text-anchor="middle" class="xs">（数据配置）</text>
+    <text x="432" y="300" text-anchor="middle" class="sm b" style="fill:#15803D">复位 bPendingReload = false（复制）</text>
+    <text x="290" y="232" text-anchor="middle" class="xs b" style="fill:#B91C1C">取消：切枪 / 死亡 / 冲刺打断</text>
+    <text x="290" y="248" text-anchor="middle" class="xs" style="fill:#B91C1C">ClearTimer，弹药不变</text>
+    <text x="430" y="40" text-anchor="middle" class="sm">另一端：OnRep_PendingReload(true) → 播 3P 换弹动画；(false) → 停止</text>
+    <text x="430" y="60" text-anchor="middle" class="sm">本机：Ammo 的 OnRep 到达后以服务器值为准，取消本地预测状态</text>
+  </svg>
+  <figcaption><b>图 5-2</b>　换弹状态机。状态由服务器驱动，本机只预测“动画和不能开火”；弹药转移只在计时器到点时发生一次，被取消就什么都不改</figcaption>
+  </figure>
+<!--code:cpp:ACoopWeapon：换弹-->
+void ACoopWeapon::StartReload() {                         // 本地输入（拥有者）
+    if (!CanReloadLocal()) return;                        // 用显示值判断：备弹 > 0 且显示弹数 < 弹匣
+    bLocalReloading = true;
+    PlayReloadCosmetics(/*bFirstPerson*/ true);           // 立即播 1P 换弹蒙太奇，不等服务器
+    if (HasAuthority()) ServerStartReload_Implementation(); else ServerStartReload();   // Reliable
+}
+
+void ACoopWeapon::ServerStartReload_Implementation() {
+    if (bPendingReload || Ammo.Reserve <= 0 || Ammo.InClip >= ClipSize || !IsOwnerAlive()) {
+        ClientCancelReload();                              // 被拒：通知本机停掉预测的动画（Reliable Client RPC）
+        return;
+    }
+    bPendingReload = true;                                // SkipOwner 复制：另一端播 3P 动画
+    if (!IsOwnerLocallyControlled() && GetNetMode() == NM_ListenServer) PlayReloadCosmetics(false);
+    GetWorldTimerManager().SetTimer(ReloadTimer, this, &ACoopWeapon::ReloadWeapon, ReloadDuration, false);
+}
+
+void ACoopWeapon::ReloadWeapon() {                        // 仅服务器，计时器到点
+    const int32 Take = FMath::Min<int32>(ClipSize - Ammo.InClip, Ammo.Reserve);
+    Ammo.InClip  += Take;
+    Ammo.Reserve -= Take;                                 // 总数守恒：InClip + Reserve 不变
+    bPendingReload = false;
+}
+
+void ACoopWeapon::CancelReload() {                        // 服务器：切枪、死亡时调用
+    if (!bPendingReload) return;
+    GetWorldTimerManager().ClearTimer(ReloadTimer);       // 弹药一发都不动
+    bPendingReload = false;
+    ClientCancelReload();
+}
+// 本机：OnRep_Ammo 到达时 bLocalReloading = false（服务器已经完成或拒绝）；
+// 换弹期间的开火在本地就被 IsReloadingLocal() 挡住，不会发出请求。
+<!--/code-->
+  <div class="co deep"><span class="h">换弹时长用计时器还是蒙太奇里的 AnimNotify？</span>
+    <p>很多教程用蒙太奇的“弹匣插入”通知来加子弹。在服务器上这有两个风险：Dedicated Server 默认不刷新不可见网格的动画，通知可能不触发或延迟；蒙太奇被其他动作打断时通知也不会来。更稳妥的做法是<strong>服务器用数据配置的时长计时</strong>，动画只负责表现（蒙太奇时长按同一个数据缩放播放速率）；用 GAS 的话，就是 Ability 里 <code>WaitDelay</code> 或服务器端的 <code>WaitGameplayEvent</code> 加超时。原 Demo 用 <code>Delay(GetPlayLength(蒙太奇))</code> 其实是对的思路，只是放在了 RPC 事件里，没有办法取消。</p>
+  </div>
+
+  <h2>原实现 vs 正确实现</h2>
+  <div class="tbl"><table>
+    <tr><th>环节</th><th>原 Demo</th><th>正确做法</th></tr>
+    <tr><td>弹药复制</td><td>5 个 int / bool 无条件复制给所有人</td><td>一个结构体，COND_OwnerOnly，带 AckSeq</td></tr>
+    <tr><td>本机能否开火</td><td>读复制的 当前子弹数量（晚一个 RTT）</td><td>读 GetDisplayedAmmo()（预测 + 对账）</td></tr>
+    <tr><td>别人看到开枪</td><td>Unreliable Multicast，排在弹药检查前</td><td>BurstCounter（SkipOwner），服务器接受后才 +1</td></tr>
+    <tr><td>换弹计算</td><td>先清零，再调用漏连 Return 的函数</td><td>到点一次性 take = min(空位, 备弹)，守恒</td></tr>
+    <tr><td>换弹状态</td><td>正在换弹 复制给所有人，但动画靠 Multicast</td><td>bPendingReload（SkipOwner）+ OnRep 播动画；本机预测</td></tr>
+    <tr><td>打断</td><td>无法取消（Delay 在 RPC 事件里）</td><td>计时器可 ClearTimer；取消时弹药不变</td></tr>
+    <tr><td>换弹中开火</td><td>服务器多播动画打断换弹，再判断无弹</td><td>本地挡住；服务器 ProcessShot 校验 !bPendingReload</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>弹药：服务器权威、<strong>COND_OwnerOnly</strong>、结构体带 <strong>AckSeq</strong>；显示 = InClip − (LocalSeq − AckSeq)。</li>
+    <li>别人看到开枪：<strong>COND_SkipOwner 的 BurstCounter</strong>，OnRep 看增量；主机看客户端开火要在服务器上手动播。</li>
+    <li>换弹：本机预测动画 → ServerStartReload 校验 → bPendingReload（SkipOwner）→ 计时器到点一次性转移 → 复位；取消不动弹药。</li>
+    <li>E4：原蓝图在备弹不够补满时吞弹匣（3/7 → 0/0）；E5：直接覆盖会回跳，序号对账不会。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么 BurstCounter 用 COND_SkipOwner，而弹药用 COND_OwnerOnly？</summary>
+    BurstCounter 是给“别人”播开火表现用的，开火者自己已经在本机预测播过了，再收到就会播两次，所以跳过拥有者。弹药只有持枪者需要看，发给别人既浪费带宽又泄露信息（PvP 里对手能知道你还剩几发），所以只发拥有者。
+  </details>
+  <details class="quiz"><summary>自测：用一个 bool bIsFiring 复制给别人，别人在 OnRep 里每次播一发，会有什么问题？</summary>
+    复制属性只发最新值：服务器在一个网络帧里开了两枪（true→true）根本不会产生变化，别人一发都看不到；连射时 bIsFiring 一直是 true，也只会触发一次 OnRep。要表达“发生了几次”，必须用计数器，或者用 Unreliable Multicast 逐发通知。
+  </details>
+</section>

@@ -1,0 +1,63 @@
+<div class="cover">
+  <div class="kicker">PATHFINDING · 游戏客户端秋招版</div>
+  <h1>A* 寻路：<em>从原理到工程</em></h1>
+  <p class="sub">从 BFS、Dijkstra 一路推到 A*：f = g + h 为什么能保证最优，启发函数怎么选，open list 怎么实现才快；再往下是 JPS、分层寻路、导航网格、分帧寻路、帧同步确定性这些游戏里真正要面对的问题。</p>
+  <div class="meta">
+    <span class="pill b">6 种搜索算法</span>
+    <span class="pill o">5 个交互实验（可画墙、拖动起终点）</span>
+    <span class="pill g">MSVC /O2 实测 10 组实验</span>
+    <span class="pill p">40 道面试追问</span>
+  </div>
+</div>
+
+<section class="chapter" id="ch0">
+  <div class="ch-head">
+    <div class="no">CHAPTER 00</div>
+    <h1>先背这个：30 秒面试版答案</h1>
+    <p class="lead">面试官问“讲讲 A*”，先用一分钟讲清全貌，再等他挑一个点深挖。</p>
+  </div>
+
+  <div class="ans">
+    <div class="q">问：讲讲 A* 算法。</div>
+    <p><strong>A* 是带启发信息的最短路搜索。</strong>它给每个节点算一个 <code>f(n) = g(n) + h(n)</code>：g 是从起点走到 n 的真实代价，h 是从 n 到终点的<strong>估计</strong>代价。每次从 open list 里取 f 最小的节点展开，更新邻居的 g，直到取出终点。</p>
+    <ul>
+      <li><strong>它是 Dijkstra 和贪心的折中</strong>：h ≡ 0 就退化成 Dijkstra（只看走了多远，向四周均匀扩散）；只看 h 就是贪心最佳优先（直奔终点，快但不保证最短）。</li>
+      <li><strong>最优性的前提是 h 可采纳（admissible）</strong>：h 永远不高估真实剩余代价。如果再满足<strong>一致性</strong>（h(n) ≤ cost(n, n') + h(n')），节点第一次出 open 时 g 就已经最优，closed 节点不用重开。</li>
+      <li><strong>h 要和移动规则匹配</strong>：4 方向用曼哈顿，8 方向用 Octile（对角距离），任意角度用欧几里得。h 越接近真实值，展开的节点越少；高估就会丢掉最优性，但能换来速度（加权 A*）。</li>
+    </ul>
+    <p><strong>工程上</strong>：open list 用二叉堆，配合“重复入队 + 出队时丢弃过期条目”的惰性删除；节点状态用整图数组 + generation 计数复位，不要每次查询清零；f 相同时优先展开 h 小的节点（平局决胜）。</p>
+    <p><strong>放到游戏里</strong>：大地图用导航网格（Recast/Detour：多边形上做 A*，再用漏斗算法拉直路径）或分层寻路；格子图可以用 JPS 加速；长路径要分帧做；先用连通块编号判断终点是否可达；帧同步游戏里代价用整数，比较器用 (f, h, 节点编号) 的全序，否则各端走出的路径会不一样。</p>
+  </div>
+
+  <h2>家族速查表</h2>
+  <div class="tbl"><table>
+    <tr><th>算法</th><th>取出顺序</th><th>最优？</th><th>搜索范围</th><th>一句话特点</th></tr>
+    <tr><td>BFS</td><td>先进先出（按步数）</td><td>只在<strong>等权图</strong>上最优</td><td>以起点为圆心向外扩</td><td>不看代价：8 方向时斜走也只算 1 步</td></tr>
+    <tr><td>Dijkstra</td><td>g 最小</td><td class="yes">✔</td><td>以起点为圆心按代价扩</td><td>一次能求出到所有点的最短路</td></tr>
+    <tr><td>贪心最佳优先</td><td>h 最小</td><td class="no">✘</td><td>朝终点直冲，碰壁才绕</td><td>开阔地极快，遇到凹形障碍会钻进去</td></tr>
+    <tr><td>A*</td><td>g + h 最小</td><td class="yes">✔（h 可采纳）</td><td>朝终点的“椭圆”</td><td>h 越准搜得越少；h = 0 就是 Dijkstra</td></tr>
+    <tr><td>加权 A*</td><td>g + w·h 最小</td><td class="mid">代价 ≤ w × 最优</td><td>介于 A* 与贪心之间</td><td>用有上界的次优换速度</td></tr>
+    <tr><td>JPS</td><td>g + h 最小（只对跳点）</td><td class="yes">✔</td><td>沿直线“跳”，只把拐点入堆</td><td>只适用于均匀代价的格子图</td></tr>
+  </table></div>
+
+  <div class="co warn"><span class="h">面试注意：最容易丢分的五句话</span>
+    <ul>
+      <li>“A* 一定比 Dijkstra 快”——<strong>不一定</strong>。启发函数被障碍误导时，A* 也会搜很大一片（本书 E1：迷宫里 A* 展开 79476 个节点，Dijkstra 是 80180 个，几乎一样）；目标不可达时两者都要把整个连通块搜完。</li>
+      <li>“h 越大越好”——<strong>错</strong>。h 一旦超过真实代价就不再保证最短（E2：8 方向地图用曼哈顿距离，随机障碍图上 40 条路径没有一条最短，最多比最短路长 9.8%）。</li>
+      <li>“8 方向用欧几里得距离最准”——<strong>不对</strong>。8 方向下的真实最短距离是 Octile，欧几里得偏小，搜得更多（E2：16105 对 11758 个节点）。</li>
+      <li>“open list 用 std::set 方便改 key”——能用，但比二叉堆慢（E5：2.21 ms 对 1.30 ms）。<strong>最常见的做法是允许重复入队，出队时丢弃过期条目</strong>。</li>
+      <li>“寻路结果只要代价对就行”——在帧同步游戏里不行。只比 f 的话，两份堆实现给出的路径 40 次里 40 次不同（E9），各端单位走的路不一样，状态就会不同步。</li>
+    </ul>
+  </div>
+
+  <h2>本书怎么读</h2>
+  <div class="cards">
+    <div class="card"><div class="t">第一部分 · 图搜索家族</div><p>寻路问题怎么建模；BFS → Dijkstra → 贪心 → A* 是怎么一步步演化出来的。</p></div>
+    <div class="card"><div class="t">第二部分 · A* 核心</div><p>逐步图解、伪代码、C++；启发函数的可采纳性与一致性；最优性证明与复杂度。</p></div>
+    <div class="card"><div class="t">第三部分 · 工程实现与加速</div><p>open list 和节点状态的数据结构；JPS、HPA*、双向搜索、路径平滑。</p></div>
+    <div class="card"><div class="t">第四部分 · 游戏实战</div><p>导航网格与漏斗算法、分帧寻路、动态障碍、流场、帧同步确定性；实测总表与 40 道面试题。</p></div>
+  </div>
+  <div class="co ver"><span class="h">关于实测数据</span>
+    <p>书中所有“实测”都来自 <code>demos/astar_demo.cpp</code>，在 Windows 11 + MSVC 14.44（<code>cl /std:c++latest /EHsc /O2</code>，x64）下运行，完整输出见 <code>demos/run_output.txt</code>。统一条件：<strong>512×512 格子图，8 方向移动，禁止切角，直走代价 1000、斜走 1414（整数）</strong>；五种地图：开阔地、随机障碍 25%、U 型陷阱、迷宫、房间；每张图 40 次随机查询取平均。绝对耗时与机器有关，<strong>请看相对关系</strong>。书中的步骤图由构建脚本真实运行搜索后生成（直走 10、斜走 14），格子里的数字都是算出来的。</p>
+  </div>
+</section>

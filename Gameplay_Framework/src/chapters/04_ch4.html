@@ -1,0 +1,261 @@
+<div class="part-head" data-toc="第二部分 · Gameplay Framework">
+  <div class="no">PART TWO</div>
+  <h1>第二部分　Gameplay Framework</h1>
+  <p>灵魂与肉体（Controller / Pawn）、裁判与计分板（GameMode / GameState），以及把它们串起来的单例。这是 Gameplay 岗位“框架理解”的必考区，也最容易被追问到联网。</p>
+</div>
+
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>Pawn / Controller / Possess：灵魂与肉体</h1>
+    <p class="lead">为什么要把“谁在操控”和“被操控的身体”拆成两个对象；Possess 的五个步骤怎么维护双向引用；以及在回调里再次 Possess、Pawn 被直接销毁时，这对引用会怎样悄悄失去一致。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能用三个理由解释 Controller / Pawn 为什么分开，并用 SoulDecay 举例</li>
+    <li>背出 Possess 与 UnPossess 的步骤和回调顺序（实测 trace）</li>
+    <li>定义双向引用的不变式，指出项目里有哪些写入口能单边破坏它</li>
+    <li>说清 6 种实测情况：正常切换、抢夺、回调抛异常、回调中再 Possess（两种）、Pawn 被直接销毁</li>
+    <li>知道 Unity 的 fake null 与 C# 的 <code>is</code> 模式匹配在这里的差别</li>
+    <li>能和 UE 的 AController::OnPossess、APawn::PossessedBy、PlayerState 对照</li>
+  </ul></div>
+
+  <h2>4.1 这一章解决什么问题</h2>
+  <p>Gameplay 岗位的面试几乎一定会问“Controller 和 Pawn 为什么分开”。背出“输入和身体解耦”不难，难的是接下来的追问：<strong>两个对象互相引用，怎么保证它们一致？回调里改了怎么办？其中一个被销毁了怎么办？</strong>SoulDecay 的夺舍玩法会反复触发 Possess，是这套机制最好的压力测试，本章用逐行移植的代码把每种情况都跑了一遍。</p>
+
+  <h2>4.2 为什么要分开</h2>
+  <div class="cards">
+    <div class="card"><div class="t">① 生命周期不同</div><p>身体会死、会被替换，操控者要一直存在。SoulDecay 里玩家的 SoulPlayerController 从开局活到结束，中间换了很多具肉体；旧肉体变黑、3 秒后销毁，灵魂不受影响。分数、阵营这类“属于玩家”的数据也就跟着灵魂走。</p></div>
+    <div class="card"><div class="t">② 同一具身体可以被不同的“大脑”控制</div><p>同一个 CombatPawn 可以被 SimpleAIController（柏林噪声瞎逛）或 SoulPlayerController（键盘输入）控制，Pawn 的代码完全不用知道是谁在操控——夺舍就是在运行时换大脑。</p></div>
+    <div class="card"><div class="t">③ 职责边界</div><p>Controller 负责“想做什么”（读输入、AI 决策），Pawn 负责“怎么做到”（移动速度、碰撞、寿命）。SoulPlayerController 重写 HandleMovement，只把方向交给 <code>CombatPawn.Move</code>，速度差异由 Pawn 自己的 MoveSpeed 决定。</p></div>
+  </div>
+  <p>项目里的一个好设计：<strong>阵营挂在 Controller 上</strong>（<code>IFactionMember</code> 由两个 Controller 实现），而不是挂在 Pawn 上。夺舍之后，肉体的颜色和敌我判断自动跟着新灵魂变，Pawn 不需要“改阵营”。UE 里队伍信息通常放在 PlayerState / Controller 上，是同样的思路。</p>
+  <div class="co deep"><span class="h">【扩展知识】UE 还有第四个理由：网络</span>
+    <p>在 UE 里 PlayerController 代表一条客户端连接，只存在于服务器和拥有它的客户端；Pawn 会复制给所有客户端。把“谁拥有输入和连接”放在 Controller、把“大家都要看到的身体”放在 Pawn，复制规则才能清晰。本项目是单机，没有这一层（第 5 章）。</p>
+  </div>
+
+  <h2>4.3 源码：Possess 与 UnPossess 的步骤</h2>
+  <!--code:cs:AController.cs:15-63（节选）-->
+public void Possess(APawn pawnToPossess)
+{
+    if (pawnToPossess == null) return;
+    if (ControlledPawn == pawnToPossess) return;
+    if (ControlledPawn != null) UnPossess();                                  // ① 先抛弃自己的
+    if (pawnToPossess.Controller != null) pawnToPossess.Controller.UnPossess(); // ② 踢掉目标的原主人
+    pawnToPossess.PossessedBy(this);                                          // ③ Pawn 侧赋值 + Pawn.OnPossess
+    ControlledPawn = pawnToPossess;                                           // ④ Controller 侧赋值
+    OnPossess(pawnToPossess);                                                 // ⑤ Controller.OnPossess
+}
+public void UnPossess()
+{
+    if (ControlledPawn == null) { Log.D("不存在控制的对象"); return; }
+    ControlledPawn.UnPossessed();          // ① Pawn.OnUnPossess（此时 Pawn.Controller 还在）→ Pawn.Controller = null
+    OnUnPossess(ControlledPawn);           // ② Controller.OnUnPossess
+    ControlledPawn = null;                 // ③ 断开
+}
+<!--/code-->
+  <p>移植版 F3-P1（C 已控制 P1，再 Possess(P2)）打印出的真实顺序：</p>
+  <!--code:text:实测 F3-P1 · 回调顺序-->
+C.Possess(P2) 开始
+C.UnPossess(P1) 开始
+  P1.OnUnPossess()（此时 Controller 仍=C）     ← Pawn 先收到通知，还能读到是谁离开
+P1.Controller=null
+  C.OnUnPossess(P1)
+C.ControlledPawn=null
+P2.PossessedBy(C) → P2.Controller=C
+  P2.OnPossess(C)                               ← 此时 C.ControlledPawn 还是 null
+C.ControlledPawn=P2
+  C.OnPossess(P2)
+<!--/code-->
+  <p>两个值得记住的设计细节：</p>
+  <ul>
+    <li><b>UnPossessed 先回调、后清空</b>：APawn.UnPossessed 先调 OnUnPossess 再把 Controller 置空，注释写着“拿到当前控制器的引用做一些判断”。CombatPawn 正是依赖这一点：<code>var leavingController = this.Controller;</code> 判断离开的是不是玩家，玩家离开才让旧肉体变黑、3 秒后销毁。</li>
+    <li><b>第 ② 步“踢掉原主人”是框架自动做的</b>：SoulPlayerController 里那行 <code>targetPawn.Controller.UnPossess()</code> 被注释掉了，旁边写着“这一步 UE 框架下会默认执行”。和 UE 的 <code>AController::OnPossess</code> 一样：先放弃自己当前的 Pawn，再让目标 Pawn 的原 Controller UnPossess，然后 <code>PossessedBy</code>、<code>SetPawn</code>。</li>
+  </ul>
+
+  <h2>4.4 双向引用的不变式</h2>
+  <!--code:text:不变式-->
+对任意 Controller c、Pawn p：
+    c.ControlledPawn == p   ⇔   p.Controller == c
+推论：一个 Pawn 至多被一个 Controller 控制；一个 Controller 至多控制一个 Pawn
+<!--/code-->
+  <p>一份关系存了两份，就必须保证两份同时改、同时成功。项目里能写这两个字段的入口：</p>
+  <div class="tbl"><table>
+    <tr><th>字段</th><th>setter</th><th>能改它的公开方法</th><th>问题</th></tr>
+    <tr><td><code>AController.ControlledPawn</code></td><td>private</td><td><code>Possess</code> / <code>UnPossess</code></td><td>—</td></tr>
+    <tr><td><code>APawn.Controller</code></td><td>private</td><td><code>PossessedBy</code> / <code>UnPossessed</code>（<strong>public</strong>）</td><td>任何代码都能 <code>pawn.PossessedBy(x)</code>，只改 Pawn 一侧</td></tr>
+  </table></div>
+  <p>所以不变式靠的是“大家只调 Controller.Possess”的约定，而不是代码结构。更关键的是，即使只调 Possess，<strong>步骤 ③ 和 ④ 之间夹着用户回调</strong>：Pawn 侧先赋值、再调 Pawn.OnPossess、然后 Controller 侧才赋值。回调里发生的任何事，都发生在“半个关系已经建立”的时刻。</p>
+
+  <h2>4.5 实测：6 种情况</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>情况</th><th>结束时的状态（实测 F3）</th><th>不变式</th></tr>
+    <tr><td>P1</td><td>C 控制 P1，再 Possess(P2)</td><td>C→P2，P1←null，P2←C</td><td class="yes">✓</td></tr>
+    <tr><td>P2</td><td>C1 控制 P，C2.Possess(P)（夺舍）</td><td>C1→null，C2→P，P←C2</td><td class="yes">✓</td></tr>
+    <tr><td>P3</td><td>Pawn.OnPossess 抛异常（Possess 早于 BeginPlay，字段未初始化）</td><td><strong>C→null，P←C</strong></td><td class="no">✗ 半绑定</td></tr>
+    <tr><td>P3'</td><td>下一帧重试 C.Possess(P)</td><td>C→P，P←C（中途打印“不存在控制的对象”）</td><td class="yes">✓ 可恢复</td></tr>
+    <tr><td>P4</td><td>【构造反例】Seat.OnPossess 里 C.Possess(Car)</td><td><strong>C→Seat，Seat←C，Car←C</strong></td><td class="no">✗ 两个 Pawn 都认 C 为主人</td></tr>
+    <tr><td>P5</td><td>【构造反例】Body.OnUnPossess 里 C.Possess(Home)</td><td><strong>C→null，Home←C</strong>；Controller.OnUnPossess 被调用 2 次</td><td class="no">✗</td></tr>
+    <tr><td>P6</td><td>Old 被直接 Destroy（没先 UnPossess），之后 C.Possess(New)</td><td>C→New；Old 的 OnUnPossess 执行 0 次</td><td class="mid">引用对、清理丢了</td></tr>
+  </table></div>
+
+  <h3>4.5.1 P3：半绑定是怎么恢复的</h3>
+  <p>异常从 Pawn.OnPossess 冒出来，步骤 ④ 没执行。此时 Controller 认为自己空手（<code>AUnityController.Tick</code> 里 <code>ControlledPawn == null</code> 直接 return，玩家动不了），Pawn 认为自己有主人（SoulPlayerController 的夺舍判断 <code>targetPawn.Controller != null</code> 为真）。下一帧重试时：步骤 ① 跳过；步骤 ② 发现 Pawn 的主人就是自己，调用自己的 UnPossess，因为 ControlledPawn 为空直接 return；然后 ③④⑤ 正常完成。<strong>恢复是“碰巧”的</strong>——如果 Pawn 的 OnUnPossess 有副作用（比如 CombatPawn 会停计时器、改颜色），而它在这条路径上没有被调用，状态就会更乱。</p>
+
+  <h3>4.5.2 P4 / P5：回调里再 Possess，字段被“重新读取”</h3>
+  <!--code:text:实测 F3-P4 · OnPossess 里再 Possess-->
+C.Possess(Seat) 开始
+Seat.PossessedBy(C) → Seat.Controller=C
+  Seat.OnPossess(C)                     ← 回调里：C.Possess(Car)
+  C.Possess(Car) 开始                   ← 此时 C.ControlledPawn 还是 null，步骤①跳过，Seat 没有被放弃
+  Car.PossessedBy(C) → Car.Controller=C
+  C.ControlledPawn=Car
+C.ControlledPawn=Seat                   ← 外层继续执行步骤④，把 Car 覆盖掉
+结果：C→Seat，Seat←C，Car←C
+<!--/code-->
+  <!--code:text:实测 F3-P5 · OnUnPossess 里再 Possess-->
+C.UnPossess(Body) 开始
+  Body.OnUnPossess()                    ← 回调里：C.Possess(Home)
+  C.Possess(Home)：C.ControlledPawn 仍是 Body → 嵌套 UnPossess(Body)
+      Body.OnUnPossess()（第二次，回调里的一次性标志挡住了递归）
+      Body.Controller=null；C.OnUnPossess(Body)；C.ControlledPawn=null
+  Home.PossessedBy(C)；C.ControlledPawn=Home；C.OnPossess(Home)
+Body.Controller=null
+  C.OnUnPossess(Home)                   ← 外层重新读取 ControlledPawn，拿到的是 Home
+C.ControlledPawn=null                   ← 外层步骤③把刚建立的关系断开
+结果：C→null，Home←C；Controller.OnUnPossess 调用 2 次，第二次参数是错的
+<!--/code-->
+  <p>两种情况的共同原因：<strong>Possess / UnPossess 在用户回调之后，还会继续读写同一个字段</strong>。回调里的嵌套调用已经把字段改了，外层不知道，按自己的进度继续执行，于是覆盖或断开了嵌套调用的结果。P5 如果没有那个一次性标志，就是无限递归、栈溢出。</p>
+  <div class="co warn"><span class="h">面试注意：这是构造出来的反例，要说清楚</span>
+    <p>项目里没有任何回调会再次 Possess，P4、P5 不会在当前 Demo 里发生。但“上车自动转控载具”“死亡后灵魂回到大本营”都是很常见的玩法需求，第一个写这种需求的人就会踩到。面试时说“我分析过回调重入，当前代码不支持在 Possess 回调里再次 Possess，需要延迟到下一帧或者改成先完成状态修改再统一回调”，比说“我的 Possess 是安全的”好得多。</p>
+  </div>
+
+  <h2>4.6 生命周期边界：一方被销毁</h2>
+  <h3>4.6.1 Pawn 被直接销毁（P6）</h3>
+  <p>如果有人直接 <code>Destroy(pawn.gameObject)</code> 而不是调用 <code>CombatPawn.Die()</code>，Controller 不会收到任何通知。Unity 的 fake null 让 <code>ControlledPawn == null</code> 在帧末之后变成 true，所以 Controller 下一次 Possess 时会跳过“放弃旧 Pawn”，引用关系本身能自动恢复；但<strong>旧 Pawn 的 OnUnPossess 永远不会执行</strong>——对 CombatPawn 来说，就是寿命计时器没有停。按源码推演，后果比“少清理一次”更严重：计时器到期后对这个已销毁的 Pawn 调用 OnBodyExploded → <code>Die(true)</code>，而它的 <code>Controller</code> 字段从没被清空、仍指向玩家灵魂，于是 ① 判定“玩家死亡”并 EndMatch；② 执行 <code>Controller.UnPossess()</code>——把玩家<strong>当前</strong>的新肉体踢掉。项目靠 <code>Die()</code> 里先 UnPossess 再 Destroy 的约定避免了这个问题，框架本身没有在 Pawn 的 OnDestroy 里自动解绑。</p>
+  <h3>4.6.2 Controller 被销毁：fake null 与 is 模式匹配</h3>
+  <p>AController 的 OnDestroy 也不会自动 UnPossess（AUnityController 只是关掉输入）。假设某个 Controller 被直接销毁，Pawn 的 <code>Controller</code> 字段还引用着它，这时同一个对象会得到两种判断：</p>
+  <div class="tbl"><table>
+    <tr><th>写法（都出现在项目里）</th><th>走不走 Unity 的 == 重载</th><th>对已销毁 Controller 的结果</th></tr>
+    <tr><td><code>targetPawn.Controller != null</code>（SoulPlayerController:44）</td><td>走</td><td>false：认为“没有灵魂”</td></tr>
+    <tr><td><code>Controller is IFactionMember mySoul</code>（CombatPawn:113）</td><td><strong>不走</strong>：<code>is</code> 只看 C# 引用和类型</td><td>true：认为“有灵魂，还能碾压别人”</td></tr>
+  </table></div>
+  <p>同一个 Pawn 在夺舍判断里是“无主”，在碰撞判断里是“有主”。当前 Demo 没有触发它，因为 SimpleAIController 只在 OnUnPossess 之后才销毁自己、玩家 Controller 从不销毁；但这是 Unity 面试里非常经典的追问：<strong><code>?.</code>、<code>??</code>、<code>is</code>、<code>ReferenceEquals</code> 都绕过 fake null</strong>。</p>
+
+  <h2>4.7 SoulDecay：夺舍就是 Possess 的压力测试</h2>
+  <p>一次夺舍的完整调用链在第 15 章 15.5 节，这里只看它覆盖了 Possess 的哪些分支：</p>
+  <div class="tbl"><table>
+    <tr><th>Possess 分支</th><th>夺舍时发生了什么</th></tr>
+    <tr><td>① 放弃自己的 Pawn</td><td>玩家旧肉体 OnUnPossess：离开的是玩家 → 变黑、改名、关碰撞、停寿命计时器、3 秒后 Destroy</td></tr>
+    <tr><td>② 踢掉目标的原主人</td><td>AI 灵魂 UnPossess → AI 肉体 OnUnPossess（离开的是 AI → 保持“新鲜”）→ SimpleAIController.OnUnPossess 里 <code>Destroy(gameObject)</code></td></tr>
+    <tr><td>③ PossessedBy</td><td>新肉体 OnPossess：玩家阵营 → 变青色、新建寿命计时器、发事件把句柄给 UI</td></tr>
+    <tr><td>④⑤</td><td>Controller 侧赋值；SoulPlayerController 没有重写 OnPossess</td></tr>
+    <tr><td>Possess 之后</td><td>Controller 直接调 <code>gameState.AddScore</code>——规则写在了 Controller 里（第 5 章）</td></tr>
+  </table></div>
+  <p>值得在面试里讲的两点：</p>
+  <ul>
+    <li><b>AI 灵魂“失去肉体就自毁”</b>：SimpleAIController 在 OnUnPossess 里 Destroy 自己，所以不会留下空转的 AI Controller。它用的是延迟 Destroy，回调返回后 Possess 剩下的步骤照常执行，没有问题。</li>
+    <li><b>Possess 早于 BeginPlay</b>：开局和刷 AI 时，Possess 发生在双方 BeginPlay 之前（第 2 章），CombatPawn 因此把取 Renderer 放到了 Awake。</li>
+  </ul>
+
+  <h2>4.8 PlayerController 与 AIController</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>本项目</th><th>UE</th></tr>
+    <tr><td>玩家控制器</td><td>AUnityController：BeginPlay 里 <code>new GameInput()</code> 并启用；Tick 里读 Move，<code>HandleMovement</code> 可重写；SoulPlayerController 加鼠标射线夺舍</td><td>APlayerController：输入组件栈（Enhanced Input 映射上下文）、PlayerCameraManager、HUD、拥有网络连接、持有 PlayerState</td></tr>
+    <tr><td>AI 控制器</td><td>SimpleAIController：柏林噪声随机移动；失去肉体自毁</td><td>AAIController：BrainComponent（行为树 / StateTree）、感知、寻路跟随</td></tr>
+    <tr><td>输入资源</td><td>每个实例 new 一个 GameInput，OnDestroy 只 Disable 不 Dispose（审计 P3-11）</td><td>LocalPlayer 级别的输入子系统</td></tr>
+    <tr><td>移动方式</td><td>直接改 Transform（AUnityController 注释：“以后应该调用 AddMovementInput”）</td><td>Pawn 的 AddMovementInput → MovementComponent 消费</td></tr>
+  </table></div>
+
+  <h2>4.9 与 UE 对照</h2>
+  <div class="tbl"><table>
+    <tr><th>环节</th><th>UE</th><th>本项目</th></tr>
+    <tr><td>入口</td><td><code>AController::Possess</code>（非虚，只在服务器调用）→ 虚函数 <code>OnPossess</code></td><td><code>Possess</code> 非虚，回调 <code>OnPossess</code> 为 protected virtual</td></tr>
+    <tr><td>步骤</td><td>放弃当前 Pawn → 目标原 Controller UnPossess → <code>Pawn->PossessedBy(this)</code> → <code>SetPawn</code></td><td>完全相同的顺序</td></tr>
+    <tr><td>Pawn 侧</td><td><code>PossessedBy</code> 设置 Controller、同步 PlayerState、触发蓝图事件</td><td>只设置 Controller、回调 OnPossess</td></tr>
+    <tr><td>Pawn 销毁</td><td>Pawn 销毁流程会通知 Controller 解除控制（DetachFromControllerPendingDestroy）</td><td>不通知（P6）</td></tr>
+    <tr><td>PlayerState</td><td>每个玩家一份，跨 Pawn 保存名字、分数、队伍，复制给所有客户端</td><td>没有；分数按阵营存在 GameState，阵营存在 Controller</td></tr>
+    <tr><td>朝向</td><td>ControlRotation 存在 Controller，Pawn 可以选择是否跟随</td><td>没有</td></tr>
+  </table></div>
+
+  <h2>4.10 Code Review：Possess 相关问题</h2>
+  <div class="tbl"><table>
+    <tr><th>当前设计</th><th>问题</th><th>影响</th><th>改进方向（不写代码）</th></tr>
+    <tr><td><code>PossessedBy / UnPossessed</code> 是 public</td><td>可以只改 Pawn 一侧</td><td>不变式靠约定维持</td><td>改成 internal / 只允许 AController 调用</td></tr>
+    <tr><td>赋值与回调交错</td><td>回调发生在半个关系已建立的时刻；异常留下半绑定（P3）</td><td>状态不一致，恢复靠碰巧</td><td>先完成两侧字段修改，再统一触发回调；或回调异常时回滚</td></tr>
+    <tr><td>回调之后继续读写字段</td><td>回调中嵌套 Possess 被覆盖（P4、P5）</td><td>两个 Pawn 认同一个主人；OnUnPossess 调两次</td><td>检测重入（正在 Possess 时拒绝或排队到下一帧）；回调前把要用的值存进局部变量</td></tr>
+    <tr><td>OnDestroy 不自动解绑</td><td>任意一方被直接销毁，另一方不知道</td><td>清理逻辑丢失（P6）；fake null 与 is 判断不一致</td><td>Pawn / Controller 的 OnDestroy 里自动 UnPossess</td></tr>
+    <tr><td>Controller 销毁后，Pawn 侧用 <code>is</code> 判断有无灵魂</td><td>绕过 fake null</td><td>“死灵魂”仍能碾压加分</td><td>判断前先 <code>Controller != null</code>，或提供 <code>IsControlled</code> 属性统一判断</td></tr>
+    <tr><td>没有 PlayerState</td><td>“属于玩家的数据”散在 Controller 和 GameState</td><td>扩展到多人时无处存放个人分数</td><td>引入 PlayerState，由 GameMode 在玩家加入时创建</td></tr>
+  </table></div>
+
+  <h2>4.11 面试追问树</h2>
+  <!--code:text:追问树 · Possess-->
+Q4-1 为什么 Controller 和 Pawn 要分开？
+ ├── Q4-2 阵营 / 分数应该放在哪一边？为什么？                       ← 灵魂 vs 肉体
+ └── Q4-3 UE 为什么还要 PlayerState？                              ← 发散到网络
+Q4-4 讲一下 Possess 的步骤。Pawn 已经有主人了怎么办？
+ ├── Q4-5 两边互相引用，怎么保证一致？                              ← 不变式
+ │    ├── Q4-6 OnPossess 抛异常呢？                                  ← P3 半绑定
+ │    └── Q4-7 OnPossess 里再 Possess 另一个 Pawn 呢？               ← P4
+ └── Q4-8 UnPossess 时 Pawn 的回调还能拿到 Controller 吗？           ← 先回调后清空
+Q4-9 Pawn 死了 Controller 怎么办？Controller 被销毁了 Pawn 怎么办？  ← P6 / fake null
+ └── Q4-10 Unity 里 is 和 == null 判断已销毁对象有什么区别？
+Q4-11 如果做成联网，Possess 应该在哪一端执行？                     ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q4-1 → Q4-3　为什么分开？阵营放哪？</div>
+    <p><b>L1 · 30 秒</b>　Controller 是灵魂，负责决策；Pawn 是肉体，负责表现和物理。分开之后身体可以死、可以换，灵魂和属于玩家的数据一直存在；同一具身体也可以被玩家或 AI 控制。</p>
+    <p><b>L2 · 正常回答</b>　我的 SoulDecay 就是这个思想的玩法化：玩家的 SoulPlayerController 从头到尾只有一个，不断夺舍 AI 的肉体；旧肉体销毁不影响灵魂。阵营我放在 Controller 上，用 IFactionMember 接口，夺舍后肉体的颜色和敌我判断自动跟着新灵魂走，Pawn 不需要改阵营。</p>
+    <p><b>L3 · 深入</b>　UE 在此基础上还有 PlayerState：每个玩家一份、跨 Pawn 保存分数和队伍，并且复制给所有客户端，因为 PlayerController 只在服务器和拥有者客户端上存在。我的项目是单机，分数按阵营存在 GameState 里，扩展到多人时需要补一个 PlayerState。</p>
+    <p><b>L4 · 面试官攻击</b>　“那 Pawn 自己的血量、寿命放哪？” → 放在 Pawn。区分标准是“换身体时这个数据要不要跟走”：寿命是这具肉体的属性，换身体就重新计时，所以 CombatPawn 自己持有寿命计时器；分数和阵营属于玩家，跟着灵魂。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q4-4 → Q4-8　Possess 的步骤与一致性</div>
+    <p><b>L1</b>　五步：先放弃自己当前的 Pawn；如果目标 Pawn 已经有主人，让那个主人 UnPossess；然后 Pawn 侧记录 Controller 并回调；Controller 侧记录 Pawn 并回调。和 UE 的 OnPossess 顺序一样。</p>
+    <p><b>L2</b>　一致性指“Controller 指向 Pawn 当且仅当 Pawn 指向 Controller”。两个字段的 setter 都是私有的，但 Pawn 的 PossessedBy 是 public，所以靠约定只走 Controller.Possess。UnPossess 时 Pawn 先回调再清空，这样 Pawn 的回调里能知道是谁离开——CombatPawn 用它判断“离开的是玩家才让肉体枯萎”。</p>
+    <p><b>L3</b>　问题在于赋值和回调是交错的。我用移植版测过：Pawn 的 OnPossess 抛异常，Pawn 已经记下主人、Controller 还没记下，形成半绑定，下一帧重试能恢复，但那是碰巧；如果在 OnPossess 回调里再 Possess 另一个 Pawn，外层会在回调返回后把字段覆盖，最后两个 Pawn 都认这个 Controller 为主人。</p>
+    <p><b>L4 攻击</b>　“那你怎么改？” → 两步提交：先把两侧所有字段改好、确认不变式成立，再依次触发回调；回调里如果又发起 Possess，检测到正在 Possess 就排队到当前操作结束之后执行。这和 TimerSystem 的“先收集、再回调、回调前二次校验”是同一个思想。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q4-9 → Q4-10　一方被销毁怎么办？</div>
+    <p><b>L2</b>　项目里靠约定：CombatPawn.Die 先 UnPossess 再 Destroy；AI Controller 在 OnUnPossess 里才销毁自己。框架层面两边的 OnDestroy 都不会自动解绑。如果 Pawn 被直接 Destroy，Controller 那边靠 Unity 的 fake null 让 <code>ControlledPawn == null</code> 变成 true，下次 Possess 能自动恢复，但 Pawn 的 OnUnPossess 不会执行，寿命计时器之类的清理就丢了。</p>
+    <p><b>L3</b>　反过来 Controller 被直接销毁更隐蔽：Pawn 的 Controller 字段用 <code>!= null</code> 判断是“没有灵魂”，用 <code>is IFactionMember</code> 判断却是“有灵魂”，因为 <code>is</code>、<code>?.</code>、<code>??</code> 都不走 UnityEngine.Object 重载的 ==。我的 CombatPawn 碰撞判断用的就是 is，SoulPlayerController 的夺舍判断用的是 !=。当前不会触发，但修复方向很明确：在两边的 OnDestroy 里自动 UnPossess，判断“有没有灵魂”统一走一个属性。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q4-11　做成联网，Possess 在哪一端执行？（发散）</div>
+    <p><b>L2</b>　在服务器执行。Possess 改变的是“谁有权操控这具身体”，属于权威状态：客户端点击目标后发一个请求（RPC），服务器校验距离、阵营、目标是否存活，通过后执行 Possess，再把 Pawn 的所有者和 Controller 的引用复制下去。UE 的 Possess 就只允许在有权威的一端调用。</p>
+    <p><b>L3</b>　表现可以先行：客户端可以先播放夺舍特效、预测性地切换镜头，服务器拒绝时再回滚。这又会引出输入延迟、客户端预测和服务器校验的话题，和第 5 章 GameMode 的“权威”是同一条线。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“Controller 和 Pawn 分开就是为了解耦输入。”</p>
+    <p><b>问题</b>：只说了一个理由，而且没说“解耦之后得到了什么”。</p>
+    <p><b>更好的回答</b>：“三个理由：生命周期不同（身体会死、灵魂常驻）、同一身体可以换大脑（玩家 / AI / 夺舍）、职责边界（决策 vs 执行）；UE 里还关系到网络复制。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“我的 Possess 会先 UnPossess 旧的，所以双向引用一定是一致的。”</p>
+    <p><b>问题</b>：回调异常会留下半绑定，回调中再 Possess 会被覆盖，一方被直接销毁时另一方不知道（实测 P3、P4、P6）。</p>
+    <p><b>更好的回答</b>：“正常路径下一致；但赋值和回调交错，回调里的异常或重入会破坏一致性，我测过这几种情况，改进方向是先改状态再统一回调，并在 OnDestroy 里自动解绑。”</p>
+  </div>
+
+  <h2>4.12 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">不变式与两阶段提交</div><p>修改一组相关状态时，先计算并校验，再一次性提交，最后通知观察者。数据库事务、UI 的批量更新、ECS 的命令缓冲都是这个模式。为什么会追过去：双向引用一致性本质上就是一个微型事务。</p></div>
+    <div class="card"><div class="t">C++ 里的双向引用</div><p>两个对象互相持有指针时，谁负责释放？常见做法是一方拥有（<code>unique_ptr</code>）、另一方观察（裸指针或 <code>weak_ptr</code>），析构时由拥有者通知对方置空，否则就是悬垂指针——Unity 的 fake null 帮项目挡住了这一类崩溃。</p></div>
+    <div class="card"><div class="t">命令模式与输入</div><p>Controller 把输入翻译成“移动、夺舍”这样的命令再交给 Pawn，命令可以被记录（回放）、被发送（联网）、被 AI 生成。为什么会追过去：面试官想知道你的 Controller 能不能扩展到回放和联网。</p></div>
+    <div class="card"><div class="t">Unity 的 fake null</div><p>UnityEngine.Object 的 C# 包装对象和原生对象分开管理，原生对象销毁后，包装对象仍然存在，== 被重载为“原生对象是否还在”。Unity 官方博客专门讨论过这个设计的取舍，也解释了为什么 <code>?.</code> 和 <code>??</code> 不应该用在 UnityEngine.Object 上。</p></div>
+    <div class="card"><div class="t">网络里的所有权</div><p>谁可以发送某个 Pawn 的输入、谁的预测会被服务器纠正，都由“这个 Pawn 归哪个连接所有”决定。UE 的 Owner / Autonomous Proxy / Simulated Proxy 就是在 Possess 之后才确定的。</p></div>
+    <div class="card"><div class="t">ECS 里的“附身”</div><p>ECS 没有对象引用，通常用一个关系组件表示“这个实体被谁控制”，换控制者就是改一个组件值，一致性问题自然消失——代价是查询“我控制着谁”需要反向索引。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>分开的理由：<strong>生命周期不同、同一身体可换大脑、决策与执行分离</strong>（UE 还有网络）；阵营挂在 Controller 上，夺舍后自动跟着灵魂走。</li>
+    <li>Possess 五步：<strong>放弃自己的 → 踢掉目标原主人 → Pawn.PossessedBy（赋值+回调）→ Controller 赋值 → Controller 回调</strong>，与 UE 的 OnPossess 顺序一致；UnPossess 时 Pawn 先回调后清空。</li>
+    <li>不变式 <code>c.ControlledPawn == p ⇔ p.Controller == c</code>；PossessedBy 是 public，靠约定维持。</li>
+    <li>实测（F3）：OnPossess 抛异常 → <strong>半绑定</strong>（可重试恢复）；回调中再 Possess → <strong>覆盖 / 断开</strong>，OnUnPossess 调 2 次；Pawn 被直接 Destroy → <strong>清理丢失</strong>。</li>
+    <li><code>!= null</code> 走 fake null，<code>is / ?. / ??</code> 不走：同一个已销毁的 Controller，夺舍判断认为“无主”，碰撞判断认为“有主”。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：CombatPawn.OnUnPossess 里为什么要在 <code>base.OnUnPossess()</code> 之前读 <code>this.Controller</code>？如果框架改成“先清空再回调”，它会出什么问题？</summary><p>它要判断“离开的是不是玩家”，只有玩家离开才让旧肉体枯萎并销毁。APawn.UnPossessed 是先回调后清空，所以回调里 Controller 还在。改成先清空，读到的就是 null，<code>leavingController is SoulPlayerController</code> 永远为 false，玩家的旧肉体不会枯萎、不会销毁。</p></details>
+  <details class="quiz"><summary>自测 2：P3 半绑定之后，玩家点击这具肉体想夺舍它，会发生什么？</summary><p>SoulPlayerController 在 Tick 开头判断 <code>ControlledPawn == null</code> 就 return，所以处于半绑定的玩家根本不会执行夺舍逻辑。如果是另一个灵魂来夺舍它：步骤 ② 会让半绑定的 Controller UnPossess，但那个 Controller 的 ControlledPawn 为空，直接 return，Pawn.OnUnPossess 不会被调用，随后新灵魂正常绑定——Pawn 的离开清理被跳过了。</p></details>
+  <details class="quiz"><summary>自测 3：为什么说 P4 和 TimerSystem 的“回调里删自己”是同一类问题？两者的解法有什么共同点？</summary><p>都是“遍历 / 操作进行到一半时执行用户代码，用户代码又修改了同一份状态”。TimerSystem 的解法是先收集句柄、再回调、回调前二次校验；Possess 的解法是先完成全部状态修改、再统一回调，并检测重入。共同点：<strong>不要在状态不一致的时刻把控制权交给用户代码</strong>。</p></details>
+</section>

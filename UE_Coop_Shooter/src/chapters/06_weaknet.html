@@ -1,0 +1,182 @@
+<section class="chapter" id="ch6">
+  <div class="ch-head">
+    <div class="no">CHAPTER 06</div>
+    <h1>问 ③：弱网造成卡顿，应该怎么优化</h1>
+    <p class="lead">“卡”有四种：按了没反应、走路被拉回、明明瞄准了打不中、消息堆积一起到。先用工具分清是哪一种，再对症下药。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>会用 UE 自带工具复现弱网、定位问题类型。</li>
+    <li>讲清 CharacterMovement 的预测与纠正，以及为什么冲刺必须进 SavedMove（E6）。</li>
+    <li>讲清延迟补偿的两种做法和代价（E3），Reliable 的队头阻塞（E2），带宽优化手段（E7）。</li>
+  </ul></div>
+
+  <div class="ans">
+    <div class="q">30 秒版</div>
+    <p>先复现、再定位：PIE 网络模拟 / <code>NetEmulation.PktLag</code>、<code>PktLoss</code>，配合 <code>stat net</code>、<code>p.NetShowCorrections 1</code>、Networking Insights。然后分四类处理：<strong>反馈慢</strong>→本机预测 + 服务器对账；<strong>被拉回</strong>→影响移动的状态全部进 CMC 的 SavedMove，两端用同一套输入算速度；<strong>打不中</strong>→服务器按开火时刻回溯目标，或客户端判定 + 服务器容差，限制最大回溯；<strong>堆积 / 带宽</strong>→表现不用 Reliable，事件用计数器，降低更新频率、用相关性和休眠、子弹不做复制 Actor。远端角色用插值平滑。</p>
+  </div>
+
+  <h2>第一步：分清是哪一种“卡”</h2>
+  <div class="tbl"><table>
+    <tr><th>症状</th><th>根因</th><th>怎么确认</th><th>本书对应</th></tr>
+    <tr><td>画面本身掉帧、卡一下</td><td>不是网络：GC、加载、主线程过载</td><td><code>stat unit</code>、<code>stat game</code>、Unreal Insights（CPU）</td><td>—</td></tr>
+    <tr><td>按开火 / 换弹后过一会儿才有反应</td><td>表现等服务器往返</td><td>RTT 越大越明显；本机 = 主机时正常</td><td>E1 / 第 4~5 章</td></tr>
+    <tr><td>自己走路被拉回、原地抖</td><td>两端移动模拟结果不一致，服务器纠正</td><td><code>p.NetShowCorrections 1</code> 画出纠正位置；日志 LogNetPlayerMovement</td><td>E6</td></tr>
+    <tr><td>别人 / 僵尸移动一顿一顿</td><td>更新间隔大、丢包、平滑参数不合适</td><td>看该 Actor 的 NetUpdateFrequency 和到达间隔（Networking Insights）</td><td>本章第 5 节</td></tr>
+    <tr><td>明明瞄准了没打中</td><td>看到的目标位置和服务器判定时的位置不同</td><td>移动目标 + 高延迟时明显，静止目标正常</td><td>E3</td></tr>
+    <tr><td>丢包后几条消息一起生效</td><td>Reliable 队头阻塞</td><td>Insights 里看 RPC 到达时间成簇</td><td>E2</td></tr>
+    <tr><td>人一多就全体延迟变大</td><td>带宽 / 服务器网络帧超预算</td><td><code>stat net</code> 的 Out Rate、饱和标志；Insights 按 Actor 统计字节</td><td>E7</td></tr>
+  </table></div>
+<!--code:text:弱网复现：PIE 设置与控制台命令-->
+编辑器偏好设置 → 关卡编辑器 → 运行 → 多人选项 → 启用网络模拟（Network Emulation）
+    Emulation Target：Everyone        Profile：Bad / Custom（Average、Bad 为内置预设）
+控制台（非 Shipping 包）：
+    NetEmulation.PktLag 100           // 单向额外延迟 ms
+    NetEmulation.PktLagVariance 20    // 抖动
+    NetEmulation.PktLoss 5            // 出包丢包率 %
+    NetEmulation.PktIncomingLoss 5    // 入包丢包率 %
+    NetEmulation.Off
+诊断：
+    stat net                          // Ping、In/Out Rate、丢包、通道数
+    p.NetShowCorrections 1            // 画出 CharacterMovement 的纠正（红 = 客户端、绿 = 服务器）
+    启动参数 -NetTrace=1 -trace=net   // 录 Networking Insights：每个 Actor / 属性 / RPC 的字节数与时间
+Epic 官方建议的极端测试条件：500 ms 往返、10% 以上丢包
+<!--/code-->
+
+  <h2>1. 按了没反应：预测（第 4、5 章回顾）</h2>
+  <p>原 Demo 的开火、换弹、后坐力全部在服务器触发，本机等一个往返（E1：RTT 200 ms 时 {{v:E1[s=0,rtt=200].own:.0f}} ms）。改成本机预测后自己的延迟为 0；被服务器拒绝的操作用序号对账纠正。<strong>预测只适用于“错了能纠正、纠正代价小”的东西</strong>：开火表现、弹药数、换弹动画可以预测；击杀、掉落、分数不能预测（或只能做“未确认”的提示）。</p>
+
+  <h2>2. 走路被拉回：CharacterMovement 的预测与纠正</h2>
+  <p>CMC 的移动是 UE 自带的客户端预测：拥有者客户端每帧本地移动，把这一帧的输入（加速度、时间、少量标志位）存成一个 <code>FSavedMove</code> 并通过 <code>ServerMove</code> 发给服务器；服务器用<strong>同样的输入、自己的状态</strong>重新模拟一遍，误差超过 <code>MAXPOSITIONERRORSQUARED</code>（默认 3，即约 1.73 cm）就回一个 <code>ClientAdjustPosition</code>；客户端收到后回到服务器给的位置，再把之后还没确认的 SavedMove 重放一遍。</p>
+  <p>这套机制成立的前提是：<strong>两端用同样的输入能算出同样的结果</strong>。原 Demo 违反了它：</p>
+  <ul>
+    <li><strong>冲刺</strong>：<code>IA_Run</code> 调用 <code>Server_StartSprint</code>，只在服务器把 <code>IsRunning</code> 设为 true，这个变量不复制，本机永远是 false——服务器按 500 算，本机按 150 算。</li>
+    <li><strong>瞄准</strong>：<code>是否瞄准</code> 只在本机的 AnimBP 上设置，服务器那份永远是 false——本机按 120 算，服务器按 150 算。</li>
+    <li>两端都在 Tick 里用 <code>FInterpTo(当前速度, 目标速度)</code> 改 <code>MaxWalkSpeed</code>，结果还依赖各自的帧率。</li>
+  </ul>
+<!--dtab {"src":"E6","cols":[["情形","map:c:原方案：冲刺只在服务器生效:原方案：瞄准只在本机生效:半修复：本地切换 + Server RPC:正确：冲刺标志随移动包预测"],["RTT ms","rtt","g"],["丢包","loss",".0%"],["纠正次 / 秒","cps",".2f"],["平均回拉 cm","avg",".2f"],["最大回拉 cm","max",".2f"],["5 秒内回拉总距离 cm","tot",".1f"]],"hl":{"纠正次 / 秒":[">",0]},"cap":"表 6-1　E6：持续前进 5 s，其中 1~3 s、4~5 s 按住冲刺（丢包行取 200 局平均）。纠正发送受 NetworkMinTimeBetweenClientAdjustments（0.1 s，大误差时 0.05 s）限频"} -->
+<!--plot {"x":[0,5],"y":[-100,80],"yticks":9,"xticks":10,"xlab":"时间（秒）","ylab":"本机位置 − 两端一致时应在的位置（cm）","bands":[[1,3,"冲刺"],[4,5,"冲刺"]],"series":[["原方案：冲刺只在服务器","E6_trace.0","r"],["原方案：瞄准只在本机","E6_trace.1","a"],["半修复：切换 RPC 丢了一次","E6_trace.2","p","dash"],["正确：标志随移动包","E6_trace.3","g"]],"cap":"<b>图 6-1</b>　E6：RTT 200 ms 时本机位置的偏差。红线在冲刺期间被不断往前拽（锯齿就是一次次纠正）；紫色虚线是“本地切换 + Server RPC”方案恰好丢了一次切换包：服务器多跑了一个 RTT，本机被往前拉了几十厘米；绿线始终为 0"} -->
+  <p>“半修复”（本机也切换速度，同时发 Server RPC）在不丢包时看起来完全正常，所以很容易被当成正确答案；但 RPC 和移动包走的是不同的路径，一旦切换消息晚到，两端就有一段时间用不同的速度模拟（表 6-1：10% 丢包时每秒仍有 {{v:E6[c=2,rtt=200,loss=0.1].cps:.2f}} 次纠正）。<strong>正确做法是把冲刺标志放进 SavedMove，和这一帧的输入一起发给服务器</strong>，服务器在重放这一帧时用的就是同一个标志：</p>
+<!--code:cpp:把冲刺标志放进 CharacterMovement 的预测（经典 CompressedFlags 写法）-->
+// UCoopMovementComponent : UCharacterMovementComponent
+float UCoopMovementComponent::GetMaxSpeed() const {
+    const float Base = Super::GetMaxSpeed();
+    if (bWantsToAim)    return Base * AimSpeedMultiplier;    // 两端用同一个规则算速度，不在 Tick 里写 MaxWalkSpeed
+    if (bWantsToSprint) return Base * SprintSpeedMultiplier;
+    return Base;
+}
+
+class FSavedMove_Coop : public FSavedMove_Character {
+public:
+    uint8 bSavedSprint : 1; uint8 bSavedAim : 1;
+    virtual void Clear() override { Super::Clear(); bSavedSprint = bSavedAim = 0; }
+    virtual void SetMoveFor(ACharacter* C, float Dt, const FVector& Accel, FNetworkPredictionData_Client_Character& D) override {
+        Super::SetMoveFor(C, Dt, Accel, D);
+        auto* M = Cast<UCoopMovementComponent>(C->GetCharacterMovement());
+        bSavedSprint = M->bWantsToSprint; bSavedAim = M->bWantsToAim;
+    }
+    virtual uint8 GetCompressedFlags() const override {     // 标志随 ServerMove 一起上行
+        uint8 F = Super::GetCompressedFlags();
+        if (bSavedSprint) F |= FLAG_Custom_0;
+        if (bSavedAim)    F |= FLAG_Custom_1;
+        return F;
+    }
+    virtual bool CanCombineWith(const FSavedMovePtr& New, ACharacter* C, float MaxDelta) const override {
+        auto* N = static_cast<FSavedMove_Coop*>(New.Get());
+        return bSavedSprint == N->bSavedSprint && bSavedAim == N->bSavedAim && Super::CanCombineWith(New, C, MaxDelta);
+    }
+    virtual void PrepMoveFor(ACharacter* C) override {      // 纠正后重放时恢复当时的标志
+        Super::PrepMoveFor(C);
+        auto* M = Cast<UCoopMovementComponent>(C->GetCharacterMovement());
+        M->bWantsToSprint = bSavedSprint; M->bWantsToAim = bSavedAim;
+    }
+};
+
+void UCoopMovementComponent::UpdateFromCompressedFlags(uint8 Flags) {   // 服务器：每个移动包解出标志
+    Super::UpdateFromCompressedFlags(Flags);
+    bWantsToSprint = (Flags & FLAG_Custom_0) != 0;
+    bWantsToAim    = (Flags & FLAG_Custom_1) != 0;
+}
+// 另需：FNetworkPredictionData_Client_Coop::AllocateNewMove() 返回 FSavedMove_Coop，
+//       GetPredictionData_Client() 返回它。输入事件里只改 bWantsToSprint / bWantsToAim，不发任何 RPC。
+// UE 5.x 也可以用 FCharacterNetworkMoveData 子类传更多自定义数据，原理相同。
+<!--/code-->
+  <div class="co tip"><span class="h">别人的角色和僵尸：模拟代理的平滑</span>
+    <p>模拟代理（SimulatedProxy）不预测，只接收服务器的位置并做平滑：CMC 默认 <code>NetworkSmoothingMode = Exponential</code>，网格从旧位置向新位置追赶，胶囊体直接到位。远端一顿一顿时先看两件事：该 Actor 的 <code>NetUpdateFrequency</code> 是否太低（10 只僵尸可以 10~20 Hz，玩家保持默认）、动画是否用复制下来的速度驱动（原 Demo 的 AnimBP 用 <code>GetVelocity()</code>，这是对的）。</p>
+  </div>
+
+  <h2>3. 明明瞄准了却打不中：延迟补偿</h2>
+  <p>客户端看到的别人 / 僵尸，是服务器“过去某一时刻”的位置再加上外推。开火请求到达服务器时，目标已经又走了半个 RTT。目标横移越快、延迟越大，服务器在“现在”做射线就越容易打空：</p>
+<!--bars {"title":"目标横移 480 cm/s（原 Demo 冲刺僵尸的速度），胶囊半径 30 cm","unit":"%","fmt":".1f","max":100,"labw":210,"items":[["—RTT 100 ms",0],["不补偿","E3[v=480,rtt=100].none","r"],["服务器回溯","E3[v=480,rtt=100].rew","g"],["客户端判定 + 容差","E3[v=480,rtt=100].lee","b"],["—RTT 200 ms",0],["不补偿","E3[v=480,rtt=200].none","r"],["服务器回溯","E3[v=480,rtt=200].rew","g"],["客户端判定 + 容差","E3[v=480,rtt=200].lee","b"],["—RTT 300 ms（超过 200 ms 回溯上限）",0],["不补偿","E3[v=480,rtt=300].none","r"],["服务器回溯","E3[v=480,rtt=300].rew","g"],["客户端判定 + 容差","E3[v=480,rtt=300].lee","b"]],"cap":"<b>图 6-2</b>　E3：瞄准本机看到的目标中心开枪，服务器判定为命中的比例。回溯在延迟超过上限后失效；容差方案（ShooterGame 的 ClientSideHitLeeway = 200 cm）几乎总是通过，但它信任客户端"} -->
+<!--dtab {"src":"E3","cols":[["目标速度 cm/s","v","g"],["RTT ms","rtt","g"],["不补偿 %","none",".1f"],["服务器回溯 %","rew",".1f"],["容差 %","lee",".1f"],["本机显示误差 均值 cm","err",".1f"],["受害者位移 cm","victim",".1f"]],"hl":{"不补偿 %":["<",50]},"cap":"表 6-2　E3 全表。“显示误差”是本机看到的目标与服务器判定时刻真实位置的距离；“受害者位移”是回溯命中时，目标在服务器当前时刻已经离开命中点多远（被打的一方会觉得“我都躲到墙后了还被打中”）"} -->
+  <div class="lab nlab lagcomplab" id="lab-lagcomp"></div><!--/lab-->
+  <h3>两种做法</h3>
+  <div class="tbl"><table>
+    <tr><th></th><th>服务器回溯（Server-Side Rewind）</th><th>客户端判定 + 服务器校验（ShooterGame）</th></tr>
+    <tr><td>做法</td><td>服务器每个网络帧记录目标的位置 / 碰撞体，收到开火时按“客户端看到的时刻”插值回去再射线</td><td>客户端射线打中后上报 (目标, 命中点)；服务器检查目标包围盒扩大容差后是否包含命中点、视线是否被墙挡、方向是否合理</td></tr>
+    <tr><td>优点</td><td>结果由服务器算，防作弊</td><td>实现简单，开火者手感最好</td></tr>
+    <tr><td>代价</td><td>每帧存历史（内存 + CPU）；要限制最大回溯时间；高延迟玩家的命中会让别人“躲到墙后还挨打”</td><td>信任客户端，容差就是外挂的空间</td></tr>
+    <tr><td>适合</td><td>PvP 竞技</td><td><strong>PvE 合作（本 Demo）</strong>：僵尸不会抱怨不公平</td></tr>
+  </table></div>
+<!--code:cpp:服务器回溯：每个网络帧记录一帧历史，按时刻插值-->
+struct FHitboxFrame { float Time; FVector Location; FQuat Rotation; };   // 简化：只存胶囊；骨骼级回溯就存关键骨骼
+TArray<FHitboxFrame> History;                                          // 环形缓冲，保留 MaxRewind（如 200 ms）
+
+void ACoopZombie::RecordFrame() {                                      // 服务器：在网络帧末尾调用
+    History.Add({GetWorld()->GetTimeSeconds(), GetActorLocation(), GetActorQuat()});
+    while (History.Num() > 2 && History[0].Time < GetWorld()->GetTimeSeconds() - MaxRewind) History.RemoveAt(0);
+}
+
+FHitboxFrame ACoopZombie::SampleAt(float T) const {                   // T = 服务器时间轴上“客户端看到的时刻”
+    T = FMath::Max(T, GetWorld()->GetTimeSeconds() - MaxRewind);      // 限制最大回溯（E3：超过上限就退化成不补偿）
+    for (int32 i = History.Num() - 1; i > 0; --i)
+        if (History[i - 1].Time <= T) {
+            const float A = (T - History[i - 1].Time) / FMath::Max(KINDA_SMALL_NUMBER, History[i].Time - History[i - 1].Time);
+            return {T, FMath::Lerp(History[i - 1].Location, History[i].Location, A),
+                    FQuat::Slerp(History[i - 1].Rotation, History[i].Rotation, A)};
+        }
+    return History.Num() ? History[0] : FHitboxFrame{T, GetActorLocation(), GetActorQuat()};
+}
+// 开火时客户端上报 ClientTime（GameState::GetServerWorldTimeSeconds() 估计的服务器时间，再减去插值延迟），
+// 服务器把候选目标临时移到 SampleAt(ClientTime) 的位置做射线，然后移回。
+<!--/code-->
+
+  <h2>4. 消息堆积：Reliable 的队头阻塞</h2>
+  <p>Reliable RPC 保证顺序：第 n 条丢了，第 n+1 条即使先到也要等第 n 条重传成功才执行。原 Demo 每 0.12 s 一条 Reliable 的 <code>Server_Fire</code>，丢包时会出现“卡一下然后几发一起打出去”：</p>
+<!--bars {"title":"RTT 200 ms：逐发 Reliable RPC 从发出到被服务器执行的 P99 延迟","unit":"ms","fmt":".0f","labw":120,"items":[["丢包 0%","E2[rtt=200,loss=0].p99","g"],["丢包 2%","E2[rtt=200,loss=0.02].p99","a"],["丢包 5%","E2[rtt=200,loss=0.05].p99","o"],["丢包 10%","E2[rtt=200,loss=0.1].p99","r"],["丢包 20%","E2[rtt=200,loss=0.2].p99","r"]],"cap":"<b>图 6-3</b>　E2：同样 2000 发，丢包从 0% 到 10%，P99 延迟从约半个 RTT 涨到 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms，{{v:E2[rtt=200,loss=0.1].burst:.1f}}% 的请求和别的请求挤在同一个服务器帧里执行"} -->
+<!--dtab {"src":"E2","cols":[["RTT ms","rtt","g"],["丢包","loss",".0%"],["平均 ms","avg",".1f"],["P95 ms","p95",".1f"],["P99 ms","p99",".1f"],["最大 ms","max",".1f"],["同帧扎堆 %","burst",".1f"],["若用 Unreliable 会丢 %","ulost",".1f"]],"cap":"表 6-3　E2 全表。Reliable 不丢但会排队，Unreliable 不排队但会丢——所以按“这条消息丢了怎么办”来选，而不是一律 Reliable"} -->
+  <div class="co warn"><span class="h">面试注意：Reliable 的三条规则</span>
+    <ul>
+      <li><strong>只给低频、必须到达的消息用</strong>：开始 / 停止开火、换弹、切枪、准备就绪、命中上报。</li>
+      <li><strong>表现类一律 Unreliable 或计数器</strong>：开火特效、受击特效、脚步声。原 Demo 的 Multicast 都是 Unreliable，这点是对的。</li>
+      <li><strong>不要每帧发 Reliable</strong>：可靠缓冲区被塞满时引擎会直接断开这个连接。Tick 里发 Reliable RPC 是面试必扣分项。</li>
+    </ul>
+  </div>
+
+  <h2>5. 带宽与服务器负载</h2>
+<!--bars {"title":"E7：两人同时连射时，每秒网络消息估算","unit":"B/s","fmt":".0f","labw":230,"items":[["原方案：每发一个复制子弹","E7.0.4","r"],["推荐：命中扫描 + BurstCounter","E7.1.4","g"]],"cap":"<b>图 6-4</b>　E7：原方案每秒新开 {{v:E7.0.2}} 个子弹 Actor 通道、发 {{v:E7.0.3:.0f}} 次移动更新。字节数是量级假设（见 run_output.txt），真实值请用 Networking Insights 测；结论看数量级"} -->
+  <div class="tbl"><table>
+    <tr><th>手段</th><th>做什么</th><th>用在本 Demo</th></tr>
+    <tr><td>不复制短命 Actor</td><td>子弹、弹壳、特效只在各端本地生成</td><td>BP_Bullet 改成命中扫描 + 本地曳光</td></tr>
+    <tr><td>复制条件</td><td>OwnerOnly / SkipOwner / InitialOnly</td><td>弹药 OwnerOnly；BurstCounter、bPendingReload SkipOwner</td></tr>
+    <tr><td>NetUpdateFrequency</td><td>Actor 默认 100 Hz 检查一次，按需降低</td><td>僵尸 10~20 Hz；武器很少变化，可配合休眠</td></tr>
+    <tr><td>休眠（Dormancy）</td><td>不变的 Actor 不参与复制比较；变化前 <code>FlushNetDormancy()</code></td><td>拾取物、门、刷怪点</td></tr>
+    <tr><td>相关性</td><td><code>NetCullDistanceSquared</code>、<code>bOnlyRelevantToOwner</code>、<code>bNetUseOwnerRelevancy</code></td><td>武器跟随持有者；双人小地图可以都相关</td></tr>
+    <tr><td>量化</td><td><code>FVector_NetQuantize</code>、<code>FVector_NetQuantizeNormal</code>，int16 代替 int32</td><td>命中点、方向</td></tr>
+    <tr><td>Push Model / Iris</td><td>属性改动时主动标脏，省掉逐帧比较；Iris 是 UE5 的新复制系统（需手动启用）</td><td>两人局收益不大，面试知道即可</td></tr>
+    <tr><td>服务器网络帧</td><td><code>NetServerMaxTickRate</code>（默认 30）、带宽上限配置</td><td>射击游戏常提到 60；代价是带宽和服务器 CPU</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><strong>先复现再定位</strong>：NetEmulation + stat net + p.NetShowCorrections + Networking Insights。</li>
+    <li>拉回的本质是两端模拟不一致：<strong>冲刺 / 瞄准进 SavedMove，GetMaxSpeed 统一算</strong>，不另发 RPC、不在 Tick 写 MaxWalkSpeed（E6：原方案每秒纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次 → 0）。</li>
+    <li>打不中：<strong>服务器回溯</strong>（PvP，限最大回溯）或<strong>客户端判定 + 容差</strong>（PvE）（E3：480 cm/s、RTT 200 不补偿 {{v:E3[v=480,rtt=200].none:.0f}}% → 回溯 {{v:E3[v=480,rtt=200].rew:.0f}}%）。</li>
+    <li>Reliable 有序 → 丢包时队头阻塞（E2）；按“丢了怎么办”选 Reliable / Unreliable。</li>
+    <li>带宽：不复制短命 Actor、复制条件、降频、休眠、相关性、量化。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么“本机切换速度 + Server RPC 通知服务器”在 PIE 里测不出问题？</summary>
+    PIE 默认没有延迟和丢包，RPC 和移动包几乎同时到达，两端切换速度的时刻一致。开启网络模拟、尤其是丢包后，切换 RPC 会比移动包晚到（或先到），这段时间两端速度不同，服务器就会纠正。把标志放进 SavedMove 后，服务器重放每一帧时用的就是这一帧客户端的标志，时序天然一致。
+  </details>
+  <details class="quiz"><summary>自测：服务器回溯为什么要设上限？上限设多少合适？</summary>
+    不设上限，高延迟（或故意制造延迟的）玩家能打中服务器上“很久以前”的位置，被打的人体验极差，也给了作弊空间；同时历史缓冲区要无限增长。常见取 150~250 ms，超过的部分不补偿（E3 里 RTT 300 ms 时回溯命中率掉回 {{v:E3[v=480,rtt=300].rew:.0f}}%），并在 UI 上提示网络差。
+  </details>
+</section>

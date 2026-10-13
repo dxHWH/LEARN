@@ -1,0 +1,138 @@
+<section class="chapter" id="ch2">
+<div class="ch-head"><div class="no">CHAPTER 02</div><h1>ML / DL 面试速查（问答式）</h1><p class="lead">AI 岗的面试很少只问强化学习，前十分钟往往是机器学习和深度学习的基础题。本章按“问题 → 30 秒答案 → 一个关键公式或实测”的形式列出 20 道高频题，分泛化、经典模型、深度学习三组。每组挑最容易被追问的一两题给出推导，并用纯 Python 小实验验证（<code>demos/ch02_ml.py</code>）。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>能推出偏差-方差分解、softmax + 交叉熵的梯度 $p-y$、注意力除以 $\sqrt{d_k}$ 的理由。</li>
+<li>用实测说清：L1 为什么稀疏、sigmoid 为什么梯度消失、残差为什么要配归一化、BN 为什么不适合 RL。</li>
+<li>每道题都能在 30 秒内答出要点，并知道它和本书哪一章有关。</li>
+</ul></div>
+
+<h2>2.1 泛化：偏差、方差与正则化</h2>
+<h3>Q1　什么是偏差-方差分解？</h3>
+<p>测试误差 = 偏差² + 方差 + 不可约噪声。模型太简单，平均预测离真值远（偏差大）；模型太复杂，换一批训练数据预测就变很多（方差大）。</p>
+<!--deriv 平方损失下的偏差-方差分解（固定 x，期望对训练集 D 和噪声取）
+y & = f(x)+\varepsilon,\quad\E\varepsilon=0,\ \Var\varepsilon=\sigma^2;\qquad\bar h(x)\doteq\E_D[h_D(x)] || $h_D$ 是在训练集 D 上学到的模型，$\bar h$ 是它对所有可能训练集的平均
+\E\big[(y-h_D)^2\big] & = \E\big[(f+\varepsilon-h_D)^2\big]=\sigma^2+\E_D\big[(f-h_D)^2\big] || ε 与 D 独立、均值为 0，交叉项消失
+\E_D\big[(f-h_D)^2\big] & = \E_D\big[(f-\bar h+\bar h-h_D)^2\big]=(f-\bar h)^2+\E_D\big[(h_D-\bar h)^2\big] || 加一项减一项 $\bar h$；交叉项 $2(f-\bar h)\E_D[\bar h-h_D]=0$
+* \E\big[(y-h_D)^2\big] & = \underbrace{(f-\bar h)^2}_{\text{偏差}^2}+\underbrace{\E_D\big[(h_D-\bar h)^2\big]}_{\text{方差}}+\underbrace{\sigma^2}_{\text{噪声}} || 和第 5 章 MC / TD、第 10 章 GAE 的“偏差-方差权衡”是同一个分解
+-->
+<!--plot {"x":[0,12],"y":[0.0005,100000],"logy":true,"xt":[0,1,2,3,4,5,6,7,8,9,10,11,12],"h":290,"xlabel":"多项式次数","ylabel":"误差（对数刻度）","legend":"tl","hlines":[[0.09,"噪声 σ² = 0.09","s"]],
+"series":[{"path":"ch02.e1.bias2","n":"偏差²","c":"b","dots":true,"sw":2.2},{"path":"ch02.e1.var","n":"方差","c":"r","dots":true,"sw":2.2},{"path":"ch02.e1.test","n":"测试误差 = 偏差² + 方差 + 噪声","c":"k","dots":true,"sw":2.6},{"path":"ch02.e1.train","n":"训练误差","c":"g","dots":true,"dash":true}],
+"cap":"<b>图 2-1</b>　偏差-方差分解的实测（$y=\\sin2\\pi x+\\mathcal N(0,0.3^2)$，每次 20 个训练点，300 个训练集，E1）。测试误差在次数 [[ch02.e1.best]] 处最小（[[ch02.e1.best_test|.3f]]）；次数 12 时训练误差只有 [[ch02.e1.rows.12.train|.3f]]，测试误差却到了 [[ch02.e1.rows.12.test|.0f]]——训练误差一路下降，泛化误差先降后升。"} -->
+
+<h3>Q2　过拟合 / 欠拟合怎么处理？</h3>
+<p>过拟合：更多数据、数据增强、降低模型容量、正则化（L1 / L2 / Dropout）、早停、集成。欠拟合：加容量、加特征、减小正则、训练更久。先看训练误差和验证误差的差距：两者都高是欠拟合，训练低验证高是过拟合。RL 里的对应是“只在训练对手 / 训练地图上强”，靠环境随机化和对手池（第 15 章）缓解。</p>
+
+<h3>Q3　L1 和 L2 正则有什么区别？为什么 L1 能产生稀疏解？</h3>
+<p>L2（权重衰减）把所有权重等比例往 0 缩，几乎不会正好为 0；L1 的次梯度在 0 处是区间 $[-\lambda,\lambda]$，坐标下降的解是<strong>软阈值</strong> $w_j=\text{sign}(z_j)\max(\lvert z_j\rvert-\lambda,0)/a_j$：相关性 $\lvert z_j\rvert$ 不超过 λ 的特征直接被置 0。几何上，L1 球的角在坐标轴上，等高线更容易先碰到角。贝叶斯视角：L2 = 高斯先验，L1 = 拉普拉斯先验（第 1 章 1.4 节）。</p>
+<!--dtab {"rows":"ch02.e2.rows","cols":[["λ","lam",".2f"],["Lasso 零系数个数（共 10 个）","lasso_zero"],["Lasso 噪声特征最大 |w|","lasso_noise",".3f"],["Ridge 零系数个数","ridge_zero"],["Ridge 噪声特征最大 |w|","ridge_noise",".3f"],["Lasso w₀（真值 3）","lasso_w0",".2f"],["Ridge w₀","ridge_w0",".2f"]],
+"cap":"<b>表 2-1</b>　10 维线性回归、只有前 3 个特征有效时的 Lasso 与 Ridge（50 个样本，E2）。λ = 0.3 时 Lasso 恰好删掉了 7 个噪声特征；Ridge 在任何 λ 下都没有正好为 0 的系数。两者都会把有效系数也往 0 缩（收缩偏差）。"} -->
+
+<h3>Q4　Dropout 为什么有效？推理时怎么处理？</h3>
+<p>训练时以概率 p 把神经元置 0，迫使网络不依赖少数特征的“共适应”，相当于训练指数多个共享参数的子网络并在推理时取平均（近似集成）。实现用 inverted dropout：训练时保留的激活除以 $1-p$，推理时什么都不做，期望一致。RL 里很少用：策略和价值目标本身就在变，dropout 的噪声会让 PPO 的比值 $\pi_\theta/\pi_{\text{old}}$ 计算不一致。</p>
+
+<h3>Q5　早停、交叉验证、数据泄漏</h3>
+<p>早停：验证误差连续若干轮不降就停，等价于一种隐式正则（对小步长的梯度下降，近似于 L2）。K 折交叉验证用于小数据的模型选择。数据泄漏：特征里混进了标签信息或未来信息（用全量数据做归一化、时间序列随机划分），验证分数虚高、上线就崩；游戏数据里常见的是“同一个玩家 / 同一局的样本同时出现在训练集和测试集”。</p>
+
+<h2>2.2 经典模型与评估</h2>
+<h3>Q6　逻辑回归为什么用交叉熵而不用 MSE？</h3>
+<p>逻辑回归 $p=\sigma(w^\top x)$ 的交叉熵损失是凸的，梯度是 $(p-y)x$，预测错得越离谱梯度越大；用 MSE 时梯度多一个 $\sigma'(z)=p(1-p)$ 因子，预测很错（$p\approx0$ 而 $y=1$）时梯度反而接近 0，学不动，而且损失非凸。交叉熵对应伯努利分布的极大似然（第 1 章 1.4 节）。</p>
+
+<h3>Q7　softmax + 交叉熵的梯度是什么？</h3>
+<!--deriv softmax + 交叉熵对 logits 的梯度 = p − y
+L & = -\log p_y,\qquad p_k=\frac{e^{z_k}}{\sum_je^{z_j}} || y 是真实类别
+\log p_y & = z_y-\log\sum_je^{z_j} || 取对数
+\frac{\partial L}{\partial z_k} & = -\mathbb 1[k=y]+\frac{e^{z_k}}{\sum_je^{z_j}} || 第二项是 log-sum-exp 的导数，正好是 softmax
+* \frac{\partial L}{\partial z} & = p-\text{onehot}(y) || 各分量之和为 0；第 9 章 softmax 策略梯度 $\partial\log\pi(a)/\partial z_k=\mathbb 1[k=a]-\pi_k$ 就是它取负号
+-->
+<p>手撕代码 <code>softmax_ce_grad</code> 与有限差分的最大差为 [[ch02.ce_err|.0e]]。</p>
+
+<h3>Q8　SVM 一句话</h3>
+<p>最大化分类间隔：$\min\tfrac12\lVert w\rVert^2+C\sum\max(0,1-y_iw^\top x_i)$（hinge 损失 + L2）。只有落在间隔边界上或内部的样本（支持向量）影响解；核技巧把内积换成核函数，在高维特征空间里做线性分类。</p>
+
+<h3>Q9　随机森林和 GBDT 的区别？</h3>
+<p>随机森林是 <strong>bagging</strong>：有放回采样 + 随机特征子集训练很多棵深树，取平均，主要降<strong>方差</strong>，可并行。GBDT 是 <strong>boosting</strong>：一棵接一棵地拟合当前模型的负梯度（平方损失时就是残差），每棵树都很浅，主要降<strong>偏差</strong>，串行训练；XGBoost / LightGBM 加了二阶近似、正则、直方图分桶。游戏里常用于流失预测、作弊检测、匹配质量这类表格数据任务。</p>
+
+<h3>Q10　准确率、精确率、召回率、F1、AUC 怎么选？</h3>
+<p>精确率 = TP/(TP+FP)（报出来的有多少是真的），召回率 = TP/(TP+FN)（真的有多少被报出来），F1 是两者的调和平均。类别不平衡时准确率没有意义（99% 正常玩家，全判“正常”准确率就是 99%）。AUC 是 ROC 曲线下的面积，等于“随机抽一个正样本和一个负样本，正样本得分更高的概率”，与阈值无关、对类别比例不敏感：</p>
+<!--plot {"x":[0,1],"y":[0,1],"h":280,"xlabel":"假阳性率 FPR","ylabel":"真阳性率 TPR","legend":"br",
+"series":[{"path":"ch02.e6.roc","n":"ROC 曲线（400 个样本）","c":"b","sw":2.4},{"f":"x","n":"随机猜测（AUC = 0.5）","c":"s","dash":true}],
+"cap":"<b>图 2-2</b>　ROC 曲线与 AUC（E6）。按秩和公式、按两两比较、按梯形面积算出的 AUC 都是 [[ch02.e6.rank|.4f]]（正负样本得分分别服从均值差 1 的高斯，理论值 [[ch02.e6.theory|.4f]]）。"} -->
+
+<h2>2.3 深度学习</h2>
+<h3>Q11　反向传播是什么？</h3>
+<p>链式法则的高效实现：前向时缓存每层的输入和激活，反向时从损失开始逐层计算 $\partial L/\partial h_{l-1}=W_l^\top\big(\partial L/\partial h_l\odot f'(z_l)\big)$，同时得到 $\partial L/\partial W_l=(\partial L/\partial h_l\odot f'(z_l))\,h_{l-1}^\top$。计算量与前向同一个量级。本书第 8 章的 C++ MLP 就是手写的反传，并用数值梯度检查（相对误差 1e-10 量级）验证。</p>
+
+<h3>Q12　梯度消失 / 爆炸的原因和解决办法？</h3>
+<p>反传时每过一层乘一次 $W^\top\text{diag}(f'(z))$，层数多时连乘结果指数缩小或放大。sigmoid 的导数最大只有 0.25，必然消失。解决：ReLU 类激活、合适的初始化（Xavier：方差 $1/n_{\text{in}}$，适合 tanh；He：方差 $2/n_{\text{in}}$，适合 ReLU）、残差连接、归一化层、梯度裁剪（防爆炸）、LSTM 的门控（时间方向上的消失）。</p>
+<!--plot {"x":[1,20],"y":[1e-13,1e6],"logy":true,"xt":[1,5,10,15,20],"h":280,"xlabel":"层号（1 = 最靠近输入）","ylabel":"该层权重梯度的范数（对数刻度）","legend":"br",
+"series":[{"path":"ch02.e3.sigmoid.pts","n":"sigmoid（Xavier 初始化）","c":"r","dots":true},{"path":"ch02.e3.tanh.pts","n":"tanh（Xavier）","c":"a","dots":true},{"path":"ch02.e3.relu.pts","n":"ReLU（He）","c":"b","dots":true},{"path":"ch02.e3.relu_res.pts","n":"ReLU + 残差","c":"p","dots":true},{"path":"ch02.e3.relu_res02.pts","n":"ReLU + 残差（分支乘 0.2）","c":"g","dots":true}],
+"cap":"<b>图 2-3</b>　20 层、宽 32 的 MLP 在初始化时各层的梯度范数（E3）。sigmoid 第 1 层的梯度只有第 20 层的 [[ch02.e3.sigmoid.ratio|.0e]] 倍；tanh / ReLU 配合正确的初始化基本不衰减。只加残差、不做归一化时，梯度不再衰减（首尾比值 [[ch02.e3.relu_res.ratio|.1f]]），但激活方差每层大约翻倍，最后一层激活的 RMS 到了 [[ch02.e3.relu_res.hrms|.0e]]——所以实际网络总是“残差 + 归一化”，或者把残差分支缩小（RMS [[ch02.e3.relu_res02.hrms|.1f]]）。"} -->
+
+<h3>Q13　残差连接为什么有用？</h3>
+<p>$h_{l+1}=h_l+F(h_l)$，反传时 $\partial h_{l+1}/\partial h_l=I+\partial F/\partial h_l$，有一条恒等通路，梯度可以不经过任何权重直接流到浅层（图 2-3）；同时网络只需要学“增量”，很深时退化成恒等映射也不会更差。代价是前向激活会累积，需要归一化或分支缩放来控制尺度。</p>
+
+<h3>Q14　BN 和 LN 的区别？为什么 RL 和 Transformer 多用 LN？</h3>
+<p>BN 对每个特征在 <strong>batch 维度</strong>上归一化，LN 对每个样本在<strong>特征维度</strong>上归一化。BN 的输出依赖同一个 batch 里的其他样本，训练用 batch 统计量、推理用滑动统计量，两者不一致；batch 小或样本不独立同分布时统计量很不稳定。RL 的 batch 来自同一段 rollout，样本高度相关、分布随策略不断变化，推理时常常是 batch = 1；序列模型的长度可变、batch 里各位置统计意义不同——这些都让 LN 更合适。</p>
+<!--dtab {"rows":"ch02.e5.rows","cols":[["归一化方式","name"],["对 x = (1, 2, 3, 4) 的输出","out"]],
+"cap":"<b>表 2-2</b>　同一个样本在不同 batch 里的归一化结果（E5，构建时读取）。BN 的输出随 batch 的其他成员改变（两次最大差 [[ch02.e5.diff|.2f]]），batch 大小为 1 时全部变成 0；LN 只看样本自己。"} -->
+
+<h3>Q15　激活函数怎么选？</h3>
+<p>隐藏层默认 ReLU（简单、不饱和、稀疏），有“死亡 ReLU”问题时用 Leaky ReLU / ELU；Transformer 常用 GELU / SwiGLU（平滑）。RL 的小网络常用 tanh（PPO 的官方实现）——输出有界、对观测尺度的突变更稳。输出层按任务：分类 softmax，二分类 sigmoid，回归线性，有界动作 tanh（第 12 章）。</p>
+
+<h3>Q16　注意力为什么要除以 $\sqrt{d_k}$？</h3>
+<!--deriv 点积的方差随维度线性增长
+q_i,k_i & \overset{\text{iid}}{\sim}(0,1),\qquad q^\top k=\sum_{i=1}^{d_k}q_ik_i || 假设各分量独立、均值 0、方差 1（初始化后近似成立）
+\Var(q_ik_i) & = \E[q_i^2]\E[k_i^2]-(\E q_i\E k_i)^2=1 || 独立乘积的方差
+\Var(q^\top k) & = d_k || 独立项之和的方差相加
+* \Var\Big(\frac{q^\top k}{\sqrt{d_k}}\Big) & = 1 || 不缩放时 logits 的尺度是 $\sqrt{d_k}$，softmax 接近 one-hot，梯度 $p_k(\mathbb 1[k=j]-p_j)$ 几乎为 0（饱和）
+-->
+<!--plot {"x":[1,1024],"logx":true,"y":[0,4.6],"yt":[0,0.5,1,1.5,2,2.5,3],"h":280,"xlabel":"维度 d（对数刻度）","ylabel":"16 个 key 上 softmax 的熵 / 最大概率","legend":"tr",
+"series":[{"path":"ch02.e4.H_raw","n":"熵：不缩放","c":"r","dots":true,"sw":2.2},{"path":"ch02.e4.H_sc","n":"熵：除以 √d","c":"b","dots":true,"sw":2.2},{"path":"ch02.e4.pmax_raw","n":"最大概率：不缩放","c":"r","dots":true,"dash":true},{"path":"ch02.e4.pmax_sc","n":"最大概率：除以 √d","c":"b","dots":true,"dash":true}],
+"hlines":[[2.7726,"均匀分布的熵 ln 16","s"]],
+"cap":"<b>图 2-4</b>　缩放点积注意力的实测（每个 d 重复 300 次，E4）。d = 1024 时不缩放的点积方差为 [[ch02.e4.rows.5.var|.0f]]，softmax 的最大概率 [[ch02.e4.rows.5.pmax_raw|.2f]]、熵只有 [[ch02.e4.rows.5.H_raw|.2f]]（几乎 one-hot）；除以 √d 后熵保持在 [[ch02.e4.rows.5.H_sc|.2f]] 左右，与 d 无关。"} -->
+
+<h3>Q17　Transformer 一句话</h3>
+<p>多头自注意力 $\text{softmax}(QK^\top/\sqrt{d_k})V$ + 前馈网络，每个子层外面套残差和 LayerNorm（现在多为 Pre-LN），用位置编码（正弦 / 可学习 / RoPE）注入顺序信息。自注意力对输入集合是置换等变的，所以游戏 Bot 用它编码“数量可变、无序的实体列表”（第 18 章图 18-2），比 RNN 编码列表更自然。</p>
+
+<h3>Q18　CNN、RNN、LSTM 各适合什么？</h3>
+<p>CNN：局部连接 + 权重共享 + 平移等变，适合网格数据（小地图热力图、像素）。RNN：时间上共享参数，但长序列梯度消失；LSTM 用遗忘门 / 输入门 / 输出门控制细胞状态，梯度沿细胞状态近似加法传播，能记住长时间的信息。游戏 Bot 用 LSTM 处理部分可观测（记住进入战争迷雾的敌人），训练时要按序列切片、保存并传递隐状态（第 18 章）。</p>
+
+<h3>Q19　学习率怎么调？warmup 和退火有什么用？</h3>
+<p>学习率是最重要的超参，先在对数刻度上粗扫。warmup：训练初期 Adam 的二阶矩估计不准、注意力等结构不稳定，先用小学习率线性升上去；退火（余弦 / 线性降到 0）：后期减小步长，让参数停在更好的位置而不是在附近抖动（第 5 章常数步长的抖动、第 11 章 PPO 的学习率线性退火）。</p>
+
+<h3>Q20　大模型相关的高频问题（和第 13 章衔接）</h3>
+<p>预训练（下一个 token 的交叉熵）→ SFT（指令数据的交叉熵）→ 对齐（RLHF / DPO / GRPO，第 13 章）。LoRA：冻结原权重，只学低秩增量 $W+BA$，参数量从 $d^2$ 降到 $2dr$。KV cache：自回归生成时缓存每层的 K、V，每步只算新 token。游戏里 LLM 用于 NPC 对话、任务生成，难点在延迟、成本、人设一致性和安全边界。</p>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch02_ml.py</code> 中的代码块逐字相同（完整脚本包括本章全部实验）：</p>
+<!--code:py:softmax+CE 梯度 / LN / BN / 缩放点积注意力 / AUC / 软阈值（Python，面试手撕版）-->
+{{demo:ch02_ml.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch02_ml.py 的输出-->
+{{demo:ch02_output.txt}}
+<!--/code-->
+
+<h2>2.4 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“模型越复杂，测试误差越低”</td><td>只看偏差</td><td>方差随复杂度上升，测试误差先降后升（图 2-1；深度网络还有“双下降”现象，但那是另一个话题）</td></tr>
+<tr><td>“L2 也能做特征选择”</td><td>L2 不产生精确的 0</td><td>只有 L1（软阈值）会把系数置 0（表 2-1）</td></tr>
+<tr><td>“残差网络不需要归一化”</td><td>前向会累积</td><td>残差解决梯度通路，归一化或分支缩放控制激活尺度（图 2-3）</td></tr>
+<tr><td>“除以 √d 是为了加快计算”</td><td>目的说错</td><td>是为了让 logits 方差为 1，避免 softmax 饱和、梯度消失（图 2-4）</td></tr>
+<tr><td>“类别不平衡时看准确率”</td><td>准确率失真</td><td>看 PR 曲线、F1、AUC；或者重采样 / 加权损失</td></tr>
+</table></div>
+
+<div class="recap"><div class="t">速记卡 · 第 2 章</div><ul>
+<li>测试误差 = 偏差² + 方差 + 噪声；复杂度 ↑ → 偏差 ↓、方差 ↑。</li>
+<li>L1 = 软阈值 → 稀疏；L2 = 等比收缩；分别对应拉普拉斯 / 高斯先验。</li>
+<li>softmax + CE 梯度 = $p-y$；逻辑回归用 CE 是因为凸且梯度不消失。</li>
+<li>梯度消失：sigmoid 导数 ≤ 0.25；ReLU + He / tanh + Xavier；残差 + 归一化。</li>
+<li>BN 依赖 batch、推理用滑动统计；LN 只看单个样本，适合 RL / Transformer。</li>
+<li>$\Var(q^\top k)=d_k$ → 除以 $\sqrt{d_k}$；AUC = 正样本得分高于负样本的概率。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：Dropout 训练时保留概率 0.8，推理时为什么不需要再乘 0.8？</summary><p>用的是 inverted dropout：训练时把保留下来的激活除以 0.8，使每个神经元输出的期望与不做 dropout 时相同；推理时直接用完整网络即可。原始论文的写法是训练时不缩放、推理时乘 0.8，两者等价。</p></details>
+<details class="quiz"><summary>自测 2：PPO 的价值网络要不要用 BN？</summary><p>一般不用。rollout 里的样本高度相关、分布随策略变化，BN 的 batch 统计量不稳定；采样（推理）时 batch 是单步的若干个环境，与训练时的小批量统计量不一致，会让 $\pi_\theta$ 与 $\pi_{\text{old}}$ 的比值算错。需要归一化时用 LN，或者对观测做滑动均值方差归一化（第 11 章表 11-4）。</p></details>
+<details class="quiz"><summary>自测 3：GBDT 每棵树为什么要浅、学习率为什么要小？</summary><p>boosting 主要降偏差，每棵树只需要修正一点残差；树太深或学习率太大，后面的树会去拟合噪声，方差上升、过拟合。小学习率 + 更多棵树（shrinkage）是用计算换泛化，和深度学习里“小步长 + 多步”的道理相同。</p></details>
+</section>

@@ -1,0 +1,138 @@
+<div class="part-head" data-toc="PART I · 数学与 ML 速查"><div class="no">PART I</div><h1>数学与 ML 速查</h1><p>按你的要求弱化成两张“速查章”：第 1 章是全书推导用到的数学工具，第 2 章是 AI 岗绕不开的 ML / DL 八股。每条都给出“结论 + 一个最关键的推导或实测 + 在哪章用到”，不展开教材式的细节；需要时回来查。</p></div>
+<section class="chapter" id="ch1">
+<div class="ch-head"><div class="no">CHAPTER 01</div><h1>RL 数学工具速查</h1><p class="lead">强化学习的推导反复用到少数几个工具：条件期望（Bellman 方程、方差分析）、重要性采样（off-policy、PPO）、KL 散度（TRPO、RLHF）、极大似然（奖励模型、行为克隆）、梯度估计（策略梯度、SAC）、几个不等式（Jensen、Hoeffding）和优化器。本章每个工具只讲到“面试能说清、推导能写出”的程度，并用小实验把容易说错的地方钉死。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>能写出全期望 / 全方差公式、重要性采样无偏性、$\KL\ge0$ 三个最基础的推导。</li>
+<li>说清前向 KL 与反向 KL 的区别（覆盖所有峰 vs 锁定一个峰），以及 RL 里各处用的是哪个方向。</li>
+<li>说清 MLE ⇔ 交叉熵 ⇔ 前向 KL、MAP ⇔ 正则化，以及得分函数估计与重参数化的取舍。</li>
+<li>知道各个工具在书中哪一章被用到。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案（KL 与重要性采样）</span><p>KL 散度 $\KL(p\Vert q)=\E_p[\log p/q]$ 衡量用 q 近似 p 的代价，由 Jensen 不等式可知它非负、当且仅当两分布相同时为 0，但不对称。最小化前向 KL $\KL(p\Vert q)$ 等价于对 p 的样本做极大似然，q 会尽量覆盖 p 的所有高概率区域（mode covering）；最小化反向 KL $\KL(q\Vert p)$ 时 q 在 p 很小的地方会被重罚，于是只锁定一个峰（mode seeking）。RLHF 的惩罚项 $\KL(\pi_\theta\Vert\pi_{\text{ref}})$ 是反向形式（期望在当前策略下取），行为克隆是前向形式。重要性采样用 $\E_p[f]=\E_q[\frac pqf]$ 把一个分布下的期望换成另一个分布下的样本，普通版无偏但方差随两分布的差异指数增长，加权版有偏但稳定；RL 里的 off-policy MC、PPO 的概率比、PER 的权重、V-trace 都是它。</p></div>
+
+<h2>1.1 条件期望：全期望与全方差</h2>
+<!--deriv 全期望公式与全方差公式
+\E[X] & = \sum_y\Pr(Y=y)\,\E[X\mid Y=y]=\E\big[\E[X\mid Y]\big] || 先在每个 Y 的取值里平均，再按 Y 的分布平均（塔式法则）
+\Var(X) & = \E[X^2]-\E[X]^2=\E\big[\E[X^2\mid Y]\big]-\E\big[\E[X\mid Y]\big]^2 || 对 $\E[X^2]$ 和 $\E[X]$ 分别用全期望公式
+& = \E\big[\Var(X\mid Y)+\E[X\mid Y]^2\big]-\E\big[\E[X\mid Y]\big]^2 || $\E[X^2\mid Y]=\Var(X\mid Y)+\E[X\mid Y]^2$
+* \Var(X) & = \underbrace{\E\big[\Var(X\mid Y)\big]}_{\text{组内方差}}+\underbrace{\Var\big(\E[X\mid Y]\big)}_{\text{组间方差}} || 后两项合并成 $\E[X\mid Y]$ 的方差
+-->
+<p>例子：先随机抽英雄类型 Y（坦克 / 战士 / 法师，概率 0.3 / 0.5 / 0.2），再按类型抽一次技能伤害 X（均值 200 / 450 / 700，标准差 40 / 90 / 150）。公式给出 $\E[X]=$ [[ch01.e1.ex|.1f]]、$\Var(X)=$ [[ch01.e1.vw|.0f]]（组内）+ [[ch01.e1.vb|.0f]]（组间）= [[ch01.e1.var|.0f]]；[[ch01.e1.N]] 次蒙特卡洛给出 [[ch01.e1.mc_mean|.1f]] 和 [[ch01.e1.mc_var|.0f]]（<code>demos/ch01_math.py</code> E1）。方差主要来自“抽到哪个类型”而不是“同类型里的波动”。</p>
+<div class="tbl"><table>
+<tr><th>在哪用到</th><th>怎么用</th></tr>
+<tr><td>第 3 章 Bellman 方程</td><td>$V_\pi(s)=\E[R+\gamma V_\pi(S')\mid S=s]$：对动作、再对下一状态逐层求条件期望</td></tr>
+<tr><td>第 5 章 MC vs TD 方差</td><td>TD 目标把“之后所有步的随机性”用 $V(S')$ 这个条件期望吸收掉了</td></tr>
+<tr><td>第 6 章 Expected Sarsa</td><td>全方差公式：Sarsa 目标的方差 = Expected Sarsa 的方差 + 下一动作带来的方差</td></tr>
+<tr><td>第 9 章 reward-to-go、基线无偏</td><td>塔式法则把过去的奖励提到内层期望外面</td></tr>
+</table></div>
+<p class="tcap"><b>表 1-1</b>　条件期望在书中的用途。</p>
+
+<h2>1.2 重要性采样</h2>
+<!--deriv 重要性采样无偏；二阶矩随分布差异指数增长
+\E_{x\sim p}[f(x)] & = \sum_xp(x)f(x)=\sum_xq(x)\frac{p(x)}{q(x)}f(x)=\E_{x\sim q}\big[w(x)f(x)\big],\quad w=\frac pq || 要求 p > 0 的地方 q > 0（覆盖性）；于是 $\frac1n\sum w(x_i)f(x_i)$ 是无偏估计
+\E_q[w] & = \sum_xq\frac pq=1 || 权重的均值总是 1
+\E_q[w^2] & = \sum_x\frac{p(x)^2}{q(x)}=\E_p[w]\ \ge1 || 二阶矩 = 1 + 权重的方差；p、q 差得越远越大
+* p=\mathcal N(\mu,1),\ q=\mathcal N(0,1) & \Rightarrow\ \E_q[w^2]=e^{\mu^2},\qquad\text{ESS}\approx\frac{n}{e^{\mu^2}} || 代入高斯密度配方即得；均值只差 3 个标准差时二阶矩就是 $e^9\approx8103$，100 个样本的有效样本量只剩 1 个左右
+-->
+<!--plot {"x":[0,3],"y":[0.005,300],"logy":true,"h":280,"xlabel":"目标分布均值 μ（行为分布固定为 N(0,1)）","ylabel":"估计 E_π[x] 的均方误差（n = 100）","legend":"tl",
+"series":[{"path":"ch01.e2.ord","n":"普通 IS（实测，2000 次重复）","c":"r","dots":true,"sw":2.4},{"path":"ch01.e2.th","n":"普通 IS 理论方差 (e^{μ²}(1+4μ²) − μ²)/n","c":"r","dash":true},{"path":"ch01.e2.wtd","n":"加权 IS（实测）","c":"b","dots":true,"sw":2.4}],
+"cap":"<b>图 1-1</b>　普通 vs 加权重要性采样（纯 Python 实测，E2，纵轴对数刻度）。μ ≥ 2 以后普通 IS 的实测误差反而明显低于理论值：方差主要来自极少出现的巨大权重，2000 次重复里还没采到足够多的“罕见大样本”——这正是重尾估计量最危险的地方。加权 IS 误差小得多，代价是有偏（μ = 3 时偏差 [[ch01.e2.rows.6.bias_w|+.2f]]）。"} -->
+<!--dtab {"rows":"ch01.e2.rows","cols":[["μ","mu",".1f"],["KL(π‖b) = μ²/2","kl",".2f"],["E_b[w²] = e^{μ²}","w2",".1f"],["平均 ESS（n = 100）","ess",".1f"],["近似 ESS n/e^{μ²}","ess_th",".1f"]],
+"cap":"<b>表 1-2</b>　有效样本量随分布差异的变化（E2）。KL 只增加到 4.5，有效样本量就从 100 掉到个位数。PPO 用 clip 和 KL 早停把新旧策略的差异限制在很小的范围内，就是为了让重要性比值保持在 1 附近（第 11 章）。"} -->
+
+<h2>1.3 熵、交叉熵与 KL 散度</h2>
+<!--deriv KL ≥ 0（Jensen 不等式），交叉熵 = 熵 + KL
+\mathcal H(p) & = -\E_p[\log p],\qquad\mathcal H(p,q)=-\E_p[\log q] || 熵：p 自身的不确定性；交叉熵：用 q 编码 p 的样本的平均码长
+\KL(p\Vert q) & = \E_p\Big[\log\frac pq\Big]=\mathcal H(p,q)-\mathcal H(p) || 所以对 q 最小化交叉熵 ⇔ 最小化 KL（$\mathcal H(p)$ 与 q 无关）
+-\KL(p\Vert q) & = \E_p\Big[\log\frac qp\Big]\le\log\E_p\Big[\frac qp\Big]=\log\sum_xq(x)=0 || Jensen：log 是凹函数，$\E[\log Z]\le\log\E[Z]$
+* \KL(p\Vert q) & \ge0,\quad\text{等号当且仅当 }p=q || Jensen 取等号要求 $q/p$ 是常数，又因为都归一化，常数只能是 1
+-->
+<p>KL 不对称。用一个高斯 $q=\mathcal N(m,s^2)$ 去拟合一个双峰分布 $p=\tfrac12\mathcal N(-2,0.6^2)+\tfrac12\mathcal N(2,0.6^2)$（数值积分 + 网格搜索，E3）：</p>
+<!--plot {"x":[-6,6],"y":[0,0.75],"h":280,"xlabel":"x","ylabel":"概率密度","legend":"tr",
+"series":[{"path":"ch01.e3.p","n":"目标 p（双峰）","c":"k","sw":2.6},{"path":"ch01.e3.qf","n":"min KL(p‖q)：覆盖所有峰","c":"b","sw":2.2},{"path":"ch01.e3.qr","n":"min KL(q‖p)：锁定一个峰","c":"r","sw":2.2,"dash":true}],
+"cap":"<b>图 1-2</b>　前向 KL 与反向 KL（E3）。前向 KL 的最优解是矩匹配 $\\mathcal N$([[ch01.e3.mf|.1f]], [[ch01.e3.sf|.2f]]²)，把概率放到了 p 几乎为 0 的中间；反向 KL 的最优解 $\\mathcal N$([[ch01.e3.mr|.1f]], [[ch01.e3.sr|.2f]]²) 只贴住一个峰。用前向 KL 衡量时，第二个解差得很远（[[ch01.e3.fwd_r|.1f]] 对 [[ch01.e3.fwd_f|.2f]]）；用反向 KL 衡量时则相反（[[ch01.e3.rev_r|.2f]] 对 [[ch01.e3.rev_f|.2f]]）。"} -->
+<div class="tbl"><table>
+<tr><th>方向</th><th>期望对谁取</th><th>行为</th><th>RL 里的例子</th></tr>
+<tr><td>前向 $\KL(p_{\text{data}}\Vert q_\theta)$</td><td>数据分布</td><td>覆盖所有峰（宁可在数据之外放概率）</td><td>行为克隆 / 监督学习的 MLE（第 14 章）；TRPO / PPO 的 $\KL(\pi_{\text{old}}\Vert\pi_\theta)$（第 11 章）</td></tr>
+<tr><td>反向 $\KL(q_\theta\Vert p)$</td><td>模型自己</td><td>锁定一个峰（不敢在 p 小的地方放概率）</td><td>RLHF 的 $\KL(\pi_\theta\Vert\pi_{\text{ref}})$（第 13 章）、SAC 的策略改进 $\KL(\pi\Vert e^{Q/\alpha}/Z)$（第 12 章）、变分推断</td></tr>
+</table></div>
+<p class="tcap"><b>表 1-3</b>　两个方向的 KL。判断方法：期望是对谁取的、样本从哪里来。小步长时两个方向的二阶近似相同（都等于 ½ΔᵀFΔ，第 11 章）。</p>
+
+<h2>1.4 极大似然、交叉熵与正则化</h2>
+<!--deriv MLE ⇔ 交叉熵 ⇔ 前向 KL；MAP ⇔ 正则化
+\hat\theta_{\text{MLE}} & = \argmax_\theta\sum_{i=1}^n\log q_\theta(y_i\mid x_i) || 独立样本的对数似然
+& = \argmin_\theta\ \E_{(x,y)\sim\hat p}\big[-\log q_\theta(y\mid x)\big] || 除以 n、取负：经验分布 $\hat p$ 下的交叉熵，分类任务就是 softmax + 交叉熵损失
+& = \argmin_\theta\ \KL\big(\hat p\,\Vert\,q_\theta\big) || 1.3 节：交叉熵与 KL 只差一个常数
+\hat\theta_{\text{MAP}} & = \argmax_\theta\Big[\sum_i\log q_\theta(y_i\mid x_i)+\log p(\theta)\Big] || 再乘一个参数先验
+* p(\theta)=\mathcal N(0,\sigma^2I)\Rightarrow & -\log p(\theta)=\tfrac{1}{2\sigma^2}\lVert\theta\rVert^2+C || 高斯先验 = L2 正则（权重衰减）；拉普拉斯先验 = L1 正则（第 2 章 E2 看稀疏性）
+-->
+<p>第 13 章的 Bradley-Terry 奖励模型、第 14 章的行为克隆、第 17 章 AlphaZero 的策略损失 $-\pi^\top\log p$，都是这一条的直接应用。</p>
+
+<h2>1.5 梯度估计：得分函数 vs 重参数化</h2>
+<p>要对 $\E_{x\sim p_\theta}[f(x)]$ 求梯度，有两条路（第 9 章工具箱已经提过）：</p>
+$$\underbrace{\nabla_\theta\E_{p_\theta}[f]=\E_{p_\theta}\big[f(x)\nabla_\theta\log p_\theta(x)\big]}_{\text{得分函数（REINFORCE）：f 可以不可导}}\qquad\underbrace{\nabla_\theta\E_{\varepsilon}\big[f(g_\theta(\varepsilon))\big]=\E_\varepsilon\big[\nabla_xf\cdot\nabla_\theta g_\theta(\varepsilon)\big]}_{\text{重参数化：要求 f 对 x 可导}}$$
+<!--dtab {"rows":"ch01.e4.rows","cols":[["μ","mu",".1f"],["真梯度 2μ","true",".1f"],["得分函数：均值","sf",".3f"],["得分函数：方差","sf_var",".1f"],["加基线：方差","sfb_var",".1f"],["重参数化：均值","rp",".3f"],["重参数化：方差","rp_var",".2f"]],
+"cap":"<b>表 1-4</b>　估计 $\\nabla_\\mu\\E_{x\\sim\\mathcal N(\\mu,1)}[x^2]=2\\mu$ 的单样本方差（[[ch01.e4.N]] 次，E4）。三种都无偏；得分函数的方差随 μ 快速增长，加基线后明显降低（μ = 3 时从 [[ch01.e4.rows.4.sf_var|.0f]] 降到 [[ch01.e4.rows.4.sfb_var|.0f]]），重参数化的方差恒为 4。μ = 0 时的理论值 15 / 10 / 4 可以用 $\\E[\\varepsilon^6]=15$、$\\E[\\varepsilon^4]=3$ 手算验证。"} -->
+<p>RL 里环境回报对动作不可导，策略梯度只能用得分函数（所以要基线、critic、GAE 拼命降方差）；SAC 的 actor 损失里 Q 对动作可导，于是用重参数化（第 12 章）。</p>
+
+<h2>1.6 常用不等式</h2>
+<div class="tbl"><table>
+<tr><th>不等式</th><th>形式</th><th>在哪用到</th></tr>
+<tr><td>Jensen</td><td>φ 凸：$\varphi(\E X)\le\E\varphi(X)$；凹函数方向相反</td><td>KL ≥ 0（1.3 节）；最大化偏差 $\E[\max\hat Q]\ge\max\E\hat Q$（第 6、8 章）；ELBO</td></tr>
+<tr><td>Hoeffding</td><td>$X_i\in[0,1]$ 独立：$\Pr(\bar X-\mu\ge\epsilon)\le e^{-2n\epsilon^2}$</td><td>UCB 的置信半径（第 7 章）、评测局数（第 21 章）</td></tr>
+<tr><td>Cauchy-Schwarz</td><td>$\lvert\langle u,v\rangle\rvert\le\lVert u\rVert\lVert v\rVert$</td><td>线性 TD 在 on-policy 下稳定的证明（第 8 章）</td></tr>
+<tr><td>Markov / Chebyshev</td><td>$\Pr(X\ge a)\le\E X/a$；$\Pr(\lvert X-\mu\rvert\ge k\sigma)\le1/k^2$</td><td>粗略的样本量估计</td></tr>
+<tr><td>$\log x\le x-1$</td><td>切线在凹函数上方</td><td>k3 KL 估计非负（第 11、13 章）</td></tr>
+</table></div>
+<p class="tcap"><b>表 1-5</b>　常用不等式速查。</p>
+
+<h2>1.7 优化器一句话</h2>
+<div class="tbl"><table>
+<tr><th>优化器</th><th>更新</th><th>一句话</th></tr>
+<tr><td>SGD</td><td>$w\leftarrow w-\eta g$</td><td>步长受最大曲率限制（$\eta<2/L$），病态问题在平坦方向上很慢</td></tr>
+<tr><td>Momentum</td><td>$v\leftarrow\beta v+g$，$w\leftarrow w-\eta v$</td><td>在一致的方向上累积速度、在来回震荡的方向上抵消</td></tr>
+<tr><td>Adam</td><td>$m\leftarrow\beta_1m+(1-\beta_1)g$，$v\leftarrow\beta_2v+(1-\beta_2)g^2$，$w\leftarrow w-\eta\frac{\hat m}{\sqrt{\hat v}+\epsilon}$</td><td>每个参数自适应步长（除以梯度的 RMS），对尺度不敏感，RL 的默认选择；偏差修正 $\hat m=m/(1-\beta_1^t)$ 让早期步长不被低估</td></tr>
+<tr><td>AdamW</td><td>Adam + $w\leftarrow w-\eta\lambda w$（与梯度解耦）</td><td>在 Adam 里把 L2 正则写进梯度，会被自适应步长缩放，效果不等于权重衰减；AdamW 把两者分开</td></tr>
+<tr><td>梯度裁剪</td><td>$\lVert g\rVert>c$ 时 $g\leftarrow cg/\lVert g\rVert$</td><td>防止偶发的大梯度（RL 里奖励尺度突变、优势极端值），PPO 常用 0.5</td></tr>
+</table></div>
+<p class="tcap"><b>表 1-6</b>　优化器速查。</p>
+<!--plot {"x":[-4.3,0.6],"y":[-1.1,1.15],"h":260,"xlabel":"x","ylabel":"y","legend":"br",
+"series":[{"path":"ch01.e5.sgd.path","n":"SGD（η = 0.035）","c":"r","dots":true,"sw":1.4},{"path":"ch01.e5.mom.path","n":"Momentum（β = 0.9）","c":"b","sw":1.6},{"path":"ch01.e5.adam.path","n":"Adam（η = 0.1）","c":"g","sw":2}],
+"cap":"<b>图 1-3</b>　病态二次函数 $f=\\tfrac12(x^2+50y^2)$ 上前 80 步的轨迹（从 (−4, 1) 出发，E5）。SGD 的步长受 y 方向的大曲率限制，在 x 方向上爬得很慢；Momentum 在 x 方向上加速；Adam 按每个坐标的梯度尺度归一化，两个方向几乎同速前进。"} -->
+<!--plot {"x":[0,200],"y":[1e-9,100],"logy":true,"h":240,"xlabel":"迭代步数","ylabel":"损失 f（对数刻度）","legend":"tr",
+"series":[{"path":"ch01.e5.sgd.loss","n":"SGD","c":"r"},{"path":"ch01.e5.mom.loss","n":"Momentum","c":"b"},{"path":"ch01.e5.adam.loss","n":"Adam","c":"g"}],
+"cap":"<b>图 1-4</b>　损失曲线（E5）。第 50 步：SGD [[ch01.e5.sgd.l50|.2e]]，Momentum [[ch01.e5.mom.l50|.2e]]，Adam [[ch01.e5.adam.l50|.2e]]。"} -->
+
+<h3>手撕代码</h3>
+<p>下面的工具函数与 <code>demos/ch01_math.py</code> 中的代码块逐字相同（完整脚本包括本章全部实验）：</p>
+<!--code:py:KL / 重要性采样 / 交叉熵 / AdamW / 梯度裁剪（Python，面试手撕版）-->
+{{demo:ch01_math.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch01_math.py 的输出-->
+{{demo:ch01_output.txt}}
+<!--/code-->
+
+<h2>1.8 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“KL 是一种距离”</td><td>不对称、不满足三角不等式</td><td>是散度；JS 散度对称，Wasserstein 才是真正的度量</td></tr>
+<tr><td>“RLHF 用的是 KL(π_ref‖π)”</td><td>方向说反</td><td>惩罚项 $\KL(\pi_\theta\Vert\pi_{\text{ref}})$，期望在当前策略的样本上取</td></tr>
+<tr><td>“重要性采样无偏，所以样本多了就准”</td><td>忽略方差</td><td>方差 ∝ $\E[w^2]$，可以指数级大甚至无穷（图 1-1、第 6 章图 6-4）</td></tr>
+<tr><td>“交叉熵和 KL 是一回事”</td><td>差一个常数</td><td>$\mathcal H(p,q)=\mathcal H(p)+\KL(p\Vert q)$；对 q 优化时等价</td></tr>
+<tr><td>“Adam + L2 正则 = AdamW”</td><td>没解耦</td><td>L2 写进梯度会被自适应步长缩放，AdamW 才是真正的权重衰减</td></tr>
+</table></div>
+
+<div class="recap"><div class="t">速记卡 · 第 1 章</div><ul>
+<li>全期望 $\E X=\E[\E[X\mid Y]]$；全方差 = 组内方差的期望 + 组间均值的方差。</li>
+<li>IS：$\E_p f=\E_q[\frac pqf]$；$\E_q w=1$，$\E_qw^2=\E_pw$；高斯平移 μ 时 $e^{\mu^2}$，ESS ≈ $n/e^{\mu^2}$。</li>
+<li>$\KL\ge0$（Jensen）；$\mathcal H(p,q)=\mathcal H(p)+\KL(p\Vert q)$；前向覆盖峰、反向锁定峰。</li>
+<li>MLE = 最小化交叉熵 = 最小化 $\KL(\hat p\Vert q)$；MAP + 高斯先验 = L2，拉普拉斯先验 = L1。</li>
+<li>得分函数：f 可不可导都行、方差大；重参数化：要求可导、方差小。</li>
+<li>Adam：一二阶矩 + 偏差修正；AdamW 解耦权重衰减；裁剪全局范数。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：用一个高斯策略拟合一个双峰的“专家动作分布”（比如专家有时左绕有时右绕），用行为克隆（MLE）会怎样？</summary><p>MLE 等价于最小化前向 KL，高斯会覆盖两个峰，均值落在中间——也就是“直直撞上障碍物”。这是 BC 在多模态示范上的经典问题，解决办法是用多模态策略（混合高斯、离散化动作、扩散策略）或者换成能锁定一个峰的目标。</p></details>
+<details class="quiz"><summary>自测 2：PPO 的比值 r 和第 6 章 off-policy MC 的比值 ρ 都是重要性权重，为什么 PPO 的方差问题没那么严重？</summary><p>MC 的 ρ 是整条轨迹上每一步比值的连乘，会指数爆炸；PPO 只用单步的比值 $\pi_\theta(a\mid s)/\pi_{\text{old}}(a\mid s)$，而且用 clip 和 KL 早停把新旧策略限制得很近，比值始终在 1 附近（表 1-2：KL 很小时 ESS 几乎不损失）。代价是忽略了状态分布的变化，只在小步长下近似成立（第 11 章性能差异引理）。</p></details>
+<details class="quiz"><summary>自测 3：交叉熵损失为什么用 log-sum-exp 写法？</summary><p>直接算 softmax 再取 log，logit 很大时 $e^z$ 会溢出、很小时概率下溢成 0 导致 log(0)。$\log\sum e^{z}=m+\log\sum e^{z-m}$（m 取最大值）既不溢出也不下溢，而且 $\text{CE}=\text{LSE}(z)-z_y$ 一步就能算出。</p></details>
+</section>

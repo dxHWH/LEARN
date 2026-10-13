@@ -1,0 +1,123 @@
+<section class="chapter" id="ch10">
+  <div class="ch-head">
+    <div class="no">CHAPTER 10</div>
+    <h1>网络同步、排错清单与面试总复习</h1>
+    <p class="lead">最后一章：多人游戏里动画怎么同步，线上常见动画 bug 怎么定位；然后是全书实测总表、40 道面试追问和速记卡。</p>
+  </div>
+
+  <h2>10.1 多人游戏中的动画同步</h2>
+  <p><strong>原则：动画本身不复制，复制的是“驱动动画的状态”</strong>。每个客户端用复制来的状态在本地跑同一个动画蓝图。</p>
+  <div class="tbl"><table>
+    <tr><th>要同步的东西</th><th>怎么同步</th></tr>
+    <tr><td>移动相关（速度、是否在空中、蹲伏）</td><td>CharacterMovementComponent 的移动复制本身就带来了速度和位置；蹲伏等标志位是角色的复制属性。动画蓝图在各端从角色读取</td></tr>
+    <tr><td>瞄准方向</td><td>Pawn 的 <code>GetBaseAimRotation()</code>（远端用复制的 RemoteViewPitch 等），各端算 Aim Offset</td></tr>
+    <tr><td>一次性动作（攻击、技能、受击）</td><td>服务器决定，<strong>蒙太奇</strong>通过角色或 GAS 的复制结构（当前蒙太奇、播放位置、速率、Section）同步给模拟代理；纯表现的可用多播 RPC</td></tr>
+    <tr><td>Root Motion 蒙太奇</td><td>CharacterMovement 对蒙太奇 Root Motion 做预测与校正（第 7 章）</td></tr>
+    <tr><td>命中判定用的姿势</td><td>服务器需要真实骨骼位置时，要保证服务器端动画更新（第 9 章），并做延迟补偿（回溯到客户端开枪时刻的姿势 / 碰撞体）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：本地预测的蒙太奇</span>
+    <p>玩家按下攻击键，如果等服务器确认再播放，会有一个 RTT 的延迟，手感很差。常见做法（GAS 的做法）：<strong>客户端立即本地播放</strong>（预测），同时请求服务器；服务器确认后复制给其他客户端，本地客户端收到的复制会被识别为“已在播放”而不重复播；服务器拒绝时本地回滚（停止蒙太奇）。所以蒙太奇的“预测键”和“谁是权威”是网络动画的核心问题。</p>
+  </div>
+
+  <h2>10.2 线上动画 bug 排错清单</h2>
+  <div class="tbl"><table>
+    <tr><th>现象</th><th>常见原因</th><th>怎么查 / 怎么改</th></tr>
+    <tr><td>角色 T-Pose / A-Pose</td><td>动画蓝图没设置或编译失败；Skeleton 不匹配；某 LOD 下 AnimGraph 输出无效；不可见不更新后刚进入视野</td><td>看 Message Log、动画蓝图调试实例；检查 AnimClass 与 Skeleton；检查 VisibilityBasedAnimTickOption</td></tr>
+    <tr><td>滑步</td><td>混合空间采样位置与动画真实速度不符；同步组缺失；移动速度与动画速度不匹配</td><td>Blend Space Analysis；加同步组 / 同步标记；步幅调整、距离匹配</td></tr>
+    <tr><td>远处角色动作卡顿</td><td>URO 降频且未开跳帧插值；Budget Allocator 限流</td><td>开 URO 调试显示；调整阈值或开启插值</td></tr>
+    <tr><td>手指 / 武器微抖</td><td>压缩误差在层级末端放大</td><td>调整压缩误差或虚拟顶点距离；对武器骨骼单独设置</td></tr>
+    <tr><td>脚步声响两次</td><td>混合中的两条动画都触发 Notify</td><td>Trigger Weight Threshold；混合空间只触发最高权重</td></tr>
+    <tr><td>蒙太奇不播放</td><td>AnimGraph 里没有对应 Slot 节点 / Slot 名不一致 / Slot 之后被别的节点覆盖；同组蒙太奇被打断</td><td>检查 Slot 名；在 Rewind Debugger 里看蒙太奇权重</td></tr>
+    <tr><td>Root Motion 不生效</td><td>Root Motion Mode 不对；动画未勾选 Enable Root Motion；分层混合把根骨骼排除</td><td>改模式；开启 Blend Root Motion Based on Root Bone</td></tr>
+    <tr><td>上半身动作朝向偏</td><td>分层混合用 Local Space</td><td>开 Mesh Space Rotation Blend（第 5 章）</td></tr>
+    <tr><td>切 LOD / 切武器时姿势跳一下</td><td>骨骼集合变化导致节点重置；子图重新相关、时间归零</td><td>FBoneReference 在 CacheBones 中重新解析；惯性化过渡；同步组保持相位</td></tr>
+    <tr><td>IK 时肘 / 膝翻转</td><td>目标接近最大长度，Pole 失效</td><td>clamp 留余量，调整 Pole（第 8 章）</td></tr>
+  </table></div>
+
+  <h2>10.3 全书实测总表</h2>
+  <div class="tbl"><table>
+    <tr><th>实验</th><th>结论（数字来自 demos/run_output.txt）</th></tr>
+    <tr><td>E1 FK 三种写法</td><td>68 骨骼：线性数组 1.12 us/角色；指针树 3.54x；逐根回溯 5.65x</td></tr>
+    <tr><td>E2 旋转混合</td><td>170° 与 −170°：欧拉插值 0°、nlerp/slerp 180°；nlerp 偏差 60° 时 0.27°、179° 时 8.00°；slerp 慢 4.86x；加权求和与顺序无关，链式 slerp 相差 1.7°</td></tr>
+    <tr><td>E3 蒙皮</td><td>LBS 扭转半径 = cos(θ/2)，180° 时为 0；DQS 恒为 1；CPU 上 DQS 慢 4.33x</td></tr>
+    <tr><td>E4 分层混合</td><td>Blend Depth 权重 (k+1)/N；骨盆扭 40° 时 Local 混合头偏 40°、Mesh Space 为 0°；Mesh Space 慢 13.2x</td></tr>
+    <tr><td>E5 混合空间</td><td>9 采样 12 个三角形；权重和为 1 且重建坐标 = 输入；输入平滑途经 Fwd（权重 1.00），Weight Speed 不经过（0.00）</td></tr>
+    <tr><td>E6 同步</td><td>支撑脚不一致：不同步 50.4%，归一化同步 21.2%，同步标记 0%</td></tr>
+    <tr><td>E7 过渡</td><td>最大跳变：硬切 38.3°、线性 3.6°、惯性化 2.29°；速度突变 4515 / 183 / 39.5 °/s；惯性化求值次数减半</td></tr>
+    <tr><td>E8 IK</td><td>两骨骼解析解误差 0、13.9 ns；FABRIK 容差 0.01 平均 4.1 次迭代，有长尾</td></tr>
+    <tr><td>E9 压缩</td><td>去常量 3.37x → 量化 8.60x → 精简最高 12.24x；局部 0.5° 误差在组件空间放大到 1.64°</td></tr>
+    <tr><td>E11 四元数基础</td><td>Z 轴 90° → (0.7071, 0, 0, 0.7071)；q·v·q⁻¹ 与罗德里格斯相差 &lt; 7.4e-5；60° 与 420° 的四元数互为相反数；X、Y 两个 90° 换顺序差 120°；组合旋转四元数 0.78 ns vs 矩阵 7.64 ns，转向量矩阵 0.50 ns vs 四元数 1.64 ns</td></tr>
+    <tr><td>E12 欧拉角问题</td><td>pitch 90° 时 (30,90,0) ≡ (0,90,−30) ≡ (60,90,30)；越过头顶 0.02° 让 yaw 跳 180°；矩阵连乘 100 万次压扁 1.18%，未归一化四元数放大 5.3%</td></tr>
+    <tr><td>E10 整体开销</td><td>300 角色 1.066 ms/帧单线程；32 线程 7.64x；LOD + URO 只需 39.9% 工作量</td></tr>
+  </table></div>
+
+  <h2>10.4 面试追问 40 题</h2>
+  <h3>骨骼与数据（1~8）</h3>
+  <details class="quiz"><summary>1. Skeleton 和 SkeletalMesh 的区别？为什么动画绑定在 Skeleton 上？</summary><p>Skeleton 是骨骼层级、Socket、曲线 / 同步标记名等“命名约定”；SkeletalMesh 是带蒙皮权重的网格，骨骼是 Skeleton 的子集。动画按骨骼名存轨道，绑在 Skeleton 上就能被所有兼容 Mesh 共享（换装、不同体型）。</p></details>
+  <details class="quiz"><summary>2. 骨骼为什么按拓扑序存放？有什么好处？</summary><p>父下标 &lt; 子下标，FK 一个循环完成（不递归、缓存友好、易并行）；LOD 减骨只需过滤下标；E1 中比指针树快 3.54x，比逐根回溯快 5.6x。</p></details>
+  <details class="quiz"><summary>3. 局部空间、组件空间、世界空间分别用在哪？怎么互转？</summary><p>动画数据与大多数混合在局部空间；IK、Mesh Space 混合、蒙皮矩阵在组件空间；挂件和射线在世界空间。Component[i] = Local[i] × Component[Parent]；Local = Component × Component[Parent]⁻¹；World = Component × ComponentToWorld。</p></details>
+  <details class="quiz"><summary>4. Compact Pose Bone Index 是什么？为什么自定义节点不能直接用骨骼下标？</summary><p>它是本帧实际需要计算的骨骼（RequiredBones）里的下标，随 LOD 变化。直接用 Skeleton / Mesh 下标会在骨骼被剔除时取错或越界；应在 CacheBones 里用 FBoneReference 解析，并检查有效性。</p></details>
+  <details class="quiz"><summary>5. 蒙皮矩阵怎么算？GPU 蒙皮做了什么？</summary><p>SkinMatrix = InvRefPose × CurrentComponent。CPU 上传每骨骼 3×4 矩阵，顶点着色器按顶点的骨骼下标和权重把矩阵加权求和后变换顶点。</p></details>
+  <details class="quiz"><summary>6. LBS 的糖纸扭曲怎么来的？UE 怎么解决？</summary><p>矩阵线性平均不再是刚体变换，扭转 θ 时关节处半径变成 cos(θ/2)（E3：180° 塌成 0）。UE 用扭转骨分摊旋转、Pose Driver / 曲线驱动修正形变；DQS 引擎未内置，且有鼓包、不支持缩放。</p></details>
+  <details class="quiz"><summary>7. 动画压缩有哪些手段？ACL 的特点？</summary><p>去常量轨、量化（丢 w、16 位甚至可变位宽）、关键帧精简；ACL（UE 5.3 起默认）保持均匀采样、按误差为每条轨道选位宽，用组件空间的虚拟顶点衡量误差，自动考虑层级累积。</p></details>
+  <details class="quiz"><summary>8. 为什么局部空间的误差阈值不够？</summary><p>误差沿父子链叠加：E9 中局部 0.5° 的误差在组件空间达到 1.64°，末端骨骼和长武器还会把角度误差放大成位移。所以要在组件 / 网格空间衡量。</p></details>
+  <h3>混合（9~18）</h3>
+  <details class="quiz"><summary>9. 为什么旋转混合不能用欧拉角？</summary><p>插值方向错（170° 与 −170° 得 0°）、万向节锁、轴顺序依赖。用四元数，并在 dot &lt; 0 时取反走最短路径。</p></details>
+  <details class="quiz"><summary>10. nlerp 和 slerp 区别？UE 用哪个？</summary><p>slerp 匀角速度，nlerp 角速度不均但路径相同；60° 内偏差 &lt; 0.3°，nlerp 快约 4.86x，且可多路加权求和。UE 姿势混合用加权求和 + 归一化（即 nlerp）。</p></details>
+  <details class="quiz"><summary>11. 多路混合为什么要“加权求和再归一化”？</summary><p>与参与顺序无关（E2：0° 差异 vs 链式 slerp 1.7°），一次遍历完成，便于 SIMD；符号修正要以同一参考为准。</p></details>
+  <details class="quiz"><summary>12. 加性动画是什么？局部空间和网格空间加性的区别？</summary><p>加性 = 动画 − 基准姿势（旋转乘逆）。局部加性在每根骨骼局部空间叠加，结果受基础姿势弯曲影响；网格空间加性在组件空间叠加，方向不受基础姿势影响，Aim Offset 必须用它。</p></details>
+  <details class="quiz"><summary>13. 2D 混合空间的权重怎么算？</summary><p>UE5 默认对采样做 Delaunay 三角剖分，输入点所在三角形的重心坐标即权重（最多 3 个采样，和为 1，加权坐标等于输入）；三角网外投影到边界；旧版网格模式是双线性插值 4 个采样。</p></details>
+  <details class="quiz"><summary>14. Smoothing Time 和 Weight Speed 有什么区别？</summary><p>前者平滑输入参数，会经过中间状态（左→右会经过前）；后者平滑每个采样的权重，直接从左淡到右（E5：Fwd 权重 1.00 vs 0.00）。不要同时使用。</p></details>
+  <details class="quiz"><summary>15. 为什么要同步组？Leader 怎么选？</summary><p>不同长度的循环不同步时脚步相位漂移（E6：50.4% 时间支撑脚相反）。组内权重最高、允许当 Leader 的成员推进时间，其余对齐其归一化位置或标记位置。</p></details>
+  <details class="quiz"><summary>16. 同步标记解决了归一化同步解决不了的什么问题？</summary><p>不同动画落脚时机不同（E6：落脚差 10% 周期，归一化同步仍有 21.2% 不一致），或一个周期步数不同。按 L/R 标记对齐后为 0%。</p></details>
+  <details class="quiz"><summary>17. Layered Blend per Bone 的 Blend Depth 怎么算权重？</summary><p>0：整个子树 1；N&gt;0：第 k 层 min(1,(k+1)/N)，N 层后都是 1；负数：排除该分支。它是渐变层数，不是影响范围。</p></details>
+  <details class="quiz"><summary>18. Mesh Space Rotation Blend 解决什么问题？代价？</summary><p>保持上半身在组件空间的朝向，不被骨盆扭转带偏（E4：头偏 40° → 0°）。需要两次 FK 和反算局部空间，E4 中慢 13.2x。</p></details>
+  <h3>动画蓝图与线程（19~26）</h3>
+  <details class="quiz"><summary>19. EventGraph 和 AnimGraph 分别在哪个线程？</summary><p>EventGraph（BlueprintUpdateAnimation / NativeUpdateAnimation）在游戏线程；AnimGraph 的 Update / Evaluate 在开启多线程时于工作线程执行；BlueprintThreadSafeUpdateAnimation 也在工作线程。</p></details>
+  <details class="quiz"><summary>20. FAnimInstanceProxy 的作用？</summary><p>把动画计算需要的状态与 UObject 隔离：游戏线程在 PreUpdate 拷数据，工作线程只读写 Proxy，避免数据竞争。</p></details>
+  <details class="quiz"><summary>21. 什么是 Fast Path？怎么判断节点走了 Fast Path？</summary><p>节点引脚直接绑定成员变量（或简单的结构体拆分、取反等），编译成内存拷贝而不执行蓝图字节码；节点上有闪电图标，否则编译器给性能警告。</p></details>
+  <details class="quiz"><summary>22. Property Access 和线程安全函数是干什么的？</summary><p>Property Access 让工作线程安全地读取游戏对象属性（引擎在安全时机拷贝）；线程安全函数由编译器检查不调用非线程安全的东西，可在线程安全更新和节点函数里调用。</p></details>
+  <details class="quiz"><summary>23. 说一下 SkeletalMeshComponent 一帧的动画流程。</summary><p>TickComponent → TickAnimation（UpdateAnimation：PreUpdate、NativeUpdate、EventGraph）→ RefreshBoneTransforms 派发并行任务 → 工作线程 Proxy Update + Evaluate + 组件空间 → CompleteParallelAnimationEvaluation：交换缓冲、派发 Notify、更新子组件、通知渲染线程。</p></details>
+  <details class="quiz"><summary>24. 自定义 AnimNode 要实现哪些函数？</summary><p>Initialize_AnyThread、CacheBones_AnyThread（解析 FBoneReference）、Update_AnyThread（推进 / 权重，调用输入的 Update）、Evaluate_AnyThread（或 EvaluateComponentSpace_AnyThread），可选 GatherDebugData；编辑器侧对应 UAnimGraphNode_*。</p></details>
+  <details class="quiz"><summary>25. 权重为 0 的分支会不会计算？有什么副作用？</summary><p>不会 Update 也不会 Evaluate（不相关）。重新相关时可能重置时间和状态，需要同步组或 Anim Node Functions 处理。</p></details>
+  <details class="quiz"><summary>26. Linked Anim Layer 有什么用？</summary><p>主蓝图定义层接口，武器 / 角色专属的实现放在独立的动画蓝图，运行时 LinkAnimClassLayers 切换，便于拆分和按需加载（Lyra 的做法）。</p></details>
+  <h3>状态机、过渡、蒙太奇（27~33）</h3>
+  <details class="quiz"><summary>27. 状态机过渡期间的开销？被打断时会怎样？</summary><p>标准交叉淡化期间源和目标都要 Update、Evaluate；打断时正在进行的过渡成为新的源，可能同时求值多个状态。</p></details>
+  <details class="quiz"><summary>28. 惯性化的原理和优点？</summary><p>切换瞬间只求值目标，记录源与目标的差值和差值速度，用五次多项式在过渡时长内衰减到 0（位置、速度、加速度都连续归零）。E7：跳变 2.29°、速度突变 39.5°/s、求值次数减半。</p></details>
+  <details class="quiz"><summary>29. 使用惯性化要注意什么？</summary><p>下游必须有 Inertialization 节点；源动画过渡后的 Notify 不再触发；适合短过渡；频繁打断会劣化；Dead Blending 是 5.3 新增的实验性替代。</p></details>
+  <details class="quiz"><summary>30. 蒙太奇和状态机怎么配合？Slot 是什么？</summary><p>状态机负责持续性的运动状态，蒙太奇负责代码触发的一次性动作；蒙太奇播放到 AnimGraph 的 Slot 节点上，通常经分层混合只影响上半身。同一 Slot Group 同时只播一个。</p></details>
+  <details class="quiz"><summary>31. 做连招用蒙太奇的什么功能？</summary><p>Section 分段 + Montage_SetNextSection / JumpToSection；连招输入窗口用 Notify State 或 Branching Point 精确判定；配合 Motion Warping 吸附目标。</p></details>
+  <details class="quiz"><summary>32. Root Motion 的几种模式？为什么网络游戏只用蒙太奇的？</summary><p>No Extraction、Ignore、From Montages Only（默认）、From Everything。蒙太奇播放可确定性重放，CharacterMovement 能预测与校正；状态机 / 混合空间的 Root Motion 依赖每帧权重，各端难以一致。</p></details>
+  <details class="quiz"><summary>33. In-Place 动画和 Root Motion 各自优缺点？</summary><p>In-Place 响应快、网络简单，但易滑步；Root Motion 脚步贴合、动作精确，但操控延迟、网络复杂。常见做法：移动用 In-Place + 步幅 / 距离匹配，攻击、翻滚、攀爬用 Root Motion 蒙太奇。</p></details>
+  <h3>IK、新特性、性能（34~40）</h3>
+  <details class="quiz"><summary>34. 两骨骼 IK 怎么解？Pole 的作用？</summary><p>clamp 目标距离，余弦定理求肩处夹角，Pole 在垂直于肩→目标方向上的分量确定弯曲平面，肘 = A + dir·L1·cosα + bend·L1·sinα。没有 Pole 解不唯一。</p></details>
+  <details class="quiz"><summary>35. 脚步 IK 的流程？射线放哪？</summary><p>游戏线程射线得到地面高度和法线 → 骨盆下沉取两脚最大下沉量 → 插值平滑 → 组件空间两骨骼 IK + 脚掌对齐法线；空中和特定动作时关闭，远处 LOD 跳过。</p></details>
+  <details class="quiz"><summary>36. FABRIK 和 CCD 的区别？</summary><p>FABRIK 前后两遍按骨长拉回点位置，不算角度、收敛快且自然；CCD 逐节旋转对准目标，简单但末端关节容易过度弯曲。两者都要设迭代上限（E8：FABRIK 有长尾）。</p></details>
+  <details class="quiz"><summary>37. 距离匹配、步幅调整、朝向调整分别解决什么？</summary><p>距离匹配让起停转身动画按剩余距离播放，停得准不滑；步幅调整按速度比例缩放步幅，少量动画覆盖连续速度；朝向调整把下半身扭向移动方向，少量方向动画覆盖任意方向。</p></details>
+  <details class="quiz"><summary>38. URO 是什么？会带来什么问题？</summary><p>按屏幕大小 / LOD 降低更新频率，可跳帧插值；问题：远处卡顿（未插值）、Notify 集中触发、Root Motion 角色位移一顿一顿。</p></details>
+  <details class="quiz"><summary>39. Leader Pose 和 Copy Pose From Mesh 怎么选？</summary><p>部件不需要自己的动画逻辑就用 Leader Pose（不求值，最省）；需要物理骨骼 / 次级动画时用 Copy Pose（拷主姿势后再跑自己的节点）。</p></details>
+  <details class="quiz"><summary>40. 场景里有 300 个 AI 角色，动画开销太高，你会怎么优化？</summary><p>先用 Insights 定位（游戏线程 EventGraph 还是工作线程求值）；开启多线程更新与 Fast Path、把逻辑移到线程安全函数；URO / Budget Allocator 降频；LOD 减骨并在低 LOD 跳过 IK、加性；不可见时 OnlyTickPoseWhenRendered（注意依赖 Notify 的逻辑）；过渡用惯性化；换装部件 Leader Pose / 合并网格；群众用 Animation Sharing 或 VAT。E10 里仅 LOD + URO 就把工作量降到 39.9%。</p></details>
+
+  <h2>10.5 速记卡</h2>
+  <div class="recap"><div class="t">骨骼与数据</div><ul>
+    <li>Skeleton 是命名约定，动画绑它；骨骼 = 拓扑序数组；三套下标，自定义节点用 Compact Pose Index。</li>
+    <li>comp[i] = local[i] × comp[parent]；蒙皮矩阵 = 参考姿势逆 × 当前组件空间。</li>
+    <li>LBS 扭转半径 cos(θ/2) → 扭转骨 + 修正形变；压缩：去常量 → 量化 → 精简 / 可变位率（ACL，5.3 默认），误差按组件空间衡量。</li>
+  </ul></div>
+  <div class="recap"><div class="t">混合</div><ul>
+    <li>旋转：四元数 + 最短路径 + 加权求和归一化（nlerp）；欧拉插值会走反方向。</li>
+    <li>加性 = 动画 − 基准；Aim Offset = 网格空间加性的混合空间。</li>
+    <li>混合空间：Delaunay + 重心坐标；Smoothing Time ≠ Weight Speed；同步组（Leader = 最高权重）+ 同步标记（按脚步对齐）。</li>
+    <li>分层混合：Blend Depth 0 / N / −1；Mesh Space Rotation Blend 防止上半身被骨盆带偏。</li>
+  </ul></div>
+  <div class="recap"><div class="t">动画蓝图</div><ul>
+    <li>EventGraph 游戏线程，AnimGraph 工作线程（Proxy 隔离）；Property Access + Thread Safe Update；Fast Path。</li>
+    <li>节点：Initialize / CacheBones / Update（自顶向下）/ Evaluate（自底向上）。</li>
+    <li>过渡：交叉淡化两边都算；惯性化只算目标 + 五次多项式衰减；蒙太奇播到 Slot，Section 做连招；Root Motion 默认只取蒙太奇。</li>
+    <li>IK：两骨骼解析解 + Pole；脚步 IK 骨盆下沉取最大；UE5 距离匹配 / 步幅 / 朝向调整 / Motion Warping / Motion Matching。</li>
+  </ul></div>
+  <div class="recap"><div class="t">性能</div><ul>
+    <li>并行有上限，少算更划算：URO、Budget Allocator、LOD 减骨与节点 LOD Threshold、不可见不更新、Leader Pose、Animation Sharing、VAT。</li>
+    <li>警惕：镜头外 Notify 不触发、服务器骨骼不刷新、降频后 Root Motion 顿挫。</li>
+  </ul></div>
+</section>

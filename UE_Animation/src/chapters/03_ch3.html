@@ -1,0 +1,167 @@
+<div class="part-head" data-toc="第二部分 · 混合">
+  <div class="no">PART TWO</div>
+  <h1>第二部分　混合：动画系统的核心运算</h1>
+  <p>混合空间、状态机过渡、分层混合、加性叠加，底下都是同一件事：把几个姿势按权重合成一个。先把数学弄对，再看 UE 把它包装成了哪些工具。</p>
+</div>
+
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>混合的数学：四元数、多路混合与加性动画</h1>
+    <p class="lead">一个姿势就是一组骨骼变换。混合两个姿势，就是对每根骨骼的平移、旋转、缩放分别插值——难点全在旋转。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清为什么旋转混合必须用四元数，并且要做“最短路径”符号修正</li>
+    <li>比较 nlerp 和 slerp 的误差与速度，理解 UE 为什么用“加权求和再归一化”</li>
+    <li>理解加性动画的定义、基准姿势、局部空间加性与网格空间加性的区别</li>
+    <li>知道 Aim Offset 本质是什么</li>
+  </ul></div>
+  <div class="co tip"><span class="h">先修：B3 什么是四元数</span>
+    <p>本章默认你知道四元数 q = (cos θ/2, n·sin θ/2)、q 与 −q 是同一旋转、乘法不交换。如果这些还陌生，先读前置篇 B3（有轴角 → 四元数、万向节锁两个交互实验），再回来看会顺很多。</p>
+  </div>
+
+  <h2>3.1 混合一个姿势：逐骨骼、逐分量</h2>
+<!--code:cpp:两姿势混合（与 FAnimationRuntime::BlendTwoPosesTogether 的思路一致）-->
+// Alpha = 0 → 全是 A；Alpha = 1 → 全是 B
+for (int32 i = 0; i < NumBones; ++i)
+{
+    Out[i].Translation = FMath::Lerp(A[i].Translation, B[i].Translation, Alpha);
+    Out[i].Scale3D     = FMath::Lerp(A[i].Scale3D,     B[i].Scale3D,     Alpha);
+    FQuat QB = B[i].Rotation;
+    if ((A[i].Rotation | QB) < 0.f) QB = -QB;                  // 最短路径：dot < 0 就取反
+    Out[i].Rotation = (A[i].Rotation * (1.f - Alpha) + QB * Alpha).GetNormalized();   // nlerp
+}
+<!--/code-->
+  <p>多路混合（混合空间的 3 个采样、Blend Multi）同理：所有姿势按权重<strong>累加</strong>，旋转累加前先和第一个参与者比较符号，最后统一归一化。UE 里对应 <code>FTransform::AccumulateWithShortestRotation</code> + <code>NormalizeRotation</code>，权重在进入混合前会被归一化到和为 1。</p>
+
+  <h2>3.2 为什么不能对欧拉角插值</h2>
+  <figure>
+  <svg viewBox="0 0 860 290" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(220,135)">
+      <circle r="88" fill="#FBFBFD" stroke="#D1D5DB"/>
+      <text y="-96" text-anchor="middle" class="xs">0°（正前）</text>
+      <text y="108" text-anchor="middle" class="xs">±180°（正后）</text>
+      <line x1="0" y1="0" x2="15.3" y2="86.7" stroke="#2F5BD3" stroke-width="2.4" marker-end="url(#ab)"/>
+      <line x1="0" y1="0" x2="-15.3" y2="86.7" stroke="#2F5BD3" stroke-width="2.4" marker-end="url(#ab)"/>
+      <text x="40" y="100" class="sm b" style="fill:#2F5BD3">A = 170°</text>
+      <text x="-40" y="100" text-anchor="end" class="sm b" style="fill:#2F5BD3">B = −170°</text>
+      <path d="M15.3,86.7 A88,88 0 1,0 -15.3,86.7" fill="none" stroke="#B91C1C" stroke-width="2" stroke-dasharray="5 4"/>
+      <line x1="0" y1="0" x2="0" y2="-80" stroke="#B91C1C" stroke-width="2.6" marker-end="url(#ar)"/>
+      <text x="8" y="-56" class="sm b" style="fill:#B91C1C">欧拉插值 → 0°</text>
+      <line x1="0" y1="0" x2="0" y2="80" stroke="#15803D" stroke-width="2.6" marker-end="url(#ag)"/>
+      <text x="0" y="134" text-anchor="middle" class="sm b" style="fill:#15803D">四元数最短路径 → 180°</text>
+    </g>
+    <g class="sm">
+      <text x="430" y="50" class="b">同一个旋转有两个四元数：q 和 −q</text>
+      <text x="430" y="76">Yaw 170°  → q = ( cos 85°, 0, 0, sin 85° )</text>
+      <text x="430" y="98">Yaw −170° → q = ( cos 85°, 0, 0, −sin 85° )</text>
+      <text x="430" y="120">dot = cos²85° − sin²85° = cos 170° ≈ −0.985 &lt; 0</text>
+      <text x="430" y="150" class="b" style="fill:#B91C1C">不取反直接 lerp：走 340° 的远路 → 结果 0°</text>
+      <text x="430" y="172" class="b" style="fill:#15803D">dot &lt; 0 时把 B 取反再 lerp：走 20° 的近路 → 180°</text>
+      <text x="430" y="202" class="xs">欧拉角还有万向节锁、三个轴的插值顺序不唯一等问题，</text>
+      <text x="430" y="220" class="xs">所以 UE 的姿势数据和混合一律使用四元数（FRotator 只用于编辑和逻辑）</text>
+    </g>
+  </svg>
+  <figcaption><b>图 3-1</b>　实测 E2：Yaw 170° 与 −170° 各占 50%，欧拉插值和“不检查符号的四元数 lerp”都得到 0°，nlerp（带符号修正）和 slerp 得到 180°</figcaption>
+  </figure>
+
+  <h2>3.3 nlerp 还是 slerp</h2>
+  <p>slerp 沿球面大圆匀速插值，角度随 t 线性变化；nlerp 是直接线性插值四个分量再归一化，路径相同但<strong>角速度不均匀</strong>（中间快、两头慢）。两者的偏差随夹角增大：</p>
+  <div class="tbl"><table>
+    <tr><th>两姿势夹角</th><th>30°</th><th>60°</th><th>90°</th><th>120°</th><th>150°</th><th>179°</th></tr>
+    <tr><td>nlerp 相对 slerp 的最大偏差（E2）</td><td>0.07°</td><td>0.27°</td><td>0.92°</td><td>2.23°</td><td>4.51°</td><td>8.00°</td></tr>
+  </table></div>
+  <p>速度上（E2，2000 万次）：nlerp 2.73 ns/次，slerp 13.27 ns/次，<strong>slerp 慢 4.86 倍</strong>（多了 acos 和两次 sin）。</p>
+  <p>UE 姿势混合用的是 nlerp（加权求和 + 归一化），原因有三：</p>
+  <ol>
+    <li><strong>快</strong>：每个角色每帧每根骨骼要混合好几次，这是动画求值里调用最频繁的操作之一。</li>
+    <li><strong>误差小</strong>：参与混合的通常是相近的姿势（同一套运动的不同方向、同一时刻的两条动画），同一根骨骼的夹角很少超过 30°~60°，偏差不到 0.3°。</li>
+    <li><strong>多路混合与顺序无关</strong>：见下一节。slerp 只能两两混合。</li>
+  </ol>
+  <div class="lab alab quatlab" id="lab-quat"></div><!--/lab-->
+
+  <h2>3.4 多路混合：为什么“加权求和”比“链式 slerp”好</h2>
+  <p>三个姿势各占 1/3。用 slerp 只能这样做：<code>slerp(slerp(A, B, 1/2), C, 1/3)</code>。换一个顺序，结果就变了：</p>
+  <div class="co ver"><span class="h">实测 E2：Yaw0 / Yaw80 / Pitch80 三路等权混合</span>
+    <ul>
+      <li>加权求和 + 归一化：三种顺序的结果两两最大夹角 <strong>0.0000°</strong>（加法满足交换律）。</li>
+      <li>链式 slerp：三种顺序的结果两两最大夹角 <strong>1.7150°</strong>，与加权求和最多差 1.412°。</li>
+    </ul>
+    <p>混合空间里三个采样权重每帧都在变，参与者的顺序也可能变，<strong>结果不应该依赖遍历顺序</strong>。这也是 UE 选择“累加再归一化”的根本原因。</p>
+  </div>
+  <div class="co warn"><span class="h">面试注意：符号修正要以谁为参考</span>
+    <p>多路累加时，每个四元数都要和<strong>同一个参考</strong>（通常是第一个参与者，或当前累加值）比较 dot 再决定是否取反。如果两两之间各自修正，三个姿势分布在超过 180° 的范围里时，可能出现 A 与 B 同侧、B 与 C 同侧、但 A 与 C 异侧的情况，结果会跳变。实际动画里很少遇到，但自己写混合节点时要意识到这一点。</p>
+  </div>
+
+  <h2>3.5 加性动画（Additive）</h2>
+  <p>普通混合是“在 A 和 B 之间取一个”，加性是“在 A 上<strong>叠加</strong>一个差值”。差值从一条动画减去一个基准姿势得到：</p>
+<!--code:text:加性动画的定义与应用-->
+制作（导入时预计算）：
+    ΔT = T_anim − T_base
+    ΔR = R_anim · R_base⁻¹             // 四元数“相减”就是乘逆
+    ΔS = S_anim / S_base（UE 内部存为相对 1 的偏移）
+
+应用（Apply Additive，Alpha 为强度）：
+    T = T_target + α·ΔT
+    R = slerp(Identity, ΔR, α) · R_target
+    S = S_target · (1 + α·(ΔS − 1))
+<!--/code-->
+  <figure>
+  <svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(110,30)">
+      <text x="0" y="0" text-anchor="middle" class="b sm">基础姿势：跑步</text>
+      <line x1="0" y1="140" x2="0" y2="60" stroke="#111827" stroke-width="4"/>
+      <circle cx="0" cy="44" r="14" fill="#fff" stroke="#111827" stroke-width="3"/>
+      <line x1="0" y1="140" x2="-18" y2="160" stroke="#111827" stroke-width="3"/><line x1="0" y1="140" x2="20" y2="158" stroke="#111827" stroke-width="3"/>
+    </g>
+    <text x="215" y="110" text-anchor="middle" class="b" style="font-size:26px">+</text>
+    <g transform="translate(320,30)">
+      <text x="0" y="0" text-anchor="middle" class="b sm">加性：受击后仰（− 参考）</text>
+      <line x1="0" y1="140" x2="0" y2="60" stroke="#CBD5E1" stroke-width="4" stroke-dasharray="4 3"/>
+      <line x1="0" y1="140" x2="-27" y2="65" stroke="#C2410C" stroke-width="4"/>
+      <circle cx="-33" cy="50" r="14" fill="#fff" stroke="#C2410C" stroke-width="3"/>
+      <path d="M0,80 A60,60 0 0,0 -20,84" fill="none" stroke="#C2410C" stroke-width="1.5"/>
+      <text x="8" y="92" class="xs" style="fill:#C2410C">ΔR = 后仰 20°</text>
+    </g>
+    <text x="440" y="110" text-anchor="middle" class="b" style="font-size:26px">× α</text>
+    <text x="520" y="110" text-anchor="middle" class="b" style="font-size:26px">=</text>
+    <g transform="translate(640,30)">
+      <text x="0" y="0" text-anchor="middle" class="b sm">结果：边跑边后仰</text>
+      <line x1="0" y1="140" x2="-27" y2="65" stroke="#15803D" stroke-width="4"/>
+      <circle cx="-33" cy="50" r="14" fill="#fff" stroke="#15803D" stroke-width="3"/>
+      <line x1="0" y1="140" x2="-18" y2="160" stroke="#15803D" stroke-width="3"/><line x1="0" y1="140" x2="20" y2="158" stroke="#15803D" stroke-width="3"/>
+    </g>
+    <text x="800" y="70" class="xs" text-anchor="end">腿部 Δ = 0，</text>
+    <text x="800" y="86" class="xs" text-anchor="end">保持跑步</text>
+  </svg>
+  <figcaption><b>图 3-2</b>　加性动画只保存“相对基准姿势的变化量”，可以叠加到任意基础姿势上：受击、呼吸、身体倾斜、瞄准偏移都这么做</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>设置</th><th>选项</th><th>说明</th></tr>
+    <tr><td>Additive Anim Type</td><td><strong>Local Space</strong></td><td>差值在每根骨骼的局部空间计算和应用，最常用（受击、呼吸、倾斜）</td></tr>
+    <tr><td></td><td><strong>Mesh Space</strong></td><td>差值在组件空间计算和应用，结果的“朝向”与基础姿势的脊柱弯曲无关，Aim Offset 必须用它</td></tr>
+    <tr><td>Base Pose Type</td><td>Reference Pose</td><td>相对绑定姿势（T/A-Pose）求差</td></tr>
+    <tr><td></td><td>Selected Animation Scaled</td><td>相对另一条动画逐帧求差（时长不同会按比例缩放）</td></tr>
+    <tr><td></td><td>Selected Animation Frame</td><td>相对另一条动画的某一帧求差（Aim Offset 常用：中间朝前的那一帧）</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">深入：局部空间加性 vs 网格空间加性</span>
+    <p>假设加性动画是“上半身往右看 30°”，基础姿势是“弯腰捡东西”。局部空间加性把 30° 加在每节脊柱的局部旋转上，而这些骨骼已经弯下去了，转动轴跟着倾斜，最终视线不是水平往右 30°。网格空间加性在组件空间里叠加 30°，<strong>不管基础姿势怎么弯，视线都水平往右转 30°</strong>。代价是网格空间加性要做组件空间转换，更贵。</p>
+  </div>
+
+  <h2>3.6 Aim Offset：网格空间加性的混合空间</h2>
+  <p>Aim Offset 是一种特殊的混合空间（第 4 章），轴通常是 Yaw 和 Pitch，每个采样是一个<strong>网格空间加性姿势</strong>（瞄准左上、正上、右上……）。运行时按瞄准角算出加性姿势，叠加到当前的运动姿势上。</p>
+  <ul>
+    <li>采样动画的 Additive Anim Type 必须是 <strong>Mesh Space</strong>，Base Pose 一般用“Selected Animation Frame”，指向朝正前方的那一帧。</li>
+    <li>一般放在 AnimGraph 里运动状态机之后、上半身分层混合之后，这样无论跑、走、蹲，瞄准方向都能叠加上去。</li>
+    <li>角色转身时，常把 Yaw 限制在 ±90° 内，超出后触发原地转身（Turn In Place），让下半身跟上。</li>
+  </ul>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>姿势混合 = 每根骨骼：平移 lerp、缩放 lerp、旋转<strong>带符号修正的 nlerp</strong>。</li>
+    <li>欧拉插值会走反方向（E2：170° 和 −170° 混合得 0°）；q 与 −q 表示同一旋转，<strong>dot &lt; 0 要取反</strong>。</li>
+    <li>nlerp 比 slerp 快 4.86 倍，60° 内偏差 &lt; 0.3°；多路混合用<strong>加权求和再归一化</strong>，结果与顺序无关（链式 slerp 差 1.7°）。</li>
+    <li>加性 = 动画 − 基准姿势；局部空间加性常用于受击 / 呼吸，网格空间加性用于 <strong>Aim Offset</strong>。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：给一个加性动画 Alpha = 2 会怎样？Alpha 为负呢？</summary><p>Alpha 只是把差值放大或取反：2 表示动作幅度加倍（容易穿模、关节超出范围），负值表示反向叠加。UE 的 Apply Additive 节点会把 Alpha 限制在合理范围（节点上可设 Alpha 的缩放与钳制），工程上通常在 0~1 之间使用；需要“减去”一个加性时用 Make Dynamic Additive 节点。</p></details>
+  <details class="quiz"><summary>自测：什么情况下 nlerp 的误差会大到肉眼可见？</summary><p>当同一根骨骼在两个姿势里的夹角很大时，比如 180° 转身动画和待机之间做长时间混合（E2：150° 时偏差 4.5°）。这种情况本身就不适合直接混合，应该用专门的转身动画或惯性化过渡。另外 nlerp 角速度不均匀，混合权重匀速变化时，大角度下动作会“中间快两头慢”。</p></details>
+</section>

@@ -1,0 +1,102 @@
+<div class="cover">
+  <div class="kicker">UNREAL ANIMATION · 游戏客户端秋招版</div>
+  <h1>UE 动画系统：<em>从骨骼到动画蓝图</em></h1>
+  <p class="sub">从一根骨骼的 FTransform 讲起：参考姿势、局部空间与组件空间、蒙皮与压缩；再到四元数混合、混合空间、同步组、分层骨骼混合；然后拆开动画蓝图的线程模型、状态机、惯性化、蒙太奇与 IK；最后是 URO、LOD、并行求值这些线上真正要面对的性能问题。</p>
+  <div class="meta">
+    <span class="pill b">前置白话篇 5 章 + 正文 10 章 + 附录</span>
+    <span class="pill o">8 个交互实验（可拖动 / 可调参）</span>
+    <span class="pill g">MSVC /O2 实测 12 组实验</span>
+    <span class="pill p">40 道面试追问 + 速记卡</span>
+  </div>
+</div>
+
+<section class="chapter" id="ch0">
+  <div class="ch-head">
+    <div class="no">CHAPTER 00</div>
+    <h1>先背这个：30 秒面试版答案</h1>
+    <p class="lead">面试官说“讲讲 UE 的动画系统”，先用一分钟把全貌讲清楚，再等他挑一个点往下问。</p>
+  </div>
+
+  <div class="ans">
+    <div class="q">问：讲讲 UE 的动画系统。</div>
+    <p><strong>数据层</strong>：<code>USkeleton</code> 定义骨骼层级（按拓扑序存放：父骨骼下标总比子骨骼小）和插槽、曲线、同步标记这些“公共语言”；<code>USkeletalMesh</code> 是蒙皮网格，每个顶点绑定最多若干根骨骼和权重；<code>UAnimSequence</code> 存每根骨骼随时间变化的局部变换，经过压缩（UE 5.3 起默认 ACL）。混合空间、蒙太奇、Aim Offset 都是在这些序列之上再组织一层。</p>
+    <p><strong>逻辑层</strong>：动画蓝图（<code>UAnimInstance</code>）分两张图。<strong>EventGraph</strong> 在游戏线程读角色状态、写变量；<strong>AnimGraph</strong> 是一棵节点树（序列播放器、混合空间、状态机、分层骨骼混合、IK……），每帧先 <strong>Update</strong>（推进时间、算权重），再 <strong>Evaluate</strong>（采样、混合，得到局部空间姿势，必要时转到组件空间做 IK）。这部分可以放到工作线程，跑在 <code>FAnimInstanceProxy</code> 上。</p>
+    <p><strong>混合</strong>：位移线性插值，旋转用四元数加权求和后归一化（带最短路径符号修正），所以多路混合与顺序无关。混合空间用三角剖分 + 重心坐标算各采样权重；同步组 / 同步标记让不同长度的走跑循环对齐脚步；分层骨骼混合按骨骼分支设置权重，上半身做动作、下半身继续跑，旋转可以选在组件空间混合，防止上半身被骨盆带偏。</p>
+    <p><strong>输出</strong>：组件空间姿势乘以参考姿势的逆矩阵得到蒙皮矩阵，交给渲染线程，在 GPU 上做线性混合蒙皮。<strong>性能</strong>主要靠：多线程更新与求值、Fast Path / 线程安全函数、URO 降低远处角色的更新频率、LOD 减骨、不可见时不刷新骨骼、主从姿势（Leader Pose）共享骨骼。</p>
+  </div>
+
+  <div class="co tip"><span class="h">基础不牢？先读前置篇</span>
+    <p>如果“四元数、局部空间、蒙皮矩阵、重心坐标”这些词还说不清，先读紧接着的<strong>前置篇 B1~B5</strong>：B1 骨骼动画怎么让模型动起来，B2 变换与坐标空间（含 FK 手算），<strong>B3 什么是四元数</strong>（含两个交互实验），B4 插值、权重与混合，B5 名词白话词典。<strong>附录 A</strong> 对照 Notion 原笔记逐条给出需要修正的说法。</p>
+  </div>
+
+  <h2>一帧里，动画系统在做什么</h2>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm b"><text x="14" y="80">游戏线程</text><text x="14" y="170">工作线程</text><text x="14" y="260">渲染线程</text></g>
+    <g class="xs"><text x="14" y="96">Game Thread</text><text x="14" y="186">TaskGraph</text><text x="14" y="276">Render / GPU</text></g>
+    <g stroke="#E5E7EB"><line x1="100" y1="120" x2="852" y2="120"/><line x1="100" y1="210" x2="852" y2="210"/></g>
+    <rect x="106" y="52" width="140" height="52" rx="8" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="176" y="74" text-anchor="middle" class="b sm">角色 / 移动 Tick</text><text x="176" y="92" text-anchor="middle" class="xs">速度、朝向、是否在空中</text>
+    <rect x="262" y="52" width="182" height="52" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="353" y="74" text-anchor="middle" class="b sm">NativeUpdateAnimation</text><text x="353" y="92" text-anchor="middle" class="xs">EventGraph：读状态、写变量</text>
+    <rect x="300" y="142" width="166" height="52" rx="8" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="383" y="164" text-anchor="middle" class="b sm">Update（Proxy）</text><text x="383" y="182" text-anchor="middle" class="xs">推进时间、算权重、状态机</text>
+    <rect x="482" y="142" width="166" height="52" rx="8" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="565" y="164" text-anchor="middle" class="b sm">Evaluate</text><text x="565" y="182" text-anchor="middle" class="xs">采样 → 混合 → 组件空间 → IK</text>
+    <rect x="664" y="52" width="186" height="52" rx="8" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="757" y="74" text-anchor="middle" class="b sm">Complete / Finalize</text><text x="757" y="92" text-anchor="middle" class="xs">派发 Notify，Root Motion 交给移动</text>
+    <rect x="664" y="232" width="186" height="52" rx="8" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="757" y="254" text-anchor="middle" class="b sm">上传骨骼矩阵</text><text x="757" y="272" text-anchor="middle" class="xs">顶点着色器里做 GPU 蒙皮</text>
+    <g fill="none" stroke="#4B5563" stroke-width="1.5">
+      <line x1="246" y1="78" x2="258" y2="78" marker-end="url(#a)"/>
+      <path d="M353,104 V123 H383 V138" marker-end="url(#a)"/>
+      <line x1="466" y1="168" x2="478" y2="168" marker-end="url(#a)"/>
+      <path d="M648,168 H700 V108" marker-end="url(#a)"/>
+      <line x1="757" y1="104" x2="757" y2="228" marker-end="url(#a)"/>
+    </g>
+    <text x="200" y="162" text-anchor="middle" class="xs">开启多线程更新时，</text><text x="200" y="178" text-anchor="middle" class="xs">Update / Evaluate 都在这里</text>
+  </svg>
+  <figcaption><b>图 0-1</b>　一帧中动画数据的流向：游戏线程准备变量 → 工作线程算出姿势 → 回到游戏线程收尾 → 渲染线程做蒙皮。第 6 章会把每一步对应到具体的函数</figcaption>
+  </figure>
+
+  <h2>概念速查表</h2>
+  <div class="tbl"><table>
+    <tr><th>概念</th><th>是什么</th><th>一句话要点</th></tr>
+    <tr><td>Skeleton（骨架）</td><td>骨骼层级 + 插槽 + 曲线 / 同步标记名</td><td>动画资产绑定的是 Skeleton 而不是 Mesh；多个 Mesh 可共享一个 Skeleton</td></tr>
+    <tr><td>Reference Pose</td><td>骨骼的绑定姿势</td><td>蒙皮矩阵 = 当前组件空间变换 × 参考姿势组件空间变换的逆</td></tr>
+    <tr><td>局部 / 组件空间</td><td>相对父骨骼 / 相对 SkeletalMeshComponent</td><td>混合大多在局部空间做；IK、Mesh Space 混合在组件空间做</td></tr>
+    <tr><td>AnimSequence</td><td>每骨骼随时间的变换轨道</td><td>压缩：去常量轨、量化、关键帧精简；UE 5.3 起默认 ACL</td></tr>
+    <tr><td>Blend Space</td><td>按 1~2 个参数在多个采样之间混合</td><td>三角剖分 + 重心坐标；输入平滑与采样权重速度是两回事</td></tr>
+    <tr><td>Sync Group / Marker</td><td>让多条循环动画对齐</td><td>归一化时间同步 vs 同步标记（按左右脚落地对齐）</td></tr>
+    <tr><td>Layered Blend per Bone</td><td>按骨骼分支混合</td><td>Blend Depth 控制权重渐变；Mesh Space Rotation Blend 防止上半身被骨盆带偏</td></tr>
+    <tr><td>Additive / Aim Offset</td><td>“差值”动画</td><td>Additive = 动画 − 基准姿势；Aim Offset 是网格空间加性混合空间</td></tr>
+    <tr><td>State Machine</td><td>状态 + 过渡规则</td><td>交叉淡化要同时求值两边；惯性化只求值目标</td></tr>
+    <tr><td>Montage / Slot</td><td>代码触发的一次性动画</td><td>按 Slot 插入 AnimGraph；分 Section、带 Notify、可网络同步</td></tr>
+    <tr><td>AnimInstance / Proxy</td><td>动画蓝图的运行实例</td><td>EventGraph 在游戏线程；AnimGraph 可以在工作线程，靠 Proxy 隔离数据</td></tr>
+    <tr><td>URO / LOD / Budget</td><td>降频、减骨、按预算调度</td><td>远处角色隔几帧更新一次；LOD 只算主干骨骼</td></tr>
+  </table></div>
+
+  <div class="co warn"><span class="h">面试注意：最容易丢分的五句话</span>
+    <ul>
+      <li>“骨骼旋转混合直接对欧拉角插值”——<strong>错</strong>。Yaw 170° 和 −170° 各占一半，欧拉插值得到 0°（转了一整圈的反方向），正确是 180°（E2）。要用四元数，并且 dot &lt; 0 时取反走最短路径。</li>
+      <li>“分层混合上半身就用 Local Space”——不一定。下半身骨盆扭了 40° 时，Local Space 混合会让瞄准方向也偏 40°；勾选 <strong>Mesh Space Rotation Blend</strong> 才能保持上半身在组件空间的朝向（E4），代价是这一步慢一个数量级。</li>
+      <li>“走和跑放进同一个混合空间就自然了”——不同步时两条动画有一半时间支撑脚相反（E6：50.4%），必须用同步组；脚步时机不一样时还要同步标记。</li>
+      <li>“动画蓝图的 EventGraph 也在工作线程跑”——<strong>错</strong>。EventGraph（BlueprintUpdateAnimation）在游戏线程；多线程只覆盖 AnimGraph 的更新与求值，以及标记为线程安全的函数（BlueprintThreadSafeUpdateAnimation）。</li>
+      <li>“惯性化就是更平滑的淡入淡出”——它的关键是<strong>只求值目标姿势</strong>，把切换瞬间的差值按五次多项式衰减掉（E7：求值次数减半，速度突变也更小）；源姿势在过渡开始后就不再计算，它的 Notify 也就不会再触发。</li>
+    </ul>
+  </div>
+
+  <h2>本书怎么读</h2>
+  <div class="cards">
+    <div class="card"><div class="t">前置篇 · 白话基础</div><p>骨骼动画原理、坐标空间与变换、四元数、插值与重心坐标、名词词典；零基础从这里开始。</p></div>
+    <div class="card"><div class="t">第一部分 · 骨骼与动画数据</div><p>Skeleton / Mesh / Sequence 的关系；空间与 FK；蒙皮；动画压缩与误差累积。</p></div>
+    <div class="card"><div class="t">第二部分 · 混合</div><p>四元数混合与加性动画；混合空间与同步组；分层骨骼混合与 Mesh Space。</p></div>
+    <div class="card"><div class="t">第三部分 · 动画蓝图</div><p>AnimInstance、Proxy 与线程模型；状态机、惯性化、蒙太奇、Root Motion；IK 与 UE5 的新动画工具。</p></div>
+    <div class="card"><div class="t">第四部分 · 性能与实战</div><p>URO、LOD、预算分配器、Leader Pose；网络同步、排错清单；实测总表与 40 道面试题。</p></div>
+    <div class="card"><div class="t">附录 A · 对照原笔记</div><p>Notion 原笔记中 20 处需要修正或补充的说法，附依据和更稳妥的面试表述。</p></div>
+  </div>
+  <div class="co ver"><span class="h">关于实测数据与版本</span>
+    <p>书中的“实测”全部来自 <code>demos/anim_demo.cpp</code>：不依赖 UE，用一套最小数学库复现动画管线里的关键算法（约定与 UE 一致：<code>A*B</code> 先 A 后 B，组件空间 = 局部 × 父组件空间，骨骼按拓扑序存放），在 Windows 11 + MSVC 14.44（<code>cl /std:c++latest /EHsc /O2</code>，x64，float）下运行，输出见 <code>demos/run_output.txt</code>。骨架仿 UE4 Mannequin 的 68 根骨骼。E11、E12 是前置篇的四元数与欧拉角实验。绝对耗时与机器有关，<strong>请看相对关系</strong>。</p>
+    <p>引擎细节以 UE 5.x 为准，涉及版本变化的地方会单独标出（如 5.1 起 Master Pose 改名为 Leader Pose，5.3 起 ACL 成为默认压缩编解码器、新增实验性的 Dead Blending 节点）。书中的混合空间、同步、分层混合、过渡曲线插图由构建脚本用和 demo 相同的算法实时计算生成。</p>
+  </div>
+</section>

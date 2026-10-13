@@ -1,0 +1,129 @@
+<div class="part-head" data-toc="PART III · 状态同步篇（UE 主线）"><div class="no">PART III</div><h1>状态同步篇：以 Unreal 为主线</h1><p>先讲与引擎无关的三件套（插值、预测与和解、延迟补偿），再进入 Unreal：网络架构与复制管线、属性复制与 RPC、移动与技能预测，以及 Iris、Mover、网络物理这些新系统。</p></div>
+
+<section class="chapter" id="ch10">
+<div class="ch-head"><div class="no">CHAPTER 10</div><h1>状态同步通论：插值、预测与和解、延迟补偿</h1><p class="lead">状态同步的客户端同时活在三个时间里：看别人是在看过去，看自己是在看未来，开枪打别人时，服务器要替你回到过去。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>画出“客户端的三个时间”：插值的他人（过去）、预测的自己（未来）、服务器的现在。</li>
+<li>用实测选插值延迟：快照间隔、抖动、丢包如何决定“该往回看多少毫秒”。</li>
+<li>写出预测 + 和解（reconciliation）的核心循环，用实测说明“直接覆盖”为什么会橡皮筋。</li>
+<li>说清延迟补偿的回溯量为什么是 RTT + 插值延迟、为什么要设上限、“隔墙杀”与“先开枪优势”从哪来。</li>
+</ul></div>
+
+<div class="ans30"><span class="h">30 秒面试版答案</span>
+<p>状态同步里服务器权威，客户端用三件套弥补延迟：① <strong>插值</strong>：别人的角色按“服务器时间 − 插值延迟（常见 100 ms 左右，约两个快照间隔）”渲染，在两份快照之间插值，丢一份快照也不卡，代价是看到的别人在过去；② <strong>预测 + 和解</strong>：自己的输入立即在本地模拟（带序号保存），服务器回传“处理到第几号输入 + 权威状态”后，客户端回到这个状态、重放之后未确认的输入，预测对了就无感，错了只纠正差值，不会被拉回一个 RTT 之前；③ <strong>延迟补偿</strong>：服务器收到开火命令时，把其他玩家的碰撞体回溯到射手当时看到的时刻（约 RTT + 插值延迟之前）做命中判定，再恢复；回溯要设上限，否则高延迟玩家会“隔墙杀”低延迟玩家。带宽靠增量压缩、量化、兴趣管理和优先级调度控制。</p></div>
+
+<h2>10.1 客户端的三个时间</h2>
+<!--flow {"w":900,"h":190,
+"rects":[{"x":10,"y":10,"w":880,"h":170,"c":"s","fill":"#FBFBFC"}],
+"boxes":[
+{"id":"o","x":40,"y":70,"w":240,"h":66,"t":"别人（SimulatedProxy）","s":"t − (RTT/2 + 插值延迟)","s2":"插值：平滑但在过去","c":"b"},
+{"id":"s","x":330,"y":70,"w":240,"h":66,"t":"服务器的“现在” t","s":"权威状态","s2":"命中判定时回溯到别人那一刻","c":"s","hl":true},
+{"id":"m","x":620,"y":70,"w":240,"h":66,"t":"自己（AutonomousProxy）","s":"≈ t + RTT/2","s2":"预测：本地先动，等服务器纠正","c":"o"}],
+"arrows":[{"from":"o","to":"s","head":false,"dash":true},{"from":"s","to":"m","head":false,"dash":true}],
+"texts":[{"x":450,"y":36,"a":"middle","t":"过去 ←──────────────────  时间轴  ──────────────────→ 未来","cls":"sm b"},
+{"x":160,"y":162,"a":"middle","t":"看到的是服务器早就算完的状态","cls":"xs"},{"x":740,"y":162,"a":"middle","t":"服务器半个 RTT 后才会算到这里","cls":"xs"}],
+"cap":"<b>图 10-1</b> 状态同步客户端的三个时间。守望先锋的描述是：客户端“领先服务器半个 RTT 加一个缓冲帧” <span class=\"tag pub\">GDC 2017</span>。HOK 的帧同步里没有这种分裂：所有单位都在同一个时间（收到第 N 帧时），代价是自己的操作也要等一个来回。"} -->
+
+<h2>10.2 插值：看别人是在看过去</h2>
+<p>服务器以固定频率（例如 20 Hz，每 50 ms 一份）下发快照。客户端不直接画最新快照，而是把它们放进缓冲区，渲染“估计的服务器时间 − 插值延迟 D”这一时刻的状态：找到前后两份快照线性插值；如果后一份还没到，只能外推（或停住）。D 越大越不容易缺快照，但画面越旧。Source 引擎的经典默认值是 100 ms 插值延迟（<code>cl_interp</code> 0.1，即 20 Hz 更新时两个快照间隔），这样丢一份快照仍有数据可插 <span class="tag pub">Valve 开发者文档</span>。</p>
+<h3>实测：插值延迟选多少 <span class="tag ex">实测 E10</span></h3>
+<p>模型：服务器 20 Hz 快照，下行 40 ms + 指数抖动（均值 2 / 15 / 40 ms 三档），丢包 2%；目标做三角波横移（每 1.4 s 折返一次，带急转），客户端 60 fps 渲染。</p>
+<!--plot {"x":[5000,6500],"h":290,"xlabel":"客户端时间（ms）","ylabel":"横向位置（cm）","legend":"bl",
+"series":[{"n":"目标时刻的真实位置（D = 0 的渲染目标）","path":"E10.sample.truth","c":"k","dash":true,"sw":1.4},{"n":"插值延迟 0 ms（几乎全靠外推）","path":"E10.sample.D0","c":"r"},{"n":"插值延迟 100 ms（整体晚 100 ms，但形状准确）","path":"E10.sample.D100","c":"b"}],
+"cap":"<b>图 10-2</b> 抖动均值 15 ms 时的一段轨迹。D = 0 时最新快照总是“还没到”，只能按速度外推，在折返处冲过头再被拉回（红线的尖角）；D = 100 ms 时画面整体晚 100 ms，但曲线形状与真实运动一致。"} -->
+<!--dtab {"rows":"E10.rows","cols":[["抖动均值 ms","J",".0f"],["插值延迟 D ms","D",".0f"],["需要外推的帧","=f'{ext:.1f}%'"],["平均误差 cm","err",".1f"],["p99 误差 cm","p99",".1f"],["画面落后 ms（40 + J + D）","behind",".0f"]],"hlif":"D==100","cap":"<b>表 10-1</b> E10。误差是“画出来的位置”与“该渲染时刻的真实位置”之差。抖动越大，需要的 D 越大：抖动 40 ms 时 D = 100 仍有 [[e10.40_100.ext|.1f]]% 的帧要外推，D = 150 才降到 [[e10.40_150.ext|.1f]]%。"} -->
+<!--deriv 插值延迟的经验下界
+D & \ge \Delta_{\text{snap}} \cdot (1 + n_{\text{loss}}) + J_{p99} || 快照间隔 × (1 + 允许连丢的份数) + 抖动的高分位
+D & \ge 50 \times (1 + 1) + J_{p99} || 20 Hz 快照、容忍连丢 1 份
+* D & \approx 100\ \text{ms} + J_{p99} || 这就是 Source 默认 100 ms 的来历；移动网络抖动大，D 要更大或做自适应
+# 自适应插值延迟：持续统计快照到达间隔的分布，网络好时缩小 D（画面更新），变差时平滑放大（拉伸时间轴，不跳变）
+-->
+
+<h2>10.3 外推：Dead Reckoning</h2>
+<p>外推（按最后已知的速度 / 加速度往前推）能让画面“不落后”，但运动一旦改变方向就会冲过头，再被拉回（图 2-2 的外推线、图 10-2 的红线）。它适合<strong>运动可预测</strong>的对象：载具、投射物、惯性大的物理物体；不适合会急转的人形角色。实践中常见的做法是：<strong>以插值为主，缺快照时短时间外推（设上限，如 250 ms），超时就停住</strong>；外推出错后不直接跳到正确位置，而是在几帧内把“显示位置”平滑收敛到“逻辑位置”（Unreal 的 SimulatedProxy 网格平滑就是这一类，第 13 章）。</p>
+
+<h2>10.4 预测与和解：看自己是在看未来</h2>
+<p>如果自己的角色也等服务器回来才动，每次按键都要多一个 RTT 的延迟。客户端预测（client-side prediction）让本地输入立即生效；服务器仍然权威，它回传“我处理到你第几号输入了，此时你在这里”。客户端拿到后有两种做法：</p>
+<!--code:cpp:预测 + 和解（通用写法，与 demos/netsync_demo.cpp E11 的方案 2 一致）-->
+struct PendingInput { uint32_t seq; Input in; float dt; };
+std::deque<PendingInput> pending;            // 已发出、服务器尚未确认的输入
+State predicted;
+
+void OnLocalInput(Input in, float dt) {
+    uint32_t seq = ++nextSeq;
+    predicted = Simulate(predicted, in, dt);  // ① 立即在本地模拟：零延迟手感
+    pending.push_back({seq, in, dt});
+    SendToServer(seq, in, dt /*, 以及最近几条未确认输入作冗余 */);
+}
+
+void OnServerState(uint32_t ackSeq, const State& authoritative) {
+    while (!pending.empty() && pending.front().seq <= ackSeq)
+        pending.pop_front();                  // ② 丢掉服务器已经处理过的输入
+    State s = authoritative;                  // ③ 回到服务器的权威状态（“加载快照”）
+    for (auto& p : pending) s = Simulate(s, p.in, p.dt);   // ④ 重放尚未确认的输入（“重算”）
+    ApplyCorrection(predicted, s);            // ⑤ 预测对了：s == predicted，什么都不发生；错了：平滑修正差值
+    predicted = s;
+}
+// 错误做法（“直接覆盖”）：predicted = authoritative —— 丢掉了 pending，
+// 角色每次都被拉回到“一个 RTT 之前”的位置，然后再往前走：经典的橡皮筋。
+<!--/code-->
+<h3>实测：三种做法 <span class="tag ex">实测 E11</span></h3>
+<p>模型：60 Hz 输入，移动速度 600 cm/s，按“右 1.2 s → 停 0.4 s → 左 1.2 s → 停 0.4 s”循环；RTT ≈ 100 ms，上行丢包 5%（每包带最近 3 个移动作冗余），服务器 30 Hz 回传确认；<strong>服务器在 3.0~3.5 s 判定玩家被定身</strong>（客户端不知道）。纵轴是“画面上的位置 − 服务器对同一组输入的权威结果”。</p>
+<!--plot {"x":[0,6000],"y":[-120,120],"h":300,"xlabel":"时间（ms）","ylabel":"画面位置 − 权威结果（cm）","legend":"tl",
+"vlines":[[3000,"服务器判定定身 3.0~3.5 s","a",88],[3500,"","a"]],
+"series":[{"n":"不预测","path":"E11.series.s0","c":"s","sw":1.6},{"n":"预测 + 直接覆盖","path":"E11.series.s1","c":"r"},{"n":"预测 + 和解","path":"E11.series.s2","c":"g","sw":2.6}],
+"cap":"<b>图 10-3</b> 三种做法的偏差曲线。和解（绿线）在移动过程中始终为 0——预测完全正确；只有定身期间本地预测“多走了”，偏差上升到一个 RTT 左右的位移后被服务器纠正回来。"} -->
+<!--dtab {"rows":"E11.rows","cols":[["做法","name"],["输入到画面延迟 ms","lat",".0f"],["纠正次数（>1 cm）","corr",".0f"],["平均纠正 cm","avg",".1f"],["最大纠正 cm","max",".1f"]],"hlif":"s==2","cap":"<b>表 10-2</b> E11。“直接覆盖”纠正了 [[e11.1.corr|.0f]] 次（移动中几乎每次确认都要拉回），和解只纠正了 [[e11.2.corr|.0f]] 次——全部发生在服务器真的与预测不同的定身期间。"} -->
+<p>和解的关键是<strong>输入带序号、服务器回传“处理到第几号”</strong>。这正是 HOK 上行包里“命令序号”、Unreal CMC 里“时间戳”扮演的角色。被定身这种“预测必错”的情况无法避免，能做的是让纠正<strong>平滑</strong>（把视觉位置在几帧内插值到正确位置），以及在玩家能感知的地方给出合理的表现（被控时的特效、音效）。</p>
+<div class="co deep"><span class="h">预测什么、不预测什么</span><p>只预测<strong>由本地输入直接决定、且失败代价可接受</strong>的东西：自己的移动、开火的枪口特效与弹道、技能的起手动画。不预测或谨慎预测：伤害数值、死亡、拾取物归属（错了要撤销会很尴尬）、与别人强交互的结果（推人、抓取）。GAS 把这一点做成了框架：能被预测的东西都挂在一个 Prediction Key 上，服务器拒绝时整体撤销（第 13 章）。</p></div>
+
+<h2>10.5 延迟补偿：开枪时服务器替你回到过去</h2>
+<p>射手看到的敌人是插值后的“过去的敌人”（图 10-1 左侧）。如果服务器用自己“现在”的敌人位置判定命中，射手只能“提前量瞄准”，延迟越高越打不中。延迟补偿（lag compensation）的做法是：服务器为每个玩家保存最近一段时间（例如 1 s）的碰撞体历史；收到开火命令时，把<strong>其他玩家</strong>回溯到“射手开火时屏幕上看到的那一刻”，判定命中，再恢复。</p>
+<!--deriv 应该回溯多少
+t_{\text{shooter view}} & = t_{\text{fire}} - \left(\tfrac{\mathrm{RTT}}{2}_{\downarrow} + D\right) || 射手开火时看到的是“下行延迟 + 插值延迟”之前的敌人
+t_{\text{server recv}} & = t_{\text{fire}} + \tfrac{\mathrm{RTT}}{2}_{\uparrow} || 命令到达服务器
+* \Delta_{\text{rewind}} & = t_{\text{server recv}} - t_{\text{shooter view}} = \mathrm{RTT} + D || 服务器要回溯的量 = 往返时间 + 插值延迟（Source 引擎的说法：命令执行时间 − 延迟 − 插值时间）
+# 实际实现常让客户端在命令里带上“我渲染的是哪个时刻”，服务器据此回溯并做合理性校验，而不是只靠估计的 RTT
+-->
+<p>实测（目标 600 cm/s 横移、随机折返，命中半径 34 cm，射手瞄得很准、只有 6 cm 手抖，插值延迟 100 ms）<span class="tag ex">实测 E12</span>：</p>
+<!--plot {"x":[0,300],"y":[0,105],"h":280,"xlabel":"射手 ping（ms）","ylabel":"命中率（%）","legend":"br","xt":[0,50,100,150,200,250,300],
+"series":[{"n":"不补偿：用服务器“现在”的位置判定","path":"e12p.none","c":"r","dots":true},{"n":"回溯 RTT + 插值延迟","path":"e12p.rewind","c":"g","dots":true,"sw":2.6},{"n":"回溯并设上限 250 ms","path":"e12p.cap","c":"b","dots":true,"dash":true}],
+"cap":"<b>图 10-4</b> 延迟补偿的效果。不补偿时，即使 ping 为 0，插值延迟本身就让命中率只剩约 [[e12.0.none|.0f]]%；回溯后（模型里 RTT 估计准确）命中率回到 100%。设了 250 ms 上限后，ping 超过约 150 ms 的射手会逐渐失去补偿。"} -->
+<p>回溯的代价落在<strong>被打的人</strong>身上：低 ping 的受害者已经躲到墙后，高 ping 射手的命令到达后服务器回溯到过去，判定命中——受害者体验到“我明明躲进去了还是死了”（隔墙杀）。所以要设回溯上限（Source 的 <code>sv_maxunlag</code> 默认 1 秒 <span class="tag pub">Valve 开发者文档</span>；很多竞技游戏设得更低），把“高 ping 不公平”限制在一个范围内。另一个副作用是<strong>先手优势（peeker's advantage）</strong>：从掩体后探出的人先看到对方（对方看到的是插值后的过去），提高 tick 率、降低插值延迟可以缓解——这是 Valorant 选择 128 tick 服务器的动机之一 <span class="tag pub">Riot 技术博客</span>。</p>
+
+<h2>10.6 带宽：增量、量化、兴趣、优先级</h2>
+<div class="tbl"><table>
+<tr><th>手段</th><th>做法</th><th>例子</th></tr>
+<tr><td>增量压缩</td><td>只发和“对方已确认的基线”不同的字段；基线没确认就继续以旧基线为参照</td><td>Quake 3 的快照增量；UE 属性复制按连接保存影子状态，只发变化的属性</td></tr>
+<tr><td>量化</td><td>位置到厘米 / 0.1 厘米、角度压到 8 / 16 位、法线压缩</td><td>UE 的 <code>FVector_NetQuantize</code> / <code>NetQuantize10</code> / <code>NetQuantize100</code> / <code>NetQuantizeNormal</code></td></tr>
+<tr><td>兴趣管理（AOI）</td><td>只发对这个客户端“相关”的对象：距离、视野、队伍、所有权</td><td>UE 的相关性（<code>IsNetRelevantFor</code>、<code>NetCullDistanceSquared</code>）、Replication Graph 的空间网格</td></tr>
+<tr><td>优先级 + 频率</td><td>重要的发得勤，不重要的发得少；带宽满了按优先级排队</td><td>UE 的 <code>NetUpdateFrequency</code> + <code>NetPriority</code> × 等待时间（第 11 章 E13）</td></tr>
+<tr><td>休眠</td><td>长期不变的对象停止检查，变化时再唤醒</td><td>UE 的 Net Dormancy</td></tr>
+</table></div>
+<p>第 1 章的 E1 已经量化过：增量 + AOI 能把 100 个单位的下行从 [[e1p.full.3.1|.1f]] KB/s 压到 [[e1p.aoi.3.1|.1f]] KB/s。</p>
+
+<div class="co warn"><span class="h">面试注意</span><p>“状态同步怎么解决延迟”的标准答案就是三件套：插值（别人）、预测与和解（自己）、延迟补偿（命中）。高频追问：① 插值延迟设多少、为什么（快照间隔 × 2 + 抖动）；② 预测错了怎么办（回到权威状态 + 重放未确认输入，不是直接覆盖）；③ 延迟补偿回溯多少、有什么副作用（RTT + 插值延迟；隔墙杀、先手优势；设上限）。</p></div>
+
+<h2>10.7 坑位</h2>
+<div class="tbl"><table>
+<tr><th>坑</th><th>后果</th><th>修正</th></tr>
+<tr><td>和解时直接用服务器状态覆盖</td><td>橡皮筋（表 10-2）</td><td>回到权威状态后重放未确认输入</td></tr>
+<tr><td>插值延迟固定且偏小</td><td>移动网络下频繁外推、跳动</td><td>按抖动统计自适应，平滑调整</td></tr>
+<tr><td>对别人的角色也做预测</td><td>别人的输入你不知道，预测必然频繁出错</td><td>别人一律插值（外推只用于可预测对象）</td></tr>
+<tr><td>延迟补偿无上限</td><td>高 ping 玩家隔墙杀</td><td>设回溯上限，并校验客户端声称的时刻</td></tr>
+<tr><td>只回溯位置不回溯姿态</td><td>动画不同步导致头部判定框错位</td><td>回溯完整的碰撞体姿态（或保存骨骼命中盒历史）</td></tr>
+<tr><td>预测了不可撤销的东西</td><td>“我捡到了”然后又没了</td><td>只预测可撤销的表现，关键结果等服务器</td></tr>
+</table></div>
+
+<div class="recap"><div class="t">本章速记</div><ul>
+<li>三个时间：别人在 t − (RTT/2 + D)，服务器在 t，自己在 ≈ t + RTT/2。</li>
+<li>插值：$D \gtrsim \Delta_{snap}(1+n_{loss}) + J_{p99}$，20 Hz 时约 100 ms；E10：抖动 40 ms 时 D = 100 仍有 [[e10.40_100.ext|.1f]]% 帧外推。</li>
+<li>预测 + 和解：输入带序号，服务器回 ack + 权威状态，客户端回到权威状态并重放未确认输入；E11 纠正 [[e11.1.corr|.0f]] → [[e11.2.corr|.0f]] 次。</li>
+<li>延迟补偿：回溯 RTT + D；代价是隔墙杀与先手优势，要设上限。带宽：增量 + 量化 + AOI + 优先级 + 休眠。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：为什么不对其他玩家做预测，而是插值？</summary>预测需要知道对方的输入，而对方的输入只有服务器（和对方自己）知道；本地只能猜，猜错就要回滚和跳变。插值只用已经确定的历史快照，永远不会出错，代价是看到的是过去——对“看别人”来说，正确比及时更重要。</details>
+<details class="quiz"><summary>自测 2：一个 FPS 服务器 tick 30 Hz、快照 30 Hz，插值延迟大概设多少？</summary>快照间隔 33 ms，容忍连丢 1 份需要约 66 ms，再加抖动的高分位（比如 20~30 ms），约 90~100 ms；如果提高到 60 Hz 快照，可以降到 50 ms 左右，先手优势也随之减小。</details>
+<details class="quiz"><summary>自测 3：和解时如果服务器的权威位置和预测只差 2 cm，要不要纠正？</summary>一般设阈值：差异很小时直接接受（或缓慢平滑过去），避免浮点误差导致每次都纠正；Unreal CMC 就是用位置误差阈值决定服务器要不要发 ClientAdjustPosition（第 13 章）。</details>
+</section>

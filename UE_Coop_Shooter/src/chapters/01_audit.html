@@ -1,0 +1,205 @@
+<div class="part-head" data-toc="第一部分 · 复盘原 Demo">
+  <div class="no">PART ONE</div>
+  <h1>第一部分　复盘原 Demo</h1>
+  <p>先弄清它实际上是怎么跑的，再谈怎么改。面试里最有说服力的是“我读过自己的代码，知道哪一行错”。</p>
+</div>
+
+<section class="chapter" id="ch1">
+  <div class="ch-head">
+    <div class="no">CHAPTER 01</div>
+    <h1>原 Demo 审计：它实际是怎么跑起来的</h1>
+    <p class="lead">28 个蓝图、19 个 RPC、11 个复制变量。把每张图按执行线读成伪代码之后，单机改联机的典型错误几乎全在这里。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清原 Demo 的对象结构、开局流程、开火 / 换弹 / 伤害链路分别在哪一端执行。</li>
+    <li>按严重程度列出问题，每条都能指到具体蓝图节点。</li>
+    <li>记住单机改联机最常见的四类错误：<strong>本地当全局、表现等服务器、结果在客户端算、两端各算各的</strong>。</li>
+  </ul></div>
+
+  <h2>Fact Sheet：工程到底有什么</h2>
+  <div class="tbl"><table>
+    <tr><th>项目</th><th>事实</th><th>证据</th></tr>
+    <tr><td>引擎 / 语言</td><td>UE 5.5，纯蓝图，没有 C++ 模块</td><td><code>FPS_Start.uproject</code>：EngineAssociation 5.5，无 Modules 段</td></tr>
+    <tr><td>联机方式</td><td>只在 PIE 里以 Listen Server 跑过；没有创建 / 查找会话的节点</td><td>全工程搜不到 Session 节点；<code>GM_MyGame</code> 里有两个 <code>servertravel CoffeeShopA_P</code> 节点，但都没有连到任何事件</td></tr>
+    <tr><td>默认地图 / GameMode</td><td><code>CoffeeShopA_P</code>，WorldSettings 覆盖为 <code>GM_MyGame</code>（GameModeBase）</td><td>DefaultPawn = <code>BP_Player</code>，GameState = <code>BP_MyGameState</code>；没有自定义 PlayerController / PlayerState</td></tr>
+    <tr><td>角色</td><td><code>BP_Player</code>（Character），唯一的网格是第一人称手臂 <code>SK_Custom_Arms</code></td><td>CDO：<code>bUseControllerRotationPitch = True</code>，相机挂在手臂上的 SpringArm（臂长 0）</td></tr>
+    <tr><td>武器 / 子弹</td><td><code>BP_Weapon</code>（Actor，bReplicates）每人一把；<code>BP_Bullet</code>（Actor，bReplicates + bReplicateMovement，ProjectileMovement 20000 cm/s，寿命 1 s）</td><td>弹匣 10、备弹 30、射速 0.12 s（循环计时器）</td></tr>
+    <tr><td>僵尸</td><td><code>BP_Zombie</code>（Character，AutoPossessAI），血量 100；爆头 100、身体 40</td><td>开局在 4 个 TargetPoint 附近刷 10 只，死一只补一只</td></tr>
+    <tr><td>RPC</td><td>19 个：BP_Player 7、BP_Weapon 6、BP_Zombie 3、GameMode 1、关卡蓝图 2</td><td>CustomEvent 的 FunctionFlags（<code>audit/*.txt</code> “Custom events / RPC” 段）</td></tr>
+    <tr><td>复制变量</td><td>11 个：玩家 HP / WeaponRef / MouseY；武器 5 个弹药相关；僵尸 血量 / 正在攻击；GameState ReadyPlayersList</td><td>除 <code>OnRep_WeaponRef</code> 外，所有 OnRep 函数都是空的</td></tr>
+  </table></div>
+
+  <h2>实际的对象与调用关系</h2>
+  <figure>
+  <svg viewBox="0 0 860 420" xmlns="http://www.w3.org/2000/svg">
+    <rect x="10" y="10" width="250" height="400" rx="12" fill="#F9FAFB" stroke="#D1D5DB"/>
+    <text x="135" y="32" text-anchor="middle" class="b">每一端各跑一份</text>
+    <rect x="300" y="10" width="270" height="400" rx="12" fill="#EAF0FD" stroke="#93C5FD"/>
+    <text x="435" y="32" text-anchor="middle" class="b" style="fill:#1E3A8A">服务器（主机）</text>
+    <rect x="610" y="10" width="240" height="400" rx="12" fill="#F9FAFB" stroke="#D1D5DB"/>
+    <text x="730" y="32" text-anchor="middle" class="b">复制到客户端后</text>
+
+    <rect x="28" y="48" width="214" height="64" rx="8" fill="#fff" stroke="#6B7280"/>
+    <text x="135" y="70" text-anchor="middle" class="b sm">关卡蓝图 CoffeeShopA_P</text>
+    <text x="135" y="88" text-anchor="middle" class="xs">主菜单 · AnyKey 准备 · Start_Logic</text>
+    <text x="135" y="104" text-anchor="middle" class="xs" style="fill:#B91C1C">Server_SetStart：客户端调用被丢弃</text>
+
+    <rect x="28" y="128" width="214" height="64" rx="8" fill="#fff" stroke="#6B7280"/>
+    <text x="135" y="150" text-anchor="middle" class="b sm">UMG：InGame / Pause / 结算</text>
+    <text x="135" y="168" text-anchor="middle" class="xs">3 分钟倒计时在 UI 里各算各的</text>
+    <text x="135" y="184" text-anchor="middle" class="xs" style="fill:#B91C1C">SetGamePaused / OpenLevel 本地执行</text>
+
+    <rect x="28" y="208" width="214" height="80" rx="8" fill="#fff" stroke="#6B7280"/>
+    <text x="135" y="230" text-anchor="middle" class="b sm">BP_Player 的输入（本机）</text>
+    <text x="135" y="248" text-anchor="middle" class="xs">开火：本地计时器 0.12 s → Server_Fire</text>
+    <text x="135" y="264" text-anchor="middle" class="xs">瞄准：只改本机 AnimBP.是否瞄准</text>
+    <text x="135" y="280" text-anchor="middle" class="xs">冲刺：Server_StartSprint（只改服务器）</text>
+
+    <rect x="28" y="304" width="214" height="90" rx="8" fill="#FDEEEE" stroke="#B91C1C"/>
+    <text x="135" y="326" text-anchor="middle" class="b sm" style="fill:#B91C1C">BP_Bullet.ReceiveHit（每一端）</text>
+    <text x="135" y="344" text-anchor="middle" class="xs">弹孔 / 音效 / 粒子：没问题</text>
+    <text x="135" y="360" text-anchor="middle" class="xs" style="fill:#B91C1C">ApplyDamage：客户端也扣僵尸血</text>
+    <text x="135" y="376" text-anchor="middle" class="xs" style="fill:#B91C1C">→ 本地触发 Multicast_Death</text>
+
+    <rect x="318" y="48" width="234" height="64" rx="8" fill="#fff" stroke="#2F5BD3"/>
+    <text x="435" y="70" text-anchor="middle" class="b sm">GM_MyGame.AddReadyPlayer</text>
+    <text x="435" y="88" text-anchor="middle" class="xs">人数到齐 → 每个 Pawn 上 Multicast_StartGame</text>
+    <text x="435" y="104" text-anchor="middle" class="xs">→ 各端的关卡蓝图 Start_Logic</text>
+
+    <rect x="318" y="128" width="234" height="80" rx="8" fill="#fff" stroke="#2F5BD3"/>
+    <text x="435" y="150" text-anchor="middle" class="b sm">BP_Weapon.Server_Fire（Reliable）</text>
+    <text x="435" y="168" text-anchor="middle" class="xs">① Multicast_Fire（动画）</text>
+    <text x="435" y="184" text-anchor="middle" class="xs">② Server_SpawnBullet → CheckCanFire</text>
+    <text x="435" y="200" text-anchor="middle" class="xs">→ 生成复制子弹、扣弹、后坐力（服务器上）</text>
+
+    <rect x="318" y="224" width="234" height="64" rx="8" fill="#fff" stroke="#2F5BD3"/>
+    <text x="435" y="246" text-anchor="middle" class="b sm">BP_Weapon.Server_Change（Reliable）</text>
+    <text x="435" y="264" text-anchor="middle" class="xs">当前=0 → Multicast_Change → Delay</text>
+    <text x="435" y="280" text-anchor="middle" class="xs" style="fill:#B91C1C">→ 当前 = 剩余子弹计算()（会返回 0）</text>
+
+    <rect x="318" y="304" width="234" height="90" rx="8" fill="#fff" stroke="#2F5BD3"/>
+    <text x="435" y="326" text-anchor="middle" class="b sm">BP_Zombie（AI 在服务器）</text>
+    <text x="435" y="344" text-anchor="middle" class="xs">ReceiveAnyDamage → 血量 −= 伤害</text>
+    <text x="435" y="360" text-anchor="middle" class="xs">→ Multicast_HitReact / Multicast_Death</text>
+    <text x="435" y="376" text-anchor="middle" class="xs" style="fill:#B91C1C">Death → 每端都调用 重新生成</text>
+
+    <rect x="628" y="128" width="204" height="80" rx="8" fill="#fff" stroke="#6B7280"/>
+    <text x="730" y="150" text-anchor="middle" class="b sm">武器 / 子弹副本</text>
+    <text x="730" y="168" text-anchor="middle" class="xs">弹药变量复制（无条件）</text>
+    <text x="730" y="184" text-anchor="middle" class="xs">子弹 Actor 晚一个 RTT/2 出现</text>
+    <text x="730" y="200" text-anchor="middle" class="xs">OnRep_WeaponRef → 挂到手臂</text>
+
+    <rect x="628" y="304" width="204" height="90" rx="8" fill="#fff" stroke="#6B7280"/>
+    <text x="730" y="326" text-anchor="middle" class="b sm">僵尸副本</text>
+    <text x="730" y="344" text-anchor="middle" class="xs">血量复制；动画靠多播</text>
+    <text x="730" y="360" text-anchor="middle" class="xs" style="fill:#B91C1C">客户端调用多播 = 只在本地执行</text>
+    <text x="730" y="376" text-anchor="middle" class="xs" style="fill:#B91C1C">重新生成 → 本地“幽灵僵尸”（推断）</text>
+
+    <g fill="none" stroke="#4B5563" stroke-width="1.4">
+      <line x1="242" y1="248" x2="314" y2="168" marker-end="url(#a)"/>
+      <line x1="242" y1="80" x2="314" y2="80" marker-end="url(#a)"/>
+      <line x1="552" y1="168" x2="624" y2="168" marker-end="url(#a)"/>
+      <line x1="552" y1="349" x2="624" y2="349" marker-end="url(#a)"/>
+      <path d="M242,349 C 280,349 280,349 314,349" stroke="#B91C1C" marker-end="url(#ar)"/>
+    </g>
+    <text x="278" y="70" text-anchor="middle" class="xs">Server_</text><text x="278" y="98" text-anchor="middle" class="xs">ReportReady</text>
+  </svg>
+  <figcaption><b>图 1-1</b>　原 Demo 的实际运行结构（红色 = 联机下会出错的地方）。左列每台机器各执行一份，中列只有服务器执行，右列是复制到客户端后的副本</figcaption>
+  </figure>
+
+  <h2>三段关键蓝图，读成伪代码</h2>
+  <p>下面是用 <code>tools/bpdump.py</code> 从 .uasset 读出的执行线（<code>#数字</code> 是节点在包里的导出序号，方便回查）。注意每段开头的事件是在<strong>哪一端</strong>触发的。</p>
+<!--code:text:BP_Weapon · 射击（本机计时器 → 服务器）-->
+CustomEvent 开始射击()                        // 本机：IA_Fire Started → WeaponRef.开始射击
+  Branch(正在换弹)  [false]:
+    SetTimer("射击中", 0.12, 循环)  ;  射击中()
+CustomEvent 射击中()                          // 本机，每 0.12 s 一次
+  Branch(当前子弹数量 <= 0)
+    [true]:  PlaySound2D(空枪声) ; ClearTimer("射击中")
+    [false]: Server_Fire()                     // Reliable Server RPC，一发一条
+CustomEvent Server_Fire [Server, Reliable]    // 服务器
+  Multicast_Fire()                             // ① 先多播开火动画（Unreliable）
+  Server_SpawnBullet()                         // ② 再判断能不能开火
+CustomEvent Server_SpawnBullet [Server]
+  Branch(CheckCanFire())  [true]:              // CheckCanFire = 当前子弹数量 > 0
+    SpawnActor(BP_Bullet, 枪口插槽, Owner=∅, Instigator=∅)   #150
+    当前子弹数量 -= 1
+    后坐力计算()                                // Timeline → GetOwner().Instigator.AddControllerYaw/PitchInput
+<!--/code-->
+<!--code:text:BP_Bullet · ReceiveHit（每一端都会触发）-->
+Event ReceiveHit(Other, OtherComp, Hit)                 // 复制子弹在服务器和每个客户端各模拟一份
+  SpawnDecalAttached(弹孔 或 血迹)  ;  SpawnSound / SpawnEmitter
+  给丧尸伤害(Hit)
+    Branch(Hit.BoneName == "head")
+      [true]:  ApplyDamage(Hit.Actor, 100, Instigator=∅, Causer=∅)   #25
+      [false]: ApplyDamage(Hit.Actor,  40, Instigator=∅, Causer=∅)   #24
+  K2_DestroyActor()                                     // 客户端上对复制 Actor 无效，由服务器销毁
+<!--/code-->
+<!--code:text:BP_Weapon · 换弹（服务器）与 剩余子弹计算-->
+CustomEvent Server_Change [Server, Reliable]
+  Branch(总子弹数 > 0) → Branch(弹夹最大容量 == 当前子弹数量)[false] → Branch(正在换弹)[false]:
+    子弹保存 = 当前子弹数量 ; 当前子弹数量 = 0 ; 正在换弹 = true
+    Multicast_Change()                                  // 播手臂 + 枪的换弹蒙太奇
+    Delay(蒙太奇时长)
+    正在换弹 = false
+    当前子弹数量 = 剩余子弹计算()                         #192
+Function 剩余子弹计算() -> 子弹保存
+  SwitchHasAuthority [Authority]:
+    need = 弹夹最大容量 - 子弹保存
+    Branch(总子弹数 - need > 0)
+      [true]:  总子弹数 -= need ; 子弹保存 = 弹夹最大容量 ; Return(子弹保存)   #123
+      [false]: 子弹保存 += 总子弹数 ; 总子弹数 = 0                         // ← 没有连 Return 节点
+<!--/code-->
+  <div class="co deep"><span class="h">为什么 false 分支会返回 0</span>
+    <p>蓝图函数的输出参数在函数入口被初始化为类型默认值（int 是 0），只有执行线走到 <strong>Return Node</strong> 时才会把当前值写进去。false 分支执行完 <code>总子弹数 = 0</code> 就结束了，没有经过 Return，于是函数返回 0；调用方 <code>当前子弹数量 = 剩余子弹计算()</code> 把弹匣清零，算好的 <code>子弹保存</code> 就这么丢了。这和网络无关，单机下也会出现——只是联机后弹药 UI 本来就“跳”，掩盖了这个 bug。第 5 章用 E4 逐节点移植验证。</p>
+  </div>
+
+  <h2>问题清单（按严重程度）</h2>
+  <p>P0 = 联机下功能必错；P1 = 弱网或特定时序下出错；P2 = 设计不合理 / 浪费；P3 = 代码质量。完整 23 条及修复见附录 A，这里列面试最常被追问的 12 条。</p>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>级别</th><th>问题</th><th>证据</th><th>后果</th></tr>
+    <tr><td>1</td><td><span class="tag p0">P0</span></td><td>换弹在“备弹不够补满”时清空弹匣</td><td><span class="tag src">源码事实</span>剩余子弹计算 false 分支无 Return（#185~#186）</td><td><span class="tag ex">实测 E4</span>3/7 换完变 0/0；整局打空再换只能打出 {{v:E4.session.0.2}}/40 发</td></tr>
+    <tr><td>2</td><td><span class="tag p0">P0</span></td><td>伤害在每一端都算</td><td><span class="tag src">源码事实</span>BP_Bullet.ReceiveHit → ApplyDamage 无权限判断（#24/#25）</td><td><span class="tag inf">推断</span>客户端本地扣僵尸血、本地播受击 / 死亡，和服务器不一致</td></tr>
+    <tr><td>3</td><td><span class="tag p0">P0</span></td><td>僵尸死亡时每一端都“补刷一只”</td><td><span class="tag src">源码事实</span>Multicast_Death → 重新生成；重新生成直接跳进 SwitchHasAuthority 之后的 Array_Random（#15 → #9）</td><td><span class="tag inf">推断</span>客户端本地生成只有自己看得见的僵尸</td></tr>
+    <tr><td>4</td><td><span class="tag p0">P0</span></td><td>玩家死亡逻辑用 GetPlayerController(0)</td><td><span class="tag src">源码事实</span>BP_Player.ReceiveAnyDamage（只在服务器触发）→ DisableInput(GetPlayerController(0))（#118）</td><td><span class="tag inf">推断</span>客户端玩家死后：目标是自己的 Pawn、传入的是主机 PC，APawn::DisableInput 只打错误日志、不生效；服务器上关输入本来也管不到客户端——死者仍能移动、开火；惨叫在主机响</td></tr>
+    <tr><td>5</td><td><span class="tag p0">P0</span></td><td>冲刺 / 瞄准状态两端不一致</td><td><span class="tag src">源码事实</span>IsRunning 只由 Server RPC 设置且不复制；是否瞄准 只在本机 AnimBP 设置；Tick 里两端各自算 MaxWalkSpeed（速度计算 #233）</td><td><span class="tag ex">实测 E6</span>冲刺时每秒纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次，平均回拉 {{v:E6[c=0,rtt=100].avg:.1f}} cm</td></tr>
+    <tr><td>6</td><td><span class="tag p0">P0</span></td><td>开局、计时、胜负、暂停、重开都在本地做</td><td><span class="tag src">源码事实</span>UWB_InGame 计时器；SetGamePaused；OpenLevel("CoffeeShopA_P")</td><td><span class="tag inf">推断</span>客户端暂停无效、主机暂停全员；任意一方点重开就断开联机</td></tr>
+    <tr><td>7</td><td><span class="tag p1">P1</span></td><td>开火表现等服务器多播</td><td><span class="tag src">源码事实</span>本机不播任何表现，全部在 Multicast_Fire 里</td><td><span class="tag ex">实测 E1</span>RTT 200 ms 时按下后 {{v:E1[s=0,rtt=200].own:.0f}} ms 才看到动画</td></tr>
+    <tr><td>8</td><td><span class="tag p1">P1</span></td><td>多播排在弹药检查之前</td><td><span class="tag src">源码事实</span>Server_Fire：Multicast_Fire 先于 Server_SpawnBullet</td><td><span class="tag ex">实测 E1</span>RTT ≥ 100 ms 时每次打空多 1 次“空放”；还会打断换弹蒙太奇</td></tr>
+    <tr><td>9</td><td><span class="tag p1">P1</span></td><td>逐发 Reliable RPC</td><td><span class="tag src">源码事实</span>Server_Fire 为 Reliable，射速 8.3 发/秒</td><td><span class="tag ex">实测 E2</span>RTT 200 / 丢包 10%：P99 处理延迟 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms</td></tr>
+    <tr><td>10</td><td><span class="tag p1">P1</span></td><td>每发子弹一个复制 Actor</td><td><span class="tag src">源码事实</span>BP_Bullet bReplicates + bReplicateMovement</td><td><span class="tag ex">实测 E1/E7</span>远端出现时已飞出约 {{v:E1[s=0,rtt=200].pop:.1f}} m；估算约 {{v:E7.0.4}} B/s，推荐方案约 {{v:E7.1.4}} B/s</td></tr>
+    <tr><td>11</td><td><span class="tag p1">P1</span></td><td>客户端玩家没有后坐力、瞄准不减散布</td><td><span class="tag src">源码事实</span>后坐力 Timeline 在服务器上调用 AddControllerYawInput；散布读服务器 AnimBP 的 是否瞄准</td><td><span class="tag inf">推断</span>AddControllerYawInput 只对本地控制器生效，客户端玩家手感与主机不同</td></tr>
+    <tr><td>12</td><td><span class="tag p2">P2</span></td><td>对方看到的是“漂浮的手臂”</td><td><span class="tag src">源码事实</span>角色唯一 Mesh 是第一人称手臂，武器挂在手臂 Socket</td><td>需要 1P / 3P 两套网格（第 3 章）</td></tr>
+  </table></div>
+
+  <div class="co warn"><span class="h">面试注意：别把问题说成“UE 网络不稳定”</span>
+    <p>这些问题全部是<strong>代码在错误的一端执行</strong>造成的，不是引擎 bug，也不是“网络不好”。面试时把它们归成四类，显得你看懂了本质：</p>
+    <ul>
+      <li><strong>本地当全局</strong>：GetPlayerController(0)、UI 里算倒计时、客户端 SetGamePaused、OpenLevel。</li>
+      <li><strong>表现等服务器</strong>：开火动画、后坐力都在服务器触发，本机要等一个来回。</li>
+      <li><strong>结果在客户端算</strong>：复制子弹在每一端都 ApplyDamage。</li>
+      <li><strong>两端各算各的</strong>：MaxWalkSpeed 依赖只在一端存在的标志；多播里修改复制变量（正在攻击 = false）。</li>
+    </ul>
+  </div>
+
+  <h2>它也有做对的地方</h2>
+  <ul>
+    <li><strong>武器在服务器生成</strong>（SwitchHasAuthority 之后 SpawnActor），<code>WeaponRef</code> 复制并在 <code>OnRep_WeaponRef</code> 里挂接——因为武器没开 bReplicateMovement，挂接信息（AttachmentReplication）本来就不会复制，这个 OnRep 是必要的。</li>
+    <li><strong>僵尸 AI 和攻击判定只在服务器</strong>：寻路、攻击范围检测、攻击伤害检测都套了 SwitchHasAuthority。</li>
+    <li><strong>受击反馈用 Client RPC</strong>：<code>Client_PlayHitFX</code> 只发给被打的玩家播镜头抖动、受击音效和后处理，这是 Client RPC 的标准用法。</li>
+    <li><code>for_server</code> 函数说明作者发现了“武器 BeginPlay 早于 SetOwner”——只是修补的方式不对（第 3 章）。</li>
+  </ul>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>原 Demo：纯蓝图、PIE Listen Server、19 个 RPC、11 个复制变量，只有 1 个 OnRep 有内容。</li>
+    <li>最致命的 3 条：<strong>子弹 ReceiveHit 在每端都 ApplyDamage</strong>、<strong>换弹函数漏连 Return 吞子弹</strong>、<strong>冲刺 / 瞄准两端不一致导致拉回</strong>。</li>
+    <li>四类根因：本地当全局、表现等服务器、结果在客户端算、两端各算各的。</li>
+    <li>回答“你的 Demo 有什么问题”时：先分类，再各举一个节点级的例子，最后说改法。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：复制子弹的 ReceiveHit 为什么会在客户端触发？客户端上 K2_DestroyActor 又为什么没效果？</summary>
+    复制的 Actor 在每个客户端都有一份副本，ProjectileMovement 在副本上也会继续模拟、做碰撞，于是 Hit 事件在每一端都会触发。客户端对自己没有权限的复制 Actor 调用 Destroy，<code>UWorld::DestroyActor</code> 会因为角色不是 Authority 直接返回（除非是 bNetTemporary 等特殊情况），真正的销毁由服务器复制过来。所以只有表现（弹孔、音效）可以放在 Hit 里各端各做，伤害必须加 <code>HasAuthority()</code>。
+  </details>
+  <details class="quiz"><summary>自测：在客户端调用一个 Multicast 事件会发生什么？</summary>
+    只在调用它的那台客户端本地执行，不会发给服务器，也不会发给其他客户端。原 Demo 里客户端因为本地扣血触发了 <code>Multicast_Death</code>，结果只有自己这边的僵尸倒地。
+  </details>
+</section>

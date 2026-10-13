@@ -1,0 +1,117 @@
+<div class="part-head" data-toc="PART IV · 选型与面试"><div class="no">PART IV</div><h1>选型、混合与面试</h1><p>把两条线并到一起：两个旋钮看懂所有方案，一张全维对照表做选型，几个公开案例校准直觉，最后是在 Unreal 里做帧同步的工程清单和 50 道追问。</p></div>
+
+<section class="chapter" id="ch14">
+<div class="ch-head"><div class="no">CHAPTER 14</div><h1>选型、混合方案与业界案例</h1><p class="lead">帧同步和状态同步不是两个阵营，而是两个旋钮的不同位置：权威放在哪，网上传什么。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>用“权威位置 × 传输内容”两个旋钮给任意同步方案定位，包括 HOK 的 CC / CS、LoL、守望先锋。</li>
+<li>掌握一张 14 个维度的全维对照表，能针对需求说出取舍。</li>
+<li>能把 HOK 的每个机制映射到 Unreal 中的对应物，反之亦然。</li>
+<li>知道如果要在 Unreal 里做帧同步，需要绕开哪些引擎设施、自己补哪些模块。</li>
+</ul></div>
+
+<div class="ans30"><span class="h">30 秒面试版答案</span>
+<p>选型先问能不能做确定性（定点数、单线程、不用引擎物理），不能就只有状态同步；能的话再看单位规模、录像观战需求、网络环境、反作弊要求和对延迟的敏感度：单位多、要录像、移动网络、服务器成本敏感 → 定频广播帧同步（HOK）；2 人、状态小、帧级延迟敏感 → 回滚；透视敏感、单位少、要强权威 → 状态同步 + 预测 + 延迟补偿（Unreal 默认）。现实中的方案大多是混合的：LoL 是状态同步但服务器做成了确定性以支持回档，守望先锋是状态同步但输入驱动的系统用固定命令帧做预测回滚，HOK 同时有 CC 帧同步和 CS 服务器演算两种模式。</p></div>
+
+<h2>14.1 两个旋钮</h2>
+<!--flow {"w":900,"h":350,
+"rects":[{"x":110,"y":40,"w":382,"h":140,"c":"o","fill":"#FFFBF7"},{"x":500,"y":40,"w":382,"h":140,"c":"p","fill":"#FBF9FF"},{"x":110,"y":188,"w":382,"h":150,"c":"a","fill":"#FFFDF5"},{"x":500,"y":188,"w":382,"h":150,"c":"b","fill":"#F7F9FF"}],
+"boxes":[
+{"id":"a1","x":122,"y":52,"w":358,"h":56,"t":"帧同步 Lockstep / 回滚","s":"各端确定性演算，网上只有输入","s2":"RTS · 格斗（GGPO）· HOK CC 模式","c":"o","hl":true},
+{"id":"a2","x":122,"y":116,"w":358,"h":54,"t":"+ 服务器也跑确定性逻辑做校验 / 托管","s":"“影子”只在需要时启用；更常见是 hash 比对","c":"o","ts":12.5},
+{"id":"b1","x":512,"y":52,"w":358,"h":56,"t":"服务器演算 + 上传输入","s":"客户端只发输入，服务器算，回传结果 / 状态","s2":"HOK CS 模式 · 守望先锋的命令帧 · 云游戏的极端形态","c":"p"},
+{"id":"b2","x":512,"y":116,"w":358,"h":54,"t":"+ 服务器确定性 → 可录制重放","s":"英雄联盟 Chronobreak","c":"p","ts":12.5},
+{"id":"c1","x":122,"y":200,"w":358,"h":60,"t":"客户端权威 / 主机权威","s":"谁控制谁说了算，直接同步状态","s2":"合作类游戏、部分 P2P 联机；作弊风险高","c":"a"},
+{"id":"c2","x":122,"y":270,"w":358,"h":58,"t":"适合：信任玩家、成本敏感、非竞技","s":"常配合服务器抽查","c":"a","ts":12.5},
+{"id":"d1","x":512,"y":200,"w":358,"h":60,"t":"经典状态同步","s":"服务器权威，复制状态 + RPC；客户端预测 / 插值","s2":"Unreal 默认 · Source · DOTA2 · Valorant","c":"b","hl":true},
+{"id":"d2","x":512,"y":270,"w":358,"h":58,"t":"+ 局部预测回滚","s":"CMC · GAS · 网络物理重模拟 · Rocket League","c":"b","ts":12.5}],
+"texts":[{"x":300,"y":28,"a":"middle","t":"权威：各客户端 / 无单点权威","cls":"b"},{"x":690,"y":28,"a":"middle","t":"权威：服务器","cls":"b"},
+{"x":56,"y":104,"a":"middle","t":"网上传","cls":"sm b"},{"x":56,"y":122,"a":"middle","t":"输入","cls":"sm b"},{"x":56,"y":140,"a":"middle","t":"（状态由输入推出）","cls":"xs"},{"x":56,"y":258,"a":"middle","t":"网上传","cls":"sm b"},{"x":56,"y":276,"a":"middle","t":"状态","cls":"sm b"}],
+"cap":"<b>图 14-1</b> 两个旋钮下的方案地图。左上是帧同步，右下是经典状态同步，但真实游戏经常落在两格之间：HOK 在左上（CC）与右上（CS）之间切换，LoL 在右下却借用了左上的确定性。"} -->
+
+<h2>14.2 全维对照表</h2>
+<div class="tbl"><table>
+<tr><th>维度</th><th>定频广播帧同步（HOK）</th><th>回滚（GGPO）</th><th>状态同步（UE 默认）</th></tr>
+<tr><td>一致性来源</td><td>确定性 + 相同输入</td><td>确定性 + 相同输入（事后修正）</td><td>服务器权威状态</td></tr>
+<tr><td>带宽</td><td>∝ 玩家 × 操作频率，与单位数无关（E1）</td><td>同左，P2P</td><td>∝ 相关单位 × 变化频率；靠增量 / AOI / 优先级压缩</td></tr>
+<tr><td>自己的操作延迟</td><td>自己 → 服务器往返（E3：约 [[e3.relay.glat|.0f]] ms），靠预表现掩盖</td><td>约等于输入延迟 d（E3：约 [[e3.rollback.glat|.0f]] ms）</td><td>本地预测，几乎为 0</td></tr>
+<tr><td>看到别人</td><td>与自己同一时间</td><td>当前帧，可能跳变</td><td>插值后的过去（约 RTT/2 + 100 ms）</td></tr>
+<tr><td>一人网卡的影响</td><td>只影响自己</td><td>短：别人轻微跳变；长：全员等待</td><td>只影响自己（服务器照常模拟他）</td></tr>
+<tr><td>服务器成本</td><td>低（不跑逻辑）</td><td>无 / 极低</td><td>高（每局跑完整逻辑 + 复制）</td></tr>
+<tr><td>防改数值</td><td>帧 hash 比对</td><td>同左（通常无服务器，需额外设计）</td><td>天然（权威在服务器）</td></tr>
+<tr><td>防透视</td><td>难（客户端有全量数据）</td><td>难</td><td>可做（按可见性裁剪复制）</td></tr>
+<tr><td>断线重连</td><td>拉历史输入重放 + 追帧</td><td>通常不支持中途加入</td><td>拉一份当前状态即可</td></tr>
+<tr><td>录像 / 观战</td><td>极小、免费</td><td>极小</td><td>录复制数据流，较大</td></tr>
+<tr><td>确定性要求</td><td>逐位一致（定点数）</td><td>更严苛（反复重算）</td><td>无（预测部分“足够接近”即可）</td></tr>
+<tr><td>引擎物理 / 动画驱动逻辑</td><td>不能用于逻辑</td><td>不能</td><td>可以</td></tr>
+<tr><td>开发 / 调试难点</td><td>desync 定位、抗丢包、追帧</td><td>状态序列化、跳变、音频</td><td>带宽、所有权 / Role、预测纠正、命中公平</td></tr>
+<tr><td>适合</td><td>MOBA、RTS、多人战场</td><td>格斗、1v1 动作、体育</td><td>FPS、MMO、开放世界、大多数 UE 项目</td></tr>
+</table></div>
+
+<h2>14.3 HOK ⇄ Unreal 概念映射</h2>
+<div class="tbl"><table>
+<tr><th>问题</th><th>HOK（帧同步）</th><th>Unreal（状态同步）</th></tr>
+<tr><td>时间节拍</td><td>服务器帧号（66 ms）</td><td>服务器网络 tick（NetServerMaxTickRate）+ 每 Actor NetUpdateFrequency</td></tr>
+<tr><td>上行</td><td>帧命令 <code>CSID_GAMING_UPERMSG</code>（UDP）</td><td>Server RPC（移动走 CMC 的 ServerMove）</td></tr>
+<tr><td>上行确认</td><td>在下行帧里看到自己的命令；期待帧号</td><td>ClientAckGoodMove / 复制状态；可靠 RPC 由通道确认</td></tr>
+<tr><td>抗丢包</td><td>下行一包多帧、上行短冗余 / 全量冗余、补发、追帧</td><td>属性发最新值、可靠 Bunch 重传、ServerMove 带旧移动</td></tr>
+<tr><td>乱序</td><td>900 帧窗口</td><td>包序号；可靠 RPC 通道内有序</td></tr>
+<tr><td>表现分离</td><td>结果事件 → AGE（C++ 决策、C# 执行）</td><td>GameplayCue、OnRep 驱动表现、不可靠多播</td></tr>
+<tr><td>预测</td><td>不预测逻辑；指示器等“预表现”</td><td>CMC、GAS Prediction Key、网络物理重模拟</td></tr>
+<tr><td>一致性 / 反作弊</td><td>帧 hash 比对</td><td>服务器权威 + RPC 校验</td></tr>
+<tr><td>带宽调度</td><td>无需（只有输入）</td><td>相关性、优先级 × 等待时间、休眠、Replication Graph / Iris</td></tr>
+<tr><td>重连</td><td>Recover：1090 / 1091 / 1093，追帧</td><td>重新连接 + 初始复制；PlayerState 保留</td></tr>
+<tr><td>录像</td><td>输入序列，回放与实战同路径</td><td>DemoNetDriver 录复制流，检查点跳转</td></tr>
+<tr><td>网络质量</td><td>网络线程时间戳 ping、卡顿四维归因、双链路</td><td>PlayerState ping、NetConnection 统计、Network Insights</td></tr>
+</table></div>
+
+<h2>14.4 公开案例速览</h2>
+<div class="tbl"><table>
+<tr><th>游戏</th><th>方案</th><th>值得记住的点</th><th>来源</th></tr>
+<tr><td>王者荣耀</td><td>定频广播帧同步（CC）+ CS 模式</td><td>三层冗余、900 帧窗口、逻辑表现分离、hash 校验</td><td><span class="tag hok">HOK 文档</span></td></tr>
+<tr><td>星际争霸 / 魔兽争霸 3</td><td>严格 Lockstep</td><td>“某玩家正在拖慢游戏”；录像就是输入文件</td><td><span class="tag pub">公开资料</span></td></tr>
+<tr><td>英雄联盟</td><td>状态同步 + 确定性服务器</td><td>为可录制输入的测试（Delta Checker）和赛场回档（Chronobreak）把服务器做成确定性</td><td><span class="tag pub">Riot 技术博客</span></td></tr>
+<tr><td>守望先锋</td><td>状态同步 + 命令帧预测回滚</td><td>16 ms 命令帧（比赛 7 ms）；客户端领先服务器约半个 RTT + 一个缓冲帧；每个包带全部未确认输入；丢包时服务器让客户端加速推进命令帧以扩大服务器缓冲</td><td><span class="tag pub">GDC 2017</span></td></tr>
+<tr><td>Rocket League</td><td>服务器权威物理 + 客户端预测回滚</td><td>对车和球都做物理预测，收到服务器状态后回滚重算</td><td><span class="tag pub">GDC 2018</span></td></tr>
+<tr><td>Valorant</td><td>状态同步，128 tick 服务器</td><td>高 tick 率缩小先手优势与延迟补偿误差</td><td><span class="tag pub">Riot 技术博客</span></td></tr>
+<tr><td>主流格斗游戏</td><td>回滚 + 小输入延迟</td><td>GGPO 及其后继；可调输入延迟</td><td><span class="tag pub">公开资料</span></td></tr>
+<tr><td>Fortnite</td><td>Unreal 状态同步 + Replication Graph</td><td>大逃杀规模的相关性计算</td><td><span class="tag ue">UE 文档</span></td></tr>
+</table></div>
+<div class="co deep"><span class="h">守望先锋的“时间膨胀”值得多看一眼</span><p>状态同步的服务器也需要输入缓冲：客户端输入到达服务器的时机有抖动，服务器在每个命令帧需要“刚好有一份输入可用”。守望先锋的做法是：服务器发现缓冲不够（丢包 / 抖动），就通知客户端<strong>略微加快</strong>命令帧的推进速度，让输入提前一点到达；网络变好再放慢回去 <span class="tag pub">GDC 2017</span>。这和 HOK 下行“窗口 + 补发”、格斗“输入延迟 d”、GGPO“时间同步”解决的是同一个问题：<strong>用一个小的、可调的缓冲吸收抖动</strong>。</p></div>
+
+<h2>14.5 在 Unreal 里做帧同步：工程清单</h2>
+<p>Unreal 的设施几乎全部围绕状态同步设计。要做 HOK 式帧同步，基本思路是<strong>把 UE 当成“表现层 + 输入层 + 传输层”，逻辑层自己写</strong>——就像 HOK 把 Unity 当表现层一样 <span class="tag inf">推断</span>：</p>
+<div class="tbl"><table>
+<tr><th>模块</th><th>做法</th><th>要避开的坑</th></tr>
+<tr><td>逻辑层</td><td>独立的纯 C++ 模块（不依赖 UObject / 引擎时间），定点数数学库、确定性随机、数组式实体存储（ECS 风格），固定帧推进</td><td>不要在逻辑里用 <code>float</code> / <code>FVector</code>、<code>TMap</code> 遍历、<code>FMath::Rand</code>、<code>GetWorld()-&gt;GetTimeSeconds()</code>、蓝图数学节点</td></tr>
+<tr><td>物理 / 碰撞</td><td>逻辑层自研定点碰撞（圆、胶囊、网格寻路）</td><td>Chaos 物理不是逐位确定的，不能参与逻辑；根运动、动画通知不能驱动逻辑</td></tr>
+<tr><td>表现层</td><td>Actor 只是“视图”：逻辑层产出结果事件（生成、移动、播放技能、受击），Actor 订阅并插值；类似 HOK 的 AGE / UE 的 GameplayCue</td><td>表现层不能改逻辑状态；Actor 不开复制（或只复制与逻辑无关的东西）</td></tr>
+<tr><td>输入</td><td>Enhanced Input 采集 → 量化成帧命令（方向量化到整数、技能槽 + 目标）→ 命令序号</td><td>不要把浮点摇杆值直接送进逻辑</td></tr>
+<tr><td>传输</td><td>方案 A：独立 UDP（自研或 KCP）连 Relay 服务；方案 B：复用 NetDriver，用 PlayerController 上的不可靠 RPC 发命令、自己做冗余与序号</td><td>不要用 Reliable RPC 发每帧命令（队头阻塞 + 缓冲溢出）</td></tr>
+<tr><td>Relay 服务</td><td>独立服务（定帧、汇总、广播、缓存、补发），或无渲染的 UE 专用服务器只跑转发逻辑</td><td>服务器不等人；期待帧做 ACK</td></tr>
+<tr><td>校验与录像</td><td>逻辑层周期性算 hash 上报；录像 = 输入序列 + 版本号</td><td>逻辑层版本必须与录像绑定</td></tr>
+<tr><td>CI</td><td>跨编译器 / 平台重放同一份录像比对 hash；回滚类项目再加同步测试模式</td><td>只在一个平台测试等于没测</td></tr>
+</table></div>
+<p>反过来，如果项目已经深度依赖 Unreal 的 Gameplay 框架（CMC、GAS、蓝图逻辑、Chaos），想“改成帧同步”几乎等于重写逻辑层——这正是 GGPO 资料里反复提到的“回滚无法后装”的问题：<strong>确定性与逻辑表现分离必须在项目第一天就决定</strong>。</p>
+
+<h2>14.6 常见混合设计</h2>
+<div class="cards">
+<div class="card"><div class="t">帧同步 + 服务器抽查</div><p>CC 模式为主，服务器对可疑对局（hash 少数派、举报）离线重放录像复核，兼顾成本和反作弊。</p></div>
+<div class="card"><div class="t">状态同步 + 确定性子模拟</div><p>弹道、技能时间轴、伤害公式写成确定性的，服务器只同步“开火事件 + 种子”，各端自己算轨迹，大幅减少投射物复制。</p></div>
+<div class="card"><div class="t">状态同步 + 局部预测回滚</div><p>只对本地玩家相关的系统（移动、技能起手）做预测回滚，其他一律插值（守望先锋、CMC、GAS）。</p></div>
+<div class="card"><div class="t">帧同步 + 关键事件可靠通道</div><p>帧命令走不可靠 UDP + 冗余，开局 / 结算 / 投降等走 TCP 或可靠通道（HOK 的 UDP + TCP 双通道）。</p></div>
+</div>
+
+<div class="co warn"><span class="h">面试注意</span><p>设计题（“让你做一个 3v3 竞技游戏的网络同步”）的答题框架：① 先问约束（人数、单位规模、品类、平台与网络、反作弊等级、是否要录像 / 观战 / 断线重连、引擎）；② 用两个旋钮给出方案并说明理由；③ 讲三个关键机制（例如状态同步就讲预测和解、插值、延迟补偿，帧同步就讲确定性、冗余补发、追帧）；④ 讲度量与兜底（ping、卡顿归因、desync / 纠正统计、弱网测试）。不要一上来就说“用帧同步”或“用 UE 默认的就行”。</p></div>
+
+<div class="recap"><div class="t">本章速记</div><ul>
+<li>两个旋钮：<strong>权威在哪 × 网上传什么</strong>；HOK CC / CS、LoL、守望先锋都是旋钮的中间位置。</li>
+<li>14 维对照：带宽、延迟、影响域、服务器成本、反作弊（改数值 vs 透视）、重连、录像、确定性、物理、调试难点、适用品类。</li>
+<li>HOK ⇄ UE 一一映射：帧号 ⇄ 网络 tick；冗余 / 窗口 ⇄ 属性最新值 / 可靠 Bunch；AGE ⇄ GameplayCue；预表现 ⇄ CMC / GAS 预测。</li>
+<li>UE 里做帧同步：自写确定性逻辑层，UE 只做表现 / 输入 / 传输；确定性必须在第一天决定。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：为什么说“英雄联盟证明了确定性不是帧同步的专利”？</summary>LoL 是状态同步（服务器权威、复制状态给客户端），但 Riot 把服务器逻辑改造成了确定性的：记录服务器的全部输入和配置后，可以把服务器重放到任意时刻，用于自动化测试和赛场回档。确定性是一种独立的工程能力，帧同步只是它最出名的用途。</details>
+<details class="quiz"><summary>自测 2：一个 4 人合作 PVE 游戏，成本敏感、不强调反作弊、大量怪物，怎么选？</summary>怪物多 → 状态同步的带宽压力大；不强调反作弊 → 可以接受主机权威或帧同步。如果逻辑能做确定性，帧同步（或主机权威 + 怪物确定性子模拟）带宽最省；如果深度依赖引擎物理与动画，就用主机权威的状态同步 + 怪物 AOI + 低频复制，并把怪物的弹道 / 技能做成“事件 + 种子”的确定性子模拟。</details>
+<details class="quiz"><summary>自测 3：在 Unreal 里用 Reliable RPC 每帧发帧命令有什么问题？</summary>可靠 RPC 在 Actor 通道内有序，丢一个包后面的命令全部等重传（队头阻塞，延迟突增）；弱网下可靠缓冲会持续堆积，超过上限会直接断开连接。应该用不可靠通道 + 冗余 + 序号（HOK 上行的做法）。</details>
+</section>

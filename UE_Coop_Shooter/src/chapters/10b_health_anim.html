@@ -1,0 +1,94 @@
+  <h2>6. AC_Health：一个组件，两种角色共用</h2>
+  <div class="tbl kv"><table>
+    <tr><th>项</th><th>内容</th></tr>
+    <tr><td>父类</td><td>ActorComponent；细节面板勾选 <strong>Component Replicates</strong>（所属 Actor 也必须 Replicates）</td></tr>
+    <tr><td>复制变量</td><td>Health（RepNotify）· bIsDead（RepNotify）· LastHit：S_HitInfo {Counter, Point, bHeadshot}（RepNotify）</td></tr>
+    <tr><td>本地变量</td><td>MaxHealth（配置）· PrevHealth（算差值）</td></tr>
+    <tr><td>事件分发器</td><td>各端：OnHealthChanged(New, Delta)、OnHit(HitInfo)、OnDeadVisual()；仅服务器：OnDeath(Killer)</td></tr>
+    <tr><td>谁在用</td><td>BP_CoopCharacter、BP_Zombie；以后的油桶、可破坏物也能直接挂</td></tr>
+  </table></div>
+<!--bpnet {"cls":"AC_Health","parent":"ActorComponent","where":"随所属 Actor（玩家、僵尸各挂一个）","defaults":[["Component Replicates","✓ 必须勾"],["所属 Actor 的 Replicates","✓ 前提：Actor 不复制，组件也不会复制"]],
+"vars":[["Health","Float","RepNotify","None","服务器（HandleDamage）","OnRep → OnHealthChanged：血条、受伤后处理"],["bIsDead","Boolean","RepNotify","None","服务器（HandleDamage）","OnRep → OnDeadVisual：布娃娃、关碰撞、关本地输入"],["LastHit","S_HitInfo","RepNotify","None","服务器（RecordHit）","{Counter, Point, bHeadshot}；OnRep → OnHit：受击动作、血迹"],["MaxHealth","Float","None","—","配置","100"],["PrevHealth","Float","None","—","各端（在 OnRep 里）","算 Delta：只在本端有意义"]],
+"events":[["Event BeginPlay","引擎事件","引擎事件","—","A","Authority 分支里才绑定伤害事件"],["HandleDamage","自定义事件","Not Replicated","—","S","Owner.OnTakeAnyDamage（只在服务器绑定）"],["RecordHit","自定义事件","Not Replicated","—","S","Owner.OnTakePointDamage"],["OnRep_Health / LastHit / bIsDead","RepNotify 函数","RepNotify 函数","—","R","变量变化"],["OnHealthChanged / OnHit / OnDeadVisual","事件分发器","事件分发器","—","R","在 OnRep 里广播"],["OnDeath","事件分发器","事件分发器","—","S","HandleDamage 判死 → 角色 / 僵尸 HandleDeath"]],
+"cap":"<b>图 10-6a</b>　AC_Health 的网络规格。规则（扣血、判死、OnDeath）只在服务器；表现（三个 OnRep 和它们广播的分发器）在所有端。没有任何 RPC"} -->
+<!--bpgraph {"cols":4,"rg":56,"title":"AC_Health · 伤害管线（只在服务器）","nodes":[
+ {"id":"h0","k":"event","x":0,"y":0,"t":"Event BeginPlay","net":"A"},
+ {"id":"h1","k":"flow","x":1,"y":0,"t":"Switch Has Authority","ex":["Authority","Remote"]},
+ {"id":"h2","k":"func","x":2,"y":0,"t":"Bind OnTakeAnyDamage","s":"Target ← Get Owner","i":["Event ← HandleDamage"]},
+ {"id":"h3","k":"func","x":3,"y":0,"t":"Bind OnTakePointDamage","s":"Target ← Get Owner","i":["Event ← RecordHit"]},
+ {"id":"h4","k":"set","x":3,"y":1,"t":"Set Health","i":["← MaxHealth"],"ex":[],"rep":"RN:→ 各端 OnRep_Health"},
+ {"id":"x0","k":"cevent","x":0,"y":2,"t":"HandleDamage","net":"S","o":["Damage","Instigated By"]},
+ {"id":"x1","k":"flow","x":1,"y":2,"t":"Branch","i":["bIsDead OR Damage ≤ 0"],"ex":["True","False"]},
+ {"id":"x2","k":"set","x":2,"y":2,"t":"Set Health","i":["← Max(0, Health − Damage)"],"rep":"RN:→ 各端 OnRep_Health"},
+ {"id":"x3","k":"flow","x":3,"y":2,"t":"Branch","i":["Health ≤ 0"],"ex":["True","False"]},
+ {"id":"x4","k":"set","x":2,"y":3,"t":"Set bIsDead","i":["← true"],"rep":"RN:→ 各端 OnRep_bIsDead"},
+ {"id":"x5","k":"call","x":3,"y":3,"t":"Call OnDeath","s":"仅服务器：带 Killer","i":["Killer ← Instigated By"],"ex":[]},
+ {"id":"y0","k":"cevent","x":0,"y":4,"t":"RecordHit","s":"ApplyPointDamage 才有","net":"S","o":["Hit Info"]},
+ {"id":"y1","k":"set","x":1,"y":4,"span":2,"t":"Set LastHit","s":"Make S_HitInfo：Counter + 1、命中点、是否爆头","i":["← Hit Info.ImpactPoint / BoneName == head"],"ex":[],"rep":"RN:→ 各端 OnRep_LastHit（整体赋值才可靠触发）"}
+],"l":[["h0","h1"],["h1:Authority","h2"],["h2","h3"],["h3","h4"],["x0","x1"],["x1:False","x2"],["x2","x3"],["x3:True","x4"],["x4","x5"],["y0","y1"]],
+"g":[{"ids":["h0","h1","h2","h3","h4"],"t":"只有服务器订阅伤害：伤害管线天然只在服务器","c":"b"},{"ids":["x0","x1","x2","x3","x4","x5"],"t":"HandleDamage（仅服务器）：已死忽略、扣血、判死","c":"r"},{"ids":["y0","y1"],"t":"RecordHit：只记录命中信息，不扣血","c":"s"}],
+"cap":"<b>图 10-6</b>　AC_Health 伤害管线。ApplyPointDamage 会同时触发 AnyDamage 与 PointDamage：血量只在 AnyDamage 里扣（僵尸攻击用的 ApplyDamage 也走这里），PointDamage 只记命中点，避免扣两次"} -->
+<!--bpgraph {"cols":4,"rg":46,"title":"AC_Health · OnRep：只广播，不改状态","nodes":[
+ {"id":"o0","k":"event","x":0,"y":0,"t":"OnRep_Health","net":"R"},
+ {"id":"o1","k":"call","x":1,"y":0,"t":"Call OnHealthChanged","i":["New ← Health","Delta ← Health − PrevHealth"]},
+ {"id":"o2","k":"set","x":2,"y":0,"t":"Set PrevHealth","i":["← Health"],"ex":[],"rep":"L:各端各自记"},
+ {"id":"o3","k":"event","x":0,"y":1,"t":"OnRep_LastHit","net":"R"},
+ {"id":"o4","k":"call","x":1,"y":1,"t":"Call OnHit","s":"受击动作、血迹、命中音","i":["Hit ← LastHit"],"ex":[]},
+ {"id":"o5","k":"event","x":0,"y":2,"t":"OnRep_bIsDead","net":"R"},
+ {"id":"o6","k":"call","x":1,"y":2,"t":"Call OnDeadVisual","s":"布娃娃、关碰撞（所属 Actor）","ex":[]}
+],"l":[["o0","o1"],["o1","o2"],["o3","o4"],["o5","o6"]],
+"g":[{"ids":["o0","o1","o2","o3","o4","o5","o6"],"t":"三个 OnRep 在每一端都执行（蓝图：服务器 Set 时也执行），所以主机与客户端走同一条表现路径","c":"p"}],
+"cap":"<b>图 10-7</b>　AC_Health 的表现广播。用计数器 LastHit.Counter 表达“又被打中一次”：同一网络帧被打两次也能被识别为变化"} -->
+  <div class="co deep"><span class="h">蓝图 RepNotify 在服务器也执行：怎么利用，怎么避坑</span>
+    <ul>
+      <li><strong>利用</strong>：把“状态变了之后的表现”只写在 OnRep 里——服务器 Set 时它自己跑一次，客户端收到时再跑一次，主机和客户端的表现走同一份代码，不需要“服务器手动调一次”。</li>
+      <li><strong>避坑 1</strong>：不要在 OnRep 里再写这个复制变量或做规则判断（例如 OnRep_Health 里判死），否则服务器会重复执行规则；规则留在 HandleDamage。</li>
+      <li><strong>避坑 2</strong>：Dedicated Server 上 OnRep 里的纯表现会白跑，必要时先判断 <code>Is Dedicated Server</code>。</li>
+      <li><strong>避坑 3</strong>：“Set Members in Struct” 改结构体成员不一定触发服务器端的 RepNotify，结构体复制变量用 <strong>Make → Set 整体赋值</strong>。</li>
+      <li><strong>C++ 对照</strong>：<code>ReplicatedUsing</code> 的 OnRep 服务器不执行，需要在改值后手动调用一次。</li>
+    </ul>
+  </div>
+
+  <h2>7. AnimBP：只读、线程安全</h2>
+<!--bpnet {"cls":"ABP_Coop3P / ABP_Coop1P","parent":"AnimInstance","where":"每个骨骼网格各一份，各端本地","defaults":[["Replicates","✗ AnimInstance 不是 Actor，不能复制"]],
+"vars":[["Speed / Direction","Float","None","—","每端（读角色速度）","模拟代理的速度来自 ReplicatedMovement"],["AimPitch","Float","None","—","每端","别人：RemoteViewPitch；自己：控制旋转"],["bIsAiming","Boolean","None","—","每端","1P 读本地预测值；3P 读角色复制的 bIsAiming"],["bInAir / bIsDead","Boolean","None","—","每端","读 CMC 与 AC_Health 的复制状态"]],
+"events":[["Thread Safe Update Animation","引擎事件","引擎事件","—","A","每帧（工作线程）"]],
+"cap":"<b>图 10-8a</b>　动画蓝图的网络规格：它本身什么都不复制，只“读”已经复制下来的角色状态。动画要同步，就同步驱动动画的那几个状态"} -->
+<!--bpgraph {"cols":3,"rg":46,"title":"ABP_Coop3P · Thread Safe Update Animation","nodes":[
+ {"id":"t0","k":"event","x":0,"y":0,"t":"Thread Safe Update Animation","s":"BlueprintThreadSafeUpdateAnimation","net":"A"},
+ {"id":"t1","k":"set","x":1,"y":0,"t":"Set Speed / Direction","s":"Property Access：Velocity","rep":"L:AnimBP 变量"},
+ {"id":"t2","k":"set","x":2,"y":0,"t":"Set AimPitch","s":"别人的俯仰来自 RemoteViewPitch","i":["← Normalize(GetBaseAimRotation.Pitch)"],"rep":"L:AnimBP 变量"},
+ {"id":"t3","k":"set","x":0,"y":1,"t":"Set bIsAiming","i":["本机 1P：Movement.bWantsToAim","别人 3P：Character.bIsAiming"],"rep":"L:AnimBP 变量"},
+ {"id":"t4","k":"set","x":1,"y":1,"t":"Set bInAir / bIsDead","s":"Movement.IsFalling、Health.bIsDead","ex":[],"rep":"L:AnimBP 变量"}
+],"l":[["t0","t1"],["t1","t2"],["t2","t3"],["t3","t4"]],
+"g":[{"ids":["t0","t1","t2","t3","t4"],"t":"动画蓝图只读复制下来的状态，不 Cast、不调游戏逻辑；开火 / 换弹蒙太奇由 OnRep 触发，走 UpperBody 插槽","c":"t"}],
+"cap":"<b>图 10-8</b>　ABP_Coop3P。原 Demo 的 AnimBP 在 EventGraph（游戏线程）里 Cast 角色、读 MouseX / MouseY 复制变量做武器摇摆；重做后摇摆只在 1P 动画里用本地输入，3P 只需要俯仰与速度"} -->
+
+  <h2>8. 原 Demo 对照</h2>
+  <div class="tbl"><table>
+    <tr><th>环节</th><th>原 Demo</th><th>问题</th><th>重做</th></tr>
+    <tr><td>网格</td><td>只有 1P 手臂；胶囊随 Pitch 旋转</td><td>对方看到漂浮的手臂，模型随低头倾斜</td><td>1P + 3P，身体只跟 Yaw，AimOffset 处理俯仰</td></tr>
+    <tr><td>输入映射</td><td>BeginPlay 里 GetPlayerController(0)</td><td>每个副本都执行；客户端时序不可靠</td><td>Receive Controller Changed + IsLocallyControlled</td></tr>
+    <tr><td>移动速度</td><td>Tick 里两端各自 FInterpTo 写 MaxWalkSpeed</td><td>依赖只在一端存在的标志，持续被纠正（E6）</td><td>GetMaxSpeed 读预测标志</td></tr>
+    <tr><td>冲刺</td><td>Server RPC 改一个不复制的布尔</td><td>本机永远不冲刺、服务器在冲刺</td><td>SetWantsToSprint（进 SavedMove）</td></tr>
+    <tr><td>瞄准</td><td>只改本机 AnimBP 的变量</td><td>服务器不知道：速度、散布都不一致</td><td>SetWantsToAim + bIsAiming（Skip Owner）</td></tr>
+    <tr><td>视角输入</td><td>MouseY 是复制变量，在客户端写</td><td>客户端写复制变量无效且误导</td><td>只调 AddControllerPitchInput；别人用 RemoteViewPitch</td></tr>
+    <tr><td>血量</td><td>HP 复制、OnRep 为空；UI 每帧 Cast 读</td><td>无事件、无受击表现</td><td>AC_Health + OnHealthChanged</td></tr>
+    <tr><td>死亡</td><td>ReceiveAnyDamage 里一长串：DisableInput(PC0)、停止射击、关碰撞、惨叫、Server_Death → 多播失败界面</td><td>客户端死后仍能操作；活着的人也被判负</td><td>服务器：HandleDeath → GM；各端：PlayDeathVisual；本机关输入</td></tr>
+    <tr><td>受击反馈</td><td>Client_PlayHitFX（镜头抖动、音效、后处理）</td><td>✓ 用法正确</td><td>保留为 PC_Coop.Client_ShowDamageFeedback</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>Player BP 只做三件事：<strong>输入转交</strong>（移动组件 / 武器）、<strong>服务器生成武器</strong>（Possessed）、<strong>各端死亡表现</strong>（OnDeadVisual）。</li>
+    <li>本地初始化放 Receive Controller Changed + IsLocallyControlled；武器挂接放 OnRep_CurrentWeapon。</li>
+    <li>冲刺 / 瞄准：本机与服务器用移动包里的同一组标志算速度；别人看姿势用 Skip Owner 复制的 bIsAiming。</li>
+    <li>AC_Health：服务器订阅 AnyDamage 扣血、PointDamage 记命中；三个 OnRep 只广播；OnDeath 只在服务器。</li>
+    <li>“禁用输入”只能在本地做；服务器靠校验拒绝死者的请求。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：血量为什么做成组件而不是写在 Character 里？</summary>
+    玩家和僵尸都需要“受伤 → 掉血 → 死亡 → 广播”这套逻辑。写成 AC_Health 组件后两者各挂一个，伤害管线、复制、OnRep 表现只写一遍（组合优于继承）；如果写在玩家的 Character 里，僵尸要么复制一份代码，要么继承玩家类——后者会把输入、武器这些僵尸不需要的东西也继承过来。
+  </details>
+  <details class="quiz"><summary>自测：为什么死者的“禁用输入”不放在服务器的 HandleDeath 里？</summary>
+    服务器上对远端玩家的 Pawn 调 DisableInput，只改了服务器那份 Pawn 的输入开关，客户端的输入照常处理并继续发 ServerMove / Server_FireShot。正确做法是双保险：客户端在 OnRep_bIsDead 里关掉本地输入（体验），服务器在每个 Server RPC 里校验存活（权威）。
+  </details>
+</section>

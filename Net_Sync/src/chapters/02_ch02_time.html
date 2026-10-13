@@ -1,0 +1,111 @@
+<section class="chapter" id="ch2">
+<div class="ch-head"><div class="no">CHAPTER 02</div><h1>时间、网络与固定步长</h1><p class="lead">同步的敌人不是“慢”，而是“不确定”：抖动比平均延迟更致命，渲染帧率不能影响逻辑，各端的“现在”要对齐到同一条时间轴上。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>说清延迟、抖动、丢包、乱序各自造成什么现象，为什么游戏用 UDP + 自定义可靠层。</li>
+<li>写出固定步长循环（accumulator），理解“插值多一帧延迟、外推会出错”的取舍，并看实测数据。</li>
+<li>会推 NTP 式对时公式，知道 UE <code>GetServerWorldTimeSeconds</code> 的精度局限。</li>
+</ul></div>
+
+<div class="ans30"><span class="h">30 秒面试版答案</span>
+<p>网络有四个“坏”：延迟、抖动、丢包、乱序。TCP 可靠有序但会队头阻塞，一个包丢了后面全部等重传，所以实时游戏用 UDP，自己在上面做“按需可靠”：序号 + ACK 位图、只对关键数据重传、状态类数据直接发最新值。逻辑必须用<strong>固定步长</strong>推进（帧同步靠它保证确定性，状态同步靠它让服务器 / 客户端步调一致），渲染帧率任意；渲染时用两次逻辑状态<strong>插值</strong>保证平滑，代价是多一个逻辑帧的延迟。各端要对齐时间轴：用 NTP 式往返测量估计时钟偏移，取 RTT 最小的样本、做平滑。</p></div>
+
+<h2>2.1 网络的四个“坏”</h2>
+<div class="tbl"><table>
+<tr><th>现象</th><th>定义</th><th>玩家感受</th><th>常见对策</th></tr>
+<tr><td>延迟（Latency / RTT）</td><td>单程或往返时间；物理距离 + 排队 + 处理</td><td>按键到反馈慢、被“隔墙杀”</td><td>预测、延迟补偿、就近部署</td></tr>
+<tr><td>抖动（Jitter）</td><td>延迟的波动</td><td>一卡一卡、忽快忽慢</td><td>抖动缓冲（插值延迟、输入缓冲）</td></tr>
+<tr><td>丢包（Loss）</td><td>包没到；移动网络常见<strong>突发</strong>丢包（连丢）</td><td>操作没生效、画面停住</td><td>冗余、选择性重传、补发</td></tr>
+<tr><td>乱序（Reordering）</td><td>后发先至</td><td>状态回跳、技能顺序颠倒</td><td>序号 + 接收窗口重排</td></tr>
+</table></div>
+<p>经验量级（仅供建立直觉）：同城有线 RTT 几十毫秒以内；4G / 5G 通常几十到一百多毫秒，抖动明显；Wi-Fi 信号弱时会出现几百毫秒的突发停顿；跨国 150~300 ms。<strong>平均值能用缓冲吸收，抖动和突发丢包才是体验杀手</strong>——HOK 文档里所有的冗余、补发、卡顿统计都在对付后两者 <span class="tag hok">HOK 文档</span>。</p>
+
+<h2>2.2 为什么游戏用 UDP</h2>
+<!--seq {"p":["发送方","网络","接收方（TCP）","接收方（自定义 UDP）"],"pc":["s","a","r","g"],
+"s":[["—","TCP：包 2 丢失 → 包 3、4 已到也不能交给应用（队头阻塞）"],
+[0,2,"包 1（帧 101）","net"],[0,1,"包 2（帧 102）丢失","net"],[0,2,"包 3（帧 103）","net"],[0,2,"包 4（帧 104）","net"],
+[2,2,"103、104 已到，但在内核里等 102","r"],[0,2,"约 1 个 RTO 后重传包 2","net"],[2,2,"一次性交付 102、103、104（突刺）","r"],
+["—","自定义 UDP：每包带最近 3 帧，丢一个包不影响后续"],
+[0,3,"包 3：帧 101~103","net"],[3,3,"立刻得到 102、103（冗余补回）","g"],[0,3,"包 4：帧 102~104","net"],[3,3,"按序消费，无需等待重传","g"]],
+"cap":"<b>图 2-1</b> TCP 的队头阻塞 vs 带冗余的 UDP。TCP 的“可靠有序”对文件传输是优点，对“只关心最新状态”的游戏是负担；游戏要的是<strong>按需可靠</strong>。"} -->
+<p>实时游戏在 UDP 上自建可靠层，常见做法：</p>
+<ul>
+<li><strong>序号 + ACK 位图</strong>：每个包带自己的序号、对方最新序号和一个 32 位位图（表示之前 32 个包哪些收到了），不用单独的 ACK 包 <span class="tag pub">Gaffer On Games</span>。</li>
+<li><strong>分通道</strong>：不可靠（移动、状态）/ 可靠有序（聊天、结算）/ 可靠无序。Unreal 的 RPC 分 Reliable / Unreliable，属性复制丢了不重发旧包、而是下次发<strong>最新值</strong> <span class="tag ue">UE</span>。</li>
+<li><strong>冗余代替重传</strong>：状态和输入很小，与其等一个 RTT 重传，不如每个包把最近几份一起带上（HOK 下行一包多帧、上行三条历史，第 6、7 章）。</li>
+<li><strong>以带宽换延迟</strong>：KCP 这类协议用快速重传、不做 TCP 式拥塞退让，换来更低的重传延迟。</li>
+</ul>
+<p>HOK 用腾讯的 Apollo 中间件同时维持 UDP 和 TCP：帧命令、ping、补帧请求走 UDP；大厅协议、开局结算等必须可靠的走 TCP；取包时<strong>先读 UDP、再读 TCP</strong>，实时性优先 <span class="tag hok">HOK 文档</span>。</p>
+
+<h2>2.3 固定逻辑步长，渲染与之解耦</h2>
+<p>逻辑如果跟着渲染帧率走（<code>pos += v * deltaTime</code>），不同机器、不同帧率算出来的结果就不同——帧同步直接 desync，状态同步的预测也对不上服务器。所以逻辑一律用固定步长，渲染帧率随便：</p>
+<!--code:cpp:固定步长 + 渲染插值（Gaffer “Fix Your Timestep” 的标准写法）-->
+const double kStep = 1.0 / 15;          // 逻辑步长：HOK 约 66 ms 一帧
+double accumulator = 0;
+State prev = state, cur = state;
+
+void OnRenderFrame(double frameDt) {    // 渲染帧率任意（30 / 60 / 120 fps，还会抖）
+    accumulator += std::min(frameDt, 0.25);   // 防“死亡螺旋”：一帧最多补 0.25 s
+    while (accumulator >= kStep) {             // 落后几步就补几步，逻辑永远是整步
+        prev = cur;
+        cur  = Simulate(cur, kStep);           // 确定性：只依赖 (状态, 输入, 固定步长)
+        accumulator -= kStep;
+    }
+    double alpha = accumulator / kStep;        // 0~1：当前时刻在两个逻辑帧之间的位置
+    Render(Lerp(prev, cur, alpha));            // 插值：平滑，但比最新逻辑晚约 1 帧
+}
+<!--/code-->
+<p>渲染时有三种选择：直接画最新逻辑状态、在上一帧和当前帧之间插值、按速度往前外推。实测如下 <span class="tag ex">实测 E2</span>：</p>
+<!--plot {"x":[1000,1500],"h":300,"xlabel":"时间（ms）","ylabel":"位置（cm）","legend":"tl",
+"series":[{"n":"真实轨迹","path":"E2.truth","c":"k","sw":1.4,"dash":true},{"n":"直接画逻辑状态（阶梯）","path":"E2.raw","c":"r"},{"n":"插值（平滑但落后）","path":"E2.itp","c":"b"},{"n":"外推（贴近但会过冲）","path":"E2.ext","c":"g"}],
+"cap":"<b>图 2-2</b> 15 Hz 逻辑 + 约 60 fps 渲染（4% 的帧多卡 34 ms）。直接画逻辑状态是阶梯（每 66 ms 跳一次），插值是平滑曲线但整体右移约一个逻辑帧，外推贴近真实但在速度变化时会过冲。"} -->
+<div class="tbl"><table>
+<tr><th>渲染方式</th><th>平均滞后（相对真实）</th><th>每帧速度抖动（标准差）</th><th>适用</th></tr>
+<tr><td>直接画逻辑状态</td><td>[[E2.lagRaw|.1f]] ms</td><td class="no">[[E2.jRaw|.0f]] cm/s</td><td>只适合逻辑帧率 ≥ 渲染帧率</td></tr>
+<tr><td>插值（prev → cur）</td><td>[[E2.lagInt|.1f]] ms</td><td class="yes">[[E2.jInt|.0f]] cm/s</td><td>默认选择：平滑、永不出错</td></tr>
+<tr><td>外推（cur + v·α）</td><td>[[E2.lagExt|.1f]] ms</td><td>[[E2.jExt|.0f]] cm/s</td><td>延迟敏感、运动可预测时</td></tr>
+</table></div>
+<p>结论：插值把阶梯感降了一个数量级以上，代价是多一个逻辑帧（66 ms）的显示延迟。HOK 的做法是逻辑 15 Hz 由服务器驱动、客户端逻辑帧率可以更高，<strong>“表现插值就发生在多出来的帧里”</strong>，帧号按 <code>客户端帧号 = 服务器帧号 × 服务器帧间隔 ÷ 客户端帧间隔</code> 换算 <span class="tag hok">HOK 文档</span>。状态同步里同样的思想放大到网络层面就是第 10 章的“快照插值”。</p>
+
+<h2>2.4 对齐时间轴：NTP 式对时</h2>
+<p>客户端在本地时刻 $t_0$ 发出请求，服务器在其时钟的 $t_1$ 收到、$t_2$ 回复，客户端在本地 $t_3$ 收到。假设上下行延迟对称：</p>
+<!--deriv 时钟偏移与往返时间
+\mathrm{RTT} & = (t_3 - t_0) - (t_2 - t_1) || 总耗时减去服务器处理时间
+t_1 & = t_0 + \theta + \delta_{\uparrow},\quad t_3 = t_2 - \theta + \delta_{\downarrow} || $\theta$：服务器钟 − 客户端钟；$\delta$：单程延迟
+* \theta & = \frac{(t_1 - t_0) + (t_2 - t_3)}{2} + \frac{\delta_{\downarrow} - \delta_{\uparrow}}{2} || 两式相减；对称时第二项为 0
+# 误差来自上下行不对称：最坏可达 RTT/2，所以实践中只用 RTT 最小的那几次样本（排队最少、最接近对称）
+-->
+<p>工程要点：连续采样多次，<strong>取 RTT 最小的样本</strong>估计偏移，再做指数平滑；运行中定期校正，校正时“拉伸”时间而不是跳变（否则插值时间轴会倒退）。</p>
+<div class="co net"><span class="h">Unreal 里的服务器时间</span><p><code>AGameStateBase::GetServerWorldTimeSeconds()</code> 的实现是服务器周期性复制自己的世界时间，客户端在 OnRep 里用“收到的值 − 本地时间”算偏移——<strong>没有扣除单程延迟</strong>，所以客户端算出的服务器时间会落后约半个 RTT，且受复制间隔影响 <span class="tag ue">UE 源码</span>。做延迟补偿、技能倒计时、回放对齐等需要精确时间的功能时，通常自己用一对 RPC 做 NTP 式对时，或者像 CMC 那样用客户端时间戳 + 服务器校验。</p></div>
+
+<h2>2.5 统一“帧”的概念</h2>
+<div class="tbl"><table>
+<tr><th></th><th>HOK（帧同步）</th><th>Unreal（状态同步）</th></tr>
+<tr><td>逻辑节拍</td><td>服务器约 15 帧/秒（66 ms），帧号由服务器分配并广播 <span class="tag hok">HOK 文档</span></td><td>服务器按 <code>NetServerMaxTickRate</code>（引擎默认配置 30）tick；每个 Actor 再按 <code>NetUpdateFrequency</code> 决定多久复制一次 <span class="tag ue">UE</span></td></tr>
+<tr><td>客户端节拍</td><td>收到第 N 帧才推进第 N 帧；C# 的帧号由 C++ 回报</td><td>按本地帧率 tick；移动用客户端时间戳（CMC 的 TimeStamp）与服务器对账</td></tr>
+<tr><td>渲染</td><td>与逻辑解耦，插值</td><td>SimulatedProxy 插值平滑，AutonomousProxy 本地预测</td></tr>
+</table></div>
+
+<div class="co warn"><span class="h">面试注意</span><p>“为什么要固定步长”要答到<strong>确定性</strong>和<strong>与服务器步调一致</strong>两层；“插值有什么代价”要答出<strong>多一帧延迟</strong>；“怎么对时”要能写出偏移公式并说明<strong>取最小 RTT 样本</strong>的原因（不对称误差）。能顺带说出 UE 默认服务器时间不做延迟补偿，是加分项。</p></div>
+
+<h2>2.6 坑位与易错说法</h2>
+<div class="tbl"><table>
+<tr><th>坑</th><th>后果</th><th>正确做法</th></tr>
+<tr><td>逻辑里用 <code>deltaTime</code> / 墙钟</td><td>帧同步 desync；状态同步预测与服务器对不上</td><td>逻辑只认帧号 × 固定步长</td></tr>
+<tr><td>accumulator 不设上限</td><td>卡一下后疯狂补帧 → 更卡 → 死亡螺旋</td><td>单帧最多补若干步，超出则放慢或丢弃</td></tr>
+<tr><td>用 float 累加游戏时间</td><td>20 分钟累计误差约 [[det.precise.D6.errms|.0f]] ms（实测 D6，第 4 章）</td><td>用整数帧号推导时间</td></tr>
+<tr><td>对时直接跳变</td><td>插值时间轴倒退，画面回跳</td><td>平滑拉伸（略快 / 略慢地走）</td></tr>
+<tr><td>只看平均 ping</td><td>抖动导致卡顿却看不出原因</td><td>统计分布（p95 / p99）和卡顿事件，HOK 用 10 档分桶（第 8 章）</td></tr>
+</table></div>
+
+<div class="recap"><div class="t">本章速记</div><ul>
+<li>四个坏：延迟（预测 / 补偿）、抖动（缓冲）、丢包（冗余 / 重传）、乱序（序号 + 窗口）。突发丢包与抖动最致命。</li>
+<li>TCP 队头阻塞 → 游戏用 UDP + 按需可靠（序号、ACK 位图、冗余、状态发最新值）。</li>
+<li>固定步长 + 渲染插值：平滑但晚一帧（实测 [[E2.lagInt|.0f]] ms，速度抖动 [[E2.jRaw|.0f]] → [[E2.jInt|.0f]] cm/s）。</li>
+<li>对时：$\theta = \frac{(t_1-t_0)+(t_2-t_3)}{2}$，取最小 RTT 样本 + 平滑；UE 默认服务器时间不扣单程延迟。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：渲染 120 fps、逻辑 15 Hz，不插值会怎样？</summary>连续 8 个渲染帧画的都是同一个逻辑状态，然后突然跳一格，看起来是 15 fps 的阶梯；插值后每个渲染帧都在两个逻辑帧之间取不同位置，看起来是 120 fps 的平滑运动，代价是整体晚一个逻辑帧。</details>
+<details class="quiz"><summary>自测 2：为什么 NTP 式对时要取 RTT 最小的样本？</summary>偏移估计的误差项是 $(\delta_{\downarrow}-\delta_{\uparrow})/2$，排队延迟越大越可能不对称；RTT 最小的样本排队最少，上下行最接近纯传播时延，最接近对称。</details>
+<details class="quiz"><summary>自测 3：Unreal 的属性复制丢包后会重发原来那个包吗？</summary>不会。属性复制只保证最终一致：丢包被检测到后，相关属性被标记为需要重发，下次发送的是<strong>当时的最新值</strong>；可靠 RPC 才会按序重传原内容。第 12 章有实测。</details>
+</section>

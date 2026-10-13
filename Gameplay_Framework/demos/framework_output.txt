@@ -1,0 +1,173 @@
+
+==================== F1 World 注册 / 首帧 BeginPlay / Tick / 场景卸载 的耗时（List.Contains 线性查找，C++ 移植） ====================
+      N | Register(ms) | 首帧pending(ms) |   Tick(ms) | 全部注销(ms) | 哈希集合注册(ms)
+    100 |       0.005 |         0.002 |     0.0023 |        0.001 |            0.010
+   1000 |       0.041 |         0.038 |     0.0010 |        0.024 |            0.047
+   5000 |       0.691 |         0.673 |     0.0045 |        0.353 |            0.256
+  20000 |      10.662 |         9.558 |     0.0210 |        7.944 |            0.902
+→ 注册与首帧处理都是 O(N^2)：每次 Contains 扫描整个 List；注销同理（Remove 先查找再整体搬移）
+
+==================== F2 World.Update 中修改 Actor 列表（倒序遍历的真实安全边界） ====================
+说明：场景里预置 A0..A4（第 1 帧 Start→pending，第 1 帧 World.Update 中 BeginPlay 并 Tick），在第 2 帧触发动作，跑 3 帧。
+      Tick=x/y/z 表示第 1/2/3 帧被 Tick 的次数；_actors 列表顺序 = 注册顺序 A0..A4，倒序遍历先 Tick A4。
+
+C1 A2 在 Tick 中 Destroy(自己)（Unity 默认，延迟到帧末）
+  A0[BeginPlay@1 Tick=1/1/1]  A1[BeginPlay@1 Tick=1/1/1]  A2[BeginPlay@1 Tick=1/1/0]  A3[BeginPlay@1 Tick=1/1/1]  A4[BeginPlay@1 Tick=1/1/1]  
+  第 3 帧末 _actors.Count=4（其中已销毁=0）
+
+C2 A2 在 Tick 中 DestroyImmediate(自己)
+  A0[BeginPlay@1 Tick=1/1/1]  A1[BeginPlay@1 Tick=1/1/1]  A2[BeginPlay@1 Tick=1/1/0]  A3[BeginPlay@1 Tick=1/1/1]  A4[BeginPlay@1 Tick=1/1/1]  
+  第 3 帧末 _actors.Count=4（其中已销毁=0）
+
+C3 A2 在 Tick 中 DestroyImmediate(A3)（下标更高 = 本帧已 Tick 过）
+  A0[BeginPlay@1 Tick=1/1/1]  A1[BeginPlay@1 Tick=1/1/1]  A2[BeginPlay@1 Tick=1/1/1]  A3[BeginPlay@1 Tick=1/1/0]  A4[BeginPlay@1 Tick=1/1/1]  
+  第 3 帧末 _actors.Count=4（其中已销毁=0）
+
+C4 A3 在 Tick 中 DestroyImmediate(A1)（下标更低 = 本帧还没 Tick）
+  A0[BeginPlay@1 Tick=1/1/1]  A1[BeginPlay@1 Tick=1/0/0]  A2[BeginPlay@1 Tick=1/1/1]  A3[BeginPlay@1 Tick=1/2/1]  A4[BeginPlay@1 Tick=1/1/1]  
+  第 3 帧末 _actors.Count=4（其中已销毁=0）
+
+C5 A3 在 Tick 中 Destroy(A1)（延迟销毁：被“打死”的 A1 本帧仍会 Tick）
+  A0[BeginPlay@1 Tick=1/1/1]  A1[BeginPlay@1 Tick=1/1/0]  A2[BeginPlay@1 Tick=1/1/1]  A3[BeginPlay@1 Tick=1/1/1]  A4[BeginPlay@1 Tick=1/1/1]  
+  第 3 帧末 _actors.Count=4（其中已销毁=0）
+
+C6 A4 在 Tick 中 DestroyImmediate(A0,A1,A2)（批量清场）
+  A0[BeginPlay@1 Tick=1/0/0]  A1[BeginPlay@1 Tick=1/0/0]  A2[BeginPlay@1 Tick=1/0/0]  A3[BeginPlay@1 Tick=1/0/1]  A4[BeginPlay@1 Tick=1/1/1]  
+  第 3 帧末 _actors.Count=2（其中已销毁=0）
+  第 2 帧：下标 3 越界（List 只剩 2 个）→ C# 抛 ArgumentOutOfRangeException，本帧剩余 Actor 不再 Tick
+
+C7 A2 在 Tick 中 Spawn 新 Actor N（新 Actor 何时 BeginPlay / 第一次 Tick）
+  A0[BeginPlay@1 Tick=1/1/1]  A1[BeginPlay@1 Tick=1/1/1]  A2[BeginPlay@1 Tick=1/1/1]  A3[BeginPlay@1 Tick=1/1/1]  A4[BeginPlay@1 Tick=1/1/1]  N[BeginPlay@3 Tick=0/0/1]  
+  第 3 帧末 _actors.Count=6（其中已销毁=0）
+
+C8 A4 在 Tick 中把 A1 的 GameObject SetActive(false)、A2 的组件 enabled=false
+  A0[BeginPlay@1 Tick=1/1/1]  A1[BeginPlay@1 Tick=1/1/1]  A2[BeginPlay@1 Tick=1/1/1]  A3[BeginPlay@1 Tick=1/1/1]  A4[BeginPlay@1 Tick=1/1/1]  
+  第 3 帧末 _actors.Count=5（其中已销毁=0）
+
+C9 同一批 pending：P.BeginPlay 里 DestroyImmediate(Q)，Q 排在 P 后面
+  A0[BeginPlay@1 Tick=1/1/1]  A1[BeginPlay@1 Tick=1/1/1]  A2[BeginPlay@1 Tick=1/1/1]  A3[BeginPlay@1 Tick=1/1/1]  A4[BeginPlay@1 Tick=1/1/1]  P[BeginPlay@3 Tick=0/0/1]  Q[BeginPlay@3 Tick=0/0/0]  
+  第 3 帧末 _actors.Count=6（其中已销毁=0）  Q 已被 DestroyImmediate，但仍执行了 BeginPlay、被加入 _actors；
+
+C10 A2 的子类 override OnDestroy 没调 base，然后在 Tick 中 Destroy(自己)
+  A0[BeginPlay@1 Tick=1/1/1]  A1[BeginPlay@1 Tick=1/1/1]  A2[BeginPlay@1 Tick=1/1/0]  A3[BeginPlay@1 Tick=1/1/1]  A4[BeginPlay@1 Tick=1/1/1]  
+  第 3 帧末 _actors.Count=4（其中已销毁=0）
+
+==================== F3 Possess / UnPossess：调用顺序与双向引用不变式 ====================
+
+P1 C 已控制 P1，再 Possess(P2)：回调顺序
+    C.Possess(P2) 开始
+    C.UnPossess(P1) 开始
+      P1.OnUnPossess()（此时 Controller 仍=C）
+    P1.Controller=null
+      C.OnUnPossess(P1)（重新读取 ControlledPawn 字段）
+    C.ControlledPawn=null
+    P2.PossessedBy(C) → P2.Controller=C
+      P2.OnPossess(C)
+    C.ControlledPawn=P2
+      C.OnPossess(P2)
+  状态：C→P2  P1←null  P2←C  
+  ✓ 双向引用一致
+
+P2 C1 控制 P，C2.Possess(P)（夺舍：踢掉原灵魂）
+    C2.Possess(P) 开始
+    C1.UnPossess(P) 开始
+      P.OnUnPossess()（此时 Controller 仍=C1）
+    P.Controller=null
+      C1.OnUnPossess(P)（重新读取 ControlledPawn 字段）
+    C1.ControlledPawn=null
+    P.PossessedBy(C2) → P.Controller=C2
+      P.OnPossess(C2)
+    C2.ControlledPawn=P
+      C2.OnPossess(P)
+  状态：C1→null  C2→P  P←C2  
+  ✓ 双向引用一致
+
+P3 Pawn.OnPossess 抛异常（Possess 早于 BeginPlay，像 MyHeroPawn 那样在 BeginPlay 里取 Renderer）
+    C.Possess(P) 开始
+    P.PossessedBy(C) → P.Controller=C
+      P.OnPossess(C)
+    !! 异常冒出 Possess：NullReferenceException：_renderer 在 BeginPlay 里才赋值
+  状态：C→null  P←C  
+  ✗ C.ControlledPawn!=P 但 P.Controller==C
+
+P3' 下一帧（BeginPlay 之后）重试 C.Possess(P)
+    C.Possess(P) 开始
+    C.UnPossess()：不存在控制的对象 → return
+    P.PossessedBy(C) → P.Controller=C
+      P.OnPossess(C)
+    C.ControlledPawn=P
+      C.OnPossess(P)
+  状态：C→P  P←C  
+  ✓ 双向引用一致
+
+P4【构造反例】Seat.OnPossess 里调用 C.Possess(Car)（坐上座位立即转控载具）
+    C.Possess(Seat) 开始
+    Seat.PossessedBy(C) → Seat.Controller=C
+      Seat.OnPossess(C)
+    C.Possess(Car) 开始
+    Car.PossessedBy(C) → Car.Controller=C
+      Car.OnPossess(C)
+    C.ControlledPawn=Car
+      C.OnPossess(Car)
+    C.ControlledPawn=Seat
+      C.OnPossess(Seat)
+  状态：C→Seat  Seat←C  Car←C  
+  ✗ C.ControlledPawn!=Car 但 Car.Controller==C
+
+P5【构造反例】Body.OnUnPossess 里调用 C.Possess(Home)（离魂时送回大本营）
+    C.UnPossess(Body) 开始
+      Body.OnUnPossess()（此时 Controller 仍=C）
+    C.Possess(Home) 开始
+    C.UnPossess(Body) 开始
+      Body.OnUnPossess()（此时 Controller 仍=C）
+    Body.Controller=null
+      C.OnUnPossess(Body)（重新读取 ControlledPawn 字段）
+    C.ControlledPawn=null
+    Home.PossessedBy(C) → Home.Controller=C
+      Home.OnPossess(C)
+    C.ControlledPawn=Home
+      C.OnPossess(Home)
+    Body.Controller=null
+      C.OnUnPossess(Home)（重新读取 ControlledPawn 字段）
+    C.ControlledPawn=null
+  状态：C→null  Body←null  Home←C  
+  ✗ C.ControlledPawn!=Home 但 Home.Controller==C
+  Controller.OnUnPossess 被调用 2 次（期望 1 次）
+
+P6 Old 被直接 Destroy（没有先 UnPossess），之后 C.Possess(New)
+    C.Possess(New) 开始
+    New.PossessedBy(C) → New.Controller=C
+      New.OnPossess(C)
+    C.ControlledPawn=New
+      C.OnPossess(New)
+  状态：C→New  Old←C  New←C  
+  ✗ C.ControlledPawn!=Old 但 Old.Controller==C
+  Old.OnUnPossess 执行次数 = 0（它的清理逻辑——停寿命计时器、改名、关碰撞——永远不会执行）
+
+==================== F4 场景里放了两个 SurvivalGameMode（“将忽略后注册的裁判”是否成立） ====================
+GM_A.BeginPlay
+  World.RegisterGameMode：成为 AuthorityGameMode
+  World.RegisterGameState：注册 GameState_GM_A
+  GameState_GM_A：EnteringMap → WaitingToStart → EventSystem.Trigger
+  GameState_GM_A：WaitingToStart → InProgress → EventSystem.Trigger
+  生成玩家肉体 + SoulPlayerController 并 Possess
+  CreateTimer("AISpawner")：新建
+GM_B.BeginPlay
+  World.RegisterGameMode：已有裁判 → Log.E 并 return（但 BeginPlay 继续执行）
+  World.RegisterGameState：越权 → Destroy(GameState_GM_B)（延迟），return
+  GameState_GM_B：EnteringMap → WaitingToStart（这个 GameState 已被 World 拒绝并 Destroy，帧末才消失） → EventSystem.Trigger
+  GameState_GM_B：WaitingToStart → InProgress（这个 GameState 已被 World 拒绝并 Destroy，帧末才消失） → EventSystem.Trigger
+  生成玩家肉体 + SoulPlayerController 并 Possess
+  CreateTimer("AISpawner")：同名计时器仍有效 → 先 Stop 旧的（属于 GM_A）再新建
+
+帧末汇总：AuthorityGameMode=GM_A，World.GameState=GameState_GM_A
+  MatchStateChanged 的 Trigger 次数 = 4（其中来自被拒绝的 GameState = 2）
+  玩家肉体 = 2，SoulPlayerController = 2（两个 Controller 读同一份输入 → 两具肉体同步移动）
+  "AISpawner" 计时器 = 1 个，回调属于 GM_B（不是裁判）
+  GM_B.GameState 帧末已销毁 → SpawnRandomAI 里 base.GameState != null 为 false → “比赛结束就不刷怪”的检查对它永远不成立
+
+==================== F5 ServerWorldTimeSeconds：scaled deltaTime 的 float 累加 ====================
+真实经过 120.017 s → ServerWorldTimeSeconds = 109.476 s（差 10.541 s：暂停 10 s + 两次卡顿各被截断 0.267 s + 少算第 1 帧）
+连续     1 小时 60fps：float 累加 = 3597.21 s，double = 3600.00 s，误差 2.79 s（0.078%）
+连续    10 小时 60fps：float 累加 = 36544.82 s，double = 36000.00 s，误差 -544.82 s（-1.513%）
+连续   100 小时 60fps：float 累加 = 418445.66 s，double = 360000.00 s，误差 -58445.66 s（-16.235%）

@@ -1,0 +1,301 @@
+<div class="part-head" data-toc="第四部分 · Demo">
+  <div class="no">PART FOUR</div>
+  <h1>第四部分　Demo</h1>
+  <p>框架是否好用，要看用它写出来的玩法。本批次先写主案例 SoulDecay（夺舍生存战）；GamePlayTest2 与通用数据流在后续批次补齐。</p>
+</div>
+
+<section class="chapter" id="ch15">
+  <div class="ch-head">
+    <div class="no">CHAPTER 15</div>
+    <h1>SoulDecay：用“夺舍”压测 Gameplay Framework</h1>
+    <p class="lead">一个 3 分钟能讲完的小玩法：灵魂每占据一具肉体就开始倒计时，必须不停夺舍别人的身体活下去。它几乎把框架的每个模块都用了一遍，也把几个隐藏问题暴露了出来。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能用 30 秒介绍玩法，并说清“为什么用这个玩法测试框架”</li>
+    <li>画出开局时间线和一次夺舍的完整调用链（旧肉体、新肉体、AI 灵魂、UI 各发生了什么）</li>
+    <li>解释碰撞结算、寿命计时器与 UI 的协作方式，以及背后的设计取舍</li>
+    <li>找出 Demo 暴露的问题：游戏结束后继续计分、Die 不幂等、默认句柄、规则散落、物理冲突、材质实例</li>
+    <li>能回答“如果做成联网 / 启用对象池 / 写自动化测试”这类发散题</li>
+  </ul></div>
+
+  <h2>15.1 玩法：一句话、规则表</h2>
+  <p><b>一句话</b>：玩家是一缕灵魂，附身的肉体有保质期，到期就爆炸；用鼠标点击任意敌方肉体即可“夺舍”，抛弃旧身体；场上不断刷出红蓝两队 AI，体型大的撞到体型小的就把它碾碎。</p>
+  <div class="tbl"><table>
+    <tr><th>项</th><th>源码事实（SurvivalGameMode / CombatPawn / SoulPlayerController）</th></tr>
+    <tr><td>阵营</td><td><code>EFaction { Neutral, Player, RedAI, BlueAI }</code>；阵营挂在<strong>灵魂（Controller）</strong>上，通过接口 <code>IFactionMember</code> 表达</td></tr>
+    <tr><td>轻型肉体</td><td>球体，缩放 0.8，速度 8，寿命 5 s（玩家开局就是这种）</td></tr>
+    <tr><td>重型肉体</td><td>立方体，缩放 1.5，速度 3，寿命 30 s</td></tr>
+    <tr><td>刷怪</td><td>命名循环计时器 <code>AISpawner</code>，每 3 s（scaled）在 [−10,10]² 随机位置刷一只；50% 重型、50% 红/蓝；<strong>没有数量上限</strong></td></tr>
+    <tr><td>寿命</td><td>只有<strong>玩家</strong>附身时才创建寿命计时器；AI 肉体没有寿命，活到被碾碎为止</td></tr>
+    <tr><td>夺舍</td><td>左键射线命中一具<strong>有灵魂</strong>、<strong>不是自己当前肉体</strong>、<strong>阵营不同</strong>的 CombatPawn → <code>Possess</code>；玩家得 1 分</td></tr>
+    <tr><td>碾碎</td><td>两具肉体碰撞，缩放<strong>严格更大</strong>且自己有灵魂的一方执行击杀；同阵营不互相碾压；击杀方阵营得 1 分</td></tr>
+    <tr><td>失败</td><td>玩家肉体寿命耗尽爆炸，或被更大的敌人碾碎 → <code>EndMatch()</code></td></tr>
+    <tr><td>场景</td><td>地面 + 四面墙（Boundaries）、静态主相机、计分 UI、寿命文本、ESC 暂停菜单</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">玩法上的一个推论（面试时可以顺口说）</span>
+    <p>玩家开局是轻型（0.8），碾不了任何人；只有夺舍到重型肉体（1.5）才能反过来碾碎轻型 AI 得分，而且重型寿命 30 s，远长于轻型的 5 s。所以最优策略是“尽快找重型肉体”。重型与重型、轻型与轻型相撞什么都不会发生（必须严格大于）。</p>
+  </div>
+
+  <h2>15.2 为什么用这个玩法来测试框架</h2>
+  <p>普通 Demo 里 Possess 只在开局发生一次；夺舍把它变成<strong>核心循环</strong>，每隔几秒就发生一次，而且每次都同时涉及“抢占别人的 Pawn”“抛弃自己的 Pawn”“被踢出的 Controller 如何收场”。同时寿命计时器把 TimerSystem 的创建、停止、回调里销毁自己也变成高频操作。</p>
+  <div class="tbl"><table>
+    <tr><th>框架能力</th><th>SoulDecay 怎么用</th><th>验证了什么</th><th>没验证什么</th></tr>
+    <tr><td>World / Actor</td><td>所有肉体和灵魂都在运行时 <code>AddComponent</code>，由 World 统一 BeginPlay/Tick</td><td>动态生成的 Actor 能正确进入 pending 并开始 Tick</td><td>大量 Actor 下 <code>List.Contains</code> 注册的 O(n) 成本（没有上限的刷怪会逐渐放大它）</td></tr>
+    <tr><td>Possess / UnPossess</td><td>夺舍 = 玩家 Controller 抢占 AI 的 Pawn</td><td>“先放弃自己的、再踢走对方的、最后双向绑定”的顺序；OnUnPossess 能拿到即将离开的 Controller</td><td>回调抛异常时的半绑定；Controller 被销毁时自动解绑</td></tr>
+    <tr><td>阵营（组合）</td><td><code>IFactionMember</code> 接口挂在 Controller 上</td><td>“身份属于灵魂，不属于肉体”：同一具肉体换了灵魂，颜色和敌我关系随之改变</td><td>—</td></tr>
+    <tr><td>GameMode / GameState</td><td>SurvivalGameMode 声明 <code>GameStateClass = SurvivalGameState</code>，父类反射生成并担保注册</td><td>子类只声明类型即可得到专属计分板</td><td>写入权限收口：Pawn 和 Controller 直接调用 AddScore / EndMatch</td></tr>
+    <tr><td>TimerSystem</td><td>每具玩家肉体一个寿命计时器；循环刷怪计时器（委托缓存在字段）</td><td>高频创建/停止；回调里停止自己 + 停止别人 + Destroy（第 10 章重入路径）</td><td>AI 肉体的默认句柄（第 9 章 E1）——当前参数下不会触发</td></tr>
+    <tr><td>EventSystem</td><td>分数（Appearance）、寿命句柄（Logic）推给 UI</td><td>UI 只订阅事件，不引用 GameMode</td><td>MatchStateChanged 在本场景<strong>无人监听</strong>：游戏结束没有任何 UI 反馈</td></tr>
+    <tr><td>ObjectPool</td><td>写了 GetOrCreatePawn / RecycleObject</td><td>—</td><td>初始化被注释，全部是死代码</td></tr>
+    <tr><td>暂停</td><td>ESC → <code>timeScale = 0</code></td><td>scaled 计时器冻结；两个 Controller 在 Tick 里检查 timeScale 停止思考</td><td>—</td></tr>
+  </table></div>
+
+  <h2>15.3 文件与职责</h2>
+  <div class="tbl"><table>
+    <tr><th>文件</th><th>继承 / 实现</th><th>职责</th></tr>
+    <tr><td>SurvivalGameMode.cs</td><td>AGameMode</td><td>开局：切到 InProgress、生成玩家肉体与灵魂并附身、启动 AISpawner；工厂方法 CreatePawn；EndMatch 时停刷怪；（未启用的对象池接入）</td></tr>
+    <tr><td>SurvivalGameState.cs</td><td>AGameState；同文件定义 EFaction、IFactionMember</td><td>三阵营分数；BeginPlay 广播一次 0 分；AddScore 修改并广播</td></tr>
+    <tr><td>CombatPawn.cs</td><td>APawn</td><td>移动；OnPossess 按阵营变色、玩家附身时创建寿命计时器并发事件；OnUnPossess 停计时器、玩家离开时枯萎并 3 s 后销毁；碰撞碾碎与加分；Die</td></tr>
+    <tr><td>SoulPlayerController.cs</td><td>AUnityController + IFactionMember</td><td>重写移动（交给 CombatPawn.Move）；左键射线夺舍并加分</td></tr>
+    <tr><td>SimpleAIController.cs</td><td>AController + IFactionMember</td><td>Perlin 噪声随机游走；失去肉体后 <code>Destroy(gameObject)</code> 自毁</td></tr>
+    <tr><td>SurvivalUIController.cs</td><td>MonoBehaviour</td><td>OnEnable 订阅分数 / 寿命句柄事件；Update 每帧用句柄拉取剩余时间，低于 1.5 s 红白闪烁，句柄失效显示 DIE</td></tr>
+    <tr><td>SoulDecayEvents.cs</td><td>AbstractEventArgs</td><td><code>ScoreChangedEventArgs</code>（Appearance）、<code>PlayerLifespanTimerEventArgs</code>（Logic，携带 TimerHandle）</td></tr>
+    <tr><td>GameObjectWrapper.cs</td><td>IPoolable</td><td>出池 SetActive + 恢复 Tick；入池关 Tick + SetActive(false) + 清速度（未启用）</td></tr>
+  </table></div>
+
+  <h2>15.4 开局时间线</h2>
+  <!--code:text:SoulDecayScene 启动（按源码推演；同一阶段内各对象的先后不保证）-->
+帧 0 · Awake/OnEnable
+  EventSystem.Awake / TimerSystem.Awake（场景预置；二者都没调 base.Awake，_instance 仍为空 → 第 6 章）
+  SurvivalUIController.OnEnable → EventSystem.Instance（FindObjectOfType 找到预置对象）→ Register ×2
+帧 0 · Start
+  SurvivalGameMode.Start（AActor.Start）→ World.RegisterAActor → World.Instance 为空 → 懒创建 World → 进入 pending
+帧 0 · Update（World.Update）
+  pending → _actors → SurvivalGameMode.BeginPlay：
+    AGameModeBase.BeginPlay → RegisterGameMode → InitGameState（反射生成 SurvivalGameState，担保注册）→ StartPlay（WaitingToStart，发事件）
+    StartMatch（InProgress，发事件）
+    CreatePawn(0,0,0, 轻型) → AddComponent<CombatPawn>（Awake 取 Renderer）
+    new GameObject("Player_Controller").AddComponent<SoulPlayerController>()
+    playerSoul.Possess(playerBody)            ← 此时两者都还没 BeginPlay
+      └ CombatPawn.OnPossess：变青色 → CreateTimer(5 s, OnBodyExploded) = (0,0) → Trigger(寿命句柄)
+    CreateTimer("AISpawner", 3 s, loop) = (1,0)
+帧 1 · Start → Update
+  SurvivalGameState / CombatPawn / SoulPlayerController 的 Start → pending → BeginPlay
+    SoulPlayerController.BeginPlay（AUnityController）：new GameInput()、启用 Player 输入
+    SurvivalGameState.BeginPlay：广播三个阵营的 0 分
+  EventSystem 派发：阶段×2、寿命句柄、分数×3 → UI 记下句柄、刷新分数
+  从这一帧起，玩家可以移动；UI 每帧显示 Last Time: 4.9 s ……
+t = 3 s、6 s、9 s …  AISpawner → SpawnRandomAI → 新肉体 + AI 灵魂（先设阵营，再 Possess）
+<!--/code-->
+  <div class="co warn"><span class="h">面试注意：“先 Possess，后 BeginPlay”</span>
+    <p>玩家的灵魂和肉体在帧 0 就完成了附身，而它们的 BeginPlay 要到帧 1 才执行。所以 OnPossess 里不能依赖 BeginPlay 中初始化的东西——CombatPawn 把 <code>GetComponent&lt;Renderer&gt;</code> 放在 Awake 里，DemoHeroPawn 的注释里也记录了这次修复。UE 的 <code>RestartPlayer</code> 顺序相反：先 Spawn（BeginPlay 已执行）再 Possess。</p>
+  </div>
+
+  <h2>15.5 一次夺舍的完整调用链</h2>
+  <!--code:text:玩家（在肉体 Old 里）点击红队 AI 的肉体 Target-->
+SoulPlayerController.Tick → Mouse 左键 → ExecuteSoulTransfer
+  Raycast 命中 Target：不是 Old、Target.Controller != null、阵营 RedAI ≠ Player   ✔
+  this.Possess(Target)
+  ├─① ControlledPawn(Old) != null → this.UnPossess()
+  │    ├ Old.UnPossessed()
+  │    │   └ CombatPawn.OnUnPossess   （此刻 Old.Controller 仍是玩家，先存为 leavingController）
+  │    │       ├ StopTimer(Old 的寿命计时器)，_decayTimer = Invalid
+  │    │       └ leavingController 是玩家 → 变黑、改名 "Dead Body"、关碰撞体、Destroy(Old, 3 s)
+  │    │     Old.Controller = null
+  │    ├ this.OnUnPossess(Old)            （SoulPlayerController 没重写）
+  │    └ ControlledPawn = null
+  ├─② Target.Controller(AI) != null → AI.UnPossess()     ← UE 默认行为；源码里注释掉的那行就是它
+  │    ├ Target.UnPossessed()
+  │    │   └ CombatPawn.OnUnPossess：StopTimer(_decayTimer)   ⚠ AI 肉体的 _decayTimer = default (0,0)（第 9 章 E1）
+  │    │     离开的是 AI → 保持“新鲜”，只打日志
+  │    └ SimpleAIController.OnUnPossess → Destroy(AI 灵魂)   （帧末真正销毁）
+  ├─③ Target.PossessedBy(this) → Target.Controller = 玩家 → CombatPawn.OnPossess
+  │       变青色 → CreateTimer(Target.MaxLifespan, OnBodyExploded) → Trigger(寿命句柄事件)
+  ├─④ ControlledPawn = Target
+  └─⑤ this.OnPossess(Target)
+  GameState.AddScore(Player, +1) → Trigger(ScoreChanged)
+下一次 EventSystem.Update：UI 收到新句柄 → 寿命文本切到新肉体
+<!--/code-->
+  <p>这条调用链回答了三个常被问的问题：</p>
+  <ul>
+    <li><b>为什么 OnUnPossess 要先通知子类、再清空 Controller？</b>（APawn.UnPossessed 的注释原话：“先通知子类，拿到当前控制器的引用做一些判断”）因为 CombatPawn 要根据“离开的是谁”决定是枯萎还是保持新鲜。</li>
+    <li><b>为什么 AI 失去肉体要自毁，玩家不自毁？</b>AI 灵魂没有任何独立价值（没有输入、没有存档、没有 UI），留着只会每帧空转 Tick；玩家的 Controller 承载输入和“我是谁”，换身体时必须保留——这正是 Controller 与 Pawn 分离的意义。把“失去肉体后怎么办”放在各自 Controller 的 OnUnPossess 里，而不是让 Pawn 去判断，是正确的职责划分。</li>
+    <li><b>为什么阵营挂在 Controller 而不是 Pawn？</b>“身份属于灵魂”：同一具肉体，被红队 AI 控制时是红色敌人，被玩家夺舍后立刻变成玩家阵营。用接口而不是基类字段，是组合优于继承的体现：不是所有 Controller 都需要阵营。</li>
+  </ul>
+  <div class="co deep"><span class="h">推断：夺舍那一刻 UI 可能闪 1 帧 “DIE”</span>
+    <p>旧计时器在 World.Update（Controller.Tick）里被停掉，新句柄通过事件送给 UI。若这一帧 UI.Update 在 EventSystem.Update 之前执行，UI 手里还是旧句柄，<code>IsHandleValid</code> 为 false → 显示 “DIE” 一帧。是否出现取决于脚本执行顺序（第 1 章 1.4）。修法：事件改为同步通知，或 UI 不缓存句柄而是向 GameState 查询“玩家当前寿命”。</p>
+  </div>
+
+  <h2>15.6 碰撞结算：双方都收到 OnCollisionEnter，怎么只结算一次</h2>
+  <!--code:cs:CombatPawn.cs:110-151（节选）-->
+private void OnCollisionEnter(Collision collision) {
+    if (Controller is IFactionMember mySoul) {                       // 只有活体能碾压
+        CombatPawn otherPawn = collision.gameObject.GetComponent<CombatPawn>();
+        if (otherPawn != null && transform.localScale.x > otherPawn.transform.localScale.x) {   // 严格更大
+            if (otherPawn.Controller is IFactionMember otherSoul && otherSoul.FactionId == mySoul.FactionId)
+                return;                                              // 同阵营保护
+            bool isCrushingPlayer = otherPawn.Controller is IFactionMember v && v.FactionId == EFaction.Player;
+            otherPawn.Die(isExplosion: isCrushingPlayer);            // 碾碎玩家 = 游戏结束
+            if (World.HasInstance && World.Instance.GameState is SurvivalGameState gs)
+                gs.AddScore(mySoul.FactionId, 1);                    // Pawn 直接写 GameState
+        }
+    }
+}
+<!--/code-->
+  <p>Unity 的物理会给碰撞的<strong>双方</strong>各调用一次 OnCollisionEnter。代码用“严格比较体型”保证只有一方执行：A 大于 B 时只有 A 进入分支；体型相等时双方都不进入——所以相同体型永远不会互相碾压。这是一个简单有效的“单一裁决者”技巧。</p>
+  <div class="co warn"><span class="h">【问题】Die 不幂等 → 可能重复计分</span>
+    <p>如果同一个物理步里两具大肉体同时撞上同一具小肉体：第一次结算调用 <code>victim.Die()</code>，Destroy 要到帧末才生效，受害者在这一帧里仍然存在；第二次结算时 <code>victim.Controller</code> 已经为 null，同阵营保护判断被跳过，再次 <code>Die()</code> 并<strong>再加一次分</strong>。<code>isDying</code> 只用来阻止“延迟销毁”，没有在 Die 的入口处拦截。修复：Die 开头 <code>if (isDying) return;</code>，并让 OnCollisionEnter 在受害者 isDying 时直接返回。</p>
+  </div>
+
+  <h2>15.7 寿命计时器与 UI：push 句柄，pull 剩余时间</h2>
+  <!--code:text:寿命数据流-->
+CombatPawn.OnPossess（玩家）
+  _decayTimer = TimerSystem.CreateTimer(MaxLifespan, OnBodyExploded)
+  EventSystem.Trigger(new PlayerLifespanTimerEventArgs(_decayTimer))      ← push：只推一次“票据”
+SurvivalUIController.OnLifespanTimerChanged：_currentPlayerTimer = args.DecayTimerHandle
+SurvivalUIController.Update（每帧）
+  IsHandleValid(_currentPlayerTimer) ? GetTimeRemaining(...) → "Last Time: 3.2 s"    ← pull：每帧自己读
+                                     : "DIE"
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>做法</th><th>优点</th><th>缺点</th></tr>
+    <tr><td><b>push 句柄 + pull 数值（本项目）</b></td><td>事件只传句柄，UI 每帧查询</td><td>不必每帧发事件；句柄带 generation，旧句柄自动失效，UI 不会读到别的计时器</td><td>UI 直接依赖 TimerSystem；UI 自己有 Update；切换时可能闪 1 帧</td></tr>
+    <tr><td>每帧 push 数值</td><td>Pawn 每帧发“剩余 x 秒”事件</td><td>UI 完全被动</td><td>每帧一个事件对象 + 闭包分配；队列压力</td></tr>
+    <tr><td>GameState 持有可观察属性</td><td>GameState 暴露 PlayerLifespan，UI 绑定</td><td>UI 只依赖 GameState，符合第 5 章的边界</td><td>需要 GameState 每帧更新或按需计算</td></tr>
+  </table></div>
+  <p>面试里这一段的亮点是：<strong>UI 敢长期持有一个 TimerHandle，正是因为它带 generation</strong>——肉体爆炸或被抛弃后计时器被停止，UI 手里的句柄自动失效，显示 “DIE”，而不会读到下一个复用该槽位的计时器。这把第 9 章的设计和 Demo 连了起来。</p>
+
+  <h2>15.8 游戏结束之后发生了什么</h2>
+  <!--code:text:寿命耗尽 → GAME OVER-->
+TimerSystem 阶段二B → OnBodyExploded → Die(isExplosion: true)
+  ├ isDying = true
+  ├ 玩家 + 爆炸 → World.AuthorityGameMode.EndMatch()            （Pawn 直接调用裁判）
+  │    └ SurvivalGameMode.EndMatch → AGameMode.EndMatch → SetMatchState(WaitingPostMatch) → Trigger(MatchStateChanged)
+  │                                                                  ⚠ 本场景没有任何监听者 → Trigger 直接返回
+  │      → StopTimer("AISpawner")                                     （重入：停止另一个计时器）
+  ├ Controller.UnPossess() → OnUnPossess → StopTimer(自己)          （重入：停止正在执行的自己）
+  │                          → 变黑、关碰撞体（isDying，不再延迟销毁）
+  └ Destroy(gameObject)
+UI：句柄失效 → “DIE”
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>现象（源码推演）</th><th>原因</th><th>该归谁管</th></tr>
+    <tr><td>没有“游戏结束”界面</td><td>MatchStateChanged 无人监听（GamePlayTest2 的 DemoMatchUI 监听了，SoulDecay 没有）</td><td>UI 订阅 GameState 的阶段事件</td></tr>
+    <tr><td><strong>结束后分数还在变</strong></td><td>剩余 AI 继续游走、互相碾碎；<code>AddScore</code> 不检查比赛阶段</td><td>GameMode 裁决：非 InProgress 时拒绝加分</td></tr>
+    <tr><td>玩家灵魂留在场上，没有身体也没有重开</td><td>SoulPlayerController 不自毁，也没有 Restart 流程</td><td>GameMode 的 RestartPlayer / 结算流程</td></tr>
+    <tr><td>AI 持续增长（结束前）</td><td>刷怪没有上限，只有互相碾碎会减少</td><td>GameMode 规则参数</td></tr>
+  </table></div>
+  <p>这几条放在一起，就是第 5 章要讨论的核心问题：<strong>规则没有收口到 GameMode</strong>。Pawn 决定了“谁加分”“何时结束”，GameState 的 AddScore 是 public 的且不校验阶段，所以“比赛已结束”这条规则没有地方生效。</p>
+
+  <h2>15.9 对象池为什么没启用？启用后会遇到什么</h2>
+  <p>【源码事实】三个池子字段已声明、GetOrCreatePawn / GetOrCreateAIController / RecycleObject 已写好，但池子的初始化被注释，SpawnRandomAI 里调用池子的两行也被注释，没有任何地方调用 RecycleObject。【设计意图】从 GameObjectWrapper 出入池时开关 Tick 可以看出，作者已经意识到“入池对象不能继续被 World Tick”。</p>
+  <p>如果现在把它打开，会遇到一串<strong>生命周期</strong>问题——这也是“对象池最难的不是数据结构，而是复位”的最好例子：</p>
+  <div class="tbl"><table>
+    <tr><th>问题</th><th>原因</th></tr>
+    <tr><td>第二次出池不会再 BeginPlay</td><td>AActor 在 <code>Start</code> 里注册，Start 每个组件一生只调用一次；<code>HasBegunPlay</code> 一直为 true。出池需要单独的“重新初始化”钩子</td></tr>
+    <tr><td>入池对象仍在 World 的名单里</td><td>SetActive(false) 不会触发 OnDestroy，World 不会注销它；只能靠 IsTickEnabled = false 阻止 Tick，但名单会一直变长</td></tr>
+    <tr><td>isDying 不会复位</td><td>CombatPawn 的状态字段没有 Reset；复用的肉体第一次被抛弃时不会延迟销毁</td></tr>
+    <tr><td>碰撞体被关掉、名字被改成 Dead Body、材质变黑</td><td>OnUnPossess 里的副作用都需要在出池时撤销（GetOrCreatePawn 里补了名字和碰撞体，但碰撞体是 <code>enabled = false</code> 而不是被删除，“为空才 AddComponent”的判断永远不成立）</td></tr>
+    <tr><td>死亡路径仍然 Destroy</td><td>Die 和 OnUnPossess 都直接 Destroy，没有改成 RecycleObject</td></tr>
+    <tr><td>旧 PoolObject 拷贝能回收别人的对象</td><td>PoolObject 只有 index 没有 generation（第 11 章，实测 E8）</td></tr>
+    <tr><td>参数不一致</td><td>GetOrCreatePawn 里轻型寿命 4.5 s、重型 8 s；CreatePawn 里是 5 s、30 s——死代码与活代码已经分叉</td></tr>
+  </table></div>
+
+  <h2>15.10 Demo 暴露的问题清单</h2>
+  <div class="tbl"><table>
+    <tr><th>级别</th><th>问题</th><th>位置</th><th>影响当前 Demo？</th></tr>
+    <tr><td>P0</td><td>AI 肉体的 <code>_decayTimer</code> 是 default (0,0)，死亡时会停掉槽位 0 的计时器</td><td>CombatPawn.cs:13 / 73 / 174</td><td>当前参数下不会触发（第 9 章 E1）</td></tr>
+    <tr><td>P1</td><td>游戏结束后继续计分；AddScore 不校验比赛阶段</td><td>CombatPawn.OnCollisionEnter、SurvivalGameState.AddScore</td><td>会：结束后画面上的分数仍在变化</td></tr>
+    <tr><td>P1</td><td>Die 不幂等，可能重复计分</td><td>CombatPawn.Die</td><td>需要同一物理步多重碰撞，偶发</td></tr>
+    <tr><td>P1</td><td>规则写在 Pawn / Controller：Pawn 直接 EndMatch、直接加分</td><td>CombatPawn、SoulPlayerController</td><td>功能正常；架构问题</td></tr>
+    <tr><td>P1</td><td>游戏结束无 UI 反馈，无重开流程</td><td>SurvivalUIController 未订阅阶段事件</td><td>会</td></tr>
+    <tr><td>P2</td><td>带 Rigidbody 的物体在 Update 里 <code>transform.Translate</code>，绕过物理（插值失效、可能穿透墙体再被弹回）</td><td>CombatPawn.Move</td><td>高速（轻型速度 8）时更明显</td></tr>
+    <tr><td>P2</td><td><code>_renderer.material</code> 每次访问会为该 Renderer 实例化一份材质；Unity 文档要求自行销毁，否则这些材质实例要等到卸载未使用资源时才释放；也会打断合批</td><td>CombatPawn.OnPossess / OnUnPossess</td><td>每具肉体至少一份材质实例</td></tr>
+    <tr><td>P2</td><td>每次玩家附身：方法组委托、事件对象、事件闭包、日志字符串插值都会分配</td><td>CombatPawn.OnPossess</td><td>频率低，影响小</td></tr>
+    <tr><td>P2</td><td>刷怪无上限，World 注册 O(n)</td><td>SurvivalGameMode.SpawnRandomAI</td><td>长时间存活后逐渐变慢</td></tr>
+    <tr><td>P3</td><td>场景里有两个都叫 “EventSystem” 的物体（Unity UI 的 EventSystem 和自写的 EventSystem），类名也与 <code>UnityEngine.EventSystems.EventSystem</code> 相同</td><td>SoulDecayScene</td><td>易混淆，不影响运行</td></tr>
+    <tr><td>P3</td><td>重/轻肉体参数硬编码在 GameMode 里；死代码与活代码参数分叉</td><td>SurvivalGameMode</td><td>—</td></tr>
+  </table></div>
+
+  <h2>15.11 发散：如果把它做成真正的游戏</h2>
+  <h3>15.11.1 做成联网（状态同步，服务器权威）</h3>
+  <!--code:text:联网版夺舍（扩展知识：项目没有实现网络）-->
+客户端                                  服务器（GameMode 只在这里）
+左键 → 本地射线得到目标 id
+     → RPC：RequestPossess(targetId, 客户端时间戳) ─────►  校验：目标存在且存活？阵营不同？距离/冷却/视线？
+                                                          （延迟补偿：按时间戳回溯目标位置再判断命中）
+                                                          通过 → Possess：改 Controller/Pawn 归属与 Owner
+                                                               → 停旧寿命、开新寿命（服务器计时）
+                                                               → PlayerState.Score += 1（复制给所有人）
+     ◄──── 复制：Pawn.Controller/Owner、阵营、寿命到期时刻 ──────
+客户端：可先做表现层预测（变色、相机切换），被服务器拒绝时回滚
+UI：读 PlayerState / GameState 的复制属性，而不是本地 TimerSystem
+<!--/code-->
+  <ul>
+    <li><b>分数放哪</b>：每个玩家的分数放 PlayerState（每个玩家一份、复制给所有人），全局阶段放 GameState；本项目只有 GameState，三阵营分数混在一起。</li>
+    <li><b>寿命怎么同步</b>：不要每帧同步“剩余时间”，而是同步“到期的服务器时刻”，客户端用同步过的服务器时钟自己算剩余时间——这正对应第 10 章“存绝对到期时刻而不是累加 elapsed”。</li>
+    <li><b>碰撞碾碎</b>：只在服务器判定；客户端的 OnCollisionEnter 只做表现。</li>
+  </ul>
+  <h3>15.11.2 做成帧同步（lockstep）</h3>
+  <p>客户端只上传“第 N 帧点击了目标 X”的输入；所有客户端在同一逻辑帧用同样的确定性逻辑执行夺舍、碰撞、计时。这要求：寿命用逻辑帧计数；物理碰撞改用确定性的自研碰撞（Unity 的 PhysX 物理不保证跨平台确定性）；Perlin 随机游走用同步的随机种子；同帧多个碰撞的结算顺序固定。</p>
+
+  <h2>15.12 面试追问树</h2>
+  <!--code:text:追问树 · SoulDecay-->
+Q15-1 介绍一下你的 Demo
+ └── Q15-2 为什么选这个玩法来测试框架？
+      ├── Q15-3 夺舍时旧肉体、新肉体、AI 灵魂各发生了什么？
+      │    ├── Q15-4 AI 失去肉体为什么自毁？玩家为什么不？
+      │    └── Q15-5 为什么阵营挂在 Controller 上？
+      ├── Q15-6 两个物体碰撞双方都触发回调，怎么只结算一次？体型相同呢？
+      │    └── Q15-7 同一帧两个大的撞同一个小的呢？                  ← 边界 / Die 不幂等
+      ├── Q15-8 UI 怎么显示寿命？为什么敢长期持有 TimerHandle？
+      └── Q15-9 游戏结束后发生了什么？                               ← 让你自己发现 bug
+Q15-10 对象池为什么没启用？打开会出什么问题？
+Q15-11 Pawn 直接调用 GameMode.EndMatch 合适吗？
+Q15-12 做成联网版，夺舍请求怎么校验？分数放哪？
+Q15-13 怎么给这个 Demo 写自动化测试？
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q15-1 / Q15-2　介绍一下你的 Demo，为什么选这个玩法？</div>
+    <p><b>L1 · 30 秒</b>　SoulDecay 是一个“夺舍生存战”：玩家是灵魂，附身的肉体有寿命，到期爆炸，必须不停点击敌人的身体夺舍续命；红蓝 AI 不断刷出，大体型碾碎小体型得分。我选它是因为它把 Possess 从“开局一次”变成了“每几秒一次”的核心循环，同时高频创建、停止计时器，正好压测框架最核心的两块。</p>
+    <p><b>L2 · 正常回答</b>　具体覆盖了：动态生成的 Actor 由 World 统一 BeginPlay/Tick；夺舍时 Controller 先放弃自己的肉体、再把目标的 AI 灵魂踢出去、最后双向绑定；阵营做成 Controller 上的接口，体现“身份属于灵魂”；GameMode 只声明 GameStateClass，父类反射生成计分板；寿命计时器到期的回调里会停止自己、停止刷怪计时器、销毁肉体，验证了计时器的重入安全；UI 通过事件拿到计时器句柄，每帧查询剩余时间。</p>
+    <p><b>L3 · 深入（主动说不足）</b>　它也暴露了框架的问题：加分和判负写在 Pawn 里，游戏结束后分数还会变；AI 肉体的空计时器句柄是默认值，会和第一个计时器冲突，只是当前参数下不会触发；对象池写了但没接入。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q15-6 / Q15-7　碰撞只结算一次？同一帧两个大的撞一个小的？</div>
+    <p><b>L2</b>　双方都会收到 OnCollisionEnter，我用“严格比较体型”保证只有大的一方进入结算，体型相同则都不处理。</p>
+    <p><b>L4 攻击</b>　“那两具大肉体同时撞一具小肉体呢？” → <b>修正回答</b>：这是我的代码的一个漏洞。Destroy 要到帧末才生效，第一次结算后受害者还在，第二次结算会再调用一次 Die 并再加一次分，因为 Die 没有在入口处判断 isDying。应该让 Die 幂等，并且在结算前检查受害者是否已经在死亡流程中。更彻底的做法是把“击杀”作为请求提交给 GameMode，由 GameMode 在一帧内去重后统一结算。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q15-9　游戏结束后发生了什么？</div>
+    <p><b>L2</b>　寿命到期的回调里 Die → EndMatch：阶段切到 WaitingPostMatch、停掉刷怪计时器；然后解绑灵魂、销毁肉体，UI 显示 DIE。</p>
+    <p><b>L3</b>　但有三个问题：阶段事件在这个场景没人监听，没有结算界面；剩下的 AI 还在游走互撞，AddScore 不检查阶段，所以分数还在变；玩家的 Controller 没有身体也没有重开流程。根本原因是规则没收口——“比赛结束后不再计分”应该是 GameMode 的规则，但加分是 Pawn 直接调 GameState 完成的，GameMode 根本插不上手。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q15-11　Pawn 直接调用 GameMode.EndMatch 合适吗？</div>
+    <p><b>L2</b>　不合适。Pawn 应该只上报事实（“我死了，凶手是谁，死因是什么”），由 GameMode 决定这是否意味着比赛结束、谁加分。这样规则集中在一处：换一种模式（比如有复活次数），只需要换 GameMode，不需要改 Pawn。UE 里也是类似思路：伤害和死亡事件最终交给 GameMode 处理击杀与计分，计分结果写到 PlayerState / GameState 再复制出去。</p>
+    <p><b>L3</b>　具体改法：Pawn 死亡时发一个 Logic 优先级的事件，或调用 GameMode 的 <code>NotifyKilled(victim, killer)</code>；GameMode 检查比赛阶段、去重、计分、判断是否结束；GameState 的 AddScore 改成只有 GameMode 能调用。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q15-13　怎么给这个 Demo 写自动化测试？</div>
+    <p><b>L2</b>　分三层。① 纯逻辑：把“能否夺舍”（阵营、存活、是否自己）、“碰撞谁赢”（体型、阵营）、“加分规则”抽成纯函数，用 EditMode 测试覆盖所有组合，包括体型相等、同阵营、结束后加分。② 框架交互：PlayMode 测试里生成一个 Controller 和两个 Pawn，调用 Possess，断言双向引用、AI 灵魂被销毁、旧肉体 3 秒后销毁、计时器句柄失效。③ 场景冒烟：加载 SoulDecayScene，用 <code>Time.captureDeltaTime</code> 之类的手段固定帧时长，跑若干秒，断言没有异常日志、分数单调、结束后分数不变。</p>
+    <p><b>L3</b>　当前代码要先做两件事才好测：TimerSystem / EventSystem 的核心逻辑从 MonoBehaviour 中拆出来，可以手动 Tick；随机数和输入通过接口注入，测试里可控。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“Demo 里用对象池管理了所有肉体，避免了 GC。”</p>
+    <p><b>问题</b>：池子没有初始化，实际走的是 new + Destroy；而且就算打开，也会遇到 BeginPlay 不再触发、状态不复位等问题。</p>
+    <p><b>更好的回答</b>：“我为肉体和 AI 灵魂写了对象池的接入代码，但发现 Actor 的生命周期（Start 只调用一次、SetActive 不会注销）和池化冲突，还没有接入；要接入需要给 Actor 增加出池/入池的生命周期钩子。”</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>玩法：<strong>灵魂附身有保质期，点敌人夺舍续命；大碾小得分</strong>；轻型 0.8/8/5 s，重型 1.5/3/30 s；刷怪每 3 s 无上限。</li>
+    <li>为什么选它：把 <strong>Possess 变成核心循环</strong>，并高频创建/停止计时器、在回调里销毁自身。</li>
+    <li>夺舍链：<strong>放弃旧肉体（停寿命、枯萎、3 s 后销毁）→ 踢出 AI 灵魂（AI 自毁）→ 双向绑定 → 新寿命 + 事件 → 加分</strong>。</li>
+    <li>碰撞：<strong>严格比较体型</strong>保证单方结算；Die 不幂等可能重复计分。</li>
+    <li>UI：<strong>push 句柄 + pull 剩余时间</strong>，句柄带 generation 才敢长期持有。</li>
+    <li>结束后：无结算 UI、<strong>分数仍在变</strong>、无重开——根因是<strong>规则没收口到 GameMode</strong>。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：玩家在轻型肉体里点击一具红队重型肉体，列出这一帧内被停止的计时器、被安排销毁的对象、分数变化。</summary><p>停止：玩家旧肉体的寿命计时器；（AI 重型肉体的 _decayTimer 是 default，也会调用一次 StopTimer(0,0)——若槽位 0 从未复用过，会误停槽位 0 上的计时器）。安排销毁：红队 AI 灵魂（帧末）、旧肉体（3 秒后）。新建：重型肉体的 30 秒寿命计时器。分数：Player +1。</p></details>
+  <details class="quiz"><summary>自测 2：为什么 CombatPawn 的 OnUnPossess 必须在 base.OnUnPossess() 之前读取 this.Controller？</summary><p>需要知道“离开的是谁”来决定枯萎还是保持新鲜。APawn.UnPossessed 先调用 OnUnPossess 再把 Controller 置空，所以在回调里 Controller 仍然有效；CombatPawn 先存一份 leavingController 是更稳妥的写法，即使基类调用顺序以后改变也不受影响。</p></details>
+</section>

@@ -1,0 +1,168 @@
+<div class="part-head" data-toc="第三部分 · 工程与加速">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　工程实现与加速算法</h1>
+  <p>教科书上的 A* 能跑，但离“每帧几十次查询、不卡顿”还有距离。先把数据结构做对，再从图本身下手：JPS 剪掉对称路径，HPA* 把图变小，平滑让路径变自然。</p>
+</div>
+
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>open list 与节点状态：数据结构决定常数</h1>
+    <p class="lead">同一个算法、同样的展开次数，数据结构选错可以慢 2.8 倍，复位方式选错可以慢 90 倍。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>比较 open list 的四种实现，理解 decrease-key 与惰性删除的取舍</li>
+    <li>理解“每次查询清零整图数组”为什么是短查询的性能杀手，掌握 generation 计数</li>
+    <li>写出可以直接用在项目里的工程版 GridPathfinder</li>
+  </ul></div>
+
+  <h2>5.1 A* 的时间花在哪</h2>
+  <p>每展开一个节点要做：一次出堆（log n）、8 次邻居可走性检查、若干次 g 比较和入堆。另外每次查询开始前，要让所有节点的状态回到“未访问”。前者决定长查询的耗时，后者决定短查询的耗时，而<strong>游戏里绝大多数查询都是短查询</strong>：追击目标、走到旁边的掩体、技能落点附近的绕行。</p>
+
+  <h2>5.2 open list 的四种实现</h2>
+  <div class="tbl"><table>
+    <tr><th>实现</th><th>取最小</th><th>插入</th><th>改 key（发现更短的 g）</th><th>特点</th></tr>
+    <tr><td><strong>二叉堆 + 惰性删除</strong></td><td>O(log n)</td><td>O(log n)</td><td>直接再插一份，出队时跳过过期条目</td><td>最简单，<code>std::priority_queue</code> 即可</td></tr>
+    <tr><td>索引二叉堆</td><td>O(log n)</td><td>O(log n)</td><td>O(log n) 原地上浮</td><td>要维护“节点 → 堆中位置”数组；堆里没有重复</td></tr>
+    <tr><td><code>std::set</code></td><td>O(log n)</td><td>O(log n)</td><td>删除旧键再插入</td><td>红黑树，每个节点单独分配内存，缓存不友好</td></tr>
+    <tr><td>无序数组</td><td>O(n) 扫描</td><td>O(1)</td><td>O(1) 原地改</td><td>open 小时反而快；open 大时退化为 O(n²)</td></tr>
+  </table></div>
+  <div class="tbl"><table>
+    <tr><th>E5：随机障碍 25%，512×512</th><th>长查询（平均展开 11757）</th><th>短查询（≤16 格，平均展开 49）</th></tr>
+    <tr><td>priority_queue + 惰性删除</td><td class="yes">1.301 ms</td><td>5.60 us</td></tr>
+    <tr><td>索引二叉堆 + decrease-key</td><td>1.388 ms</td><td>5.54 us</td></tr>
+    <tr><td>std::set + 删除再插入</td><td class="no">2.212 ms</td><td class="no">9.22 us</td></tr>
+    <tr><td>无序数组 + 线性找最小</td><td class="no">3.593 ms</td><td class="yes">5.01 us</td></tr>
+  </table></div>
+  <ul>
+    <li><strong>惰性删除和索引堆几乎一样快</strong>。教科书强调 decrease-key，但在格子图上同一节点被改 key 的次数很少，堆里多出的过期条目代价不大；而索引堆每次交换都要多写一次位置数组。所以<strong>工程上的默认选择就是 priority_queue + 惰性删除</strong>。</li>
+    <li><strong>std::set 慢 70%</strong>：红黑树每个节点单独分配内存，指针跳转多。</li>
+    <li><strong>无序数组在短查询上最快</strong>，因为 open 里只有几十个元素，线性扫描完全在 L1 缓存里，没有堆调整的开销；长查询时 open 有上千个元素，就慢了 2.8 倍。这再次说明：<strong>先看你的查询分布，再选数据结构</strong>。</li>
+  </ul>
+  <div class="co deep"><span class="h">深入一层：整数代价可以用桶队列</span>
+    <p>代价是小整数时，可以把 f 值相同的节点放进同一个桶（数组下标就是 f），取最小只要从当前 f 往后找第一个非空桶，插入和取出都是 O(1)。一致 h 下 f 单调不减，所以“当前桶”的指针只会前进，这叫 <strong>bucket queue / Dial 算法</strong>；值域大时可以用基数堆（radix heap）。它们在大规模寻路服务（比如服务器批量寻路）里能比二叉堆快不少，代价是要预估 f 的范围。另一个常见的小优化是 <strong>4 叉堆</strong>：树更矮，一个节点的孩子在内存里相邻。</p>
+  </div>
+
+  <h2>5.3 节点状态怎么复位</h2>
+  <p>每次查询都需要一张“这个节点的 g / parent / 是否 closed”的表。三种做法：</p>
+  <!--bars {"title":"E5 · 短查询（起终点相距 ≤ 16 格，平均展开 49 个节点）每次耗时","unit":"us","items":[["每次重新分配并清零整图数组",504.45,"r"],["unordered_map 只存访问过的节点",10.17,"o"],["整图数组 + generation 计数",5.60,"g"]],"labw":250,"cap":"<b>图 5-1</b>　512×512 的图，每次查询清零 g / parent / 状态三个数组约 2.4 MB；只展开 49 个节点的查询，90% 以上的时间都花在清零上"} -->
+  <div class="tbl"><table>
+    <tr><th>做法</th><th>长查询</th><th>短查询</th><th>说明</th></tr>
+    <tr><td><strong>整图数组 + generation 计数</strong></td><td class="yes">1.297 ms</td><td class="yes">5.60 us</td><td>数组只分配一次。每个节点另存一个 <code>gen</code> 戳，<code>gen[i] == 当前查询号</code> 才算有效；开始新查询只要把查询号加 1，O(1) 复位</td></tr>
+    <tr><td>每次重新分配并清零</td><td>1.763 ms</td><td class="no">504.45 us</td><td>面试版代码就是这样写的。复位代价 O(V)，和查询长短无关</td></tr>
+    <tr><td><code>unordered_map</code></td><td class="no">2.354 ms</td><td>10.17 us</td><td>只为访问过的节点分配，复位便宜；但每次访问都要哈希、可能分配内存</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：这是区分“写过 demo”和“做过项目”的点</span>
+    <p>被问“你的 A* 怎么优化”时，除了 JPS、分层这些算法层面的回答，能说出“节点状态用 generation 计数复位，避免每次查询清零整张图；open 用惰性删除的二叉堆，容器保留容量不重新分配”，会显得很有工程经验。还要注意 gen 是 32 位计数，<strong>回绕到 0 时要整体清零一次</strong>，否则旧数据会被误认为有效。</p>
+  </div>
+
+  <h2>5.4 其他常数优化</h2>
+  <ul>
+    <li><strong>邻居偏移预计算</strong>：8 个方向的下标偏移 <code>{1, −1, W, −W, W+1, …}</code> 提前算好，不要每次做乘法。</li>
+    <li><strong>地图加一圈边框</strong>：在地图外围加一圈“障碍”，邻居检查就不用判断越界。</li>
+    <li><strong>压缩节点状态</strong>：g 用 int32 就够（512×512 迷宫最长路径 36968 格 × 1414 ≈ 5200 万）；可走性用位图；parent 可以只存 3 比特的方向而不是 int 下标。内存越小，缓存命中率越高。</li>
+    <li><strong>SoA 布局</strong>：g、parent、gen 分别放在连续数组里，热循环只碰需要的字段。</li>
+    <li><strong>容器复用</strong>：open 的 vector 每次 <code>clear()</code> 而不是重新构造，保留容量。</li>
+  </ul>
+
+  <h2>5.5 工程版 GridPathfinder</h2>
+  <p>把上面的要点组合起来：generation 复位、惰性删除二叉堆、全序比较器（为帧同步准备）、禁止切角、展开上限。代码在 <code>demos/astar_engineering.cpp</code>，在 256×256 随机图上和 Dijkstra 对比了 300 次查询，代价全部一致（<code>engineering_output.txt</code>：294 次最短且正确，6 次不可达，0 错误，平均 0.446 ms）。</p>
+<!--code:cpp:GridPathfinder（工程版，可直接用于项目；demo 中另有 cost() / lastExpanded() 两个访问器，此处省略）-->
+class GridPathfinder {
+public:
+    explicit GridPathfinder(const Grid& grid)
+        : grid_(grid), n_(grid.w * grid.h), g_(n_), parent_(n_), seenGen_(n_, 0), closedGen_(n_, 0) {
+        const int W = grid.w;
+        const int off[8] = {1, -1, W, -W, W + 1, -W + 1, W - 1, -W - 1};   // 与 DX/DY 顺序一致
+        std::copy(off, off + 8, offset_);
+        heap_.reserve(4096);
+    }
+
+    // 找到返回 true，path 为格子下标序列（含起终点）；maxExpand 限制单次查询的展开数
+    bool find(int s, int t, std::vector<int>& path, int maxExpand = INT_MAX) {
+        if (++gen_ == 0) {                                   // 40 亿次查询后回绕：整体清零一次
+            std::fill(seenGen_.begin(), seenGen_.end(), 0u);
+            std::fill(closedGen_.begin(), closedGen_.end(), 0u);
+            gen_ = 1;
+        }
+        heap_.clear();                                       // 保留容量，不重新分配
+        path.clear();
+        const int W = grid_.w, tx = t % W, ty = t / W;
+        auto h = [&](int i) {                                // Octile，直走 1000、斜走 1414
+            int dx = std::abs(i % W - tx), dy = std::abs(i / W - ty);
+            return 1000 * std::max(dx, dy) + 414 * std::min(dx, dy);
+        };
+        push(s, 0, -1, h(s));
+        int expanded = 0;
+        while (!heap_.empty()) {
+            std::pop_heap(heap_.begin(), heap_.end(), Cmp{});
+            OpenE e = heap_.back(); heap_.pop_back();
+            if (closedGen_[e.i] == gen_) continue;           // 惰性删除
+            closedGen_[e.i] = gen_;
+            if (e.i == t) { build(t, path); return true; }
+            if (++expanded > maxExpand) break;
+            const int x = e.i % W, y = e.i / W;
+            for (int d = 0; d < 8; ++d) {
+                if (!canMove(x, y, d)) continue;
+                const int j = e.i + offset_[d];
+                if (closedGen_[j] == gen_) continue;
+                const int ng = g_[e.i] + (d < 4 ? 1000 : 1414);   // int32 足够：最长路径 × 1414 远小于 2^31
+                if (seenGen_[j] == gen_ && ng >= g_[j]) continue;
+                push(j, ng, e.i, h(j));
+            }
+        }
+        return false;
+    }
+
+private:
+    struct OpenE { int f, h, i; };
+    struct Cmp {   // 全序：f 小 → h 小 → 下标小。任何平台、任何堆实现结果都相同
+        bool operator()(const OpenE& a, const OpenE& b) const {
+            if (a.f != b.f) return a.f > b.f;
+            if (a.h != b.h) return a.h > b.h;
+            return a.i > b.i;
+        }
+    };
+    static constexpr int DX[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+    static constexpr int DY[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+    bool canMove(int x, int y, int d) const {
+        if (!grid_.walkable(x + DX[d], y + DY[d])) return false;
+        return d < 4 || (grid_.walkable(x + DX[d], y) && grid_.walkable(x, y + DY[d]));   // 禁止切角
+    }
+    void push(int i, int g, int p, int h) {
+        seenGen_[i] = gen_; g_[i] = g; parent_[i] = p;
+        heap_.push_back({g + h, h, i});
+        std::push_heap(heap_.begin(), heap_.end(), Cmp{});
+    }
+    void build(int t, std::vector<int>& path) const {
+        for (int i = t; i != -1; i = parent_[i]) path.push_back(i);
+        std::reverse(path.begin(), path.end());
+    }
+
+    const Grid& grid_;
+    int n_;
+    std::vector<int> g_, parent_;
+    std::vector<uint32_t> seenGen_, closedGen_;   // == gen_ 才算本次查询的有效数据
+    uint32_t gen_ = 0;
+    std::vector<OpenE> heap_;
+    int offset_[8];
+};
+<!--/code-->
+
+  <h2>5.6 多线程寻路</h2>
+  <p>寻路是只读地图、彼此独立的计算，很适合放到工作线程：</p>
+  <ul>
+    <li><strong>每个线程一份搜索状态</strong>：GridPathfinder 里的 g / parent / gen / heap 都是可变状态，不能共享，每个工作线程各持有一个实例。地图数据只读共享。Detour 的 <code>dtNavMeshQuery</code> 也是这个设计：navmesh 共享，query 对象每线程一个。</li>
+    <li><strong>请求队列 + 回调</strong>：游戏逻辑提交请求，下一帧或几帧后拿到结果。UE 的 <code>FindPathAsync</code> 就是这种异步接口。</li>
+    <li><strong>地图修改要同步</strong>：动态障碍改变地图时，要么加读写锁，要么用双缓冲（逻辑帧末尾交换），保证搜索过程中地图不变。</li>
+    <li><strong>帧同步游戏要小心</strong>：异步寻路的结果必须在一个<strong>确定的逻辑帧</strong>生效（比如“请求帧 + 2”），而不是“哪一帧算完就哪一帧用”，否则各端时序不同就会不同步。</li>
+  </ul>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>open：<strong>priority_queue + 惰性删除</strong>是默认选择，和索引堆一样快（1.30 对 1.39 ms），std::set 慢 70%；open 很小时线性数组最快。</li>
+    <li>节点状态：<strong>整图数组 + generation 计数</strong>，O(1) 复位；每次清零整图会让短查询慢 90 倍（504 对 5.6 us）。gen 回绕时整体清零一次。</li>
+    <li>常数优化：邻居偏移预计算、外围加边框、int32 g、SoA、容器复用。</li>
+    <li>多线程：地图只读共享、搜索状态每线程一份；帧同步下异步结果必须在确定的逻辑帧生效。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：惰性删除会让堆变多大？</summary><p>每次发现更短的 g 都会多一个条目，堆的大小上限是总入堆次数，约为展开数 × 平均有效邻居数。格子图上同一节点被改进的次数很少（一般 0～2 次），实际只比索引堆大一些。如果担心内存，可以在堆过大时重建一次，丢掉过期条目。</p></details>
+</section>

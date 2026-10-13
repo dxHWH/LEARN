@@ -1,0 +1,167 @@
+<section class="chapter" id="ch7">
+  <div class="ch-head">
+    <div class="no">CHAPTER 07</div>
+    <h1>状态机、过渡与惯性化，蒙太奇与 Root Motion</h1>
+    <p class="lead">状态机决定“现在该放哪类动画”，过渡决定“怎么换过去”，蒙太奇负责“代码说放就放”的一次性动作，Root Motion 决定“谁来移动角色”。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>掌握状态机的组成：状态、过渡规则、Conduit、State Alias、优先级</li>
+    <li>理解交叉淡化的代价，以及惯性化“只算目标姿势”的原理和限制</li>
+    <li>说清蒙太奇的 Slot / Section / Notify 结构和常用 API</li>
+    <li>知道 Root Motion 的四种模式，以及为什么网络游戏通常只用蒙太奇的 Root Motion</li>
+  </ul></div>
+
+  <h2>7.1 状态机的组成</h2>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="40" cy="70" r="12" fill="#111827"/><text x="40" y="100" text-anchor="middle" class="xs">Entry</text>
+    <g class="sm b" text-anchor="middle">
+      <rect x="90" y="48" width="110" height="44" rx="22" fill="#EAF0FD" stroke="#2F5BD3"/><text x="145" y="75">Idle</text>
+      <rect x="270" y="48" width="110" height="44" rx="22" fill="#EAF0FD" stroke="#2F5BD3"/><text x="325" y="75">Start</text>
+      <rect x="450" y="48" width="130" height="44" rx="22" fill="#EAF0FD" stroke="#2F5BD3"/><text x="515" y="75">Cycle（混合空间）</text>
+      <rect x="650" y="48" width="110" height="44" rx="22" fill="#EAF0FD" stroke="#2F5BD3"/><text x="705" y="75">Stop</text>
+      <rect x="270" y="170" width="110" height="44" rx="22" fill="#F3EEFE" stroke="#6D28D9"/><text x="325" y="197">JumpStart</text>
+      <rect x="450" y="170" width="130" height="44" rx="22" fill="#F3EEFE" stroke="#6D28D9"/><text x="515" y="197">FallLoop</text>
+      <rect x="650" y="170" width="110" height="44" rx="22" fill="#F3EEFE" stroke="#6D28D9"/><text x="705" y="197">Land</text>
+    </g>
+    <path d="M145,150 l18,18 l-18,18 l-18,-18 z" fill="#FEF6E4" stroke="#B45309"/><text x="145" y="212" text-anchor="middle" class="xs">Conduit</text>
+    <rect x="58" y="226" width="180" height="26" rx="13" fill="#FFF" stroke="#9CA3AF" stroke-dasharray="4 3"/><text x="148" y="243" text-anchor="middle" class="xs">State Alias：任意地面状态</text>
+    <g fill="none" stroke="#4B5563" stroke-width="1.4">
+      <line x1="52" y1="70" x2="86" y2="70" marker-end="url(#a)"/>
+      <line x1="200" y1="62" x2="266" y2="62" marker-end="url(#a)"/>
+      <line x1="380" y1="62" x2="446" y2="62" marker-end="url(#a)"/>
+      <line x1="580" y1="62" x2="646" y2="62" marker-end="url(#a)"/>
+      <path d="M705,48 C705,10 145,10 145,44" marker-end="url(#a)"/>
+      <path d="M266,80 H210" marker-end="url(#a)"/>
+      <path d="M148,226 V190"/>
+      <path d="M163,168 C220,168 230,192 266,192" marker-end="url(#a)"/>
+      <line x1="380" y1="192" x2="446" y2="192" marker-end="url(#a)"/>
+      <line x1="580" y1="192" x2="646" y2="192" marker-end="url(#a)"/>
+      <path d="M705,170 V96" marker-end="url(#a)"/>
+    </g>
+    <g class="xs">
+      <text x="233" y="54" text-anchor="middle">速度 &gt; 10</text><text x="413" y="54" text-anchor="middle">快播完</text>
+      <text x="613" y="54" text-anchor="middle">无输入</text><text x="430" y="40" text-anchor="middle">Stop 播完 → Idle（自动规则）</text>
+      <text x="238" y="96" text-anchor="middle">输入取消</text>
+      <text x="210" y="162">跳起</text><text x="413" y="184" text-anchor="middle">播完</text><text x="613" y="184" text-anchor="middle">落地</text>
+      <text x="712" y="140">回到地面状态</text>
+    </g>
+  </svg>
+  <figcaption><b>图 7-1</b>　一个典型的运动状态机：起步 → 循环 → 急停，跳跃三段式。Conduit 把“从任意地面状态起跳”的共同判断收拢到一处；State Alias 代表一组状态，避免每个状态都连一条线</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>元素</th><th>说明</th></tr>
+    <tr><td>State</td><td>里面是一张子 AnimGraph（一个序列、一个混合空间、甚至嵌套状态机）</td></tr>
+    <tr><td>Transition Rule</td><td>返回 bool 的小图，满足就开始过渡。可勾选 <strong>Automatic Rule Based on Sequence Player in State</strong>：源状态的序列快播完时自动过渡（时间由过渡时长决定）</td></tr>
+    <tr><td>Priority Order</td><td>同一状态有多条过渡同时满足时，按优先级取一条</td></tr>
+    <tr><td>Conduit</td><td>不播放动画的“路口”，用来合并共同条件或做多路分发</td></tr>
+    <tr><td>State Alias</td><td>代表多个状态的别名，从它出发的过渡对这些状态都生效</td></tr>
+    <tr><td>过渡设置</td><td>Duration、Blend Logic（Standard Blend / <strong>Inertialization</strong> / Custom）、Blend Mode 曲线、Blend Profile（按骨骼不同速度）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：状态机里的规则要“读变量”而不是“算逻辑”</span>
+    <p>过渡规则每帧都要对当前状态的所有出边求值。把复杂判断（Cast、函数调用）写进规则里，开销会随状态数和角色数放大，还可能在工作线程里访问不安全的数据。正确做法是在线程安全更新里算好 <code>bShouldMove</code>、<code>bIsFalling</code> 这些布尔量，规则里只读变量（这样也能走 Fast Path）。</p>
+  </div>
+
+  <h2>7.2 交叉淡化：过渡期间两边都要算</h2>
+  <p>标准过渡（Standard Blend）在 Duration 内把源状态和目标状态的姿势按权重混合。<strong>过渡期间两个状态都要 Update、Evaluate</strong>：源状态里如果是一个 3 采样的混合空间，目标状态也是，那这几帧就要解压、混合 6 条动画。过渡被打断时（例如 A→B 过渡中又触发 B→C），UE 会把正在进行的过渡当作源，形成嵌套混合，最坏情况下同时求值三四个状态。</p>
+
+  <h2>7.3 惯性化：只算目标，把差值衰减掉</h2>
+  <p>惯性化（Inertialization，来自 Gears of War 4 的 GDC 2018 分享）换了个思路：切换的那一刻<strong>立即只求值目标姿势</strong>，同时记录切换瞬间源与目标的<strong>差值 x₀ 和差值的速度 v₀</strong>，之后每帧把一个随时间衰减到 0 的偏移加到目标姿势上。衰减曲线是一个五次多项式，满足：</p>
+<!--code:text:惯性化的偏移曲线（逐骨骼、逐分量）-->
+x(0) = x0, x'(0) = v0                      // 从切换瞬间的位置差和速度差出发
+x(t1) = 0, x'(t1) = 0, x''(t1) = 0           // 在 t1（过渡时长）处平滑归零
+v0 若方向背离目标则钳为 0；若 v0 会让偏移提前过零，则缩短 t1 = min(t1, -5·x0/v0)
+a0 = max(0, (-8·v0·t1 - 20·x0) / t1²)
+x(t) = A t⁵ + B t⁴ + C t³ + a0/2 · t² + v0 t + x0
+输出姿势 = 目标姿势(t) + x(t)               // 旋转用轴角形式的差值
+<!--/code-->
+  <!--curves {"t0":0.4,"T":0.2,"range":[0.2,0.9],"methods":["cut","linear","smooth","inertial"],
+    "cap":"<b>图 7-2</b>　同一次切换的四种处理（构建时按 E7 的同一公式计算）。硬切有 38° 的跳变；线性淡化位置连续但速度有折角；惯性化从源动画的运动趋势自然地“拐”向目标"} -->
+  <div class="co ver"><span class="h">实测 E7：单根骨骼角度信号，0.40 s 切换，过渡 0.2 s，120 Hz 采样</span>
+    <div class="tbl"><table>
+      <tr><th>方法</th><th>最大单帧跳变</th><th>最大速度突变</th><th>过渡期内姿势求值次数（60 fps）</th></tr>
+      <tr><td>硬切</td><td class="no">38.30°</td><td class="no">4515.0 °/s</td><td>12</td></tr>
+      <tr><td>线性交叉淡化</td><td>3.60°</td><td class="mid">183.3 °/s</td><td>24</td></tr>
+      <tr><td>SmoothStep 淡化</td><td>3.33°</td><td>51.7 °/s</td><td>24</td></tr>
+      <tr><td><strong>惯性化</strong></td><td class="yes">2.29°</td><td class="yes">39.5 °/s</td><td><strong>12</strong></td></tr>
+    </table></div>
+    <p>参考：源动画自身每帧最大变化 2.08°。切换瞬间位置差 36.2°、速度差 −160.1 °/s——差值本来就在朝目标收缩，惯性化利用了这个速度，所以过渡几乎和动画自身的运动一样平顺。</p>
+  </div>
+  <div class="lab alab translab" id="lab-trans"></div><!--/lab-->
+  <h3>在 UE 里怎么用</h3>
+  <ol>
+    <li>在 AnimGraph 里、过渡发生位置的<strong>下游</strong>放一个 <strong>Inertialization</strong> 节点（通常靠近 Output Pose）。</li>
+    <li>把状态机过渡、Blend Poses by Enum 等节点的混合方式设为 Inertialization。它们不再自己混合，而是向下游的 Inertialization 节点发出请求。</li>
+    <li>缺少这个节点时会在消息日志里报运行时错误；多个请求同时到达时取最短的时长。</li>
+  </ol>
+  <div class="co warn"><span class="h">面试注意：惯性化的限制</span>
+    <ul>
+      <li><strong>源姿势停止求值</strong>：源动画里过渡开始之后的 Notify 不会再触发，依赖这些 Notify 的逻辑要改。</li>
+      <li><strong>适合短过渡</strong>（0.1~0.3 s），不适合需要长时间“两个动作同时存在”的混合。</li>
+      <li><strong>频繁打断会劣化</strong>：每次打断都基于当前（已带偏移的）姿势重新计算差值。</li>
+      <li><strong>Dead Blending</strong>：UE 5.3 新增的实验性节点，用源动画的速度向前外推再与目标交叉淡化，姿势差异很大时效果通常更好，但官方不建议在发行项目中依赖它。</li>
+    </ul>
+  </div>
+
+  <h2>7.4 蒙太奇：代码驱动的一次性动画</h2>
+  <figure>
+  <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="28" class="b">AM_Attack（Slot：UpperBody）</text>
+    <g class="sm">
+      <rect x="120" y="44" width="200" height="34" fill="#EAF0FD" stroke="#2F5BD3"/><text x="220" y="66" text-anchor="middle" class="b">Combo1</text>
+      <rect x="320" y="44" width="200" height="34" fill="#F3EEFE" stroke="#6D28D9"/><text x="420" y="66" text-anchor="middle" class="b">Combo2</text>
+      <rect x="520" y="44" width="200" height="34" fill="#EAF7EF" stroke="#15803D"/><text x="620" y="66" text-anchor="middle" class="b">Combo3</text>
+      <rect x="720" y="44" width="110" height="34" fill="#F3F4F6" stroke="#6B7280"/><text x="775" y="66" text-anchor="middle" class="b">Recover</text>
+      <text x="20" y="66">Sections</text>
+      <text x="20" y="110">Notifies</text>
+      <text x="20" y="154">Blend</text>
+    </g>
+    <g>
+      <path d="M200,94 l6,10 h-12 z" fill="#C2410C"/><text x="200" y="124" text-anchor="middle" class="xs">开伤害判定（State）</text>
+      <rect x="200" y="96" width="70" height="6" fill="#FED7AA"/>
+      <path d="M290,94 l6,10 h-12 z" fill="#B91C1C"/><text x="292" y="138" text-anchor="middle" class="xs">连招窗口 Branching Point</text>
+      <path d="M470,94 l6,10 h-12 z" fill="#B91C1C"/>
+      <path d="M600,94 l6,10 h-12 z" fill="#C2410C"/><text x="600" y="124" text-anchor="middle" class="xs">脚步声</text>
+    </g>
+    <path d="M120,170 L160,146 H790 L830,170" fill="#FEF6E4" stroke="#B45309"/>
+    <text x="140" y="190" class="xs">Blend In</text><text x="810" y="190" text-anchor="end" class="xs">Blend Out（Blend Out Trigger Time 前开始淡出）</text>
+    <path d="M320,40 C330,20 410,20 420,40" fill="none" stroke="#6D28D9" stroke-width="1.3" stroke-dasharray="3 3" marker-end="url(#ap)"/>
+    <text x="370" y="16" text-anchor="middle" class="xs" style="fill:#6D28D9">Montage_SetNextSection / JumpToSection</text>
+  </svg>
+  <figcaption><b>图 7-3</b>　一个连招蒙太奇：分段（Section）可以按默认顺序串接，也可以由代码在连招窗口内跳转；Notify 驱动伤害判定和音效；首尾有淡入淡出</figcaption>
+  </figure>
+  <ul>
+    <li><strong>Slot</strong>：蒙太奇不进状态机，而是播放到 AnimGraph 里的 <strong>Slot 节点</strong>上。Slot 名形如 <code>DefaultGroup.UpperBody</code>。<strong>同一 Slot Group 同时只能播放一个蒙太奇</strong>，新播放的会把旧的淡出。</li>
+    <li><strong>Section</strong>：把一条蒙太奇切成若干段，可设置每段结束后跳到哪段（可循环），用于连招、读条循环、开始-循环-结束三段式技能。</li>
+    <li><strong>常用 API</strong>：<code>Montage_Play</code> / <code>PlayAnimMontage</code>、<code>Montage_JumpToSection</code>、<code>Montage_SetNextSection</code>、<code>Montage_Stop</code>、<code>Montage_SetPlayRate</code>；委托 <code>OnMontageBlendingOut</code>、<code>OnMontageEnded</code>（注意被打断时也会回调，参数里有 <code>bInterrupted</code>）。GAS 里对应 <code>PlayMontageAndWait</code> 这个 Ability Task。</li>
+  </ul>
+  <div class="co tip"><span class="h">Branching Point 与普通 Notify</span>
+    <p>普通 Notify 排队到游戏线程统一派发，可能晚一帧；<strong>Branching Point</strong> 在推进蒙太奇时间时立即同步触发，触发点精确到这一帧扫过的位置，适合“在第 0.45 秒检查是否按了下一次攻击键，按了就跳 Section”这种对时机敏感的逻辑。代价是它会打断时间推进、在游戏线程执行，所以只在需要时用。</p>
+  </div>
+
+  <h2>7.5 Root Motion：谁来移动角色</h2>
+  <div class="tbl"><table>
+    <tr><th>模式（Root Motion Mode）</th><th>行为</th><th>适用</th></tr>
+    <tr><td>No Root Motion Extraction</td><td>root 骨骼的位移留在姿势里，网格会“跑出”胶囊体</td><td>很少用</td></tr>
+    <tr><td>Ignore Root Motion</td><td>提取出来但丢掉，root 被锁在原地</td><td>只要原地动画</td></tr>
+    <tr><td><strong>Root Motion from Montages Only</strong>（默认）</td><td>只有蒙太奇的位移交给移动组件</td><td>网络游戏的标准做法</td></tr>
+    <tr><td>Root Motion from Everything</td><td>所有动画（含混合空间、状态机）的位移按权重混合后交给移动</td><td>单机、动作精确的移动；网络预测难做</td></tr>
+  </table></div>
+  <div class="cards">
+    <div class="card"><div class="t">In-Place + 代码移动</div><p>移动由 CharacterMovement 决定，动画只负责“看起来像在走”。<strong>响应快、好做网络预测</strong>，但容易滑步，需要混合空间速度匹配、步幅调整来补救。</p></div>
+    <div class="card"><div class="t">Root Motion</div><p>动画决定位移，<strong>脚和地面严丝合缝</strong>，适合攻击突进、翻滚、攀爬、处决。缺点是操控不够跟手，网络同步要额外处理。</p></div>
+  </div>
+  <div class="co deep"><span class="h">深入：Root Motion 在网络中怎么同步</span>
+    <p>CharacterMovementComponent 对<strong>蒙太奇的 Root Motion</strong> 做了预测支持：客户端本地播放蒙太奇并用提取出的位移移动，把移动当作普通的预测移动发给服务器；服务器也播放同一个蒙太奇，用相同位移校验；模拟代理通过复制的蒙太奇状态（当前蒙太奇、播放位置、速率等）对齐。之所以“只支持蒙太奇”，是因为蒙太奇的播放是确定的、可以按位置重放；而状态机 / 混合空间的 Root Motion 依赖每帧的权重和输入，服务器和客户端很难算得完全一样。程序化的位移（击退、冲刺）可以用 <strong>Root Motion Source</strong>，它同样被移动组件预测和同步。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>状态机 = 状态 + 过渡规则（可自动按剩余时间）+ Conduit + State Alias + 优先级；规则里只读预先算好的变量。</li>
+    <li>交叉淡化过渡期<strong>两边都求值</strong>，打断会叠成多层混合。</li>
+    <li><strong>惯性化</strong>：只求值目标，加一个按五次多项式衰减的差值；E7：跳变 2.29°、速度突变 39.5°/s、求值次数减半。需要下游 Inertialization 节点；源 Notify 不再触发。</li>
+    <li>蒙太奇播到 <strong>Slot</strong>，同组互斥；Section 做连招；Branching Point 精确触发。</li>
+    <li>Root Motion 默认只取蒙太奇的，因为蒙太奇可确定性重放，便于网络预测；程序化位移用 Root Motion Source。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：同时在 UpperBody 和 FullBody 两个 Slot 上播放蒙太奇，会互相打断吗？</summary><p>取决于它们是否在同一个 Slot Group。不同 Group 的 Slot 可以同时各播一个蒙太奇；同一 Group 内同时只能有一个，新的会让旧的淡出（旧蒙太奇的 OnMontageBlendingOut / OnMontageEnded 以 bInterrupted=true 回调）。所以“上半身换弹”和“全身受击”通常放在不同组，或者设计成受击打断换弹。</p></details>
+  <details class="quiz"><summary>自测：攻击蒙太奇带 Root Motion，角色撞墙后为什么还在“原地踏步往前冲”？</summary><p>Root Motion 只是把位移交给移动组件，移动组件仍然做碰撞，所以角色被墙挡住；但动画本身继续播放向前突进的姿势。常见做法是在 Notify 或代码里检测阻挡后提前跳到收招 Section，或者用 Motion Warping 把位移缩放到“刚好贴到目标 / 墙面”的距离（第 8 章）。</p></details>
+</section>

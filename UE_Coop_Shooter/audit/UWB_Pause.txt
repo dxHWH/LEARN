@@ -1,0 +1,33 @@
+# /Game/UI/UWB_Pause  (WidgetBlueprint)
+ParentClass: /Script/UMG.UserWidget
+
+## UWB_Pause_C Default__UWB_Pause_C
+   bHasScriptImplementedTick = False
+   bHasScriptImplementedPaint = False
+
+## Custom events / RPC
+
+## Graph UWB_Pause.EventGraph
+
+Event 继续游戏按钮.OnClicked():  #49
+  SetInputMode_GameOnly(PlayerController=GetPlayerController(PlayerIndex=0), bFlushInput=false)  #43
+  bShowMouseCursor(bShowMouseCursor=true, self=GetPlayerController(PlayerIndex=0))  #56
+  SetGamePaused(bPaused=false)  #44
+  RemoveFromParent()  #48
+
+Event 退出游戏按钮.OnClicked():  #50
+  QuitGame(SpecificPlayer=∅, QuitPreference=Quit, bIgnorePlatformRestrictions=false)  #45
+
+Event 重新开始按钮.OnClicked():  #51
+  OpenLevel(LevelName="CoffeeShopA_P", bAbsolute=true, Options=∅)  #46
+
+Event PreConstruct(IsDesignTime):  #52
+
+Event Construct():  #53
+  SetInputMode_UIOnlyEx(PlayerController=GetPlayerController(PlayerIndex=0), InWidgetToFocus=None, InMouseLockMode=LockAlways, bFlushInput=false)  #41
+  bShowMouseCursor(bShowMouseCursor=true, self=GetPlayerController(PlayerIndex=0))  #57
+  PlayAnimation(InAnimation=淡入, StartAtTime=0.000000, NumLoopsToPlay=1, PlayMode=Forward, PlaybackSpeed=1.000000, bRestoreState=false)  #47
+
+Event Tick(MyGeometry, InDeltaTime):  #54
+  // node #52 Event PreConstruct EnabledState=ENodeEnabledState::Disabled
+  // node #54 Event Tick EnabledState=ENodeEnabledState::Disabled

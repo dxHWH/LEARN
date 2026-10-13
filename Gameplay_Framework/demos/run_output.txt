@@ -1,0 +1,78 @@
+
+==================== E1 default(TimerHandle) 别名问题 ====================
+[A] 当前 Demo 顺序：playerDecay=(0,0) spawner=(1,0)
+    AI 肉体的 _decayTimer=(0,0)，!= Invalid ? true，IsHandleValid ? true(危险)
+    AI 死亡后：玩家寿命计时器 IsHandleValid=false，剩余=0.00 s → UI 显示 DIE，且玩家永不爆炸
+[B] 若刷怪器先创建：spawner=(0,0) 在任意 AI 死亡后 IsHandleValid=false → 刷怪停止
+[C] slot0 被复用过一次之后：t1=(0,1)，default 句柄已失效，t1 存活=true（所以当前 Demo 能侥幸跑通）
+
+==================== E2 空闲槽 + 残留映射 + 伪造句柄 ====================
+Stop(B) 后：_handleToIndex[1]=1（残留，未置 -1），_generations[1]=1，slot1 位于 free list
+伪造句柄 (1,1) IsHandleValid=true，GetTimeRemaining=30.0（读到的是 C 的数据）
+StopTimer(伪造) 后：A 有效=true C 有效=true，但 C 的 dense 下标=1 ≥ _timerCount=1 → C 成了僵尸句柄（不再 Tick）
+    同时 slot1 被第二次压入 free list（长度=2，含重复下标）
+    新建 D=(1,2) 落在 dense[1] → 用 C 的句柄查询剩余时间=99.0（读到的是 D）
+
+==================== E3 interval 追赶语义 (interval=0.1s, 一帧 dt=0.6s) ====================
+isChase=true  卡顿帧触发 5 次，intervalElapsed=0；下一帧(16ms)再触发 0 次
+isChase=false 卡顿帧触发 1 次，intervalElapsed=0；下一帧(16ms)再触发 0 次
+isChase=true  dt=0.35s 触发 3 次，余量 intervalElapsed=0.0500000045（相位被保留）
+isChase=true  dt=0.5s 触发 5 次，余量=1.49011612e-08（float 0.5-5*0.1 不精确为 0）
+Loop(duration=0.1) 卡顿 0.35s 后各帧 onComplete 次数：1 1 1 0 1 0 → 每帧至多 1 次但不丢弃，欠账分摊到后续帧（与 interval 的封顶+清零语义不一致）
+Loop(duration=0) 5 帧触发 5 次 → 每帧必触发，没有参数校验
+
+==================== E4 回调重入安全性 ====================
+A=(0,0) B=(1,0) 回调序列：A.complete C=(0,1) 
+→ B 的旧句柄被 generation 拦截；C 复用 slot0 但代数为 1，旧句柄无法访问它
+创建顺序 1,2,3,0(重建) 的同帧到期回调顺序：0 1 2 3 
+
+==================== E5 测试用例的顺序依赖 (FIFO free list) ====================
+free list 预留 0 个槽：h1=(0,0) h2=(0,1) → GenerationIncrement PASS, IndexReuse PASS
+free list 预留 1 个槽：h1=(0,1) h2=(0,2) → GenerationIncrement PASS, IndexReuse PASS
+free list 预留 2 个槽：h1=(0,1) h2=(1,1) → GenerationIncrement FAIL, IndexReuse FAIL
+
+==================== E6 generation 溢出估算 ====================
+同一 slot 每秒复用      1 次 → 4.97e+04 天后 generation 回到同一值
+同一 slot 每秒复用     60 次 → 829 天后 generation 回到同一值
+同一 slot 每秒复用   1000 次 → 49.7 天后 generation 回到同一值
+int.MaxValue + 1 (unchecked) = -2147483648
+
+==================== E7 EventSystem 双缓冲 / 溢出 / 快照 / 异常 ====================
+(a) A↔B 互相触发，5 帧派发序列：| A | B | A | B | A  最大调用深度=1
+(b) 单帧 Trigger 2001 次 → 派发 2000 次，静默丢弃 1 次（无日志、无返回值）
+(c) 已注销的监听者在下一帧仍被调用 1 次（快照语义；若监听者是已销毁的 UI → MissingReferenceException）
+(d) 派发序列 |F1: E1 (异常逃出 Update) |F2: E4 |F3: E2 E3 → E2/E3 晚 2 帧且排到 E4 之后（乱序）
+(e) 先 Trigger Appearance 后 Trigger Logic：|F1: Logic Appearance |F2: Appearance 
+
+==================== E8 ObjectPool 陈旧 PoolObject 拷贝 ====================
+a.index=3 b.index=3；Recycle(a)=true，随后 Recycle(旧拷贝)=true → b 手里的对象 inUse=false（被别人回收了）
+default(PoolObject).index=0 → 若 slot0 正在使用，Recycle(default) 会解引用 null elem（C# 中为 NullReferenceException）
+
+==================== E9 World 倒序遍历 + Tick 中注销更低下标的 Actor ====================
+各 Actor 本帧 Tick 次数：A0=1 A1=0 A2=1 A3=2 A4=1 
+→ 删除自己/已遍历元素安全；删除更低下标元素会让当前 Actor 被 Tick 两次
+
+==================== E10 跨场景：旧场景的句柄在新场景的 TimerSystem 上仍然有效 ====================
+旧句柄=(0,0) 新场景第一个计时器=(0,0) → sceneB.IsHandleValid(旧)=true，剩余=60.0 s（读到的是新计时器）
+sceneB.StopTimer(旧句柄) 后新计时器存活=false
+
+==================== E11 timeScale=0 时（scaled dt=0） ====================
+暂停 10 帧：duration=0 的循环计时器触发 10 次；5s 计时器剩余 5.00 s；interval 计时器触发 0 次
+
+==================== E12 Unity 帧时长上限对 interval / loop 的影响 ====================
+真实卡顿 0.6s，scaled   计时器(interval=0.1, chase)：本帧 dt=0.3333333 触发 3 次，余量=0.03333332
+真实卡顿 0.6s，unscaled 计时器(interval=0.1, chase)：本帧 dt=0.6 触发 5 次，余量=0
+真实卡顿 2.0s，scaled   计时器(interval=0.1, chase)：本帧 dt=0.3333333 触发 3 次，余量=0.03333332
+真实卡顿 2.0s，unscaled 计时器(interval=0.1, chase)：本帧 dt=2 触发 5 次，余量=0
+unscaled Loop(duration=0.1)：卡顿帧(2s) + 之后 30 帧(16ms) 每帧触发次数：[1] 111111111111111111111100010000
+→ 总时长 2.480s，理想触发 24 次，实际 24 次；卡顿后连续约 26 帧每帧补 1 次（每帧至多 1 次，欠账分摊）
+
+==================== E13 dense 尾部残留引用（托管层的'泄漏'） ====================
+StopTimer(b) 后：_timerCount=1，被捕获对象仍存活=true（引用残留在 _timers[1]）
+新建一个计时器覆盖该槽后：被捕获对象仍存活=false
+
+==================== E14 float 累加 timeElapsed：已走时间很大时，每帧 +0.016 会被舍入 ====================
+已走     3600 s（0.04 天）后再走 600 帧：理想 +9.600 s，实际 +9.6680 s
+已走    86400 s（1.00 天）后再走 600 帧：理想 +9.600 s，实际 +9.3750 s
+已走   262144 s（3.03 天）后再走 600 帧：理想 +9.600 s，实际 +18.7500 s
+已走   524288 s（6.07 天）后再走 600 帧：理想 +9.600 s，实际 +0.0000 s

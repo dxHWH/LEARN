@@ -1,0 +1,36 @@
+# /Game/UI/UWB_WinOrFail  (WidgetBlueprint)
+ParentClass: /Script/UMG.UserWidget
+
+## UWB_WinOrFail_C Default__UWB_WinOrFail_C
+   bHasScriptImplementedTick = False
+   bHasScriptImplementedPaint = False
+
+## Custom events / RPC
+- CustomEvent 游戏结果   (graph UWB_WinOrFail.EventGraph)
+
+## Graph UWB_WinOrFail.EventGraph
+
+Event 退出游戏按钮.OnClicked():  #48
+  QuitGame(SpecificPlayer=∅, QuitPreference=Quit, bIgnorePlatformRestrictions=false)  #44
+
+Event 重新开始按钮.OnClicked():  #49
+  OpenLevel(LevelName="CoffeeShopA_P", bAbsolute=true, Options=∅)  #45
+
+CustomEvent 游戏结果(游戏是否成功):  #50
+  SetText(self=游戏结果文本, InText=SelectText(A="成功", B="失败", bPickA=CustomEvent 游戏结果#50.游戏是否成功))  #47
+  SetColorAndOpacity(self=游戏结果文本, InColorAndOpacity=MakeSlateColor(SpecifiedColor=SelectColor(A=(R=1.000000,G=0.332452,B=0.000000,A=1.000000), B=(R=1.000000,G=0.000000,B=0.000000,A=0.701961), bPickA=CustomEvent 游戏结果#50.游戏是否成功), ColorUseRule=UseColor_Specified))  #38
+  SetText(self=游戏提示文本, InText=SelectText(A="恭喜你胜利，你可以选择重新开始或退出游戏", B="很遗憾，你失败了，你可以选择重新开始或退出游戏", bPickA=CustomEvent 游戏结果#50.游戏是否成功))  #40
+  PlaySound2D(Sound=Select(Option 0=WAV_Extra_Game_Over, Option 1=WAV_Survival2_Time_to_Breathe_Harp_and_Flute, Index=CustomEvent 游戏结果#50.游戏是否成功), VolumeMultiplier=1.000000, PitchMultiplier=1.000000, StartTime=0.000000, ConcurrencySettings=None, OwningActor=None, bIsUISound=true)  #42
+
+Event PreConstruct(IsDesignTime):  #51
+
+Event Construct():  #52
+  SetInputMode_UIOnlyEx(PlayerController=GetPlayerController(PlayerIndex=0), InWidgetToFocus=None, InMouseLockMode=LockAlways, bFlushInput=false)  #36
+  bShowMouseCursor(bShowMouseCursor=true, self=GetPlayerController(PlayerIndex=0))  #59
+  PlayAnimation(InAnimation=淡入, StartAtTime=0.000000, NumLoopsToPlay=1, PlayMode=Forward, PlaybackSpeed=1.000000, bRestoreState=false)  #46
+
+Event Tick(MyGeometry, InDeltaTime):  #53
+  // comment: 注释
+  // comment: 游戏结果
+  // node #51 Event PreConstruct EnabledState=ENodeEnabledState::Disabled
+  // node #53 Event Tick EnabledState=ENodeEnabledState::Disabled

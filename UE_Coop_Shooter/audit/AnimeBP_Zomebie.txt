@@ -1,0 +1,40 @@
+# /Game/Blueprints/Zombie/AnimeBP_Zomebie  (AnimBlueprint)
+ParentClass: /Script/Engine.AnimInstance
+
+## Variables
+- 待机动画 : object<AnimSequenceBase>
+- 移动动画 : object<AnimSequenceBase>
+- 是否移动 : bool
+- Start Position : real
+
+## AnimeBP_Zomebie_C Default__AnimeBP_Zomebie_C
+   __AnimBlueprintMutables = ('struct', 'AnimBlueprintGeneratedMutableData', {'__FloatProperty': 0.0})
+   AnimBlueprintExtension_PropertyAccess = ('struct', 'AnimSubsystemInstance', {})
+   AnimBlueprintExtension_Base = ('struct', 'AnimSubsystemInstance', {})
+   AnimGraphNode_Root = ('struct', 'AnimNode_Root', {'Result': ('struct', 'PoseLink', {'LinkID': 7, 'SourceLinkID': 0}), 'Name': 'AnimGraph', 'LayerGroup': 'DefaultSharedGroup', 'Initi
+   AnimGraphNode_TransitionResult_1 = ('struct', 'AnimNode_TransitionResult', {'bCanEnterTransition': False, 'InitialUpdateFunction': ('struct', 'AnimNodeFunctionRef', {'ClassName': 'None', 'Functio
+   AnimGraphNode_TransitionResult = ('struct', 'AnimNode_TransitionResult', {'bCanEnterTransition': False, 'InitialUpdateFunction': ('struct', 'AnimNodeFunctionRef', {'ClassName': 'None', 'Functio
+   AnimGraphNode_SequencePlayer_1 = ('struct', 'AnimNode_SequencePlayer', {'GroupName': 'None', 'GroupRole': 'EAnimGroupRole::CanBeLeader', 'Method': 'EAnimSyncMethod::DoNotSync', 'bIgnoreForRelev
+   AnimGraphNode_StateResult_1 = ('struct', 'AnimNode_StateResult', {'StateIndex': 1, 'StateEntryFunction': ('struct', 'AnimNodeFunctionRef', {'ClassName': 'None', 'FunctionName': 'None', 'Clas
+   AnimGraphNode_SequencePlayer = ('struct', 'AnimNode_SequencePlayer', {'GroupName': 'None', 'GroupRole': 'EAnimGroupRole::CanBeLeader', 'Method': 'EAnimSyncMethod::DoNotSync', 'bIgnoreForRelev
+   AnimGraphNode_StateResult = ('struct', 'AnimNode_StateResult', {'StateIndex': 0, 'StateEntryFunction': ('struct', 'AnimNodeFunctionRef', {'ClassName': 'None', 'FunctionName': 'None', 'Clas
+   AnimGraphNode_StateMachine = ('struct', 'AnimNode_StateMachine', {'StateMachineIndexInClass': 0, 'MaxTransitionsPerFrame': 3, 'MaxTransitionsRequests': 32, 'bSkipFirstUpdateTransition': Tru
+   待机动画 = IP_Idle_01
+   移动动画 = IP_Run_Front
+
+## Custom events / RPC
+
+## Graph AnimeBP_Zomebie.AnimGraph.AnimGraphNode_StateMachine_0.New State Machine.AnimStateNode_0.Idle
+
+## Graph AnimeBP_Zomebie.AnimGraph.AnimGraphNode_StateMachine_0.New State Machine.AnimStateNode_1.Move
+
+## Graph AnimeBP_Zomebie.AnimGraph.AnimGraphNode_StateMachine_0.New State Machine.AnimStateTransitionNode_0.Transition
+
+## Graph AnimeBP_Zomebie.AnimGraph.AnimGraphNode_StateMachine_0.New State Machine.AnimStateTransitionNode_1.Transition
+
+## Graph AnimeBP_Zomebie.EventGraph
+
+Event BlueprintUpdateAnimation(DeltaTimeX):  #45
+  Macro IsValid(InputObject=TryGetPawnOwner())  #46
+    [Is Valid]:
+      是否移动(是否移动=Greater_DoubleDouble(A=VSize(A=GetVelocity(self=TryGetPawnOwner())), B=1.000000))  #53

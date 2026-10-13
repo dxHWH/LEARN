@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UE 双人联机射击 Demo：面试复盘与正确实现 —— 游戏客户端秋招电子书</title>
+<style>
+:root{
+  --bg:#FBFAF7; --paper:#FFFFFF; --ink:#1F2937; --ink2:#4B5563; --ink3:#6B7280; --line:#E5E7EB;
+  --brand:#2F5BD3; --brand-soft:#EAF0FD; --accent:#C2410C; --accent-soft:#FFF4EC;
+  --green:#15803D; --green-soft:#EAF7EF; --purple:#6D28D9; --purple-soft:#F3EEFE;
+  --red:#B91C1C; --red-soft:#FDEEEE; --amber:#B45309; --amber-soft:#FEF6E4;
+  --code-bg:#F7F8FA; --code-line:#E8EAEE;
+  --side-w:300px;
+  --font: "PingFang SC","Microsoft YaHei","Noto Sans SC","Hiragino Sans GB",system-ui,sans-serif;
+  --mono: "JetBrains Mono","Cascadia Code",Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:16px;line-height:1.85;-webkit-font-smoothing:antialiased}
+a{color:var(--brand);text-decoration:none}
+a:hover{text-decoration:underline}
+#progress{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--brand),var(--accent));width:0;z-index:100}
+
+/* ---------- sidebar ---------- */
+#side{position:fixed;top:0;left:0;bottom:0;width:var(--side-w);background:#F4F2EC;border-right:1px solid var(--line);overflow-y:auto;padding:22px 14px 40px;z-index:50}
+#side .brand{font-weight:800;font-size:17px;line-height:1.4;padding:0 8px 4px;color:var(--ink)}
+#side .brand small{display:block;font-weight:500;font-size:12px;color:var(--ink3);margin-top:4px}
+#side input{width:100%;margin:14px 0 10px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;font-size:13px}
+#toc{list-style:none;margin:0;padding:0;font-size:13.5px}
+#toc .part{margin:16px 8px 4px;font-size:11.5px;font-weight:700;letter-spacing:.08em;color:var(--accent);text-transform:uppercase}
+#toc a{display:block;padding:4px 8px;border-radius:6px;color:var(--ink2);line-height:1.5}
+#toc a:hover{background:#ECE9E1;text-decoration:none}
+#toc a.ch{font-weight:600;color:var(--ink)}
+#toc a.sec{padding-left:22px;font-size:12.8px;display:none}
+#toc li.open a.sec{display:block}
+#toc a.active{background:var(--brand-soft);color:var(--brand)}
+#menuBtn{display:none;position:fixed;top:12px;left:12px;z-index:60;border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 10px;font-size:14px}
+
+/* ---------- main ---------- */
+main{margin-left:var(--side-w);padding:0 48px 120px}
+.wrap{max-width:900px;margin:0 auto}
+.cover{min-height:92vh;display:flex;flex-direction:column;justify-content:center;padding:60px 0;border-bottom:1px solid var(--line)}
+.cover .kicker{font-size:13px;letter-spacing:.2em;color:var(--accent);font-weight:700}
+.cover h1{font-size:46px;line-height:1.25;margin:18px 0 12px;letter-spacing:-.01em}
+.cover h1 em{font-style:normal;color:var(--brand)}
+.cover .sub{font-size:18px;color:var(--ink2);max-width:680px}
+.cover .meta{margin-top:28px;display:flex;gap:10px;flex-wrap:wrap}
+.pill{display:inline-block;font-size:12.5px;padding:3px 10px;border-radius:999px;background:#fff;border:1px solid var(--line);color:var(--ink2)}
+.pill.b{background:var(--brand-soft);border-color:#C9D7FA;color:var(--brand)}
+.pill.o{background:var(--accent-soft);border-color:#F8D3BC;color:var(--accent)}
+.pill.g{background:var(--green-soft);border-color:#BFE6CC;color:var(--green)}
+.pill.p{background:var(--purple-soft);border-color:#DCCDFB;color:var(--purple)}
+
+.part-head{margin:90px 0 10px;padding:34px 36px;border-radius:16px;background:linear-gradient(135deg,#1E3A8A 0%,#2F5BD3 60%,#4F7BEA 100%);color:#fff}
+.part-head .no{font-size:13px;letter-spacing:.25em;opacity:.85;font-weight:700}
+.part-head h1{margin:6px 0 6px;font-size:32px}
+.part-head p{margin:0;opacity:.92}
+
+section.chapter{padding-top:40px}
+.ch-head{margin:40px 0 24px;padding-bottom:16px;border-bottom:2px solid var(--ink)}
+.ch-head .no{font-family:var(--mono);color:var(--accent);font-weight:700;font-size:14px;letter-spacing:.1em}
+.ch-head h1{font-size:32px;line-height:1.35;margin:4px 0 6px}
+.ch-head .lead{color:var(--ink2);font-size:15.5px;margin:0}
+h2{font-size:23px;margin:46px 0 12px;padding-left:12px;border-left:4px solid var(--brand);line-height:1.45}
+h3{font-size:18.5px;margin:30px 0 8px;color:#111827}
+h4{font-size:16px;margin:22px 0 6px;color:var(--ink2)}
+p{margin:10px 0}
+strong{color:#111827}
+ul,ol{padding-left:24px;margin:8px 0}
+li{margin:3px 0}
+code{font-family:var(--mono);font-size:.88em;background:#F1F2F5;border:1px solid #E6E8EC;padding:1px 5px;border-radius:5px;color:#9A3412;word-break:break-word}
+hr{border:none;border-top:1px dashed var(--line);margin:30px 0}
+
+/* goals box */
+.goals{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 20px;margin:18px 0}
+.goals .t{font-weight:700;font-size:14px;color:var(--ink3);letter-spacing:.06em}
+.goals ul{margin:6px 0 0}
+
+/* callouts */
+.co{border-radius:10px;padding:12px 16px 12px 18px;margin:18px 0;border:1px solid;position:relative;font-size:15px}
+.co .h{font-weight:700;display:block;margin-bottom:2px;font-size:14.5px}
+.co p:first-of-type{margin-top:2px}
+.co.tip{background:var(--green-soft);border-color:#BFE6CC}.co.tip .h{color:var(--green)}
+.co.warn{background:var(--red-soft);border-color:#F5C7C7}.co.warn .h{color:var(--red)}
+.co.deep{background:var(--purple-soft);border-color:#DCCDFB}.co.deep .h{color:var(--purple)}
+.co.net{background:var(--brand-soft);border-color:#C9D7FA}.co.net .h{color:var(--brand)}
+.co.ver{background:var(--amber-soft);border-color:#F3DDA8}.co.ver .h{color:var(--amber)}
+.co.ana{background:#fff;border-color:var(--line);border-left:4px solid var(--accent)}.co.ana .h{color:var(--accent)}
+
+/* figures */
+figure{margin:26px 0;background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 18px 10px}
+figure svg{width:100%;height:auto;display:block}
+figure svg text{font-family:var(--font);fill:#1F2937;font-size:13px}
+figure svg .sm{font-size:11.5px;fill:#4B5563}
+figure svg .xs{font-size:10.5px;fill:#6B7280}
+figure svg .b{font-weight:700}
+figure svg .mono{font-family:var(--mono);font-size:11.5px}
+figure svg .wt{fill:#FFFFFF}
+figure svg text{paint-order:stroke fill;stroke:#FFFFFF;stroke-width:3px;stroke-linejoin:round}
+figure svg .wt{stroke:none}
+@media print{figure svg text{stroke:none}}
+figure svg g.sm text{font-size:11.5px}
+figure svg g.xs text{font-size:10.5px}
+figure svg g.mono text{font-family:var(--mono);font-size:11px}
+figcaption{font-size:13.5px;color:var(--ink3);text-align:center;margin-top:8px}
+figcaption b{color:var(--ink2)}
+
+/* tables */
+.tbl{overflow-x:auto;margin:16px 0}
+table{border-collapse:collapse;width:100%;font-size:14.5px;background:#fff;border-radius:10px;overflow:hidden;border:1px solid var(--line)}
+th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:#F3F4F6;font-weight:700;color:#111827;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+td code{font-size:.84em}
+.yes{color:var(--green);font-weight:700}.no{color:var(--red);font-weight:700}.mid{color:var(--amber);font-weight:700}
+
+/* code */
+.code{margin:16px 0;border:1px solid var(--code-line);border-radius:10px;background:var(--code-bg);overflow:hidden}
+.code .bar{display:flex;justify-content:space-between;align-items:center;padding:5px 12px;background:#EEF0F4;border-bottom:1px solid var(--code-line);font-size:12.5px;color:var(--ink3);font-family:var(--mono)}
+.code .bar button{border:1px solid #D9DCE2;background:#fff;border-radius:6px;font-size:11.5px;padding:1px 8px;cursor:pointer;color:var(--ink2)}
+.code pre{margin:0;padding:12px 16px;overflow-x:auto;font-family:var(--mono);font-size:13.2px;line-height:1.62;color:#24292F;tab-size:4}
+.k{color:#CF222E}.ty{color:#8250DF}.s{color:#0A3069}.c{color:#6E7781;font-style:italic}.n{color:#0550AE}.m{color:#953800}.f{color:#6639BA}
+
+/* steps & cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:16px 0}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 16px}
+.card .t{font-weight:700;margin-bottom:2px}
+.card p{margin:4px 0;font-size:14.5px;color:var(--ink2)}
+.recap{background:#111827;color:#E5E7EB;border-radius:14px;padding:18px 24px;margin:34px 0 10px}
+.recap .t{font-weight:800;color:#FCD34D;letter-spacing:.05em;font-size:14px}
+.recap ul{margin:6px 0 0}
+.recap code{background:#1F2937;border-color:#374151;color:#FCA5A5}
+.recap strong{color:#fff}
+details.quiz{background:#fff;border:1px dashed #CBD5E1;border-radius:12px;padding:10px 16px;margin:12px 0}
+details.quiz summary{cursor:pointer;font-weight:700;color:var(--ink2)}
+details.quiz[open] summary{margin-bottom:6px}
+
+/* interactive */
+.lab{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px 20px;margin:22px 0}
+.lab .t{font-weight:800;color:var(--accent);font-size:14px;letter-spacing:.06em}
+.lab label{font-size:13.5px;color:var(--ink2)}
+.lab input[type=number]{width:80px;padding:3px 6px;border:1px solid var(--line);border-radius:6px;font:inherit;font-size:13.5px}
+.lab input[type=range]{width:220px;vertical-align:middle}
+.lab .row{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;margin:8px 0}
+.lab .out{font-family:var(--mono);font-size:13.5px;background:var(--code-bg);border:1px solid var(--code-line);border-radius:8px;padding:10px 12px;white-space:pre-wrap}
+
+.term{margin:16px 0;border-radius:10px;background:#0F172A;color:#E2E8F0;overflow:hidden;border:1px solid #1E293B}
+.term .bar{padding:5px 12px;background:#1E293B;font-size:12.5px;color:#94A3B8;font-family:var(--mono)}
+.term pre{margin:0;padding:12px 16px;font-family:var(--mono);font-size:12.6px;line-height:1.6;white-space:pre-wrap;word-break:break-all}
+.term .hl{color:#FCD34D;font-weight:700}.term .ok{color:#86EFAC}.term .bad{color:#FCA5A5}
+.ans{background:#fff;border:1px solid var(--line);border-radius:12px;padding:6px 20px 12px;margin:16px 0}
+.ans .q{font-weight:800;font-size:17px;margin:12px 0 4px;color:var(--brand)}
+.st-btn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 10px;margin:3px;font:inherit;font-size:13px;cursor:pointer}
+.st-btn:hover{background:var(--brand-soft)}
+.st-btn:disabled{opacity:.35;cursor:not-allowed}
+@media print{.term{background:#F8FAFC;color:#111;border-color:#CBD5E1}.term .bar{background:#E2E8F0;color:#334155}.term .hl{color:#B45309}.term .ok{color:#15803D}.term .bad{color:#B91C1C}}
+/* ---------- net labs ---------- */
+.nlab .stage{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:14px;align-items:start}
+.nlab canvas{width:100%;display:block;background:#fff;border:1px solid var(--line);border-radius:10px}
+.nlab .side{font-size:13.5px;color:var(--ink2)}
+.nlab .side b{color:var(--ink)}
+.nlab select{font:inherit;font-size:13.5px;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.nlab .kv{font-family:var(--mono);font-size:12.5px;background:var(--code-bg);border:1px solid var(--code-line);border-radius:8px;padding:8px 10px;white-space:pre-wrap;margin-top:4px}
+.nlab .hint{font-size:12.5px;color:var(--ink3);margin-top:6px}
+@media (max-width:720px){.nlab .stage{grid-template-columns:1fr}}
+@media print{.nlab .row{display:none}}
+.tcap{font-size:13.5px;color:var(--ink3);text-align:center;margin:-6px 0 18px}
+.tbl.kv th{width:22%;white-space:normal}
+.tbl.kv td:first-child{font-weight:700;color:#111827;width:20%}
+.ans.chain{border-left:5px solid var(--brand)}
+.ans.chain .q{font-size:15.5px}
+.ans.chain .q.f{color:var(--accent);font-size:14.5px;margin:12px 0 2px 18px}
+.ans.chain .q.f + p{margin-left:18px}
+.ans.chain .q.r{color:var(--green);font-size:14px;margin:12px 0 2px 0}
+.ans.chain .co{margin-left:0}
+.tag.cls{background:#111827;color:#fff}
+.tag{display:inline-block;font-size:11.5px;font-weight:700;padding:0 6px;border-radius:5px;margin-right:4px;vertical-align:1px}
+.tag.p0{background:#FDE2E2;color:#B91C1C}.tag.p1{background:#FFEDD5;color:#C2410C}.tag.p2{background:#FEF3C7;color:#B45309}.tag.p3{background:#E5E7EB;color:#4B5563}
+.tag.src{background:#EAF0FD;color:#2F5BD3}.tag.inf{background:#F3EEFE;color:#6D28D9}.tag.ex{background:#EAF7EF;color:#15803D}
+.foot{margin-top:80px;padding-top:20px;border-top:1px solid var(--line);color:var(--ink3);font-size:13px;text-align:center}
+
+@media (max-width:1000px){
+  #side{transform:translateX(-100%);transition:.25s}
+  #side.show{transform:none;box-shadow:0 0 40px rgba(0,0,0,.15)}
+  #menuBtn{display:block}
+  main{margin-left:0;padding:0 18px 80px}
+  .cover h1{font-size:34px}
+}
+@media print{
+  #side,#menuBtn,#progress,.code .bar button{display:none!important}
+  main{margin:0;padding:0}
+  body{background:#fff;font-size:12pt}
+  .part-head,section.chapter{break-before:page}
+  figure,.code,table,.co{break-inside:avoid}
+  .recap{background:#fff;color:#111;border:1px solid #999}
+  .recap strong{color:#000}
+}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<button id="menuBtn" onclick="document.getElementById('side').classList.toggle('show')">☰ 目录</button>
+<nav id="side">
+  <div class="brand">UE 双人联机射击 Demo<small>面试复盘与正确实现 · 开火 · 绑定 · 同步 · 弱网 · 游戏客户端秋招版</small></div>
+  <input id="q" placeholder="筛选目录（如：Owner、换弹、延迟补偿、RPC）">
+  <ul id="toc"></ul>
+</nav>
+
+<!-- 全局 SVG 定义：箭头等，供所有内联插图复用 -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4B5563"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2F5BD3"/></marker>
+    <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C2410C"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#15803D"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#B91C1C"/></marker>
+    <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6D28D9"/></marker>
+  </defs>
+</svg>
+
+<style>#side,#menuBtn{display:none}body{margin:0}</style><svg width="0" height="0" style="position:absolute">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4B5563"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2F5BD3"/></marker>
+    <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#C2410C"/></marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#15803D"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#B91C1C"/></marker>
+    <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6D28D9"/></marker>
+  </defs>
+</svg><div style="width:960px;padding:10px"><figure>
+<svg viewBox="0 0 860 247" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="848" height="34" rx="8" fill="#1F2937"/><text x="18" y="28" class="b wt" style="font-size:14px">AIC_Zombie</text><text x="117.88800000000002" y="28" class="wt" style="font-size:11px;fill:#D1D5DB">父类 AIController　·　存在于：仅服务器</text><text x="14" y="58" class="b" style="font-size:11px;fill:#374151">Class Defaults → Replication</text><rect x="196.0" y="47.0" width="204.6" height="15" rx="7" fill="#FDEEEE" stroke="#B91C1C"/><text x="202.0" y="58.0" class="b" style="font-size:9.6px;fill:#B91C1C">Replicates：✗ AIController 默认不复制</text><rect x="408.6" y="47.0" width="278.0" height="15" rx="7" fill="#FDEEEE" stroke="#B91C1C"/><text x="414.6" y="58.0" class="b" style="font-size:9.6px;fill:#B91C1C">客户端上存在：✗ 客户端上僵尸的 Get Controller = None</text><rect x="6" y="80" width="848" height="22" rx="4" fill="#EEF2FF"/><text x="14" y="95" class="b" style="font-size:11.5px;fill:#1E3A8A">变量（My Blueprint → Variables；Details → Replication / Replication Condition）</text><text x="30" y="114" class="b" style="font-size:10.5px;fill:#6B7280">名称</text><text x="196" y="114" class="b" style="font-size:10.5px;fill:#6B7280">类型</text><text x="288" y="114" class="b" style="font-size:10.5px;fill:#6B7280">Replication</text><text x="380" y="114" class="b" style="font-size:10.5px;fill:#6B7280">Condition</text><text x="466" y="114" class="b" style="font-size:10.5px;fill:#6B7280">谁写</text><text x="640" y="114" class="b" style="font-size:10.5px;fill:#6B7280">收到后 / 说明</text><rect x="8" y="122" width="844" height="35" fill="#F9FAFB"/><circle cx="17" cy="133" r="3.5" fill="#fff" stroke="#9CA3AF" stroke-width="1.3"/><text x="30" y="137" class="b" style="font-size:11px">黑板键 TargetActor、</text><text x="30" y="150" class="b" style="font-size:11px">bInRange</text><text x="196" y="137" class="mono" style="font-size:10px;fill:#4B5563">Blackboard</text><rect x="288.0" y="126.0" width="69.6" height="15" rx="7" fill="#F3F4F6" stroke="#6B7280" stroke-dasharray="3 2"/><text x="294.0" y="137.0" class="b" style="font-size:9.6px;fill:#6B7280">None 不复制</text><text x="380" y="137" style="font-size:10.5px;fill:#9CA3AF">—</text><text x="466" y="137" style="font-size:10.5px;fill:#374151">服务器（BTS_FindTarget）</text><text x="640" y="137" style="font-size:10.5px;fill:#374151">黑板、行为树、感知都只在服务器；客户端</text><text x="640" y="150" style="font-size:10.5px;fill:#374151">想显示“僵尸盯着谁”只能另加复制变量</text><rect x="6" y="169" width="848" height="22" rx="4" fill="#FEF2F2"/><text x="14" y="184" class="b" style="font-size:11.5px;fill:#991B1B">事件 / 函数（自定义事件 Details → Graph → Replicates · Reliable）</text><text x="30" y="203" class="b" style="font-size:10.5px;fill:#6B7280">名称</text><text x="214" y="203" class="b" style="font-size:10.5px;fill:#6B7280">类型</text><text x="300" y="203" class="b" style="font-size:10.5px;fill:#6B7280">Replicates</text><text x="446" y="203" class="b" style="font-size:10.5px;fill:#6B7280">Reliable</text><text x="504" y="203" class="b" style="font-size:10.5px;fill:#6B7280">在哪执行</text><text x="674" y="203" class="b" style="font-size:10.5px;fill:#6B7280">谁触发</text><rect x="8" y="211" width="844" height="22" fill="#F9FAFB"/><rect x="12" y="216" width="10" height="10" rx="2" fill="#2F5BD3"/><text x="30" y="226" class="b" style="font-size:11px">Event On Possess</text><text x="214" y="226" style="font-size:10.5px;fill:#4B5563">引擎事件</text><rect x="300.0" y="215.0" width="53.1" height="15" rx="7" fill="#F3F4F6" stroke="#6B7280"/><text x="306.0" y="226.0" class="b" style="font-size:9.6px;fill:#6B7280">引擎事件</text><text x="454" y="226" class="b" style="font-size:11px;fill:#9CA3AF">—</text><rect x="504.0" y="215.0" width="53.1" height="15" rx="7" fill="#EAF0FD" stroke="#2F5BD3"/><text x="510.0" y="226.0" class="b" style="font-size:9.6px;fill:#2F5BD3">仅服务器</text><text x="674" y="226" style="font-size:10.5px;fill:#374151">僵尸生成后自动 Possess</text></svg>
+<figcaption><b>图 12-0b</b>　AIC_Zombie 的网络规格：整个“灵魂”只在服务器，客户端只看到身体的移动和复制下来的状态</figcaption></figure></div></body></html>

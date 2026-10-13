@@ -1,0 +1,205 @@
+<section class="chapter" id="ch20">
+<div class="ch-head"><div class="no">CHAPTER 20</div><h1>引擎侧集成：UE 中的 AI 与 ML</h1><p class="lead">训练好的策略要进游戏，至少要过三关：游戏得先变成一个能 reset / step、能关渲染加速、能开很多份的训练环境；模型要能在每帧几毫秒的预算里给几十上百个 NPC 推理；它还要和行为树、导航、联机复制这些现有系统共存。本章先梳理 UE 的传统 AI 栈和 Learning Agents / NNE，再用 C++ 实测推理合批、量化和帧预算，最后以你的 UE 双人射击 Demo 为例，给出接入 RL Bot 的完整方案。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>说清 UE 传统 AI 栈各组件的职责，以及 RL 策略插在哪里。</li>
+<li>知道把游戏改造成训练环境要处理哪些问题：接口、加速、并行、确定性、帧对齐、训练与线上一致性。</li>
+<li>了解 Learning Agents 的组件划分与训练闭环、NNE 的三种运行时接口。</li>
+<li>能用访存 / 计算比解释“为什么要合批”，用实测数字估算每帧推理预算，设计 AI LOD 与错峰调度。</li>
+<li>能讲清楚在自己的 Demo 里加一个 RL Bot 的方案。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>接入分训练和部署两段。训练时，把游戏逻辑包装成 reset / step 接口：观测采集、动作执行、奖励和终止判定都放在固定步长的 Tick 里，关掉渲染、加速时钟、一台机器开多个实例并行；UE 5 自带的 Learning Agents 插件就是这套流程，UE 进程负责采样和推理，外部 Python（PyTorch）进程负责 PPO / BC 训练，只回传权重。部署时，把模型导出成 ONNX，用 NNE（CPU 上 ORT 运行时）或者手写的小网络推理；多个 NPC 要合批，因为单个 NPC 的前向是矩阵 × 向量，受内存带宽限制，合批变成矩阵 × 矩阵，权重读一次用 B 次；再按距离做 AI LOD、错峰分帧，把每帧推理控制在预算内。架构上行为树（或 StateTree）做骨架和兜底，RL 策略作为一个 Task 负责战斗决策；联机时推理只在服务器上跑，结果通过普通的移动 / 能力复制下发。最后要保证训练和线上一致：同样的观测归一化、同样的决策频率和反应延迟、同样的动作掩码。</p></div>
+
+<h2>20.1 UE 的传统 AI 栈</h2>
+<div class="tbl"><table>
+<tr><th>组件</th><th>职责</th><th>和 RL 的关系</th></tr>
+<tr><td>AIController</td><td>“AI 版的 PlayerController”：Possess 一个 Pawn，运行行为树 / StateTree，持有感知组件</td><td>RL 策略的宿主：在这里采集观测、执行动作</td></tr>
+<tr><td>行为树 + Blackboard</td><td>决策流程：Selector / Sequence 组合节点，Decorator（条件）、Service（周期性更新黑板）、Task（叶子动作）</td><td>骨架与兜底；RL 作为一个 Task 或 Service 嵌入（20.6 节）</td></tr>
+<tr><td>StateTree（UE 5）</td><td>分层状态机 + 选择器，状态有进入条件和过渡，执行开销比行为树低</td><td>同上，RL 可以作为一个状态里的 Task</td></tr>
+<tr><td>EQS（环境查询）</td><td>生成候选点 / 目标并按测试打分（距离、可见性、路径长度…）</td><td>可以直接当观测（“周围掩体候选点”），也可以当 RL 动作的离散候选集</td></tr>
+<tr><td>AI Perception</td><td>视觉 / 听觉 / 伤害等感知，带遗忘时间</td><td>观测来源：保证 Bot 只看到“人能看到的”（第 18 章）</td></tr>
+<tr><td>NavMesh / 寻路</td><td>Recast 生成导航网格，MoveTo 自动寻路与避障</td><td>RL 常输出“去哪个点”，底层移动交给寻路，降低动作空间难度</td></tr>
+<tr><td>Smart Objects</td><td>场景中可交互对象的声明式描述（椅子、掩体、门）</td><td>动作候选集</td></tr>
+<tr><td>Mass（ECS）</td><td>大规模实体（人群、交通）的数据导向框架</td><td>大量 NPC 时把观测打包成数组，天然适合合批推理</td></tr>
+<tr><td>Gameplay Debugger / Visual Logger</td><td>运行时查看 AI 状态、黑板、感知；按时间轴记录日志和形状</td><td>调试 RL 策略的主要工具（第 21 章）</td></tr>
+</table></div>
+<p class="tcap"><b>表 20-1</b>　UE 传统 AI 栈。RL 不替代这些组件，而是替换其中“做决策”的那一小块。</p>
+
+<h2>20.2 把游戏变成训练环境</h2>
+<div class="tbl"><table>
+<tr><th>问题</th><th>做法</th><th>不做会怎样</th></tr>
+<tr><td>接口</td><td>每个 agent 实现：采观测 → 执行动作 → 推进 k 帧 → 算奖励 / 终止 / 截断；整局可 reset（重置位置、血量、冷却、随机种子）</td><td>没有 reset 就只能整局重开，开销大</td></tr>
+<tr><td>加速</td><td>无渲染运行（<code>-nullrhi</code>）、固定时间步长（<code>-benchmark -fps=N</code> 或自定义 Tick 循环）、关闭音频和不必要的特效</td><td>按真实时间跑，样本太少</td></tr>
+<tr><td>并行</td><td>一个关卡里放多个互不干扰的训练场（Learning Agents 的做法），或者一台机器开多个进程；Dedicated Server 构建最省</td><td>单实例吞吐上不去（第 19 章）</td></tr>
+<tr><td>确定性</td><td>固定步长 + 可设种子的随机数；物理用子步进；记录种子便于复现某一局</td><td>Bug 无法复现、评测噪声大</td></tr>
+<tr><td>帧对齐</td><td>观测在动作生效前采集、奖励在动作生效后结算；决策间隔 k 帧内重复动作或交给底层</td><td>奖励和动作错位，信用分配混乱</td></tr>
+<tr><td>训练 / 线上一致</td><td>同一套观测代码、归一化统计量、动作掩码、决策频率和反应延迟；线上用的地图 / 英雄组合要在训练分布里</td><td>“训练很强、上线很弱”（20.4 节实测）</td></tr>
+</table></div>
+<p class="tcap"><b>表 20-2</b>　训练环境化的检查清单。</p>
+
+<h2>20.3 Learning Agents 与 NNE</h2>
+<p><strong>Learning Agents</strong> 是 UE 5 的实验性插件（Experimental），定位是“给游戏开发者训练角色决策的库”，内置 PPO 和行为克隆，不面向生成式 AI 或聊天。核心组件（以 5.5 为例，类名前缀 <code>ULearningAgents</code>）：</p>
+<div class="tbl"><table>
+<tr><th>组件</th><th>职责</th></tr>
+<tr><td>Manager</td><td>管理参与训练 / 推理的 agent 列表（agent 可以是任意 UObject，通常是 Pawn）</td></tr>
+<tr><td>Interactor</td><td>定义观测与动作的结构（标量、向量、位置、离散选择、可变长数组…），并实现“采集观测”“执行动作”</td></tr>
+<tr><td>TrainingEnvironment</td><td>计算奖励、判断回合结束、重置 agent</td></tr>
+<tr><td>Policy / Critic</td><td>策略网络（含编码器 / 解码器）与价值网络，进程内推理</td></tr>
+<tr><td>PPOTrainer / ImitationTrainer</td><td>收集经验并与外部 Python 训练进程通信；<code>RunTraining</code> 封装了“采观测 → 推理 → 执行 → 收奖励 → 处理经验”的循环</td></tr>
+<tr><td>Communicator / 训练进程</td><td>本地共享内存或网络连接一个外部 Python（PyTorch）进程，训练在那边做，权重回传给 UE；可接 TensorBoard</td></tr>
+</table></div>
+<p class="tcap"><b>表 20-3</b>　Learning Agents 的组件。插件仍是实验性的，API 在版本间变化较大（例如 5.6 / 5.7 起创建训练器需要显式传入 Communicator），以所用引擎版本的文档为准。</p>
+<!--flow {"w":900,"h":240,
+"rects":[{"x":20,"y":20,"w":520,"h":200,"c":"s","fill":"#F8FAFC","dash":true}],
+"boxes":[
+{"id":"i","x":40,"y":56,"w":150,"h":60,"t":"Interactor","s":"采观测 / 执行动作","c":"b"},
+{"id":"p","x":215,"y":56,"w":140,"h":60,"t":"Policy（推理）","s":"进程内前向","c":"o"},
+{"id":"e","x":375,"y":56,"w":158,"h":60,"t":"TrainingEnvironment","s":"奖励 / 终止 / 重置","c":"g"},
+{"id":"t","x":215,"y":146,"w":140,"h":56,"t":"PPOTrainer","s":"缓存经验","c":"a"},
+{"id":"py","x":640,"y":110,"w":240,"h":80,"t":"外部 Python 进程","s":"PyTorch：PPO / BC 训练","s2":"TensorBoard、检查点","c":"p"}],
+"arrows":[
+{"p":[[190,86],[215,86]],"c":"b","label":"obs","lx":192,"ly":78},{"p":[[355,86],[380,86]],"c":"o","label":"act","lx":358,"ly":78},
+{"p":[[452,116],[452,174],[355,174]],"c":"g","label":"r, done","lx":400,"ly":166},
+{"p":[[355,160],[640,140]],"c":"a","label":"经验（共享内存 / 网络）","lx":420,"ly":138},
+{"p":[[640,165],[355,190]],"c":"p","label":"新权重","lx":500,"ly":194}],
+"texts":[{"x":40,"y":42,"cls":"sm b","t":"UE 进程（一个关卡里可以放多个训练场并行）"}],
+"cap":"<b>图 20-1</b>　Learning Agents 的训练闭环。UE 进程负责环境与推理（采样），外部 Python 进程负责梯度更新，只交换经验和权重——就是第 19 章 actor-learner 架构的单机版。"} -->
+<p><strong>NNE（Neural Network Engine）</strong>是 UE 的通用推理接口：导入 ONNX 得到模型资产，按用途选择运行时接口——<code>INNERuntimeCPU</code>（输入输出都在 CPU，可在游戏线程同步或异步任务里跑）、<code>INNERuntimeGPU</code>（输入输出在 CPU、计算在 GPU，需要上传下载，适合编辑器工具）、<code>INNERuntimeRDG</code>（作为渲染依赖图的一部分，在渲染线程上执行，输入输出是 RDG 缓冲）。具体的运行时由插件提供，例如基于 ONNX Runtime 的 <code>NNERuntimeORTCpu</code>（CPU）和 <code>NNERuntimeORTDml</code>（DirectML，GPU）。Bot 决策这类小网络、小批量、需要当帧结果的场景，一般用 CPU 接口放在工作线程上跑；网络很小时也可以像 20.4 节那样手写推理，避免框架的单次调用开销。</p>
+
+<h2>20.4 推理为什么要合批：访存 / 计算比</h2>
+<!--deriv 单个 NPC 是 GEMV，受带宽限制；合批变成 GEMM，权重读一次用 B 次
+\text{FLOPs} & = 2\,B\,d_{\text{in}}d_{\text{out}},\qquad\text{字节}\approx4\,d_{\text{in}}d_{\text{out}}+4B(d_{\text{in}}+d_{\text{out}}) || 一层全连接，fp32；权重读一次，每个样本读输入、写输出
+I(B) & = \frac{\text{FLOPs}}{\text{字节}}\approx\frac{2Bd_{\text{in}}d_{\text{out}}}{4d_{\text{in}}d_{\text{out}}}=\frac B2\quad(B\ll d) || 算术强度（每读 1 字节做多少次浮点运算）；B = 1 时只有 0.5 FLOP/字节
+\text{可达性能} & \approx\min\big(\text{峰值算力},\ I(B)\times\text{带宽}\big) || roofline 模型：强度低时被带宽卡住，高时被算力卡住
+* B=1\ \Rightarrow & \ \text{GFLOP/s}\approx0.5\times\text{带宽（GB/s）} || 权重放不进缓存时，单个 NPC 的推理速度只由内存带宽决定，SIMD 写得再好也没用；合批后强度按 B 线性增长，直到撞上算力上限
+-->
+<!--plot {"x":[1,256],"logx":true,"y":[200,5e7],"logy":true,"h":320,"xlabel":"批大小 B（对数刻度）","ylabel":"每个 NPC 的推理耗时（ns，对数刻度）","legend":"tr",
+"series":[{"path":"ch20.e1.large.p1","n":"大网络 · 逐个标量","c":"r","dots":true},{"path":"ch20.e1.large.p3","n":"大网络 · 逐个 AVX2","c":"a","dots":true},{"path":"ch20.e1.large.p4","n":"大网络 · 合批 AVX2","c":"o","dots":true,"sw":2.6},
+{"path":"ch20.e1.small.p1","n":"小网络 · 逐个标量","c":"b","dots":true,"dash":true},{"path":"ch20.e1.small.p3","n":"小网络 · 逐个 AVX2","c":"t","dots":true,"dash":true},{"path":"ch20.e1.small.p4","n":"小网络 · 合批 AVX2","c":"g","dots":true,"sw":2.6,"dash":true}],
+"cap":"<b>图 20-2</b>　每个 NPC 的推理耗时（C++ 实测，<code>demos/ch20_infer_bench.cpp</code> E1；计时每次运行有波动）。小网络 64-128-128-16（[[ch20.e1.small.mb|.2f]] MB，放得进 L2），大网络 256-1024-1024-64（[[ch20.e1.large.mb|.1f]] MB，放不进 L2）。四种实现的输出最大差 [[ch20.e1.large.maxdiff|.0e]]。"} -->
+<div class="tbl"><table>
+<tr><th>网络</th><th>逐个标量</th><th>逐个 AVX2</th><th>合批 AVX2（B = 64）</th><th>合批 AVX2 的实测算力</th></tr>
+<tr><td>小（0.05 MFLOP）</td><td>[[ch20.e1.small.rows.3.s1|.0f]] ns</td><td>[[ch20.e1.small.rows.3.s3|.0f]] ns</td><td>[[ch20.e1.small.rows.3.s4|.0f]] ns</td><td>[[ch20.e1.small.rows.3.gf|.0f]] GFLOP/s</td></tr>
+<tr><td>大（2.75 MFLOP）</td><td>[[ch20.e1.large.rows.3.s1|.0f]] ns</td><td>[[ch20.e1.large.rows.3.s3|.0f]] ns</td><td>[[ch20.e1.large.rows.3.s4|.0f]] ns</td><td>[[ch20.e1.large.rows.3.gf|.0f]] GFLOP/s</td></tr>
+</table></div>
+<p class="tcap"><b>表 20-4</b>　批大小 64 时每个 NPC 的耗时（E1）。</p>
+<p>三个现象正好对应上面的推导：</p>
+<ol>
+<li><strong>大网络逐个推理时，AVX2 几乎没用</strong>（[[ch20.e1.large.rows.0.s1|.0f]] ns → [[ch20.e1.large.rows.0.s3|.0f]] ns）：5 MB 的权重每个 NPC 都要从 L3 / 内存重新读一遍，瓶颈是带宽而不是算力。合批后每行权重被 4 个 NPC 共用，耗时降到 [[ch20.e1.large.rows.3.s4|.0f]] ns，约快 [[ch20.e1.large.rows.3.sp|.1f]] 倍。</li>
+<li><strong>小网络放得进缓存</strong>，逐个推理时 AVX2 就有明显收益（约 3 倍）；合批再快约 3 倍，因为 4×8 微内核让每次载入的权重向量做 4 次 FMA，减少了载入指令。</li>
+<li><strong>“合批标量”没有收益</strong>（见 <code>ch20_output.txt</code>）：标量代码本身就被算力卡住，减少访存没用。优化顺序是：先让计算快（SIMD），再让访存少（合批、分块），否则看不到效果。</li>
+</ol>
+<p>这就是为什么 SEED RL 把推理集中到加速器上、为什么 Mass 这类 ECS 框架适合 AI：把很多 NPC 的观测排成连续数组，一次推理。</p>
+
+<h3>量化与“忘了归一化”</h3>
+<p>把小网络的权重做逐行对称 int8 量化（$w\approx q\cdot s$，$q\in[-127,127]$，每个输出通道一个 scale），再进一步把每层输入也动态量化成 int8，用 [[ch20.e2.M]] 个随机观测比较（E2）：</p>
+<div class="tbl"><table>
+<tr><th>部署方式</th><th>logits 最大误差（平均幅值 [[ch20.e2.mag|.2f]]）</th><th>贪心动作与 fp32 一致的比例</th><th>动作分布的平均 KL</th></tr>
+<tr><td>int8 权重（模型体积 ÷ 4）</td><td>[[ch20.e2.maxd_w|.3f]]</td><td>[[ch20.e2.agree_w|.2f]]%</td><td>[[ch20.e2.kl_w|.1e]]</td></tr>
+<tr><td>int8 权重 + int8 激活</td><td>[[ch20.e2.maxd_wa|.3f]]</td><td>[[ch20.e2.agree_wa|.2f]]%</td><td>[[ch20.e2.kl_wa|.1e]]</td></tr>
+<tr><td>fp32，但部署端忘了观测归一化</td><td>—</td><td>[[ch20.e2.agree_raw|.1f]]%</td><td>[[ch20.e2.kl_raw|.0f]]</td></tr>
+</table></div>
+<p class="tcap"><b>表 20-5</b>　部署数值误差（E2）。量化带来的误差远小于“预处理不一致”：观测各维的尺度相差几个数量级（坐标、血量、冷却），忘了用训练时的均值 / 标准差归一化，网络输入就完全落在训练分布之外。</p>
+<div class="co warn"><span class="h">面试注意：训练和线上不一致的常见来源</span><p>① 观测归一化统计量没导出或版本不对（上表）；② 决策频率不同（训练 4 帧一次、线上 1 帧一次，第 18 章表 18-2 的视界就变了）；③ 反应延迟、动作掩码只在一边有；④ 坐标系 / 单位不同（UE 是厘米、左手系）；⑤ 线上的地图、英雄、对手行为超出训练分布。防御办法：观测预处理和掩码写成同一份代码（或同一份配置生成两端代码），模型资产里带上归一化参数和版本号，上线前用录制的线上观测回放做一致性测试。</p></div>
+<h2>20.5 每帧预算、AI LOD 与错峰调度</h2>
+<p>60 FPS 时一帧只有 16.7 ms，留给 AI 的通常只有 1~2 ms。估算公式很简单：每帧推理耗时 ≈ 这一帧要决策的 NPC 数 × 每个的耗时（合批后）。控制它的手段：</p>
+<ul>
+<li><strong>AI LOD</strong>：离玩家近、正在交战的 NPC 高频决策（如 10 Hz），中距离低频（2 Hz），远处或看不见的不跑网络、交给行为树甚至直接冻结。</li>
+<li><strong>错峰（分桶）</strong>：同一档的 NPC 按 ID 分散到不同帧，避免“所有人都在第 0 帧决策”。</li>
+<li><strong>异步</strong>：在工作线程上推理，本帧提交、下一帧取结果（多一帧延迟，训练时也要加上，见表 20-2）。</li>
+</ul>
+<p>200 个 NPC（40 个近处 10 Hz、80 个中距 2 Hz、80 个远处不推理），用大网络、合批 AVX2 的实测耗时，模拟 60 帧（E3）：</p>
+<!--plot {"x":[0,59],"y":[0,18],"yt":[0,2,4,6,8,10,12],"h":280,"xlabel":"帧号（60 FPS）","ylabel":"本帧推理耗时（ms）","legend":"tr","hlines":[[2,"AI 预算 2 ms","r"]],
+"series":[{"path":"ch20.e3.all","n":"同一帧集中决策","c":"r","dots":true},{"path":"ch20.e3.stag","n":"按 ID 错峰分桶","c":"b","dots":true,"sw":2.4}],
+"cap":"<b>图 20-3</b>　每帧推理耗时（C++ 实测耗时 + 调度模拟）。集中决策时第 0 帧要推理 [[ch20.e3.maxB_all]] 个 NPC，耗时 [[ch20.e3.peak_all|.1f]] ms，60 帧里有 [[ch20.e3.over_all]] 帧超出 2 ms 预算；错峰后每帧最多 [[ch20.e3.maxB_stag]] 个，峰值 [[ch20.e3.peak_stag|.2f]] ms，没有一帧超预算。代价是平均耗时从 [[ch20.e3.mean_all|.2f]] ms 升到 [[ch20.e3.mean_stag|.2f]] ms——批变小了，合批效率下降。"} -->
+<p>这个取舍很典型：帧时间关心的是<strong>峰值</strong>（卡一帧玩家就能感觉到），吞吐关心的是平均。错峰用一点平均效率换掉尖峰。决策频率本身也是训练超参：如果线上要降频，训练时就要用同样的频率（以及第 18 章的 γ 换算）。</p>
+
+<h2>20.6 行为树 + RL 的混合架构</h2>
+<!--flow {"w":900,"h":270,
+"boxes":[
+{"id":"root","x":360,"y":10,"w":180,"h":46,"t":"Selector（根）","c":"s"},
+{"id":"dead","x":20,"y":100,"w":180,"h":56,"t":"死亡 / 受控","s":"Decorator：IsDead","c":"s"},
+{"id":"flee","x":230,"y":100,"w":190,"h":56,"t":"脚本行为","s":"出生、剧情、回城、购买","c":"s"},
+{"id":"rl","x":450,"y":100,"w":220,"h":56,"t":"战斗子树：BTTask_RLDecide","s":"Decorator：HasTarget && InCombat","c":"o"},
+{"id":"idle","x":700,"y":100,"w":180,"h":56,"t":"巡逻 / 待机","s":"兜底","c":"s"},
+{"id":"obs","x":330,"y":200,"w":170,"h":56,"t":"采观测","s":"感知 + 黑板 + EQS","c":"b"},
+{"id":"inf","x":520,"y":200,"w":150,"h":56,"t":"推理（合批）","s":"工作线程","c":"o"},
+{"id":"act","x":690,"y":200,"w":190,"h":56,"t":"动作 → 底层执行","s":"MoveTo / 能力 / 瞄准","c":"g"}],
+"arrows":[
+{"p":[[400,56],[110,100]],"c":"s"},{"p":[[430,56],[325,100]],"c":"s"},{"p":[[480,56],[560,100]],"c":"o"},{"p":[[510,56],[790,100]],"c":"s"},
+{"p":[[520,156],[415,200]],"c":"o"},{"p":[[500,228],[520,228]],"c":"b"},{"p":[[670,228],[690,228]],"c":"o"}],
+"cap":"<b>图 20-4</b>　行为树做骨架、RL 做战斗子树。死亡、剧情、购买这些规则清楚的部分留给行为树（可控、策划能改）；只有“打不打、打谁、怎么走位”交给策略网络；推理失败或超时直接落到兜底分支。"} -->
+<p>设计要点：① RL Task 的输入输出要“窄”：观测只取战斗相关的信息，动作输出语义化的指令（目标、移动点、技能），底层执行复用现有能力系统和寻路；② 训练时行为树的其他分支也要在环境里（否则 RL 学到的状态分布和线上不同）；③ 策划可调的参数（攻击欲望、难度）可以作为观测条件输入（第 15、16 章的条件化策略）。</p>
+
+<h2>20.7 联机：Bot 跑在服务器上</h2>
+<p>UE 是服务器权威：AIController 只存在于服务器（Listen Server 的主机或 Dedicated Server），客户端只看到复制过来的 Pawn。所以：</p>
+<ul>
+<li>推理只在服务器做，观测用服务器上的真实状态；结果通过现有的移动组件和能力复制下发，不需要额外同步网络输出。</li>
+<li>Bot 不需要模拟客户端的网络延迟，但为了公平和拟人，要在训练和线上都加“反应延迟”（第 18 章）。</li>
+<li>Dedicated Server 上 CPU 预算按“每个服务器进程承载多少局 × 每局多少 Bot”算，这也是推理必须合批、必须 LOD 的原因。</li>
+<li>服务器帧率通常比客户端低（如 30 Hz），决策频率要按服务器 Tick 换算。</li>
+</ul>
+
+<h2>20.8 案例：给你的 UE 双人射击 Demo 加一个 RL Bot</h2>
+<p>你的 UE 5.5 蓝图 Demo（双人 Listen Server 合作打僵尸，详见本工作区 UE_Coop_Shooter 一书）里，僵尸已经是标准结构：<code>BP_Zombie</code>（Character，AutoPossessAI）+ <code>AIC_Zombie</code> + <code>BT_Zombie</code> / <code>BB_Zombie</code> + <code>BTS_FindTarget</code>（找目标）+ <code>BTT_Attack</code>（攻击），AI 与攻击判定只在服务器。在这个基础上加 RL，最小改动的方案：</p>
+<div class="tbl"><table>
+<tr><th>环节</th><th>设计</th></tr>
+<tr><td>目标</td><td>让僵尸学会“包抄、绕后、躲视线、配合”而不是直线冲脸；难度可调</td></tr>
+<tr><td>插入点</td><td>在 <code>BT_Zombie</code> 的追击分支里，用一个 <code>BTTask_RLDecide</code>（C++）替换“MoveTo 目标”；<code>BTS_FindTarget</code> 和 <code>BTT_Attack</code> 保留，攻击范围内仍走原攻击逻辑</td></tr>
+<tr><td>观测</td><td>自身速度 / 血量；两名玩家相对自己的位置（极坐标）、朝向、是否看向自己、当前武器 / 弹药状态；附近 4 只僵尸的相对位置；8 方向射线测距（掩体）；上一步动作</td></tr>
+<tr><td>动作</td><td>离散：目标选择（2 名玩家）× 移动意图（直扑 / 左绕 / 右绕 / 找掩体 / 等待）；具体移动交给 NavMesh 的 MoveTo；每 0.2 秒决策一次</td></tr>
+<tr><td>奖励</td><td>造成伤害 +、靠近到攻击距离 +（势函数塑形，第 16 章）、被击杀 −、每步小惩罚；团队奖励（所有僵尸共享击倒玩家的奖励）鼓励配合</td></tr>
+<tr><td>对手</td><td>训练时玩家由脚本 Bot 扮演（会瞄准最近僵尸、会后退换弹），逐步加强（课程，第 16 章）；后期混入人类录像回放</td></tr>
+<tr><td>训练</td><td>Learning Agents：Interactor 定义上面的观测 / 动作，TrainingEnvironment 写奖励和重置；关卡里放 8 个隔离的训练场并行；PPO + 参数共享（所有僵尸同一个策略，MAPPO 思路，第 15 章）</td></tr>
+<tr><td>部署</td><td>只在服务器（Listen Server 主机）推理；同一帧要决策的僵尸合批；远处僵尸退回原行为树；推理失败时落回原 MoveTo 分支</td></tr>
+<tr><td>评估</td><td>固定脚本玩家下的“击倒玩家用时 / 僵尸存活时间”、真人试玩的主观难度与“像不像有配合”；按难度档位调温度和反应延迟</td></tr>
+</table></div>
+<p class="tcap"><b>表 20-6</b>　在 UE 双人射击 Demo 中加入 RL 僵尸的方案。面试时这张表可以直接作为“结合你的项目讲讲”的回答骨架；注意原 Demo 是蓝图工程，RL 部分需要一个 C++ 模块（Learning Agents 的 Interactor / TrainingEnvironment 可以用蓝图子类实现，但性能敏感的观测采集建议放 C++）。</p>
+
+<h3>手撕代码</h3>
+<p>下面是 <code>demos/ch20_infer_bench.cpp</code> 中的推理核心（与 demo 逐字相同）：逐个标量、合批标量，以及 AVX2 + FMA 的 4×8 微内核（4 个 NPC × 8 个输出共用一次权重载入）：</p>
+<!--code:cpp:小 MLP 推理：逐个 / 合批 / AVX2 4×8 微内核（C++，面试手撕版）-->
+{{demo:ch20_infer_bench.cpp#书中代码块}}
+<!--/code-->
+<!--code:text:demos/ch20_infer_bench.exe 的输出（计时每次运行有波动）-->
+{{demo:ch20_output.txt}}
+<!--/code-->
+
+<h2>20.9 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“推理慢就上 SIMD / GPU”</td><td>没先判断瓶颈</td><td>单个 NPC 的大网络是带宽瓶颈，先合批再谈 SIMD（表 20-4）；小网络小批量上 GPU 往往更慢（上传下载、调度开销）</td></tr>
+<tr><td>“RL 直接替代行为树”</td><td>可控性、成本</td><td>行为树做骨架和兜底，RL 做战斗子树（图 20-4）</td></tr>
+<tr><td>“量化会让 AI 变傻”</td><td>误差量级不对</td><td>int8 权重量化动作一致率 99% 以上；预处理不一致的影响大得多（表 20-5）</td></tr>
+<tr><td>“Learning Agents 在 UE 里训练网络”</td><td>训练位置说错</td><td>UE 进程负责采样和推理，梯度更新在外部 Python（PyTorch）进程</td></tr>
+<tr><td>“客户端也跑一份 AI 推理更流畅”</td><td>违背服务器权威</td><td>AIController 只在服务器；客户端只做表现插值</td></tr>
+<tr><td>“平均耗时在预算内就行”</td><td>忽略尖峰</td><td>帧时间看峰值；错峰调度（图 20-3）</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:UE 集成常见追问链-->
+怎么把 RL 模型接入 UE？
+├─ 训练环境怎么做？ → reset / step、无渲染 + 固定步长加速、多训练场并行、确定性、帧对齐
+│   └─ Learning Agents 怎么工作？ → Interactor / TrainingEnvironment / Policy / Critic / PPOTrainer；Python 进程训练、回传权重
+├─ 推理怎么部署？ → ONNX → NNE（INNERuntimeCPU，ORT CPU 运行时）或手写；工作线程异步
+│   ├─ 性能怎么优化？ → 先 SIMD 后合批（GEMV → GEMM，强度 ≈ B/2）、量化、AI LOD、错峰
+│   └─ 预算怎么算？ → 每帧 NPC 数 × 每个耗时；看峰值不看平均
+├─ 行为树和 RL 怎么结合？ → BT 骨架 + RL Task；窄接口；推理失败落兜底
+├─ 训练和线上不一致怎么办？ → 同一份预处理 / 掩码 / 频率 / 延迟；归一化参数随模型导出；回放一致性测试
+└─ 联机怎么办？ → 只在服务器推理，结果走现有复制；反应延迟两端一致
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 20 章</div><ul>
+<li>UE AI 栈：AIController、行为树 / StateTree、EQS、Perception、NavMesh、Smart Objects、Mass；RL 只替换决策那一块。</li>
+<li>训练环境：reset / step、<code>-nullrhi</code> + 固定步长、多实例、确定性、帧对齐、训练线上一致。</li>
+<li>Learning Agents（实验性）：UE 采样 + 推理，Python 训练（PPO / BC）；NNE：CPU / GPU / RDG 三种接口，ORT 运行时。</li>
+<li>单 NPC = GEMV，强度 0.5 FLOP/字节，带宽瓶颈；合批强度 ≈ B/2；先 SIMD 再合批。</li>
+<li>int8 量化误差小；忘记归一化是灾难。AI LOD + 错峰把峰值压到预算内。</li>
+<li>联机：推理只在服务器；BT 骨架 + RL 战斗子树 + 兜底。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：一个 Dedicated Server 进程跑 10 局，每局 8 个 Bot，每个 Bot 5 Hz 决策，单次推理（合批后）每个 0.1 ms。CPU 开销大概多少？</summary><p>每秒决策 10 × 8 × 5 = 400 次，每次 0.1 ms，共 40 ms / 秒，即约 4% 的一个核。如果服务器 30 Hz Tick 且不错峰，最坏一帧 80 个 Bot 同时决策 = 8 ms，超过 30 Hz 一帧 33 ms 的四分之一，需要错峰或异步。</p></details>
+<details class="quiz"><summary>自测 2：为什么图 20-2 中小网络“逐个 AVX2”比“逐个标量”快 3 倍，而大网络几乎一样？</summary><p>小网络 0.1 MB 的权重在 L2 里，瓶颈是计算，SIMD 一条指令做 8 个乘加，所以快；大网络 5 MB 的权重放不进 L2，每次都从 L3 / 内存流进来，瓶颈是带宽，计算再快也要等数据。合批让每次读进来的权重被多个 NPC 复用，才能绕过带宽瓶颈。</p></details>
+<details class="quiz"><summary>自测 3：Learning Agents 训练时，为什么一个关卡里要放多个训练场而不是多开 UE 进程？</summary><p>同一进程内多个训练场共享引擎和资源，内存占用小；所有 agent 的观测可以一次性打包、合批推理，和外部训练进程的通信也只有一条通道。多开进程更隔离、能跨机器扩展，但每个进程都要加载完整引擎，单机能开的数量有限。两者可以组合。</p></details>
+</section>

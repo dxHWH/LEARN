@@ -1,0 +1,301 @@
+<div class="part-head" data-toc="第三部分 · 重做：一个合格的联机 Demo">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　重做：一个合格的联机 Demo</h1>
+  <p>先用 OOP 的眼光把 UE Gameplay 框架重新梳理一遍（谁是谁、谁包含谁、谁活多久、谁在哪端），再定义“合格”的标准，然后逐个类画出蓝图事件图表，最后是测试与演示。</p>
+</div>
+
+<section class="chapter" id="ch7">
+  <div class="ch-head">
+    <div class="no">CHAPTER 07</div>
+    <h1>UE Gameplay 框架：从 World 到 Player BP（OOP 视角）</h1>
+    <p class="lead">面试官问“讲讲 GameMode 和 GameState 的区别”“PlayerController 和 Pawn 是什么关系”，考的不是背定义，而是你脑子里有没有这张图：对象怎么组合、怎么继承、活多久、在哪一端。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出一个进程里的运行时对象结构：GameInstance → World → Level → Actor → Component。</li>
+    <li>分清继承（is-a）、组合（has-a）和 UE 特有的 Outer / Owner / AttachParent / Instigator / Possess 五种“关系”。</li>
+    <li>说出每个框架类的生命周期、存在于哪一端、客户端上“拿”它会得到什么。</li>
+    <li>按时间顺序讲清主机开局、客户端加入时框架类被创建与调用的顺序。</li>
+  </ul></div>
+
+  <div class="ans">
+    <div class="q">30 秒版：UE 的 Gameplay 框架是什么</div>
+    <p>它是一套按职责切开的类：<strong>GameMode 定规则</strong>（只在服务器，负责登录、生成、胜负）；<strong>GameState 广播全局状态</strong>（所有端都有，比赛阶段、剩余时间、玩家列表）；<strong>PlayerState 记“人”的数据</strong>（分数、准备，Pawn 死了也还在）；<strong>PlayerController 是“灵魂”</strong>（输入、相机、UI，只在服务器和它自己的客户端）；<strong>Pawn / Character 是“身体”</strong>（被 Possess 后接受控制，所有端都有副本）；它们都是 <code>AActor</code>，活在某个 <code>UWorld</code> 的 <code>ULevel</code> 里；<code>UGameInstance</code> 在 World 之上，整个进程只有一份，切地图也不销毁。功能用 <code>UActorComponent</code> 组合（移动、血量、相机），界面是不复制的 <code>UUserWidget</code>。</p>
+  </div>
+
+  <h2>1. 运行时对象结构：一个进程里到底有什么</h2>
+  <figure>
+  <svg viewBox="0 0 860 452" xmlns="http://www.w3.org/2000/svg">
+    <rect x="8" y="8" width="844" height="436" rx="12" fill="#F9FAFB" stroke="#9CA3AF"/>
+    <text x="20" y="28" class="b">一个游戏进程（以主机为例） · UGameEngine</text>
+    <rect x="20" y="40" width="262" height="392" rx="10" fill="#EAF0FD" stroke="#2F5BD3" stroke-width="1.5"/>
+    <text x="34" y="62" class="b" style="fill:#1E3A8A">UGameInstance</text>
+    <text x="34" y="78" class="xs">整个进程一份 · 切地图不销毁 · 不复制</text>
+    <g class="sm">
+      <rect x="34" y="90" width="234" height="44" rx="7" fill="#fff" stroke="#15803D"/>
+      <text x="44" y="108" class="b sm">ULocalPlayer ×1</text><text x="44" y="125" class="xs">本机玩家：视口、Enhanced Input 子系统</text>
+      <rect x="34" y="142" width="234" height="44" rx="7" fill="#fff" stroke="#6B7280"/>
+      <text x="44" y="160" class="b sm">Subsystems</text><text x="44" y="177" class="xs">会话（Online Session）、存档、设置</text>
+      <rect x="34" y="194" width="234" height="44" rx="7" fill="#fff" stroke="#6B7280"/>
+      <text x="44" y="212" class="b sm">FTimerManager</text><text x="44" y="229" class="xs">World 的计时器实际由它管理</text>
+      <rect x="34" y="246" width="234" height="62" rx="7" fill="#fff" stroke="#6B7280"/>
+      <text x="44" y="264" class="b sm">跨地图的本地数据</text><text x="44" y="281" class="xs">昵称、上次错误信息、设置</text><text x="44" y="297" class="xs">（不同步：每台机器各一份）</text>
+      <rect x="34" y="316" width="234" height="104" rx="7" fill="#fff" stroke="#6B7280"/>
+      <text x="44" y="334" class="b sm">UGameViewportClient</text>
+      <text x="44" y="351" class="xs">屏幕上的 UMG 层（UUserWidget）</text>
+      <text x="44" y="367" class="xs">Widget 的 Owning Player 是本地 PC</text>
+      <text x="44" y="383" class="xs">只在本机，永远不复制</text>
+      <text x="44" y="399" class="xs">WBP_HUD / Lobby / Result / Pause</text>
+    </g>
+    <rect x="300" y="40" width="540" height="392" rx="10" fill="#FFFFFF" stroke="#C2410C" stroke-width="1.5"/>
+    <text x="314" y="62" class="b" style="fill:#9A3412">UWorld（当前地图 L_CoffeeShop）</text>
+    <text x="314" y="78" class="xs">每张地图一份 · Open Level / ServerTravel 时销毁重建</text>
+    <rect x="314" y="90" width="262" height="186" rx="8" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="326" y="108" class="b sm">PersistentLevel（ULevel）</text>
+    <text x="326" y="124" class="xs">所有 Actor 的 Outer（内存归属）</text>
+    <g class="xs">
+      <text x="334" y="146">· AWorldSettings：GameMode 覆盖</text>
+      <text x="334" y="164">· ALevelScriptActor：关卡蓝图</text>
+      <text x="334" y="182">· 摆放的 Actor：灯、门、BP_SpawnPoint</text>
+      <text x="334" y="200">· 运行时生成：Pawn、武器、僵尸</text>
+      <text x="334" y="218">· 框架 Actor：GameMode、GameState、</text>
+      <text x="334" y="234">　PlayerController、PlayerState</text>
+      <text x="334" y="256">StreamingLevels：按需加载的子关卡</text>
+    </g>
+    <rect x="590" y="90" width="236" height="42" rx="7" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="600" y="108" class="b sm">AuthorityGameMode</text><text x="600" y="124" class="xs">只在服务器；客户端 GetGameMode = 空</text>
+    <rect x="590" y="140" width="236" height="42" rx="7" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="600" y="158" class="b sm">GameState（复制）</text><text x="600" y="174" class="xs">PlayerArray → PlayerState ×2</text>
+    <rect x="590" y="190" width="236" height="42" rx="7" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="600" y="208" class="b sm">PlayerController ×2</text><text x="600" y="224" class="xs">Player = ULocalPlayer 或 UNetConnection</text>
+    <rect x="590" y="240" width="236" height="36" rx="7" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="600" y="262" class="b sm">NetDriver → UNetConnection ×1</text>
+    <rect x="314" y="290" width="512" height="130" rx="8" fill="#EAF7EF" stroke="#15803D"/>
+    <text x="326" y="308" class="b sm">Pawn / Character（每端都有副本）</text>
+    <g class="xs">
+      <text x="334" y="328">BP_CoopCharacter ×2：Capsule · Mesh3P · Camera · Mesh1P · Movement · AC_Health</text>
+      <text x="334" y="346">　└ BP_WeaponBase（Owner = 角色，挂在 3P / 1P 手上）</text>
+      <text x="334" y="366">BP_Zombie ×N：Capsule · Mesh · Movement · AC_Health</text>
+      <text x="334" y="384">　└ 被 AIC_Zombie Possess（AIController 只在服务器）</text>
+      <text x="334" y="406">World 还持有：NavigationSystem、AISystem、PhysicsScene、FXSystem</text>
+    </g>
+    <g fill="none" stroke="#4B5563" stroke-width="1.4">
+      <path d="M282,60 H296" marker-end="url(#a)"/>
+      <path d="M708,276 V286" marker-end="url(#a)"/>
+      <path d="M268,104 H288 V286 H586 V224" stroke-dasharray="4 3"/>
+      
+    </g>
+    <text x="716" y="283" class="xs">Possess ↓</text>
+    <text x="440" y="200" class="xs" style="fill:#15803D"> </text>
+  </svg>
+  <figcaption><b>图 7-1</b>　运行时对象结构（主机进程）。GameInstance 在 World 之上；切地图时 World 及其中所有 Actor（包括 GameMode、GameState、PlayerController）都会重建，GameInstance 与 LocalPlayer 留下。虚线：本地 PC 的 Player 指向 ULocalPlayer，远端 PC 的 Player 指向 UNetConnection</figcaption>
+  </figure>
+  <div class="co deep"><span class="h">一个常被忽略的 OOP 细节：UNetConnection 也是一个 UPlayer</span>
+    <p><code>UNetConnection</code> 继承自 <code>UPlayer</code>，和 <code>ULocalPlayer</code> 是兄弟类。<code>APlayerController::Player</code> 指向谁，决定了这个 PC 是“本地玩家”还是“远端玩家在服务器上的代理”。<code>IsLocalController()</code> 本质上就是在问：这个 PC 背后是不是一个 <code>ULocalPlayer</code>。理解这一点，就知道为什么服务器上可以有“不是本地”的 PlayerController，而客户端上永远只有自己那一个。</p>
+  </div>
+
+  <h2>2. 继承树（is-a）：每个类站在哪一层</h2>
+<!--tree {"cols":["类（红 = 本 Demo 新建的子类）","一句话职责","存在于（Listen Server）"],"x":[12,330,640],"root":{"n":"UObject","col":"s","d":"反射、垃圾回收、序列化的基类","w":"—","c":[
+ {"n":"UGameInstance","col":"b","d":"进程级：会话、跨地图本地数据","w":"每个进程各一份，不复制","c":[{"n":"BP_CoopGameInstance","col":"r","d":"主持 / 加入 / 离开、网络错误处理","w":"每个进程各一份"}]},
+ {"n":"UPlayer","col":"s","d":"“一个玩家”的抽象","w":"—","c":[{"n":"ULocalPlayer","col":"g","d":"本机玩家：视口、输入子系统","w":"各进程本地"},{"n":"UNetConnection","col":"b","d":"远端玩家 = 一条网络连接","w":"服务器上每个远端一条"}]},
+ {"n":"UActorComponent","col":"p","d":"挂到 Actor 上的功能块（组合）","w":"随所属 Actor","c":[
+   {"n":"USceneComponent","col":"p","d":"有变换、可挂接","w":"随所属 Actor","c":[{"n":"USkeletalMeshComponent","col":"p","d":"骨骼网格：3P 身体、1P 手臂、枪模","w":"随所属 Actor"},{"n":"UCameraComponent","col":"p","d":"第一人称相机","w":"随所属 Actor"}]},
+   {"n":"UCharacterMovementComp.","col":"p","d":"角色移动 + 客户端预测 / 服务器纠正","w":"随 Character","c":[{"n":"UCoopMovementComponent","col":"r","d":"冲刺 / 瞄准进 SavedMove（C++）","w":"随 Character"}]},
+   {"n":"AC_Health","col":"r","d":"血量与死亡，玩家和僵尸共用","w":"随 Actor（组件复制）"}]},
+ {"n":"UUserWidget","col":"t","d":"UMG 界面","w":"仅本机","c":[{"n":"WBP_HUD / Lobby / Result","col":"r","d":"只读显示 + 通过 PC 发请求","w":"仅本机"}]},
+ {"n":"AActor","col":"o","d":"能放进 World 的对象","w":"看 bReplicates","c":[
+   {"n":"AInfo","col":"s","d":"没有外形的“管理者”基类","w":"—","c":[
+     {"n":"AGameModeBase","col":"b","d":"规则：登录、生成、胜负","w":"仅服务器","c":[{"n":"GM_Coop","col":"r","d":"开局、刷怪、结算、重开","w":"仅服务器"}]},
+     {"n":"AGameStateBase","col":"b","d":"全局状态 + PlayerArray","w":"所有端（复制）","c":[{"n":"GS_Coop","col":"r","d":"Phase、结束时刻、僵尸数","w":"所有端"}]},
+     {"n":"APlayerState","col":"b","d":"跟“人”走的数据","w":"所有端（复制）","c":[{"n":"PS_Coop","col":"r","d":"准备、击杀、是否存活","w":"所有端"}]}]},
+   {"n":"AController","col":"o","d":"“灵魂”：Possess 一个 Pawn","w":"—","c":[
+     {"n":"APlayerController","col":"o","d":"输入、相机、UI、Client RPC 落点","w":"服务器 + 自己的客户端","c":[{"n":"PC_Coop","col":"r","d":"建 UI、准备 / 重开请求、观战","w":"服务器 + 自己的客户端"}]},
+     {"n":"AAIController","col":"o","d":"AI 的“灵魂”：行为树、感知","w":"仅服务器","c":[{"n":"AIC_Zombie","col":"r","d":"运行 BT_Zombie","w":"仅服务器"}]}]},
+   {"n":"APawn","col":"g","d":"“身体”：可被控制","w":"所有端（复制）","c":[{"n":"ACharacter","col":"g","d":"胶囊 + 骨骼网格 + 移动组件","w":"所有端（复制）","c":[{"n":"BP_CoopCharacter","col":"r","d":"玩家：1P/3P、武器、输入","w":"所有端"},{"n":"BP_Zombie","col":"r","d":"僵尸：动画变体、攻击、死亡","w":"所有端"}]}]},
+   {"n":"BP_WeaponBase","col":"r","d":"武器：开火 / 换弹（Owner = 角色）","w":"所有端（复制）"},
+   {"n":"BP_SpawnPoint","col":"r","d":"刷怪点标记，只给服务器读","w":"关卡摆放，各端都加载"}]}
+]},"cap":"<b>图 7-2</b>　继承树：灰 / 蓝 / 橙 / 绿 / 紫 / 青是引擎类，红色是重做后本 Demo 新建的子类。框架类大多是 AInfo（没有外形）；“身体”是 APawn，“灵魂”是 AController；功能靠 UActorComponent 组合"} -->
+  <div class="co tip"><span class="h">怎么讲继承树才不像背书</span>
+    <p>按“三问”讲：① <strong>它是不是 Actor</strong>（能不能放进 World、能不能复制）；② <strong>它在哪一端</strong>（GameMode 只在服务器、PC 只在服务器 + 自己、其余大多所有端）；③ <strong>它活多久</strong>（GameInstance 进程级、GameMode 地图级、Pawn 一条命）。本 Demo 新建的每个子类都只做一件事，红色框的“一句话职责”就是面试时的答案。</p>
+  </div>
+
+  <h2>3. 五种“关系”：继承和组合之外，UE 还有 Outer / Owner / AttachParent / Instigator / Possess</h2>
+  <div class="tbl"><table>
+    <tr><th>关系</th><th>是什么</th><th>谁来设置</th><th>影响什么</th><th>本 Demo 的武器</th></tr>
+    <tr><td><strong>继承 is-a</strong></td><td>类层级</td><td>类定义</td><td>能重写哪些事件、能调用哪些函数</td><td>BP_Rifle → BP_WeaponBase → AActor</td></tr>
+    <tr><td><strong>组合 has-a</strong></td><td>Actor 由 Component 拼成</td><td>组件面板 / 构造函数</td><td>功能复用：AC_Health 同时给玩家和僵尸</td><td>Mesh1P、Mesh3P、枪口点</td></tr>
+    <tr><td><strong>Outer</strong></td><td>UObject 的“容器”</td><td>创建时（NewObject / SpawnActor）</td><td>对象路径、GC 归属、随谁一起卸载</td><td>PersistentLevel</td></tr>
+    <tr><td><strong>Owner</strong></td><td>网络上的归属</td><td>SpawnParams.Owner / SetOwner / Possess</td><td>Server RPC 能否发出、OwnerOnly 发给谁、相关性</td><td>持有它的角色</td></tr>
+    <tr><td><strong>AttachParent</strong></td><td>变换层级</td><td>AttachToComponent</td><td>跟着谁移动、旋转</td><td>3P 身体的 hand_r 插槽</td></tr>
+    <tr><td><strong>Instigator</strong></td><td>“这件事是谁造成的”</td><td>SpawnParams.Instigator</td><td>伤害统计、友伤判断、仇恨</td><td>持有它的角色</td></tr>
+    <tr><td><strong>Possess</strong></td><td>灵魂 ↔ 身体</td><td>Controller.Possess（服务器）</td><td>谁的输入驱动它、Owner 链、PlayerState 关联</td><td>—（角色被 PC Possess）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：这五个最容易被混为一谈</span>
+    <p>“武器的 Owner 是角色”和“武器挂在角色手上”是两件独立的事：前者决定网络（能不能从这个客户端发 ServerFire），后者决定画面（枪跟着手动）。原 Demo 先挂接、再 SetOwner，作者以为是一件事，所以写出了 <code>for_server</code> 这种补丁。被问到时用一句话区分：<strong>Outer 管内存，Owner 管网络，AttachParent 管变换，Instigator 管责任，Possess 管控制</strong>。</p>
+  </div>
+
+  <h2>4. 每个类在哪一端，在客户端上“拿”它会得到什么</h2>
+  <div class="tbl"><table>
+    <tr><th>类</th><th>主机进程</th><th>客户端进程</th><th>在客户端上调用 Get… 得到</th><th>典型错误</th></tr>
+    <tr><td>GameInstance</td><td>自己的一份</td><td>自己的一份</td><td>本机的 GameInstance</td><td>以为改它会同步给别人</td></tr>
+    <tr><td>GameMode</td><td class="yes">有</td><td class="no">没有</td><td><code>Get Game Mode</code> = None</td><td>UI 里 Cast GameMode 读规则</td></tr>
+    <tr><td>GameState</td><td class="yes">有</td><td class="yes">有（复制）</td><td>复制下来的那份；PlayerArray 也有</td><td>在 GameState 上存 PlayerController 引用</td></tr>
+    <tr><td>PlayerState ×2</td><td class="yes">两份</td><td class="yes">两份</td><td>可能晚于 Pawn 到达</td><td>Pawn BeginPlay 里直接读 PlayerState</td></tr>
+    <tr><td>PlayerController</td><td class="yes">两份</td><td class="mid">只有自己</td><td><code>Get Player Controller(0)</code> = 本机玩家</td><td>在服务器上用 index 0 当“当前玩家”</td></tr>
+    <tr><td>别人的 Pawn</td><td class="yes">有</td><td class="yes">有（SimulatedProxy）</td><td><code>Get Controller</code> = None</td><td>在别人的 Pawn 上 Cast Controller</td></tr>
+    <tr><td>僵尸 + AIController</td><td class="yes">都有</td><td class="mid">只有僵尸</td><td>僵尸的 <code>Get Controller</code> = None</td><td>客户端里取 AIController / 黑板</td></tr>
+    <tr><td>Widget</td><td>自己的</td><td>自己的</td><td>只有本机创建的</td><td>服务器“给客户端创建界面”</td></tr>
+  </table></div>
+
+  <h2>5. 谁活多久：生命周期</h2>
+<!--spans {"ph":["启动进程","主菜单","主持 / 加入","大厅准备","对局中","死亡 → 观战","结算","重开\n(ServerTravel)"],"labw":150,"rows":[
+ ["GameInstance",[[0,7,"b","整个进程一份，切地图不销毁"]]],
+ ["LocalPlayer",[[0,7,"g","本机玩家，进程内常驻"]]],
+ ["UWorld",[[1,1,"s","菜单地图"],[2,6,"o","L_CoffeeShop"],[7,7,"o","重建"]]],
+ ["GameMode / GameState",[[2,6,"b","随地图创建、随地图销毁"],[7,7,"b","重建"]]],
+ ["PlayerController",[[1,1,"s","菜单 PC"],[2,6,"o","对局 PC（每个连接一个）"],[7,7,"o","重建 *"]]],
+ ["PlayerState",[[2,6,"p","跟人走：Pawn 死了它还在"],[7,7,"p","重建 *"]]],
+ ["BP_CoopCharacter",[[3,4,"g","Possess 后存在"],[5,5,"r","尸体 10 s"]]],
+ ["BP_WeaponBase",[[3,4,"o","跟着持有者"],[5,5,"r","随角色销毁"]]],
+ ["僵尸 + AIController",[[4,4,"r","反复刷新"]]],
+ ["Widget（本机）",[[1,1,"t","主菜单"],[3,3,"t","大厅"],[4,5,"t","HUD / 观战提示"],[6,6,"t","结算"]]]
+],"cap":"<b>图 7-3</b>　生命周期。* 非无缝漫游（本 Demo 的 servertravel）会断开重连式地重建 PC 与 PlayerState；无缝漫游（bUseSeamlessTravel）下 PC 保留、PlayerState 通过 CopyProperties 拷贝。要跨地图保留的本地数据放 GameInstance"} -->
+  <div class="co net"><span class="h">为什么分数放 PlayerState，不放 Character</span>
+    <p>Character 是“一条命”：死亡、重生会换一个新的 Actor，变量全部丢失；PlayerState 是“这个人”，整局都在，而且<strong>总是复制给所有人</strong>（GameState 的 PlayerArray 在每一端都维护），记分板、队友名字、准备状态直接读它就行。原 Demo 把准备列表放在 GameState、存的是 PlayerController 引用——客户端上别人的 PC 不存在，复制下来是空。</p>
+  </div>
+
+  <h2>6. 一局是怎么启动的：两张时序图</h2>
+  <h3>主机开局（Listen Server）</h3>
+<!--seq {"p":["主机 GameInstance","主机 World\n/ GameMode","主机 GameState","主机 PC / Pawn"],"pc":["b","o","b","g"],"grp":[[0,3,"全部在主机进程里（Listen Server = 服务器 + 主机玩家），这张图没有任何网络消息","b"]],"s":[
+ [0,0,"Init()：进程启动，进入主菜单地图"],
+ [0,0,"HostGame：Create Session（LAN，2 人）","b"],
+ [0,1,"Open Level L_CoffeeShop?listen：销毁旧 World，建新 World"],
+ [1,1,"SpawnGameMode → InitGame（读 URL 选项）"],
+ [1,2,"InitGameState：生成 GameState"],
+ [1,1,"关卡 Actor 初始化（构造脚本、组件注册）"],
+ ["—","本地玩家登录：主机自己的玩家也走一遍 Login"],
+ [1,3,"Login：生成 PlayerController（+ PlayerState）"],
+ [1,1,"PostLogin → HandleStartingNewPlayer → RestartPlayer"],
+ [1,3,"SpawnDefaultPawnFor → PC.Possess(Pawn)"],
+ [3,3,"Pawn：Event Possessed（服务器）→ 生成武器","g"],
+ ["—","World 开始游戏"],
+ [1,2,"StartPlay → GameState.HandleBeginPlay"],
+ [2,2,"bReplicatedHasBegunPlay = true（之后复制给客户端）","p"],
+ [2,3,"所有 Actor 收到 BeginPlay"]
+],"cap":"<b>图 7-4</b>　主机开局（GameModeBase 默认流程）。第 7~10 步发生在第 11~13 步之前：主机自己的 Pawn 和武器在 World 开始游戏之前就已生成并被 Possess，所以服务器上这个 Pawn 的 Event Possessed 早于它的 BeginPlay"} -->
+  <h3>客户端加入</h3>
+<!--seq {"p":["客户端\nGameInstance","客户端 World\n（PC / Pawn 副本）","服务器\nGameMode","服务器\nPC / Pawn（玩家 2）"],"pc":["b","g","b","o"],"grp":[[0,1,"客户端进程","o"],[2,3,"主机进程（服务器）","b"]],"s":[
+ [0,0,"Find Sessions → Join Session"],
+ [0,2,"ClientTravel：连接服务器（握手、登录请求）","net"],
+ [2,2,"PreLogin：可以拒绝（满员、版本不符）"],
+ [2,3,"Login：为这条连接生成 PC（+ PlayerState）"],
+ [2,2,"PostLogin → HandleStartingNewPlayer → RestartPlayer"],
+ [2,3,"SpawnDefaultPawnFor → Possess"],
+ [3,3,"Event Possessed：SetOwner(PC)、生成武器","o"],
+ [3,1,"复制：GameState、PC、PlayerState、Pawn、武器","rep"],
+ [1,1,"GameState 到达 → OnRep_ReplicatedHasBegunPlay → 客户端 World 开始游戏"],
+ [1,1,"PC.BeginPlay：IsLocalController = true → 创建 HUD","g"],
+ [3,1,"ClientRestart（Client RPC）","net"],
+ [1,1,"Pawn：Controller 到达 → Receive Controller Changed → 加输入映射","g"],
+ [1,3,"每帧 ServerMove（移动预测开始）","net"]
+],"cap":"<b>图 7-5</b>　客户端加入。客户端上各 Actor 的到达顺序不保证（PlayerState 可能晚于 Pawn），所以“本地玩家专属”的初始化放在 Receive Controller Changed / PC BeginPlay，依赖 PlayerState 的东西要能处理“暂时为空”。跨过两个色块的箭头才是真正的网络消息：蓝虚线 = RPC / 连接握手，紫点线 = 属性复制"} -->
+
+  <h2>7. 单个 Actor 的生命周期：服务器和客户端各触发哪些事件</h2>
+  <div class="tbl"><table>
+    <tr><th>阶段</th><th>蓝图事件</th><th>服务器</th><th>拥有者客户端</th><th>其他客户端</th><th>注意</th></tr>
+    <tr><td>构造</td><td>Construction Script</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>编辑器里拖动也会跑，不要写游戏逻辑</td></tr>
+    <tr><td>开始游戏</td><td>Event BeginPlay</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>客户端此时 Controller / PlayerState 可能还没到</td></tr>
+    <tr><td>被控制</td><td>Event Possessed / Unpossessed</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td>只在服务器：生成武器、初始化服务器状态</td></tr>
+    <tr><td>控制者变化</td><td>Event Receive Controller Changed</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td><td>加输入映射、绑 HUD 的好时机（判断 IsLocallyControlled）</td></tr>
+    <tr><td>属性到达</td><td>OnRep_X（RepNotify 函数）</td><td class="mid">蓝图：Set 时也执行</td><td class="yes">✓</td><td class="yes">✓</td><td>C++ 的 OnRep 服务器不执行；蓝图会</td></tr>
+    <tr><td>每帧</td><td>Event Tick</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>能用事件就别用 Tick</td></tr>
+    <tr><td>结束</td><td>Event End Play（Reason）</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>Destroyed / LevelTransition / Quit 等原因</td></tr>
+    <tr><td>销毁</td><td>Event Destroyed</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td>客户端是跟随服务器销毁，自己调 Destroy 无效</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">客户端的 BeginPlay 是谁触发的</span>
+    <p>服务器上，GameMode 的 <code>StartPlay</code> 让 GameState 调 <code>HandleBeginPlay</code>，所有 Actor 收到 BeginPlay，同时把 <code>bReplicatedHasBegunPlay</code> 置为 true；客户端收到这个复制属性，在 <code>OnRep_ReplicatedHasBegunPlay</code> 里让自己的 World 开始游戏。所以：<strong>客户端 World 开始游戏时 GameState 一定已经到了</strong>；而之后才复制过来的 Actor，到达时就直接 BeginPlay。这解释了“BeginPlay 里 GameState 一般能拿到、PlayerState 和 Controller 却不一定”。</p>
+  </div>
+
+  <h2>8. 把 OOP 原则落到这几个类上</h2>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm">
+      <rect x="110" y="14" width="560" height="78" rx="10" fill="#E6F6F5" stroke="#0F766E"/>
+      <text x="124" y="34" class="b" style="fill:#0F766E">表现层（每端本地，不复制）</text>
+      <rect x="124" y="44" width="120" height="36" rx="6" fill="#fff" stroke="#0F766E"/><text x="184" y="67" text-anchor="middle" class="sm">WBP_HUD</text>
+      <rect x="254" y="44" width="130" height="36" rx="6" fill="#fff" stroke="#0F766E"/><text x="319" y="67" text-anchor="middle" class="sm">Lobby / Result</text>
+      <rect x="394" y="44" width="130" height="36" rx="6" fill="#fff" stroke="#0F766E"/><text x="459" y="67" text-anchor="middle" class="sm">AnimBP（1P/3P）</text>
+      <rect x="534" y="44" width="124" height="36" rx="6" fill="#fff" stroke="#0F766E"/><text x="596" y="67" text-anchor="middle" class="sm">特效 / 音效</text>
+
+      <rect x="110" y="112" width="560" height="78" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+      <text x="124" y="132" class="b" style="fill:#B45309">请求层（本地控制端 → 服务器）</text>
+      <rect x="124" y="142" width="250" height="36" rx="6" fill="#fff" stroke="#B45309"/><text x="249" y="165" text-anchor="middle" class="sm">PC_Coop：准备 / 重开 / 暂停菜单</text>
+      <rect x="388" y="142" width="270" height="36" rx="6" fill="#fff" stroke="#B45309"/><text x="523" y="165" text-anchor="middle" class="sm">角色输入：移动 / 开火 / 换弹</text>
+
+      <rect x="110" y="210" width="560" height="78" rx="10" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="124" y="230" class="b" style="fill:#15803D">玩法层（服务器权威，状态复制）</text>
+      <rect x="124" y="240" width="122" height="36" rx="6" fill="#fff" stroke="#15803D"/><text x="185" y="263" text-anchor="middle" class="sm">Character</text>
+      <rect x="256" y="240" width="122" height="36" rx="6" fill="#fff" stroke="#15803D"/><text x="317" y="263" text-anchor="middle" class="sm">Weapon</text>
+      <rect x="388" y="240" width="122" height="36" rx="6" fill="#fff" stroke="#15803D"/><text x="449" y="263" text-anchor="middle" class="sm">AC_Health</text>
+      <rect x="520" y="240" width="138" height="36" rx="6" fill="#fff" stroke="#15803D"/><text x="589" y="263" text-anchor="middle" class="sm">Zombie + AI</text>
+
+      <rect x="110" y="308" width="560" height="78" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="124" y="328" class="b" style="fill:#2F5BD3">规则与全局状态层</text>
+      <rect x="124" y="338" width="170" height="36" rx="6" fill="#fff" stroke="#2F5BD3"/><text x="209" y="361" text-anchor="middle" class="sm">GM_Coop（仅服务器）</text>
+      <rect x="306" y="338" width="170" height="36" rx="6" fill="#fff" stroke="#2F5BD3"/><text x="391" y="361" text-anchor="middle" class="sm">GS_Coop（复制）</text>
+      <rect x="488" y="338" width="170" height="36" rx="6" fill="#fff" stroke="#2F5BD3"/><text x="573" y="361" text-anchor="middle" class="sm">PS_Coop（复制）</text>
+    </g>
+    <g fill="none" stroke-width="2.2">
+      <path d="M70,40 V370" stroke="#B45309" marker-end="url(#ao)"/>
+      <path d="M710,370 V40" stroke="#6D28D9" marker-end="url(#ap)"/>
+    </g>
+    <text x="62" y="210" text-anchor="middle" class="b sm" style="fill:#B45309" transform="rotate(-90 62 210)">请求向下：Server RPC / 函数调用</text>
+    <text x="726" y="210" text-anchor="middle" class="b sm" style="fill:#6D28D9" transform="rotate(90 726 210)">通知向上：复制 / OnRep / 事件分发器</text>
+    <rect x="746" y="40" width="106" height="330" rx="10" fill="#FDEEEE" stroke="#B91C1C" stroke-dasharray="5 4"/>
+    <g class="xs" style="fill:#B91C1C">
+      <text x="756" y="60" class="b sm" style="fill:#B91C1C">禁止的依赖</text>
+      <text x="756" y="84">✗ 武器直接改 HUD</text>
+      <text x="756" y="106">✗ GameMode 建界面</text>
+      <text x="756" y="128">✗ UI 里算倒计时</text>
+      <text x="756" y="150">✗ 僵尸 Cast 玩家</text>
+      <text x="756" y="166">　的 PlayerController</text>
+      <text x="756" y="188">✗ 客户端调用</text>
+      <text x="756" y="204">　GameMode</text>
+      <text x="756" y="226">✗ 多播里改</text>
+      <text x="756" y="242">　复制变量</text>
+      <text x="756" y="264">✗ Tick 里每帧</text>
+      <text x="756" y="280">　Cast 找对象</text>
+    </g>
+  </svg>
+  <figcaption><b>图 7-6</b>　依赖方向。上层只能“读”下层和“发请求”，下层通过复制和事件分发器“通知”上层，从不直接引用上层；右侧是原 Demo 里出现过的反方向依赖</figcaption>
+  </figure>
+  <div class="cards">
+    <div class="card"><div class="t">单一职责</div><p>每个类一句话说得清：GameMode 管规则、GameState 管全局状态、Weapon 管开火与弹药、AC_Health 管血量。原 Demo 的关卡蓝图同时管菜单、开局、相机、BGM、刷怪，是典型的“上帝对象”。</p></div>
+    <div class="card"><div class="t">组合优于继承</div><p>血量做成 AC_Health 组件，玩家和僵尸都挂一个，伤害管线只写一遍；而不是给 Character 写一个“可受伤的基类”再让僵尸继承玩家。</p></div>
+    <div class="card"><div class="t">依赖倒置 / 事件驱动</div><p>下层不认识上层：AC_Health 只广播 OnHealthChanged / OnDeath，谁关心谁订阅（HUD、Character、GameMode）。UI 不再每帧 Cast GetPlayerPawn(0)。</p></div>
+    <div class="card"><div class="t">数据驱动</div><p>武器参数（伤害、射速、弹匣、换弹时长、散布）放 DA_Weapon 数据资产，加一把枪不改代码；僵尸变体同理。</p></div>
+    <div class="card"><div class="t">面向接口</div><p>伤害走引擎的 ApplyPointDamage → OnTakeAnyDamage，武器不需要知道打的是僵尸还是油桶；需要交互的东西（门、拾取物）用蓝图接口 BPI_Interactable。</p></div>
+    <div class="card"><div class="t">权威边界清晰</div><p>每个事件只在一处决定结果：伤害在服务器、表现在各端、请求从拥有者发出。图里每个节点都标了“在哪端执行”。</p></div>
+  </div>
+
+  <div class="co warn"><span class="h">面试注意：框架类的三个高频问法</span>
+    <ul>
+      <li><strong>“GameMode 和 GameState 有什么区别？”</strong>——不要只答“一个服务器一个客户端”。答：GameMode 是规则（只在服务器，决定能不能进、在哪出生、什么时候结束），GameState 是规则运行的结果（复制给所有人看）；客户端想知道比赛状态只能读 GameState，想改只能通过自己拥有的 Actor 发 Server RPC，再由服务器上的 GameMode 决定。</li>
+      <li><strong>“PlayerController 和 Pawn 为什么要分开？”</strong>——灵魂与身体分离：身体可以死、可以换（载具、观战），灵魂一直在；输入、相机、UI 跟着“人”走，而不是跟着某一具身体。AI 也复用同一套 Possess（AIController）。</li>
+      <li><strong>“GameInstance 能用来做什么？”</strong>——跨地图的本地数据、会话管理、网络错误回调；它不复制，<strong>不能</strong>用来在玩家之间同步任何东西。</li>
+    </ul>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>结构：<strong>GameInstance（进程）→ World（地图）→ Level → Actor → Component</strong>；UI 挂在 ViewportClient，只在本机。</li>
+    <li>职责：GameMode 规则（服务器）· GameState 全局状态（复制）· PlayerState 人（复制）· PC 灵魂（服务器 + 自己）· Pawn 身体（复制）。</li>
+    <li>五种关系：Outer 管内存、Owner 管网络、AttachParent 管变换、Instigator 管责任、Possess 管控制。</li>
+    <li>主机开局：本地玩家的 Login → PostLogin → RestartPlayer → Possess 早于 World BeginPlay；客户端 World 开始游戏由 GameState 的复制触发。</li>
+    <li>OOP：单一职责、组合（AC_Health）、事件驱动（分发器）、数据驱动（DataAsset）、依赖只向下。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：服务器上一个 PlayerController 的 IsLocalController 为 false，说明了什么？</summary>
+    说明它的 Player 是一个 UNetConnection 而不是 ULocalPlayer——它是远端客户端玩家在服务器上的“代理”。在它上面创建 Widget、加输入映射都没有意义（服务器不显示它的画面、也不处理它的输入）；在它上面调用 Client RPC，则会发到那个客户端执行。
+  </details>
+  <details class="quiz"><summary>自测：为什么服务器上 Pawn 的 Event Possessed 可能比 BeginPlay 先触发？</summary>
+    在 GameModeBase 的默认流程下，主机加载地图时本地玩家的 Login / PostLogin / RestartPlayer 在 World 调用 BeginPlay 之前就执行了：Pawn 被生成并 Possess 时，World 还没开始游戏，它的 BeginPlay 要等 World BeginPlay 时才派发。所以在 Possessed 里不要依赖 BeginPlay 里才初始化的东西，反之亦然。
+  </details>
+</section>

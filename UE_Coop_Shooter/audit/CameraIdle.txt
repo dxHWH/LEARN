@@ -1,0 +1,13 @@
+# /Game/Blueprints/CameraIdle  (Blueprint)
+ParentClass: /Script/GameplayCameras.LegacyCameraShake
+
+## CameraIdle_C Default__CameraIdle_C
+   OscillationDuration = 55.0
+   OscillationBlendInTime = 0.20000000298023224
+   OscillationBlendOutTime = 0.6000000238418579
+   RotOscillation = ('struct', 'ROscillator', {'Pitch': ('struct', 'FOscillator', {'Amplitude': 0.5, 'Frequency': 1.0}), 'Yaw': ('struct', 'FOscillator', {'Amplitude': 0.2000000029
+   LocOscillation = ('struct', 'VOscillator', {'X': ('struct', 'FOscillator', {'Amplitude': 0.20000000298023224, 'Frequency': 1.0}), 'Y': ('struct', 'FOscillator', {'Amplitude': 0.
+   bSingleInstance = True
+   RootShakePattern = RootShakePattern
+
+## Custom events / RPC

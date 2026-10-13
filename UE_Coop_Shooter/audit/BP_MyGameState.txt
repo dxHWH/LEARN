@@ -1,0 +1,35 @@
+# /Game/Blueprints/BP_MyGameState  (Blueprint)
+ParentClass: /Script/Engine.GameStateBase
+
+## Variables
+- ReadyPlayersList : object<PlayerController>[]  [Replicated]
+- 游戏是否开始 : bool
+
+## BP_MyGameState_C Default__BP_MyGameState_C
+
+## SceneComponent BP_MyGameState_C.DefaultSceneRoot_GEN_VARIABLE
+   bVisualizeComponent = True
+
+## SCS_Node BP_MyGameState_C.SimpleConstructionScript_0.SCS_Node_0
+   ComponentClass = SceneComponent
+   ComponentTemplate = DefaultSceneRoot_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = DefaultSceneRoot
+
+## Custom events / RPC
+- CustomEvent 清除队列   (graph BP_MyGameState.EventGraph)
+
+## Graph BP_MyGameState.EventGraph
+
+CustomEvent 清除队列():  #11
+  Array_Clear(TargetArray=ReadyPlayersList)  #10
+
+Event ReceiveBeginPlay():  #12
+  Array_Clear(TargetArray=ReadyPlayersList)  #9
+
+Event ReceiveTick(DeltaSeconds):  #13
+  // node #13 Event ReceiveTick EnabledState=ENodeEnabledState::Disabled
+
+## Graph BP_MyGameState.UserConstructionScript
+
+FunctionEntry():  #14

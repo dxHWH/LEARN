@@ -1,0 +1,134 @@
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>IK 与程序化动画：让动画适应世界</h1>
+    <p class="lead">动画是按平地、按标准体型做的。真实场景里有台阶、斜坡、不同长度的武器、要去够的门把手——这些靠 IK 和各种“Warping”在运行时修正。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>推导两骨骼 IK 的解析解，理解 Pole（Joint Target）的作用</li>
+    <li>知道 FABRIK / CCD 这类迭代解法的收敛特性和代价</li>
+    <li>讲清脚步 IK 的完整流程，以及射线检测该放在哪个线程</li>
+    <li>了解 UE5 的 Control Rig、IK Rig、距离匹配、步幅 / 朝向调整、Motion Warping 和 Motion Matching</li>
+  </ul></div>
+
+  <h2>8.1 FK 与 IK</h2>
+  <p>FK（正向运动学）：给每节骨骼的局部旋转，算出末端在哪——动画序列就是 FK 数据。IK（逆向运动学）：给末端的目标位置，反求每节骨骼该怎么转。游戏里常见的 IK：</p>
+  <div class="cards">
+    <div class="card"><div class="t">脚步 IK</div><p>台阶、斜坡上脚贴地，骨盆随之下沉。</p></div>
+    <div class="card"><div class="t">手部 IK</div><p>左手始终握住枪的护木（不同武器握点不同），双手搬箱子。</p></div>
+    <div class="card"><div class="t">Look At / Aim</div><p>头和眼睛看向目标；枪口精确指向准星。</p></div>
+    <div class="card"><div class="t">交互</div><p>伸手去按按钮、开门、攀爬时手扶边缘。</p></div>
+  </div>
+
+  <h2>8.2 两骨骼 IK：解析解</h2>
+  <figure>
+  <svg viewBox="0 0 860 280" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="120" cy="200" r="7" fill="#2F5BD3"/><text x="104" y="226" class="sm b">A（肩 / 髋）</text>
+    <circle cx="260" cy="70" r="7" fill="#6D28D9"/><text x="272" y="66" class="sm b">B（肘 / 膝）</text>
+    <circle cx="420" cy="190" r="7" fill="#C2410C"/><text x="440" y="214" text-anchor="end" class="sm b">C = 目标 T</text>
+    <line x1="120" y1="200" x2="260" y2="70" stroke="#111827" stroke-width="5" stroke-linecap="round"/>
+    <line x1="260" y1="70" x2="420" y2="190" stroke="#111827" stroke-width="5" stroke-linecap="round"/>
+    <line x1="120" y1="200" x2="420" y2="190" stroke="#9CA3AF" stroke-width="1.4" stroke-dasharray="5 4"/>
+    <text x="168" y="125" class="sm" style="fill:#2F5BD3">L1</text><text x="352" y="120" class="sm" style="fill:#2F5BD3">L2</text>
+    <text x="270" y="214" class="sm" style="fill:#6B7280">d = |T − A|</text>
+    <path d="M160,198 A40,40 0 0,0 148,172" fill="none" stroke="#2F5BD3" stroke-width="1.6"/><text x="166" y="184" class="sm b" style="fill:#2F5BD3">α</text>
+    <circle cx="280" cy="20" r="6" fill="none" stroke="#15803D" stroke-width="2"/><text x="292" y="24" class="sm b" style="fill:#15803D">Pole / Joint Target</text>
+    <line x1="260" y1="70" x2="278" y2="26" stroke="#15803D" stroke-width="1.2" stroke-dasharray="3 3"/>
+    <g class="sm">
+      <text x="500" y="40" class="b">三步求解</text>
+      <text x="500" y="66">1. d = clamp(|T−A|, |L1−L2|, L1+L2)　（够不着就伸直）</text>
+      <text x="500" y="90">2. 余弦定理：cos α = (L1² + d² − L2²) / (2·L1·d)</text>
+      <text x="500" y="114">3. 弯曲平面由 A、T 和 Pole 确定：</text>
+      <text x="520" y="136">dir = (T−A)/|T−A|，</text>
+      <text x="520" y="156">bend = Pole 在垂直于 dir 方向上的分量（归一化）</text>
+      <text x="520" y="178">B = A + dir·L1·cos α + bend·L1·sin α</text>
+      <text x="500" y="204">最后把上臂旋转到 A→B，前臂旋转到 B→T</text>
+      <text x="500" y="232" class="xs">没有 Pole 时，肘可以绕 A→T 轴转到任意位置，结果不唯一、会抖</text>
+    </g>
+  </svg>
+  <figcaption><b>图 8-1</b>　两骨骼 IK 的几何：三角形三边已知（L1、L2、d），肘部只剩“绕 A→T 轴转多少”这一个自由度，由 Pole 决定</figcaption>
+  </figure>
+<!--code:cpp:两骨骼 IK（demo 中的实现，与 UE AnimationCore::SolveTwoBoneIK 思路相同）-->
+void TwoBoneIK(FVector A, float L1, float L2, FVector Target, FVector Pole, FVector& Elbow, FVector& End)
+{
+    const FVector ToT  = Target - A;
+    const float   Dist = ToT.Size();
+    const FVector Dir  = ToT / Dist;
+    const float   D    = FMath::Clamp(Dist, FMath::Abs(L1 - L2) + 1e-3f, L1 + L2 - 1e-4f);
+    const float   CosA = (L1 * L1 + D * D - L2 * L2) / (2.f * L1 * D);
+    const float   SinA = FMath::Sqrt(FMath::Max(0.f, 1.f - CosA * CosA));
+    const FVector Bend = (Pole - Dir * FVector::DotProduct(Pole, Dir)).GetSafeNormal();   // Pole 去掉沿 Dir 的分量
+    Elbow = A + Dir * (L1 * CosA) + Bend * (L1 * SinA);
+    End   = A + Dir * D;                                 // 够不着时停在伸直的位置
+}
+<!--/code-->
+  <div class="co ver"><span class="h">实测 E8：上臂 30、前臂 28，2 万个随机目标</span>
+    <ul>
+      <li>可达 16330 个：末端误差最大 <strong>0.0000</strong>；不可达 3670 个：手臂伸直指向目标；骨长误差 0；肘部全部落在 Pole 一侧。</li>
+      <li>耗时 <strong>13.9 ns/次</strong>——解析解几乎是免费的，所以手脚 IK 全都用它。</li>
+    </ul>
+  </div>
+  <div class="lab alab iklab" id="lab-ik"></div><!--/lab-->
+  <p>UE 的 <strong>Two Bone IK</strong> 节点参数：IK Bone（末端骨骼，例如 hand_l / foot_r，向上两级自动确定链）、Effector Location 与其空间（组件、世界、某骨骼空间）、Joint Target Location（即 Pole）、Allow Stretching（够不着时允许拉长，可设起始比例和最大比例）、Take Rotation from Effector Space / Maintain Effector Relative Rotation（末端旋转怎么处理）。</p>
+  <div class="co warn"><span class="h">面试注意：两骨骼 IK 的三个坑</span>
+    <ul>
+      <li><strong>手臂伸直时 Pole 失效、肘部翻转</strong>：A、B、T 共线时弯曲平面不确定，Pole 的微小变化会让肘部翻到另一边。办法：让目标略在最大长度之内（clamp 时留余量），Pole 放在合理方向并随身体旋转。</li>
+      <li><strong>空间搞错</strong>：Effector 用世界坐标却按组件空间解释，角色一转身手就飞了。用骨骼空间（如“相对右手”）给左手 IK 目标最稳。</li>
+      <li><strong>IK 要在混合之后、最后阶段做</strong>：IK 是对最终姿势的修正，放在混合之前会被后续混合冲掉。</li>
+    </ul>
+  </div>
+
+  <h2>8.3 多骨骼：FABRIK、CCD 与全身 IK</h2>
+  <p>链条超过两节时，没有唯一的解析解，用迭代：</p>
+  <ul>
+    <li><strong>FABRIK</strong>（Forward And Backward Reaching IK）：先把末端放到目标、从末端往根逐节拉回骨长（Backward）；再把根放回原位、从根往末端逐节拉回（Forward）；重复到误差小于容差。只做点和长度运算，不算角度，很快。</li>
+    <li><strong>CCD</strong>（Cyclic Coordinate Descent）：从末端前一节开始，每节旋转使“这节到末端”的方向对准“这节到目标”，循环往复。实现简单，但容易让靠近末端的关节转得过多。</li>
+    <li><strong>全身 IK（Full Body IK）</strong>：同时考虑多个末端（双手双脚）和关节限制，UE5 在 Control Rig / IK Rig 里提供 Full Body IK 解算器。</li>
+  </ul>
+  <div class="co ver"><span class="h">实测 E8：FABRIK，5 节链（每节 10），2 万个可达目标，最多 50 次迭代</span>
+    <div class="tbl"><table>
+      <tr><th>容差</th><th>平均迭代</th><th>最多迭代</th><th>50 次未收敛</th><th>耗时</th></tr>
+      <tr><td>1.00</td><td>1.4</td><td>13</td><td>0</td><td>0.21 us</td></tr>
+      <tr><td>0.10</td><td>2.7</td><td>50</td><td>3</td><td>0.35 us</td></tr>
+      <tr><td>0.01</td><td>4.1</td><td>50</td><td>25</td><td>0.49 us</td></tr>
+    </table></div>
+    <p>平均很快，但<strong>长尾明显</strong>：初始链条接近共线、目标靠近根部等情况收敛很慢。实际使用一定要设最大迭代次数和合理容差，并接受“差一点”的结果。</p>
+  </div>
+
+  <h2>8.4 脚步 IK 的完整流程</h2>
+  <ol>
+    <li><strong>射线检测（游戏线程）</strong>：在角色或 EventGraph 里，从每只脚的骨骼位置向下做 Line / Sphere Trace，得到地面高度和法线。物理查询不能在动画工作线程里随意做。</li>
+    <li><strong>算偏移</strong>：每只脚的高度差 = 地面高度 − 动画里脚的高度；<strong>骨盆下沉量 = 两脚中下沉最多的那个</strong>（否则低的那只脚够不着地）。</li>
+    <li><strong>平滑</strong>：偏移和脚的旋转都做插值（例如 15~20/s 的指数插值），避免走台阶时一帧一跳。</li>
+    <li><strong>AnimGraph</strong>：转到组件空间 → 调整 pelvis 高度 → 两只脚各一个 Two Bone IK（目标 = 原位置 + 偏移，Pole 在膝盖前方）→ 按地面法线旋转脚掌 → 转回局部空间。</li>
+    <li><strong>开关</strong>：空中、播放特定蒙太奇时关闭（用曲线或变量控制 Alpha）；远处角色在 LOD 中跳过。</li>
+  </ol>
+  <div class="co net"><span class="h">游戏客户端实战：为什么用“IK 骨骼”（ik_foot_l 等）</span>
+    <p>Mannequin 里有一组不参与蒙皮的骨骼：<code>ik_foot_root / ik_foot_l / ik_foot_r / ik_hand_root / ik_hand_gun / ik_hand_l / ik_hand_r</code>。动画导出时把脚、手的位置烘焙到这些骨骼上。运行时 IK 目标直接取这些骨骼的位置，即使上游混合改变了腿的姿势，也能知道“这条动画原本想让脚放在哪”；左手 IK 也可以取 ik_hand_l 相对 ik_hand_gun 的位置，自动适配不同武器。</p>
+  </div>
+
+  <h2>8.5 UE5 的程序化动画工具</h2>
+  <div class="tbl"><table>
+    <tr><th>工具</th><th>做什么</th><th>要点</th></tr>
+    <tr><td><strong>Control Rig</strong></td><td>节点化的绑定与程序化动画系统</td><td>可在 AnimGraph 里作为节点运行（Forward Solve），做 IK、程序化修正；也用于 Sequencer 里手 K 动画</td></tr>
+    <tr><td><strong>IK Rig / IK Retargeter</strong></td><td>定义 IK 目标与解算器栈；不同骨架之间按“骨骼链”重定向</td><td>取代 UE4 只能同骨架重定向的限制；支持运行时重定向</td></tr>
+    <tr><td><strong>距离匹配</strong>（Distance Matching）</td><td>起步、急停、转身动画按“离停止点还有多远”选择播放位置，而不是按时间</td><td>动画里带距离曲线；角色按代码物理减速，动画刚好在停下时播到最后一帧，不滑步</td></tr>
+    <tr><td><strong>步幅调整</strong>（Stride Warping）</td><td>按实际速度 / 动画速度的比例拉长或缩短腿的步幅</td><td>少量动画覆盖连续的速度范围</td></tr>
+    <tr><td><strong>朝向调整</strong>（Orientation Warping）</td><td>把下半身扭向实际移动方向，上半身保持朝前</td><td>只需 4 个基本方向动画就能覆盖任意方向</td></tr>
+    <tr><td><strong>Motion Warping</strong></td><td>在蒙太奇的指定时间窗内，把 Root Motion 的位移 / 旋转调整到某个目标点</td><td>翻越、处决、攻击吸附：动画落点精确对准目标</td></tr>
+    <tr><td><strong>Motion Matching</strong>（Pose Search）</td><td>不用状态机，每帧在动画数据库里搜索“与当前姿势和期望轨迹最匹配”的那一帧接着播</td><td>UE 5.4 起随 Game Animation Sample 推广；需要大量动作捕捉数据、搜索有 CPU 开销</td></tr>
+    <tr><td>物理动画</td><td>布娃娃、受击物理、次级运动</td><td>Physics Asset；AnimGraph 的 RigidBody 节点（辫子、披风）、AnimDynamics；Physical Animation Component 用马达驱动刚体跟随动画</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">深入：Motion Matching 的代价函数</span>
+    <p>每一帧（或每隔几帧）计算一个查询向量：当前若干骨骼的位置和速度（如双脚、骨盆）+ 未来若干时刻的期望轨迹（位置、朝向，来自玩家输入和移动预测）。数据库里每一帧都预先算好同样格式的特征向量，搜索<strong>加权距离最小</strong>的那一帧，如果它和当前播放位置足够不同就跳过去，并用惯性化平滑切换。工程难点在于特征的归一化和权重、搜索加速（KD 树 / 聚类）、数据覆盖率，以及与玩法需要的“确定性响应”之间的平衡。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>两骨骼 IK：<strong>clamp 距离 → 余弦定理求角 → Pole 定平面</strong>；E8：误差 0、13.9 ns/次。伸直时 Pole 失效会翻肘。</li>
+    <li>多骨骼用 FABRIK / CCD / Full Body IK；FABRIK 平均几次迭代就收敛，但有长尾（E8：容差 0.01 时 50 次不收敛 25/20000）。</li>
+    <li>脚步 IK：游戏线程射线 → 骨盆下沉取最大值 → 平滑 → 组件空间两骨骼 IK + 脚掌对齐法线。</li>
+    <li>UE5：Control Rig、IK Rig 重定向、距离匹配、步幅 / 朝向调整、Motion Warping、Motion Matching。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么脚步 IK 时骨盆要往下沉，而不是只把一只脚往上抬？</summary><p>站在台阶边缘时，一只脚踩在高处、另一只在低处。动画里两只脚是在同一高度的，如果骨盆不动，只能把低处那只脚往下“伸”——而动画里腿通常已经接近伸直，伸不下去，脚就悬空。先把骨盆下沉到“低的那只脚刚好能踩到”的高度，再用 IK 把高处那只脚抬上去（弯膝盖总是可行的）。</p></details>
+  <details class="quiz"><summary>自测：Motion Warping 和 Root Motion Source 有什么区别？</summary><p>Motion Warping 修改的是<strong>蒙太奇自带的 Root Motion</strong>：动画本来位移 2 米，目标在 2.5 米外，就在指定窗口内把位移拉伸到 2.5 米，姿势仍来自动画。Root Motion Source 是<strong>代码直接生成</strong>的位移（恒定速度、跳到某点、径向力），不依赖动画。两者都通过角色移动组件执行，可参与网络预测。</p></details>
+</section>

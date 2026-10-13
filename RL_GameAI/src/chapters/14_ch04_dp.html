@@ -1,0 +1,214 @@
+<section class="chapter" id="ch4">
+<div class="ch-head"><div class="no">CHAPTER 04</div><h1>动态规划：策略评估、策略迭代与价值迭代</h1><p class="lead">已知环境模型时怎样求最优策略。策略改进定理是后面所有“评估—改进”循环的理论依据；价值迭代的误差界决定了什么时候可以停；网格实验展示价值如何从终点向外传播、随机性如何改变最优路线。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>写出迭代策略评估、策略迭代、价值迭代的更新式，并能手撕代码。</li>
+<li>完整证明策略改进定理，说清“策略迭代为什么有限步收敛”。</li>
+<li>推出价值迭代的停止准则 $\lVert V_{k+1}-V_*\rVert_\infty\le\frac{\gamma}{1-\gamma}\lVert V_{k+1}-V_k\rVert_\infty$ 和贪心策略的损失界 $\frac{2\gamma\epsilon}{1-\gamma}$。</li>
+<li>用实测回答“策略迭代和价值迭代哪个快”，并理解广义策略迭代（GPI）如何统领后面所有算法。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>动态规划在已知 $p(s',r\mid s,a)$ 时求解 MDP。<strong>策略评估</strong>反复用 Bellman 期望方程更新，求 $V_\pi$；<strong>策略改进</strong>对 $V_\pi$ 贪心得到新策略，由策略改进定理保证不会变差。两者交替就是<strong>策略迭代</strong>：确定性策略只有有限个、每轮严格变好，所以有限轮收敛，实际通常几轮就够。<strong>价值迭代</strong>把评估缩成一次扫描，直接迭代 Bellman 最优方程 $V\leftarrow\max_a[r+\gamma PV]$，误差按 $\gamma^k$ 收缩；当相邻两次差小于 $\epsilon(1-\gamma)/\gamma$ 时停止，误差就不超过 $\epsilon$。PI 轮数少但每轮贵，VI 每轮便宜但轮数多。DP 需要模型、每次扫描要遍历所有状态，所以在大型游戏里不直接用，但它的“评估—改进”结构（GPI）贯穿了后面所有 RL 算法。</p></div>
+
+<h2>4.1 动态规划要解决的两个问题</h2>
+<p>“动态规划”这个名字在算法课里指“最优子结构 + 重叠子问题”。在 MDP 里，Bellman 方程就是最优子结构（一个状态的价值由后继状态的价值决定），而同一个后继状态会被很多状态引用，所以把每个状态的价值存下来反复使用就是“重叠子问题”。DP 的前提是<strong>已知完整模型</strong> $p(s',r\mid s,a)$，要解决两个问题：</p>
+<div class="tbl"><table>
+<tr><th>问题</th><th>输入</th><th>输出</th><th>依据的方程</th><th>本章算法</th></tr>
+<tr><td>预测（prediction）</td><td>MDP + 策略 $\pi$</td><td>$V_\pi$</td><td>Bellman 期望方程（线性）</td><td>迭代策略评估</td></tr>
+<tr><td>控制（control）</td><td>MDP</td><td>$V_*$ 与 $\pi_*$</td><td>Bellman 最优方程（含 max）</td><td>策略迭代、价值迭代</td></tr>
+</table></div>
+
+<h2>4.2 迭代策略评估</h2>
+<p>把 Bellman 期望方程当成赋值语句，从任意 $V_0$（通常全 0）开始反复扫描所有状态：</p>
+$$V_{k+1}(s)\leftarrow\sum_a\pi(a\mid s)\sum_{s',r}p(s',r\mid s,a)\big[r+\gamma V_k(s')\big]\qquad\text{即}\quad V_{k+1}=T^\pi V_k$$
+<p>第 0 章已证明 $T^\pi$ 是 γ-压缩，所以 $V_k\to V_\pi$。实现上有两种写法：</p>
+<ul>
+<li><strong>同步更新</strong>（Jacobi）：用两个数组，$V_{k+1}$ 全部由 $V_k$ 算出，和数学定义完全一致。</li>
+<li><strong>原地更新</strong>（Gauss-Seidel）：只用一个数组，算出一个状态就立刻覆盖，后面的状态能马上用上新值。收敛性不变，通常更快（4.6 节实测），而且扫描顺序会影响速度。</li>
+</ul>
+<p>下面是 Sutton 书例 4.1 的 4×4 网格：左上、右下两个角是终止格，每步奖励 −1，γ = 1，策略是四个方向各 1/4 的随机游走。每个格子上的数字是 $V_k$，箭头是“对当前 $V_k$ 贪心”会选的方向（并列最优就画多个箭头）：</p>
+<!--grid {"id":"sut","map":"SUTTON","mode":"eval","gamma":1.0,"step":-1.0,"cell":40,"cols":3,"gapx":56,"fmt":".1f","tol":1e-10,
+"panels":[{"show":0,"title":"k = 0"},{"show":1,"title":"k = 1"},{"show":2,"title":"k = 2"},{"show":3,"title":"k = 3"},{"show":10,"title":"k = 10"},{"show":"inf","title":"k = ∞（精确解）"}],
+"cap":"<b>图 4-1</b>　4×4 网格上随机策略的迭代评估（构建时真实运行，同步更新）。价值从终止格向外一圈圈传开；收敛后的数字（−14、−18、−20、−22）就是“随机游走到终点的期望步数”的相反数。注意 k = 3 时贪心箭头就已经是最优路线了——评估远没收敛，改进却已经到位，这正是价值迭代和 GPI 的直觉来源。"} -->
+<p>同步更新在容差 $10^{-10}$ 下需要 [[sut.eval_0.n]] 次扫描才收敛（γ = 1 时没有折扣帮忙，收敛只靠“终止”把误差吸收掉）。但图 4-1 里贪心箭头早在第 3 次扫描就不再变化——<strong>为了改进策略，没必要把评估做到收敛</strong>。</p>
+
+<h2>4.3 策略改进定理</h2>
+<p>有了 $V_\pi$，怎样得到更好的策略？直觉是：在每个状态挑 $Q_\pi(s,a)$ 最大的动作。下面的定理保证这样做不会变差。</p>
+<!--deriv 策略改进定理：若对所有 s 有 Q_π(s, π′(s)) ≥ V_π(s)，则对所有 s 有 V_π′(s) ≥ V_π(s)
+V_\pi(s) & \le Q_\pi\big(s,\pi'(s)\big) || 定理条件（$\pi'$ 为确定性策略；随机策略同理，把 $Q_\pi(s,\pi'(s))$ 换成 $\sum_a\pi'(a\mid s)Q_\pi(s,a)$）
+& = \E\big[R_{t+1}+\gamma V_\pi(S_{t+1})\,\big|\,S_t=s,A_t=\pi'(s)\big] || 第 3 章 Q 与 V 的转换式
+& = \E_{\pi'}\big[R_{t+1}+\gamma V_\pi(S_{t+1})\,\big|\,S_t=s\big] || 第一步的动作正是 $\pi'$ 选的，所以可以写成“按 $\pi'$ 行动”的期望
+& \le \E_{\pi'}\big[R_{t+1}+\gamma\,Q_\pi\big(S_{t+1},\pi'(S_{t+1})\big)\,\big|\,S_t=s\big] || 对下一状态 $S_{t+1}$ 再用一次定理条件（$\gamma\ge0$ 不改变不等号方向）
+& = \E_{\pi'}\big[R_{t+1}+\gamma R_{t+2}+\gamma^2V_\pi(S_{t+2})\,\big|\,S_t=s\big] || 把 $Q_\pi$ 展开一步，第二步动作也由 $\pi'$ 选
+& \le \E_{\pi'}\big[R_{t+1}+\gamma R_{t+2}+\gamma^2R_{t+3}+\gamma^3V_\pi(S_{t+3})\,\big|\,S_t=s\big] || 同样的操作再做一次
+& \;\;\vdots || 反复展开 $k$ 次，尾项 $\gamma^kV_\pi(S_{t+k})$ 的绝对值不超过 $\gamma^kR_{\max}/(1-\gamma)\to0$
+* & \le \E_{\pi'}\big[R_{t+1}+\gamma R_{t+2}+\gamma^2R_{t+3}+\cdots\,\big|\,S_t=s\big]=V_{\pi'}(s) || 正是 $\pi'$ 的价值的定义
+-->
+<p>定理的条件对“贪心策略”自动成立，于是得到策略改进的具体做法和停止条件：</p>
+<!--deriv 推论：贪心改进不会变差；不再变好时已经最优
+\pi'(s) & = \argmax_a Q_\pi(s,a) || 对 $V_\pi$ 贪心（$Q_\pi$ 由 $V_\pi$ 一步算出，需要模型）
+Q_\pi\big(s,\pi'(s)\big) & = \max_a Q_\pi(s,a)\ \ge\ \sum_a\pi(a\mid s)\,Q_\pi(s,a)=V_\pi(s) || 最大值不小于加权平均 ⇒ 满足定理条件 ⇒ $V_{\pi'}\ge V_\pi$
+# 如果改进后价值没有变化（$V_{\pi'}=V_\pi$）：
+V_\pi(s) & = V_{\pi'}(s)=\max_a\sum_{s',r}p(s',r\mid s,a)\big[r+\gamma V_\pi(s')\big] || $V_{\pi'}$ 满足它自己的期望方程，而 $\pi'$ 在每个状态取的正是 max
+* V_\pi & = V_* || 上式就是 Bellman 最优方程，第 3 章已证明其解唯一
+-->
+<p>用对线 MDP 验证：均匀随机策略的价值是 ([[lane.Vu.0|.3f]], [[lane.Vu.1|.3f]], [[lane.Vu.2|.3f]])，对它做一次贪心改进得到 [[lane.greedy_u.0]] / [[lane.greedy_u.1]] / [[lane.greedy_u.2]]，新策略的价值是 ([[lane.V_greedy_u.0|.3f]], [[lane.V_greedy_u.1|.3f]], [[lane.V_greedy_u.2|.3f]])——三个状态<strong>同时</strong>变好，和定理一致。但它还不是最优：回城状态选的是“补满状态”，而 $\pi_*$ 选“快速上线”，还需要再改进一轮。</p>
+
+<h2>4.4 策略迭代</h2>
+<p>把“完整评估 → 贪心改进”交替进行，就是策略迭代（Policy Iteration）：</p>
+$$\pi_0\ \xrightarrow{\ \text{评估}\ }\ V_{\pi_0}\ \xrightarrow{\ \text{改进}\ }\ \pi_1\ \xrightarrow{\ \text{评估}\ }\ V_{\pi_1}\ \xrightarrow{\ \text{改进}\ }\ \pi_2\ \longrightarrow\ \cdots\ \longrightarrow\ \pi_*$$
+<p><strong>为什么有限步收敛</strong>：确定性策略只有 $\lvert\mathcal A\rvert^{\lvert\mathcal S\rvert}$ 个（有限）；只要还没到最优，改进后的价值在某个状态上严格变大（推论的逆否），所以不会回到以前出现过的策略；有限集合里不重复地走，必然在有限步内停下，而停下时就是最优（推论）。</p>
+<div class="co warn"><span class="h">面试注意：平局会让策略迭代停不下来</span><p>如果某个状态有两个动作的 $Q_\pi$ 完全相等，而改进时用 <code>argmax</code> 随意挑一个，策略可能在两个同样好的动作之间来回切换，“策略不再变化”这个停止条件永远不满足。正确写法是：<strong>只有新动作严格更好（超过一个小阈值）才换</strong>，或者改用“价值不再变化”作为停止条件。本书 demo 都按前一种写法实现。</p></div>
+<p>对线 MDP 从最差的“激进·强行·补满”出发，策略迭代的每一轮：</p>
+<!--gbars {"groups":{"path":"lane.pi_names"},"hl":{"path":"lane.pi_last"},"h":280,"w":860,"fmt":".2f","ymax":16,"gname":"轮次与策略",
+"series":[{"n":"V(对线)","v":{"path":"lane.pi_V.0"},"c":"b"},{"n":"V(团战)","v":{"path":"lane.pi_V.1"},"c":"r"},{"n":"V(回城)","v":{"path":"lane.pi_V.2"},"c":"g"}],
+"cap":"<b>图 4-2</b>　对线 MDP 上的策略迭代（精确评估，构建时计算）。每一轮三个状态的价值都不下降；第 1 轮改了对线、团战两个状态，第 2 轮只改回城一个状态，之后策略不再变化，就是 $\\pi_*$。"} -->
+<p>在更大的问题上，策略迭代的轮数也出奇地少。下面是本章的“地牢”地图：7×9 网格，中间一条走廊两侧是陷阱（−10），右边是目标（+10），每步 −0.1，γ = 0.95，并且有 20% 的<strong>滑步</strong>——想往前走时各有 10% 概率被挤到左边或右边（可以理解为操作误差或网络延迟）。从“所有格子都往右走”出发：</p>
+<!--grid {"id":"g43","map":"DUNGEON","mode":"pi","gamma":0.95,"slip":0.2,"step":-0.1,"goal":10,"trap":-10,"pi0":1,"cell":40,"cols":2,"fmt":".1f",
+"panels":[{"show":0,"title":"π₀ 全部向右：V(S) = {v:.2f}","path":true},{"show":1,"title":"π₁：V(S) = {v:.2f}","path":true},{"show":2,"title":"π₂：V(S) = {v:.2f}","path":true},{"show":3,"title":"π₃ = π*：V(S) = {v:.2f}","path":true}],
+"cap":"<b>图 4-3</b>　地牢地图上的策略迭代（20% 滑步，构建时真实运行）。数字是当前策略的精确价值 $V_{\\pi_i}$，箭头是策略本身，橙色线是从出生点 S 按策略走的路线。π₀ 直穿陷阱走廊，走廊里的格子价值很低；一轮改进后出生点就改走上方绕行，之后两轮只做局部微调。$4^{59}$ 个确定性策略里，只用 4 轮就找到最优。"} -->
+
+<h2>4.5 价值迭代</h2>
+<p>图 4-1 和图 4-3 都说明评估不必做完。把评估缩到只扫描一次、并把改进合并进去，就是价值迭代（Value Iteration）——直接把 Bellman <strong>最优</strong>方程当赋值语句：</p>
+$$V_{k+1}(s)\leftarrow\max_a\sum_{s',r}p(s',r\mid s,a)\big[r+\gamma V_k(s')\big]\qquad\text{即}\quad V_{k+1}=T^*V_k$$
+<p>它可以看成“每轮评估只做一次扫描的策略迭代”：对 $V_k$ 贪心得到 $\pi_{k+1}$，再对 $\pi_{k+1}$ 做一次 $T^{\pi_{k+1}}V_k$——结果恰好就是 $T^*V_k$。由第 3 章的压缩性，$\lVert V_k-V_*\rVert_\infty\le\gamma^k\lVert V_0-V_*\rVert_\infty$。但实际停止时我们不知道 $V_*$，只能看相邻两次的变化量，需要一个由“可观测量”给出的误差界：</p>
+<!--deriv 价值迭代的停止准则
+\lVert V_{k+1}-V_*\rVert_\infty & = \lVert T^*V_k-T^*V_*\rVert_\infty\le\gamma\lVert V_k-V_*\rVert_\infty || $V_*$ 是不动点 + γ-压缩
+& \le \gamma\big(\lVert V_k-V_{k+1}\rVert_\infty+\lVert V_{k+1}-V_*\rVert_\infty\big) || 三角不等式：在 $V_k$ 与 $V_*$ 之间插入 $V_{k+1}$
+* \lVert V_{k+1}-V_*\rVert_\infty & \le \frac{\gamma}{1-\gamma}\,\lVert V_{k+1}-V_k\rVert_\infty || 移项：左边留下 $(1-\gamma)\lVert V_{k+1}-V_*\rVert$
+-->
+<p>所以“相邻两次差小于 $10^{-3}$”并不意味着误差小于 $10^{-3}$：γ = 0.99 时系数是 99，真实误差可能接近 0.1。要保证误差不超过 $\epsilon$，停止阈值应设为 $\epsilon(1-\gamma)/\gamma$。还有一个更实用的问题：价值没有完全收敛，贪心出来的策略差多少？</p>
+<!--deriv 贪心策略的损失界：若 ‖V − V*‖∞ ≤ ε，π 对 V 贪心，则 ‖V_π − V*‖∞ ≤ 2γε/(1−γ)
+\lVert V_*-V_\pi\rVert_\infty & = \lVert T^*V_*-T^\pi V_\pi\rVert_\infty || 两者分别是 $T^*$ 与 $T^\pi$ 的不动点
+& \le \lVert T^*V_*-T^*V\rVert_\infty+\lVert T^\pi V-T^\pi V_\pi\rVert_\infty || 中间插入 $T^*V=T^\pi V$（$\pi$ 对 $V$ 贪心，正好取到 max）+ 三角不等式
+& \le \gamma\lVert V_*-V\rVert_\infty+\gamma\lVert V-V_\pi\rVert_\infty || 两个算子都是 γ-压缩
+& \le \gamma\epsilon+\gamma\big(\epsilon+\lVert V_*-V_\pi\rVert_\infty\big) || 条件 + 三角不等式
+* \lVert V_*-V_\pi\rVert_\infty & \le \frac{2\gamma\epsilon}{1-\gamma} || 移项
+-->
+<p>这个界很松（实际上价值误差远大于“策略误差”，图 4-1 就是例子），但它说明了一件事：<strong>价值估得不准，策略可以已经很好</strong>。深度 RL 里 critic 的误差往往很大，策略却照样能学好，背后是同一个道理。</p>
+<p>回到地牢地图，看价值迭代的价值如何传播（20% 滑步，同步更新；全部 4 个方向并列时不画箭头）：</p>
+<!--grid {"id":"g44","map":"DUNGEON","mode":"vi","gamma":0.95,"slip":0.2,"step":-0.1,"goal":10,"trap":-10,"cell":40,"cols":2,"fmt":".1f","hide_ties":true,
+"panels":[{"show":3,"title":"k = 3"},{"show":8,"title":"k = 8"},{"show":14,"title":"k = 14"},{"show":"inf","title":"k = ∞：V(S) = {v:.2f}","path":true}],
+"cap":"<b>图 4-4</b>　地牢地图上的价值迭代（构建时真实运行）。正价值像波一样从目标 G 一格一格往外扩散，陷阱旁的格子很早就学会“离开陷阱”；k = 8 时出生点的贪心方向还指向走廊，k = 14 时已经改走上方绕行，与图 4-3 策略迭代的结果相同。"} -->
+<p>同步价值迭代在容差 $10^{-10}$ 下用了 [[dng.s2.sweeps]] 次扫描，原地更新只要 [[dng.s2.sweeps_inplace]] 次；策略迭代用了 [[dng.s2.pi_rounds]] 轮，但如果评估也用原地迭代，4 轮合计要 [[ch04.dungeon.s2.pi_eval_sweeps]] 次评估扫描。</p>
+
+<h3>随机性改变最优路线</h3>
+<p>同一张地图，只改滑步概率。没有滑步时，最短路就是直穿走廊；有 20% 滑步时，走廊里每一步都有 20% 概率掉进陷阱，最优路线变成绕远路：</p>
+<!--grid {"id":"g45","map":"DUNGEON","mode":"vi","gamma":0.95,"step":-0.1,"goal":10,"trap":-10,"cell":40,"cols":2,"fmt":".1f","hide_ties":true,
+"panels":[{"slip":0.0,"show":"inf","title":"无滑步：V(S) = {v:.2f}","path":true},{"slip":0.2,"show":"inf","title":"20% 滑步：V(S) = {v:.2f}","path":true}],
+"cap":"<b>图 4-5</b>　同一张地图、不同的转移随机性下的最优策略（构建时价值迭代）。无滑步时路线长 [[g45.vi_00.pathlen]] 步，直穿陷阱走廊；20% 滑步时路线长 [[g45.vi_02.pathlen]] 步，宁可多走也不靠近陷阱，出生点的价值也从 [[dng.s0.Vstart|.2f]] 降到 [[dng.s2.Vstart|.2f]]。"} -->
+<div class="co tip"><span class="h">游戏 AI 实战：环境随机性就是“风险偏好”</span><p>这是面试里很好用的一个例子：Bot 的“胆子”不只来自奖励，也来自它对环境随机性的认识。训练环境里如果没有延迟、没有操作误差、对手技能命中率也被高估或低估，Bot 学到的就是“走钢丝”的路线，上线后在真实网络条件下会频繁失误。常见做法是在训练时加入动作延迟、执行噪声、随机化对手（domain randomization），让 Bot 学到更稳健的策略。第 6 章的 Cliff Walking 会从另一个角度（Sarsa vs Q-learning）讨论同一个问题。</p></div>
+
+<h3>手撕代码</h3>
+<p>面试手撕价值迭代 / 策略迭代时，下面的版本足够短，也处理了终止状态、原地更新和平局问题。它和 <code>demos/ch04_interview.py</code> 中的代码完全相同，运行脚本会在对线 MDP 和两张地牢地图上与精确解对拍：</p>
+<!--code:py:价值迭代与策略迭代（Python，面试手撕版）-->
+{{demo:ch04_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch04_interview.py 的输出-->
+{{demo:ch04_interview_output.txt}}
+<!--/code-->
+<p>两份策略在地牢上有若干状态选了不同动作，原因是这些状态有多个并列最优的动作；分别精确评估后与 $V_*$ 的差都在 $10^{-12}$ 量级，所以都是最优策略。面试官问“你的 VI 和 PI 结果不一样”时，先检查是不是平局。</p>
+
+<h2>4.6 实测：三种算法的代价</h2>
+<h3>γ 对扫描次数的影响</h3>
+<p>按压缩性给出的上界，从 $V_0=0$ 出发、要让相邻差降到容差以下，扫描次数不超过 $\lceil\ln(\text{tol}/\lVert V_1-V_0\rVert_\infty)/\ln\gamma\rceil+1$，约与 $1/(1-\gamma)$ 成正比。在地牢地图上实测（20% 滑步，容差 $10^{-10}$）：</p>
+<!--dtab {"rows":"ch04.gamma","cols":[["γ","g"],["有效视界 1/(1−γ)","=1/(1-g)",".0f"],["理论上界（次）","theory"],["同步 VI（次）","vi"],["原地 VI（次）","vi_in"],["策略迭代（轮）","pi"]],
+"cap":"<b>表 4-1</b>　γ 对扫描次数的影响（<code>demos/ch04_dp.cpp</code> 实测）。"} -->
+<!--plot {"x":[1.5,1500],"y":[10,40000],"logx":true,"logy":true,"h":280,"xlabel":"有效视界 1/(1−γ)（对数坐标）","ylabel":"扫描次数","legend":"tl",
+"series":[{"path":"ch04d.theory","n":"压缩性给出的上界","c":"o","dash":true,"dots":true},{"path":"ch04d.vi","n":"同步价值迭代（实测）","c":"b","dots":true},{"path":"ch04d.vi_in","n":"原地价值迭代（实测）","c":"g","dots":true}],
+"cap":"<b>图 4-6</b>　地牢地图上价值迭代的扫描次数 vs 有效视界（C++ 实测）。上界随 $1/(1-\\gamma)$ 线性增长，实测却在 [[ch04.gamma.5.vi]] 次左右饱和——与第 0 章图 0-4 那个“上界几乎是紧的”例子形成对比。"} -->
+<p>为什么这里的上界这么松？γ-压缩是<strong>最坏情况</strong>：它假设误差可以在状态之间无限循环、每步只乘一个 γ。第 0 章的 MRP 没有终止状态，误差确实一直在循环，所以上界几乎是紧的。地牢是回合制任务，最优策略下约 [[g45.vi_02.pathlen]] 步就到达终止格，误差在终止格被“吸收”，实际的收缩因子是 $\gamma$ 乘上“还没结束的概率”，所以 γ → 1 时扫描次数也不会无限增长。<strong>决定收敛速度的是“误差能在状态之间循环多久”</strong>，回合越短、终止越确定，收敛越快。</p>
+
+<h3>规模化：同步 / 原地 / 策略迭代</h3>
+<p>随机生成 n×n 迷宫（15% 墙、5% 陷阱，到不了目标的格子改成墙，20% 滑步），比较三种算法的扫描次数与耗时（MSVC /O2，3 次取最快）：</p>
+<!--dtab {"rows":"ch04.scale","cols":[["γ","g"],["n","n"],["状态数","S"],["同步 VI","=f'{vi} 次 / {vi_ms:.2f} ms'"],["原地 VI（正序）","=f'{vin} 次 / {vin_ms:.2f} ms'"],["原地 VI（倒序）","=f'{vrev} 次 / {vrev_ms:.2f} ms'"],["策略迭代","=f'{pi} 轮 / {pi_sweeps} 次评估扫描 / {pi_ms:.2f} ms'"],["撞墙躲避格","hide"]],
+"cap":"<b>表 4-2</b>　随机迷宫上的 DP 代价（<code>demos/ch04_dp.cpp</code> E4 实测）。目标在右下角，“倒序”就是从目标一侧开始扫描。"} -->
+<p>从表 4-2 可以读出四个结论：</p>
+<ol>
+<li><strong>每次扫描的代价与状态数成正比</strong>；扫描次数主要取决于价值要传播多远、误差能循环多久，地图变大时只缓慢增加（γ = 0.9 时从 [[ch04.scale.0.vi]] 次到 [[ch04.scale.2.vi]] 次，状态数却增加了十几倍）。</li>
+<li><strong>原地更新 + 好的扫描顺序更快</strong>：从目标一侧开始扫，新价值能在一次扫描里传得更远（这就是“优先扫描”思想的雏形，第 8 章 PER 的源头之一）。</li>
+<li><strong>策略迭代轮数少，但总时间未必少</strong>：γ = 0.99、n = 40 时策略迭代只要 [[ch04.scale.5.pi]] 轮，但这些轮次的评估合计扫描了 [[ch04.scale.5.pi_sweeps]] 次，耗时 [[ch04.scale.5.pi_ms|.2f]] ms，而同步价值迭代只要 [[ch04.scale.5.vi_ms|.2f]] ms。实践中常用两者的折中——每轮只做 m 次评估扫描的<strong>修正策略迭代</strong>（modified PI），m = 1 就是价值迭代，m = ∞ 就是策略迭代。</li>
+<li><strong>γ 变大时多出来的扫描花在“躲避格”上</strong>：最后一列统计的是“最优动作是撞墙原地不动”的格子。它们离目标太远、路上又有陷阱，Bot 判断“走过去的风险不值得”，宁可原地每步扣 0.1。这些格子的误差每次扫描只乘 $\gamma\times0.8$ 左右，收敛最慢。</li>
+</ol>
+<div class="co warn"><span class="h">游戏 AI 实战：“Bot 原地发呆”往往是奖励设计问题</span><p>“躲避格”在游戏里对应一个经典现象：Bot 找个角落待着不动，因为“行动可能被罚 −10，不动只罚 −0.1/步”。这不是算法 bug，而是奖励在告诉它：不动是最优的。解决办法在第 16 章：调整每步惩罚与失败惩罚的比例、加入势函数塑形引导它靠近目标、或者给“长期不动”额外惩罚（注意别引入新的漏洞）。</p></div>
+
+<h2>4.7 广义策略迭代（GPI）</h2>
+<!--flow {"w":900,"h":200,
+"boxes":[
+{"id":"e","x":60,"y":40,"w":250,"h":76,"t":"策略评估","s":"V ← V_π（解或近似解期望方程）","s2":"可以只做几步，甚至一步","c":"b"},
+{"id":"i","x":420,"y":40,"w":250,"h":76,"t":"策略改进","s":"π ← greedy(V) 或沿梯度走一小步","s2":"可以只改部分状态","c":"o"},
+{"id":"c","x":740,"y":40,"w":140,"h":76,"t":"同时稳定","s":"V = V*，π = π*","s2":"⇔ Bellman 最优方程","c":"g"}],
+"arrows":[
+{"p":[[310,62],[420,62]],"c":"b","sw":2,"label":"给出 V","lx":340,"ly":54},
+{"p":[[420,96],[310,96]],"c":"o","sw":2,"label":"给出新 π","lx":336,"ly":114},
+{"p":[[670,78],[740,78]],"c":"g","sw":2}],
+"texts":[
+{"x":450,"y":150,"a":"middle","cls":"sm","t":"评估让 V 贴近当前策略的真实价值，改进让 π 对当前 V 贪心——两者互相“拉扯”。"},
+{"x":450,"y":172,"a":"middle","cls":"sm","t":"只要交替进行、谁都不永久停下，就会一起收敛到最优：这就是广义策略迭代（GPI）。"}],
+"cap":"<b>图 4-7</b>　广义策略迭代。策略迭代（评估做满）、价值迭代（评估一步）、异步 DP（只改部分状态）都是它的特例；后面的 MC 控制、Sarsa、Q-learning、Actor-Critic、PPO 也是。"} -->
+<p>把后面要学的算法放进 GPI 框架，能一眼看出它们的区别——面试时用这张表回答“这些算法有什么联系”：</p>
+<div class="tbl"><table>
+<tr><th>算法</th><th>评估怎么做</th><th>改进怎么做</th><th>需要模型吗</th><th>章节</th></tr>
+<tr><td>策略迭代</td><td>精确解或迭代到收敛</td><td>所有状态贪心</td><td>需要</td><td>4</td></tr>
+<tr><td>价值迭代</td><td>一次扫描</td><td>隐含在 max 里</td><td>需要</td><td>4</td></tr>
+<tr><td>蒙特卡洛控制</td><td>用完整回报的样本均值估 $Q_\pi$</td><td>ε-greedy</td><td>不需要</td><td>6</td></tr>
+<tr><td>Sarsa</td><td>TD 自举估 $Q_\pi$</td><td>ε-greedy</td><td>不需要</td><td>6</td></tr>
+<tr><td>Q-learning / DQN</td><td>TD 自举直接估 $Q_*$（目标里带 max）</td><td>隐含（行为策略 ε-greedy）</td><td>不需要</td><td>6、8</td></tr>
+<tr><td>Actor-Critic / PPO</td><td>critic 估 $V$ 或优势 $A$</td><td>actor 沿策略梯度走一小步（PPO 还限制步长）</td><td>不需要</td><td>10、11</td></tr>
+</table></div>
+
+<h2>4.8 DP 的局限，以及它在游戏开发里真正出现的地方</h2>
+<h3>局限</h3>
+<ul>
+<li><strong>维度灾难</strong>：每次扫描要遍历所有状态，每个状态还要遍历所有动作和后继。一个极简的 1v1 MOBA：双方位置离散成 50×50 格就是 $2500^2\approx6\times10^6$，再乘上双方各 20 档血量就是 $2.5\times10^9$，还没算技能冷却和兵线。表格 DP 在这里完全不可行，必须用函数近似（第 8 章起）。</li>
+<li><strong>需要显式模型</strong>：游戏引擎是一个可以“玩”的模拟器，但给不出 $p(s',r\mid s,a)$ 的表达式。只能采样，于是有了第 5 章的蒙特卡洛和时序差分。</li>
+<li><strong>期望 backup vs 样本 backup</strong>：DP 每次更新都对所有后继求期望（全宽 backup，图 3-4 整棵树），代价与分支数成正比；采样方法每次只沿一条路径更新，单次便宜但有噪声。第 5 章会把 DP、MC、TD 放在“全宽 vs 采样、自举 vs 不自举”的二维坐标里比较。</li>
+</ul>
+<h3>游戏里真正用到 DP 的地方</h3>
+<div class="tbl"><table>
+<tr><th>场景</th><th>与本章的关系</th><th>说明</th></tr>
+<tr><td>网格寻路 / 流场（Flow Field）</td><td>确定性转移、每步 −1、γ = 1 的价值迭代</td><td>从目标出发算“积分场”就是价值迭代，Dijkstra 是按价值从小到大的顺序更新、每个状态只更新一次的价值迭代；RTS 大规模单位寻路常用流场。可对照本仓库 <code>Algorithm_AStar</code> 一书</td></tr>
+<tr><td>小规模离散决策</td><td>离线跑 VI / PI，结果打表</td><td>回合制战斗的残局、卡牌游戏的终局、Boss 阶段机的转阶段时机；状态少到能枚举时，DP 给出的是真正的最优解</td></tr>
+<tr><td>数值平衡检查</td><td>对“玩家决策模型”求最优策略</td><td>把养成 / 经济系统简化成 MDP，求最优策略的期望收益，检查是否存在压倒性的最优路线（策划常说的“唯一解”）——这是 JD 里“AI 工具链”可以落地的点</td></tr>
+<tr><td>模型规划（planning）</td><td>在学到的模型上做 DP / 搜索</td><td>Dyna-Q、MCTS、MuZero（第 17 章）：先学一个模型，再在模型里“想几步”</td></tr>
+</table></div>
+
+<h2>4.9 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“价值迭代比策略迭代快”</td><td>没有区分轮数和单轮代价</td><td>PI 轮数少（通常几轮），但每轮要完整评估；VI 每轮只扫一次，但轮数多。哪个总时间短取决于问题规模与 γ（表 4-2），实际常用修正策略迭代</td></tr>
+<tr><td>“相邻两次差小于 ε 就说明收敛到 ε 精度了”</td><td>漏了 $\gamma/(1-\gamma)$ 系数</td><td>$\lVert V_{k+1}-V_*\rVert\le\frac{\gamma}{1-\gamma}\lVert V_{k+1}-V_k\rVert$，γ = 0.99 时差 99 倍</td></tr>
+<tr><td>“策略迭代一定在策略不变时停止”</td><td>平局时可能永远在两个等价动作之间切换</td><td>只在严格更好时换动作，或以价值不变作为停止条件</td></tr>
+<tr><td>“价值必须收敛，策略才会正确”</td><td>与图 4-1 的现象相反</td><td>贪心策略往往远早于价值收敛就已最优；损失界 $2\gamma\epsilon/(1-\gamma)$ 只是最坏情况</td></tr>
+<tr><td>“DP 在游戏里没用”</td><td>太绝对</td><td>大型对抗 Bot 不直接用表格 DP；但寻路 / 流场、小规模决策打表、数值平衡检查、模型规划都在用同一套原理</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:动态规划常见追问链-->
+策略迭代和价值迭代的区别？
+├─ 策略迭代为什么一定收敛？ → 策略改进定理（单调）+ 确定性策略有限 + 不会重复
+│   ├─ 证明一下策略改进定理 → 反复展开 Q_π(s, π′(s))，尾项 γᵏV → 0（4.3 节）
+│   └─ 平局会怎样？ → 可能来回切换不停止：严格更好才换
+├─ 价值迭代什么时候停？ → 相邻差 < ε(1−γ)/γ 才保证误差 < ε
+│   └─ 价值没收敛，贪心策略差多少？ → ≤ 2γε/(1−γ)；实际往往早已最优
+├─ 哪个更快？ → 轮数 vs 单轮代价；修正策略迭代折中；原地更新 + 扫描顺序
+│   └─ γ 越大越慢吗？ → 最坏情况线性于 1/(1−γ)；回合制任务里误差被终止吸收，会饱和
+└─ 为什么游戏里不直接用？ → 维度灾难 + 需要模型 → 采样（第 5 章）+ 函数近似（第 8 章）
+    └─ 哪里还在用？ → 流场寻路 / Dijkstra、离线打表、数值平衡检查、模型规划
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 4 章</div><ul>
+<li>迭代评估 $V\leftarrow T^\pi V$；同步 vs 原地（原地更快，扫描顺序有影响）。</li>
+<li>策略改进定理：$Q_\pi(s,\pi'(s))\ge V_\pi(s)\ \forall s\Rightarrow V_{\pi'}\ge V_\pi$；贪心自动满足；不再变好 ⇒ 满足最优方程 ⇒ 最优。</li>
+<li>策略迭代：有限个确定性策略 + 严格改进 ⇒ 有限轮收敛；平局要“严格更好才换”。</li>
+<li>价值迭代 $V\leftarrow T^*V$；停止准则 $\lVert V_{k+1}-V_*\rVert\le\frac{\gamma}{1-\gamma}\lVert V_{k+1}-V_k\rVert$；贪心损失 $\le\frac{2\gamma\epsilon}{1-\gamma}$。</li>
+<li>收敛速度看“误差能循环多久”：回合制 + 终止确定时远快于压缩上界。</li>
+<li>GPI：评估与改进交替，统领 MC 控制、Sarsa、Q-learning、Actor-Critic、PPO。</li>
+<li>随机性改变最优路线（图 4-5）；“原地发呆”往往是奖励比例问题（表 4-2 躲避格）。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：价值迭代可以看成每轮只做一次评估扫描的策略迭代，为什么？</summary><p>对 $V_k$ 贪心得到 $\pi_{k+1}$，再对 $\pi_{k+1}$ 做一次评估扫描 $T^{\pi_{k+1}}V_k$；由于 $\pi_{k+1}$ 在每个状态都取到 max，$T^{\pi_{k+1}}V_k=T^*V_k$，正好是价值迭代的一步。</p></details>
+<details class="quiz"><summary>自测 2：γ = 0.99，希望价值误差不超过 0.01，价值迭代的停止阈值应设多少？</summary><p>需要 $\frac{\gamma}{1-\gamma}\Delta\le0.01$，即 $\Delta\le0.01\times0.01/0.99\approx1.01\times10^{-4}$。</p></details>
+<details class="quiz"><summary>自测 3：图 4-5 中有滑步时 Bot 绕远路，如果把陷阱惩罚从 −10 改成 −1，会怎样？</summary><p>掉进陷阱的代价变小，直穿走廊的期望收益相对变高，最优路线很可能重新变回直穿走廊。这说明“稳健”或“冒险”是奖励大小与环境随机性共同决定的，调奖励比例就是在调 Bot 的风险偏好。</p></details>
+<details class="quiz"><summary>自测 4：为什么说 Dijkstra 是一种价值迭代？</summary><p>最短路问题是确定性转移、每步代价为正的 MDP，Bellman 最优方程就是 $d(v)=\min_u[d(u)+w(u,v)]$。Bellman-Ford 是同步价值迭代；Dijkstra 利用“代价非负时最终值按从小到大的顺序确定”，每次只更新当前最小的那个状态，每个状态只需更新一次——是一种按最优顺序进行的异步价值迭代。</p></details>
+</section>

@@ -1,0 +1,244 @@
+<div class="part-head" data-toc="PART III · 深度强化学习"><div class="no">PART III</div><h1>深度强化学习</h1><p>把 Part II 的表格方法换成神经网络：价值派（DQN 家族）、策略派（策略梯度 → Actor-Critic → PPO）、连续控制（DDPG / TD3 / SAC），以及同一套理论在大模型上的用法（RLHF / DPO / GRPO）。面试最高频的 PPO、GAE、GRPO 都在这一部分。</p></div>
+<section class="chapter" id="ch8">
+<div class="ch-head"><div class="no">CHAPTER 08</div><h1>价值函数近似与 DQN 家族</h1><p class="lead">状态多到存不下 Q 表时，用参数化函数（线性或神经网络）近似价值。一旦“函数近似 + 自举 + off-policy”三者同时出现，训练就可能发散，这叫致命三角。DQN 用经验回放和目标网络把它稳住；之后的 Double DQN、Dueling、PER、n 步、分布式 RL 各自修一个具体毛病，合起来就是 Rainbow。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>说清“半梯度”到底半在哪里，并用线性 TD 的期望更新推出：on-policy 时稳定，off-policy 时可能发散。</li>
+<li>讲透 DQN 的两大技巧各自解决什么问题，用 CartPole 实测去掉目标网络会怎样。</li>
+<li>用 Jensen 不等式证明 max 带来高估，并解释 Double DQN 为什么能缓解。</li>
+<li>推出 Dueling 减均值的理由、PER 的 IS 权重；能手写 sum-tree。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>DQN 用神经网络 $Q_w(s,a)$ 近似 Q 表，最小化 $\big(r+\gamma\max_{a'}Q_{\bar w}(s',a')-Q_w(s,a)\big)^2$。直接这样训练会不稳定：连续采到的样本高度相关，而且回归目标随 $w$ 一起变，相当于“追着自己的影子跑”。DQN 的两个技巧正好对应这两点：<strong>经验回放</strong>把转移存进缓冲区再随机抽，打乱相关性、重复利用数据；<strong>目标网络</strong> $\bar w$ 每隔 C 步才从 $w$ 复制一次，让目标在一段时间内固定，回归问题变得接近监督学习。剩下的问题是 max 带来的<strong>高估</strong>（$\E[\max\hat Q]\ge\max\E[\hat Q]$），Double DQN 用在线网络选动作、目标网络估值来缓解。Dueling 把 Q 拆成 V 和减过均值的 A，PER 按 TD 误差优先回放并用 IS 权重修正偏差，n 步回报加快奖励传播，C51 / QR-DQN 学回报分布，这些合起来是 Rainbow。</p></div>
+
+<h2>8.1 为什么要近似：从 Q 表到参数化函数</h2>
+<p>第 3 章算过：哪怕只把 MOBA 里自己和对手的位置各粗略离散成 100×100 格，状态数就已经是 $10^8$，再乘上血量、技能冷却、兵线，Q 表根本存不下；更重要的是，表格方法<strong>没有泛化</strong>——没去过的格子一无所知。函数近似用参数 $w$（维度远小于状态数）表示价值：</p>
+<ul>
+<li><strong>线性</strong>：$\hat v(s,w)=\phi(s)^\top w$，$\phi$ 是手工特征（瓦片编码、径向基）。理论最清楚，本章用它分析稳定性。</li>
+<li><strong>神经网络</strong>：$\hat v(s,w)$ 或 $Q_w(s,\cdot)$（一次前向输出所有动作的 Q 值）。表达力强，但理论保证几乎没有，靠工程技巧稳住。</li>
+</ul>
+<p>改一个状态的参数会同时改变很多状态的估计，这既是泛化的来源，也是不稳定的来源。训练目标是按状态分布 $\mu$ 加权的价值误差，问题出在 TD 的目标本身也含 $w$：</p>
+<!--deriv 半梯度 TD：把目标当成常数求导
+\overline{\mathrm{VE}}(w) & = \sum_s\mu(s)\big[v_\pi(s)-\hat v(s,w)\big]^2 || 理想目标：按状态分布 $\mu$ 加权的均方价值误差
+\nabla_w\tfrac12\big[U_t-\hat v(S_t,w)\big]^2 & = -\big[U_t-\hat v(S_t,w)\big]\nabla_w\hat v(S_t,w) || 用样本目标 $U_t$ 代替未知的 $v_\pi(S_t)$；$U_t$ 与 $w$ 无关时（MC 的 $G_t$）这是真梯度
+* w & \leftarrow w+\alpha\big[R_{t+1}+\gamma\hat v(S_{t+1},w)-\hat v(S_t,w)\big]\nabla_w\hat v(S_t,w) || TD 把 $U_t=R_{t+1}+\gamma\hat v(S_{t+1},w)$ 代进来，但<strong>不对目标里的 $w$ 求导</strong>，所以叫半梯度
+# 如果对目标也求导（残差梯度法），更新方向是：
+-\nabla_w\tfrac12\delta_t^2 & = \delta_t\big[\nabla_w\hat v(S_t,w)-\gamma\nabla_w\hat v(S_{t+1},w)\big] || 是某个目标的真梯度、收敛有保证，但学得慢；随机环境下还要“双采样”才无偏，实践中很少用
+-->
+<p>半梯度不是任何函数的梯度，所以 SGD 的收敛理论用不上。代码里体现为：计算目标时用 <code>torch.no_grad()</code> 或 <code>.detach()</code>，DQN 更进一步，直接用另一套参数 $\bar w$ 来算目标。</p>
+<div class="co tip"><span class="h">工具箱：手写 MLP 的反向传播要做数值梯度检查</span><p>后面几章的 C++ demo 都用 <code>demos/rlcommon.h</code> 里手写的 MLP（tanh 隐藏层 + 线性输出 + Adam）。用中心差分 $\frac{L(w+h)-L(w-h)}{2h}$ 和反传结果比较：4-8-8-3 网络的 [[ch08.e0.checked]] 个权重，最大相对误差 [[ch08.e0.max_rel|.1e]]（<code>demos/ch08_output.txt</code> E0）。面试让你“手写反传”时，主动提这一步，比代码本身更能说明工程习惯。</p></div>
+
+<h2>8.2 致命三角：函数近似 + 自举 + off-policy</h2>
+<p>Sutton 把这三者同时出现时可能发散的现象叫做<strong>致命三角</strong>（deadly triad）。三个都很难放弃：函数近似是规模化的前提；自举让学习更快、能在线（第 5 章）；off-policy 让我们能用回放数据、能学最优策略的同时按 ε-greedy 探索。为什么三者凑齐就会出问题？用线性 TD 的期望更新看得最清楚：</p>
+<!--deriv 线性 TD 的期望更新：稳定 ⇔ A 正定；on-policy 时 A 一定正定
+\E[\Delta w] & = \alpha\,\E\big[(R+\gamma\phi'^\top w-\phi^\top w)\,\phi\big]=\alpha\,(b-Aw) || 线性近似 $\hat v=\phi^\top w$；$b=\E[R\phi]$，$A=\E[\phi(\phi-\gamma\phi')^\top]=\Phi^\top D(I-\gamma P)\Phi$，$D$ 是状态分布对角阵
+w_{\text{TD}} & = A^{-1}b || TD 不动点；迭代 $w_{k+1}=w_k+\alpha(b-Aw_k)$ 收敛 ⇔ $A$ 的特征值实部都为正
+# on-policy 时 D 是 P 的平稳分布。对任意 $v=\Phi u\neq0$：
+v^\top D(I-\gamma P)v & = \|v\|_D^2-\gamma\,v^\top DPv\ \ge\ \|v\|_D^2-\gamma\|v\|_D\|Pv\|_D || $D$ 加权内积下的 Cauchy–Schwarz
+& \ge (1-\gamma)\|v\|_D^2>0 || 平稳性 + Jensen：$\|Pv\|_D^2=\sum_sd(s)\big(\sum_{s'}P_{ss'}v_{s'}\big)^2\le\sum_{s'}d(s')v_{s'}^2=\|v\|_D^2$
+* & \Rightarrow\ A\ \text{正定，期望更新收敛到}\ w_{\text{TD}} || off-policy 时数据分布 $D$ 不是目标策略转移 $P_\pi$ 的平稳分布，最后一步不成立，$A$ 可能有负特征值 → 指数发散
+-->
+<p>Baird 反例就是一个让 $A$ 出现负特征值的构造：7 个状态、8 维线性特征（状态 1–6 的特征是 $2e_i+e_8$，状态 7 是 $e_7+2e_8$），奖励全为 0（真值全为 0，用 $w=0$ 就能完美表示），行为策略以 6/7 的概率随机跳到状态 1–6、1/7 的概率跳到状态 7，目标策略总是跳到状态 7。下图比较三角凑齐与各缺一角的情况：</p>
+<!--plot {"x":[0,3000],"y":[0.5,200000],"logy":true,"h":300,"xlabel":"更新步数","ylabel":"价值 RMS（真值为 0）","legend":"tl",
+"series":[{"path":"ch08.e2.off","n":"线性特征 + 自举 + off-policy（三角凑齐）","c":"r","sw":2.4},{"path":"ch08.e2.on","n":"线性特征 + 自举 + on-policy","c":"b"},{"path":"ch08.e2.tab","n":"表格 + 自举 + off-policy","c":"g","dash":true}],
+"cap":"<b>图 8-1</b>　Baird 反例上的半梯度 TD(0)（α = 0.01，γ = 0.99，C++ 实测，纵轴对数刻度）。三角凑齐时价值 RMS 从 [[ch08.e2.init|.2f]] 指数增长到 [[ch08.e2.off_end|.2e]]；换成 on-policy 数据后衰减到 [[ch08.e2.on_end|.2f]]；换成表格表示后始终有界（[[ch08.e2.tab_end|.1f]]，慢慢收敛到 0）。"} -->
+<div class="tbl"><table>
+<tr><th>去掉的一角</th><th>做法</th><th>代价</th><th>深度 RL 里的对应</th></tr>
+<tr><td>函数近似</td><td>表格</td><td>无法规模化、无泛化</td><td>—</td></tr>
+<tr><td>自举</td><td>MC 回报 / 长 n 步</td><td>方差大、要等回合结束</td><td>n 步回报（Rainbow）、λ-回报</td></tr>
+<tr><td>off-policy</td><td>只用当前策略的数据</td><td>样本利用率低</td><td>PPO 等 on-policy 方法（第 11 章）</td></tr>
+<tr><td>都不去掉，但让目标稳定</td><td>目标网络、小学习率、梯度裁剪</td><td>没有理论保证，靠经验</td><td>DQN（本章）</td></tr>
+</table></div>
+<p class="tcap"><b>表 8-1</b>　致命三角的三个角各自的作用。DQN 三个角全占，所以需要额外的稳定技巧。</p>
+
+<h2>8.3 DQN：经验回放 + 目标网络</h2>
+<p>DQN（Mnih et al., 2015）的损失函数：</p>
+$$L(w)=\E_{(s,a,r,s')\sim\mathcal D}\Big[\ell\big(\underbrace{r+\gamma(1-\text{term})\max_{a'}Q_{\bar w}(s',a')}_{y\text{：目标网络算，不求导}}-Q_w(s,a)\big)\Big],\qquad \ell(d)=\begin{cases}\tfrac12d^2,&|d|\le1\\|d|-\tfrac12,&|d|>1\end{cases}$$
+<!--flow {"w":900,"h":290,
+"boxes":[
+{"id":"env","x":20,"y":30,"w":170,"h":64,"t":"游戏环境","s":"CartPole / 引擎 Tick","c":"s"},
+{"id":"on","x":250,"y":30,"w":200,"h":64,"t":"在线网络 Q_w","s":"ε-greedy 选动作","c":"b"},
+{"id":"tg","x":700,"y":30,"w":180,"h":64,"t":"目标网络 Q_w̄","s":"参数冻结 C 步","c":"p"},
+{"id":"buf","x":20,"y":170,"w":200,"h":64,"t":"回放缓冲区","s":"环形数组，满了覆盖最旧","c":"a"},
+{"id":"loss","x":300,"y":170,"w":220,"h":64,"t":"Huber 损失 + Adam","s":"ℓ(Q_w(s,a) − y)","c":"o"}],
+"arrows":[
+{"p":[[190,50],[250,50]],"c":"s","label":"s","lx":214,"ly":44},
+{"p":[[250,78],[190,78]],"c":"s","label":"a","lx":214,"ly":94},
+{"p":[[105,94],[105,170]],"c":"a","label":"(s, a, r, s′, term)","lx":112,"ly":136},
+{"p":[[220,202],[300,202]],"c":"a","label":"随机采样","lx":232,"ly":194},
+{"p":[[330,94],[330,170]],"c":"b","label":"Q_w(s,a)","lx":336,"ly":128},
+{"p":[[430,170],[430,94]],"c":"o","label":"更新 w","lx":436,"ly":128},
+{"p":[[450,62],[700,62]],"c":"p","dash":true,"label":"每 C 步复制 w̄ ← w","lx":510,"ly":54},
+{"p":[[790,94],[790,202],[520,202]],"c":"p","label":"y = r + γ(1−term)·max Q_w̄(s′,·)","lx":530,"ly":194}],
+"texts":[
+{"x":450,"y":268,"a":"middle","cls":"sm","t":"经验回放：打乱时间相关性、重复利用样本　　目标网络：让回归目标在 C 步内固定，把“追影子”变成一段段监督回归"}],
+"cap":"<b>图 8-2</b>　DQN 的数据流。行为用在线网络（ε-greedy），目标用目标网络；梯度只流过 $Q_w(s,a)$ 这一路。"} -->
+<p>两个技巧各自对应一个问题：</p>
+<ol>
+<li><strong>经验回放</strong>：连续帧的样本高度相关（CartPole 连续几十步的状态几乎一样），直接 SGD 相当于用一个极小、且有偏的 batch 反复训练，网络会对最近的状态过拟合、遗忘别处。回放缓冲区随机抽样，把数据近似成 i.i.d.；每条转移还能被用很多次，样本效率高。前提是算法本身是 off-policy 的（Q-learning 的目标与行为策略无关），所以 Sarsa / PPO 不能直接这么用。</li>
+<li><strong>目标网络</strong>：没有它时，每次更新 $w$ 也改变了 $y$，而且由于泛化，改 $Q(s,a)$ 往往也会把 $Q(s',\cdot)$ 一起推高——正反馈。冻结 $\bar w$ 后，每 C 步内是一个固定目标的回归问题。<strong>硬更新</strong>每 C 步整体复制；<strong>软更新</strong>（Polyak）每步 $\bar w\leftarrow\tau w+(1-\tau)\bar w$，τ 常取 0.005，DDPG / SAC 用这种。</li>
+</ol>
+<p>其他细节：Huber 损失的梯度是 $\clip(d,-1,1)$，避免偶发的大 TD 误差把网络拉坏（DQN 论文里叫“误差裁剪”）；Atari 上把最近 4 帧堆叠成一个状态，用来恢复速度这类单帧看不到的信息（部分可观测的简单补救，第 3 章 POMDP）；ε 从 1 线性衰减到 0.05 左右。</p>
+<div class="co warn"><span class="h">面试注意：term 和 truncated 在 DQN 目标里的区别</span><p>和第 5 章一样，回放缓冲区里存的“done”只能是<strong>真正终止</strong>。CartPole 到 500 步被截断时，杆子其实还立着，$Q(s',\cdot)$ 照常自举。本章 demo 的缓冲区只存 <code>term</code>，截断时只重置环境。如果把截断也当成终止，网络会学到“快到 500 步的状态价值低”，而状态里又没有时间信息，就成了无法拟合的噪声。</p></div>
+
+<h2>8.4 最大化偏差与 Double DQN</h2>
+<p>$\max$ 有一个“选择偏差”：哪怕每个 $\hat Q(a)$ 都是无偏的，挑最大的那个也会系统性高估，因为被挑中的往往是噪声恰好偏大的那个。</p>
+<!--deriv 最大化偏差：max 估计量高估，双估计量不高估
+\E\big[\max_a\hat Q(a)\big] & \ge \max_a\E\big[\hat Q(a)\big]=\max_aQ(a) || $\max$ 是凸函数，Jensen 不等式；动作越多、估计噪声越大，高估越多
+# 双估计量：两组独立样本，A 组负责选动作、B 组负责估值
+\hat a & = \argmax_a\hat Q^A(a) || 只由 A 组样本决定
+\E\big[\hat Q^B(\hat a)\big] & = \E\big[\,\E[\hat Q^B(\hat a)\mid\hat a]\,\big]=\E\big[Q(\hat a)\big] || B 与 A 独立，给定 $\hat a$ 时 $\hat Q^B(\hat a)$ 是 $Q(\hat a)$ 的无偏估计
+* & \le\max_aQ(a) || 选错动作时偏低：双估计量可能低估，但不会系统性高估
+-->
+<!--plot {"x":[0,66],"y":[-0.05,0.8],"xt":[1,8,16,32,64],"h":260,"xlabel":"动作数 k（每个动作的真值都是 0）","ylabel":"估计的最大值（均值）","legend":"tl",
+"series":[{"path":"ch08.e1.bias.single_pts","n":"max 估计量：max 样本均值","c":"r","dots":true},{"path":"ch08.e1.bias.double_pts","n":"双估计量：A 组选、B 组估","c":"b","dots":true}],
+"cap":"<b>图 8-3</b>　最大化偏差随动作数增长（C++ 实测，每个动作 10 个 N(0,1) 样本，20000 次重复）。真值的最大值是 0，max 估计量在 k = 64 时高估 [[ch08.e1.bias.single.6|.3f]]；双估计量始终在 0 附近。"} -->
+<p>在 RL 里，高估会通过自举一步步传播。Sutton 例 6.7 是一个最小例子：状态 A 向右直接结束（奖励 0）；向左到 B（奖励 0），B 有 10 个动作，奖励都服从 $N(-0.1,1)$。向左的真实价值是 −0.1，最优是一直向右。</p>
+<!--plot {"x":[1,300],"y":[0,100],"h":280,"xlabel":"回合数","ylabel":"在 A 选择“向左”的比例（%）","legend":"tr","hlines":[[5,"ε-greedy 下的最优比例 5%","s"]],
+"series":[{"path":"ch08.e1.mdp.q","n":"Q-learning","c":"r"},{"path":"ch08.e1.mdp.dq","n":"Double Q-learning","c":"b"}],
+"cap":"<b>图 8-4</b>　Sutton 例 6.7 的最大化偏差（ε = 0.1，α = 0.1，[[ch08.e1.mdp.runs]] 次运行平均，C++ 实测）。Q-learning 在第 [[ch08.e1.mdp.peak_q_ep]] 回合有 [[ch08.e1.mdp.peak_q|.1f]]% 的时间向左，最后 50 回合仍为 [[ch08.e1.mdp.last_q|.1f]]%；Double Q-learning 最后 50 回合为 [[ch08.e1.mdp.last_dq|.1f]]%，接近最优的 5%。"} -->
+<p>原因：B 的 10 个 Q 估计里总有几个因为噪声暂时大于 0，$\max_bQ(B,b)>0$ 被自举进 $Q(A,\text{left})$，于是 A 认为“向左有利”。Double Q-learning 维护两张表，一张选、一张估，交替更新。DQN 里天然有两套参数，Double DQN 直接复用：</p>
+$$y^{\text{DQN}}=r+\gamma\,Q_{\bar w}\big(s',\argmax_{a'}Q_{\bar w}(s',a')\big)\qquad\longrightarrow\qquad y^{\text{Double}}=r+\gamma\,Q_{\bar w}\big(s',\argmax_{a'}Q_{w}(s',a')\big)$$
+<p>改动只有一行：<strong>在线网络选动作，目标网络估值</strong>。两者不完全独立（$\bar w$ 是 $w$ 的旧版本），所以只是“缓解”而不是消除。</p>
+
+<h2>8.5 实测：CartPole 上的 DQN、去掉目标网络、Double DQN</h2>
+<p>环境是自写的 CartPole（与 Gymnasium CartPole-v1 动力学一致，500 步截断），网络 4-64-64-2，Adam 学习率 5e-4，batch 64，缓冲区 10000，目标网络每 500 步复制，ε 在前 16000 步从 1 降到 0.05，共 80000 步；每 4000 步用贪心策略评估 5 局。三个变体各 5 个种子，15 个训练在 C++ 里并行（总耗时约 [[ch08.e4.sec|.0f]] 秒）。</p>
+<!--plot {"x":[0,80000],"y":[0,520],"h":300,"xlabel":"环境步数","ylabel":"贪心策略评估回报（5 个种子平均）","legend":"tl",
+"series":[{"path":"ch08.e4.runs.0.ret","n":"DQN（目标网络每 500 步复制）","c":"b","dots":true,"sw":2.4},{"path":"ch08.e4.runs.1.ret","n":"无目标网络（目标 = 在线网络）","c":"r","dots":true},{"path":"ch08.e4.runs.2.ret","n":"Double DQN","c":"g","dots":true}],
+"cap":"<b>图 8-5</b>　CartPole 学习曲线（C++ 实测，<code>demos/ch08_dqn.cpp</code> E4）。去掉目标网络后，有的种子学到一半就崩了（见表 8-2）。"} -->
+<!--plot {"x":[0,80000],"y":[-90,90],"h":270,"xlabel":"环境步数","ylabel":"Q(s₀) − 实际折扣回报 G(s₀)","legend":"br","hlines":[[0,"","s"]],
+"series":[{"path":"ch08.e4.runs.0.over","n":"DQN","c":"b","dots":true},{"path":"ch08.e4.runs.1.over","n":"无目标网络","c":"r","dots":true},{"path":"ch08.e4.runs.2.over","n":"Double DQN","c":"g","dots":true}],
+"cap":"<b>图 8-6</b>　初始状态的 Q 估计减去贪心策略实际的折扣回报（γ = 0.99，评估局最长 1000 步，所以满分时 G ≈ 100）。正值 = 高估。无目标网络最高高估 [[ch08.e4.runs.1.maxover|.1f]]，而它的回报很差——高估与崩溃同时出现。"} -->
+<div class="tbl"><table>
+<tr><th>变体</th><th>最后 4 次评估平均回报</th><th>5 个种子各自的结果</th><th>Q − G（最后）</th><th>Q − G（最大）</th></tr>
+<tr><td>DQN</td><td>[[ch08.e4.runs.0.last|.1f]]</td><td>[[ch08.e4.runs.0.seedlast.0|.0f]] / [[ch08.e4.runs.0.seedlast.1|.0f]] / [[ch08.e4.runs.0.seedlast.2|.0f]] / [[ch08.e4.runs.0.seedlast.3|.0f]] / [[ch08.e4.runs.0.seedlast.4|.0f]]</td><td>[[ch08.e4.runs.0.lastover|.1f]]</td><td>[[ch08.e4.runs.0.maxover|.1f]]</td></tr>
+<tr><td>无目标网络</td><td>[[ch08.e4.runs.1.last|.1f]]</td><td>[[ch08.e4.runs.1.seedlast.0|.0f]] / [[ch08.e4.runs.1.seedlast.1|.0f]] / [[ch08.e4.runs.1.seedlast.2|.0f]] / [[ch08.e4.runs.1.seedlast.3|.0f]] / [[ch08.e4.runs.1.seedlast.4|.0f]]</td><td>[[ch08.e4.runs.1.lastover|.1f]]</td><td>[[ch08.e4.runs.1.maxover|.1f]]</td></tr>
+<tr><td>Double DQN</td><td>[[ch08.e4.runs.2.last|.1f]]</td><td>[[ch08.e4.runs.2.seedlast.0|.0f]] / [[ch08.e4.runs.2.seedlast.1|.0f]] / [[ch08.e4.runs.2.seedlast.2|.0f]] / [[ch08.e4.runs.2.seedlast.3|.0f]] / [[ch08.e4.runs.2.seedlast.4|.0f]]</td><td>[[ch08.e4.runs.2.lastover|.1f]]</td><td>[[ch08.e4.runs.2.maxover|.1f]]</td></tr>
+</table></div>
+<p class="tcap"><b>表 8-2</b>　CartPole 实测汇总（<code>demos/ch08_output.txt</code> E4，满分 500）。</p>
+<p>结果要如实读：</p>
+<ol>
+<li><strong>目标网络是必需的</strong>。去掉后 5 个种子里有 3 个最后几乎学不会，Q 值同时被高估 50 以上。这正是 8.3 节说的“改 $Q(s,a)$ 把 $Q(s',\cdot)$ 一起推高”的正反馈。</li>
+<li><strong>Double DQN 在 CartPole 上反而更慢</strong>。CartPole 只有 2 个动作、奖励没有噪声，图 8-3 里 k = 2 的高估本来就最小；而 Double 估计偏保守，价值传播得慢，80000 步时还没学满。Double DQN 的收益在动作多、奖励随机的环境（Atari 的 57 个游戏）里才明显。面试被问“Double DQN 一定更好吗”，可以拿这个例子说明：改进针对的是特定毛病，毛病不存在时可能只剩代价。</li>
+<li><strong>DQN 的 Q − G 为负</strong>不代表低估是毛病：策略刚变好、回报刚升到满分时，价值还在通过自举一步步往上追（γ = 0.99 对应约 100 步的视界，目标网络每 500 步才更新一次）。比较高估要在同一个策略下比较，所以这里只把“无目标网络”的大正值当作高估的证据。</li>
+</ol>
+
+<h2>8.6 DQN 的改进：Dueling、PER、n 步、分布式与 Rainbow</h2>
+<h3>Dueling 网络</h3>
+<p>很多状态下选哪个动作都差不多（CartPole 杆子很正时左推右推都行；MOBA 里在泉水回血时），但 DQN 每次只更新被选中动作的 Q 值。Dueling 网络把输出拆成状态价值 $V(s)$ 和优势 $A(s,a)$ 两路，$V$ 每次都会被更新，学得更快：</p>
+<!--deriv Dueling：为什么要减去优势的均值
+Q(s,a) & = V(s)+A(s,a) || 朴素相加：对任意常数 $c$，$(V+c,\ A-c)$ 给出同一个 $Q$，两路输出不可辨识，训练时会互相漂移
+Q(s,a) & = V(s)+\Big(A(s,a)-\tfrac{1}{|\mathcal A|}\sum_{a'}A(s,a')\Big) || 减均值：两边对动作求平均，括号里那项平均为 0
+* V(s) & = \tfrac{1}{|\mathcal A|}\sum_aQ(s,a),\qquad A(s,a)=Q(s,a)-V(s) || 两路的含义被唯一确定；减 max 也可辨识（此时 $V=\max_aQ$），但均值版的梯度更平稳，论文最终用均值
+-->
+<h3>优先经验回放（PER）</h3>
+<p>均匀回放里大部分样本已经学会了（TD 误差接近 0），浪费算力。PER 按优先级 $p_i=|\delta_i|+\epsilon$ 采样，$P(i)=p_i^\alpha/\sum_kp_k^\alpha$（α = 0 退化为均匀，常用 0.6）。但这改变了数据分布，梯度的期望不再是原来的损失：</p>
+<!--deriv PER 的 IS 权重从哪来
+\nabla L_{\text{uniform}} & = \frac1N\sum_{i=1}^Ng_i=\sum_iP(i)\cdot\frac{1}{N\,P(i)}\,g_i || 均匀回放的梯度是所有样本梯度 $g_i$ 的平均；乘除同一个 $P(i)$
+& = \E_{i\sim P}\big[w_i\,g_i\big],\qquad w_i=\big(N\cdot P(i)\big)^{-1} || 按 $P$ 采样时乘上重要性权重才无偏（demo E3：β = 1 时加权期望 [[ch08.e3.isw|.6f]] = 均匀期望 [[ch08.e3.uni|.6f]]）
+* w_i & = \big(N\cdot P(i)\big)^{-\beta}\big/\max_jw_j || 实际用 β 从 0.4 退火到 1（训练后期才要求无偏），再除以最大权重：只把步长往下缩，不放大
+-->
+<p>采样和更新优先级都要在 $O(\log N)$ 内完成，数据结构是 <strong>sum-tree</strong>：每个内部节点存两个孩子的和，根是总和。采样时取 $u\sim U[0,\text{总和})$，从根往下走：$u$ 小于左子树和就往左，否则减掉左子树和往右。</p>
+<!--graph {"w":860,"h":300,
+"nodes":[
+{"id":"n1","k":"box","x":430,"y":36,"w":56,"h":30,"t":"[[ch08.e3.fig.tree.0|.0f]]","c":"r","hl":true},
+{"id":"n2","k":"box","x":230,"y":104,"w":56,"h":30,"t":"[[ch08.e3.fig.tree.1|.0f]]","c":"r","hl":true},
+{"id":"n3","k":"box","x":630,"y":104,"w":56,"h":30,"t":"[[ch08.e3.fig.tree.2|.0f]]","c":"b"},
+{"id":"n4","k":"box","x":130,"y":172,"w":56,"h":30,"t":"[[ch08.e3.fig.tree.3|.0f]]","c":"b"},
+{"id":"n5","k":"box","x":330,"y":172,"w":56,"h":30,"t":"[[ch08.e3.fig.tree.4|.0f]]","c":"r","hl":true},
+{"id":"n6","k":"box","x":530,"y":172,"w":56,"h":30,"t":"[[ch08.e3.fig.tree.5|.0f]]","c":"b"},
+{"id":"n7","k":"box","x":730,"y":172,"w":56,"h":30,"t":"[[ch08.e3.fig.tree.6|.0f]]","c":"b"},
+{"id":"n8","k":"box","x":80,"y":240,"w":50,"h":30,"t":"[[ch08.e3.fig.tree.7|.0f]]","c":"g"},
+{"id":"n9","k":"box","x":180,"y":240,"w":50,"h":30,"t":"[[ch08.e3.fig.tree.8|.0f]]","c":"g"},
+{"id":"n10","k":"box","x":280,"y":240,"w":50,"h":30,"t":"[[ch08.e3.fig.tree.9|.0f]]","c":"r","hl":true},
+{"id":"n11","k":"box","x":380,"y":240,"w":50,"h":30,"t":"[[ch08.e3.fig.tree.10|.0f]]","c":"g"},
+{"id":"n12","k":"box","x":480,"y":240,"w":50,"h":30,"t":"[[ch08.e3.fig.tree.11|.0f]]","c":"g"},
+{"id":"n13","k":"box","x":580,"y":240,"w":50,"h":30,"t":"[[ch08.e3.fig.tree.12|.0f]]","c":"g"},
+{"id":"n14","k":"box","x":680,"y":240,"w":50,"h":30,"t":"[[ch08.e3.fig.tree.13|.0f]]","c":"g"},
+{"id":"n15","k":"box","x":780,"y":240,"w":50,"h":30,"t":"[[ch08.e3.fig.tree.14|.0f]]","c":"g"}],
+"edges":[
+{"f":"n1","t":"n2","c":"r","sw":2.4},{"f":"n1","t":"n3","c":"s"},
+{"f":"n2","t":"n4","c":"s"},{"f":"n2","t":"n5","c":"r","sw":2.4},{"f":"n3","t":"n6","c":"s"},{"f":"n3","t":"n7","c":"s"},
+{"f":"n4","t":"n8","c":"s"},{"f":"n4","t":"n9","c":"s"},{"f":"n5","t":"n10","c":"r","sw":2.4},{"f":"n5","t":"n11","c":"s"},
+{"f":"n6","t":"n12","c":"s"},{"f":"n6","t":"n13","c":"s"},{"f":"n7","t":"n14","c":"s"},{"f":"n7","t":"n15","c":"s"}],
+"texts":[
+{"x":470,"y":40,"cls":"xs","t":"根 = 总优先级；取 u = [[ch08.e3.fig.u|.0f]]"},
+{"x":196,"y":110,"a":"end","cls":"xs","t":"u = [[ch08.e3.fig.u|.0f]] < 左子树 [[ch08.e3.fig.tree.1|.0f]] → 往左"},
+{"x":364,"y":190,"cls":"xs","t":"u ≥ [[ch08.e3.fig.tree.3|.0f]] → 往右，u −= [[ch08.e3.fig.tree.3|.0f]]"},
+{"x":110,"y":290,"cls":"xs","t":"叶子 = 每条经验的优先级 pᵢ^α（i = 0…7）；剩余 u < 左孩子 → 落在叶子 i = [[ch08.e3.fig.leaf]]，被抽中的概率 = 叶子值 / 根"}],
+"cap":"<b>图 8-7</b>　8 个叶子的 sum-tree 与一次采样（<code>demos/ch08_dqn.cpp</code> E3 构建）。红色是查找路径：比较 3 次就找到了叶子。更新某个叶子时，把差值沿同一条路径加到所有祖先上。"} -->
+<p>demo E3 验证了正确性和速度：N = [[ch08.e3.N]] 时采样 [[ch08.e3.M]] 次，经验频率与理论概率的总变差距离为 [[ch08.e3.tv|.4f]]；N = 2²⁰ 时，sum-tree 采样比线性前缀扫描快约 [[ch08.e3.speedup|.0f]] 倍（某次运行的计时，具体数字因机器而异）。</p>
+<h3>n 步回报、Noisy Net、分布式 RL</h3>
+<ul>
+<li><strong>n 步目标</strong> $y=\sum_{k=0}^{n-1}\gamma^kr_{t+k}+\gamma^n\max_{a'}Q_{\bar w}(s_{t+n},a')$：第 5 章的 n 步回报，奖励传播快 n 倍、减弱自举（致命三角的一个角）。严格说中间几步来自旧策略，是 off-policy 的近似，n 取 3 左右影响不大。</li>
+<li><strong>Noisy Net</strong>：把线性层的权重写成 $\mu+\sigma\odot\varepsilon$，噪声幅度 $\sigma$ 是可学习参数，让网络自己决定在哪些状态多探索，代替 ε-greedy。</li>
+<li><strong>分布式 RL</strong>：学回报的分布 $Z(s,a)$ 而不只是期望，分布 Bellman 方程 $Z(s,a)\overset{D}{=}R+\gamma Z(S',A')$。C51 把分布离散成 51 个固定支撑点、用投影 + 交叉熵；QR-DQN 学分位数、用分位数回归损失。即使最后只用期望来选动作，学分布这个辅助任务本身就让表征更好。</li>
+</ul>
+<div class="tbl"><table>
+<tr><th>组件</th><th>修的毛病</th><th>一句话</th></tr>
+<tr><td>Double DQN</td><td>max 高估</td><td>在线网络选、目标网络估</td></tr>
+<tr><td>Dueling</td><td>每次只更新一个动作</td><td>$Q=V+(A-\bar A)$</td></tr>
+<tr><td>PER</td><td>均匀回放浪费</td><td>按 $|\delta|^\alpha$ 采样 + IS 权重</td></tr>
+<tr><td>n 步回报</td><td>奖励传播慢、自举偏差</td><td>多看 n 步真实奖励</td></tr>
+<tr><td>Noisy Net</td><td>ε-greedy 探索太笨</td><td>可学习的参数噪声</td></tr>
+<tr><td>C51 / 分布式</td><td>只学期望，信息少</td><td>学回报分布</td></tr>
+</table></div>
+<p class="tcap"><b>表 8-3</b>　Rainbow 的 6 个组件（Hessel et al., 2018）。消融实验里影响最大的是 PER 和 n 步回报，Double DQN 在 Rainbow 里的单独贡献反而不大。</p>
+
+<h2>8.7 大离散 / 连续动作：DQN 的短板</h2>
+<p>DQN 要对每个动作输出一个 Q 值并取 max，动作必须是离散的、而且不能太多。游戏 Bot 的动作通常是“技能类型 × 目标单位 × 方向 × 移动”的组合（第 18 章），笛卡尔积动辄上万：</p>
+<ul>
+<li><strong>动作分解</strong>（Action Branching / BDQ）：共享躯干，每个动作维度一个 Q 头，各自取 max，输出数从 $\prod n_i$ 降到 $\sum n_i$；代价是假设各维度可以独立选。</li>
+<li><strong>混合动作</strong>（离散技能 + 连续瞄准位置）：P-DQN 先对每个离散动作输出连续参数，再对离散部分取 max；更常见的做法是直接改用策略梯度（第 9–11 章），多头动作的 log-prob 相加即可。</li>
+<li><strong>连续动作</strong>：$\max_a Q(s,a)$ 本身就是一个优化问题。DDPG 用一个 actor 网络 $\mu(s)$ 近似 argmax（第 12 章）。</li>
+</ul>
+<div class="co tip"><span class="h">面试注意：为什么游戏 Bot 很少用 DQN</span><p>① 动作空间大且是组合结构，max 难求；② DQN 学出的是确定性贪心策略，对抗游戏里固定套路容易被针对，而且不好调“拟人的随机性”；③ PPO 一类 on-policy 方法配合大规模并行采样（第 19 章）更稳定、超参更鲁棒。DQN 适合动作少、能大量回放的场景，比如卡牌出牌（每步可选牌有限）、简单的离散决策子模块。回答时不要说“DQN 过时了”，而是说清适用条件。</p></div>
+
+<h2>8.8 工程：回放缓冲区与手撕代码</h2>
+<p>回放缓冲区用<strong>环形数组</strong>：预分配容量 N，写指针取模前进，满了覆盖最旧的数据；采样就是随机下标。大规模训练时缓冲区往往是单独的服务（Ape-X / R2D2，第 19 章），actor 写、learner 读。图像观测还要注意：相邻帧共享，存单帧再按下标拼 4 帧，内存能省到四分之一。</p>
+<p>面试手写最常见的是 sum-tree 和 DQN / Double DQN 的目标。下面的代码与 <code>demos/ch08_interview.py</code> 逐字相同，运行时与线性扫描、手算结果对拍：</p>
+<!--code:py:sum-tree + PER 分层采样 + DQN / Double DQN 目标（Python，面试手撕版）-->
+{{demo:ch08_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch08_interview.py 的输出-->
+{{demo:ch08_interview_output.txt}}
+<!--/code-->
+
+<h2>8.9 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“经验回放是为了省样本”</td><td>只说了一半</td><td>主要是打破样本相关性、让 SGD 的数据近似 i.i.d.；样本复用是附带的好处。前提是 off-policy</td></tr>
+<tr><td>“目标网络让 Q 值更准”</td><td>说反了因果</td><td>目标网络让回归目标在 C 步内固定，切断“更新 → 目标变 → 再更新”的正反馈，提高的是稳定性（图 8-5）</td></tr>
+<tr><td>“高估是因为网络拟合误差”</td><td>没说到机制</td><td>是 max 对噪声的选择偏差，$\E[\max\hat Q]\ge\max Q$，再经自举传播；无偏噪声也会高估（图 8-3）</td></tr>
+<tr><td>“Double DQN 用两个独立网络”</td><td>和 Double Q-learning 混了</td><td>复用在线 / 目标两套参数：在线网络选动作，目标网络估值，并不完全独立</td></tr>
+<tr><td>“PER 的 IS 权重是为了降方差”</td><td>目的说错</td><td>是为了修正分布改变带来的偏差；除以 max w 才是为了稳定</td></tr>
+<tr><td>“DQN 的 done 包括时间截断”</td><td>终止 / 截断混淆</td><td>截断要自举，只有真正终止才乘 $(1-\text{term})$</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:DQN 常见追问链-->
+DQN 的两大技巧？
+├─ 经验回放解决什么？ → 样本相关 + 复用；要求 off-policy，所以 PPO 不能直接用
+│   └─ PER 怎么做？ → P(i) ∝ |δ|^α，sum-tree O(log N)；IS 权重 (N·P)^-β / max 修正偏差
+├─ 目标网络解决什么？ → 目标随 w 变 + 泛化 → 正反馈；冻结 C 步（硬）或 Polyak τ（软）
+│   └─ 为什么会发散？ → 致命三角；线性 TD 的 A 矩阵在 off-policy 下可能非正定（Baird）
+├─ Q 值为什么高估？ → E[max] ≥ max E（Jensen），自举传播；动作越多越严重
+│   └─ Double DQN？ → 在线网络 argmax、目标网络估值；可能低估，CartPole 上反而慢
+├─ Dueling 为什么减均值？ → V、A 不可辨识；减均值后 V = 平均 Q
+└─ 动作空间很大 / 连续怎么办？ → 动作分解、P-DQN；或换策略梯度 / DDPG
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 8 章</div><ul>
+<li>半梯度：目标 $r+\gamma\hat v(s',w)$ 不求导；残差梯度对目标也求导，稳但慢。</li>
+<li>致命三角 = 函数近似 + 自举 + off-policy；线性 TD 期望更新 $w\leftarrow w+\alpha(b-Aw)$，on-policy 时 $A\succ0$。</li>
+<li>DQN：$L=\E[\ell(r+\gamma(1-\text{term})\max Q_{\bar w}(s')-Q_w(s,a))]$，回放去相关，目标网络稳目标，Huber 裁剪梯度。</li>
+<li>高估：$\E[\max\hat Q]\ge\max Q$；Double：$Q_{\bar w}(s',\argmax Q_w(s',\cdot))$。</li>
+<li>Dueling：$Q=V+A-\bar A$。PER：$P\propto p^\alpha$，$w=(NP)^{-\beta}/\max w$，sum-tree。</li>
+<li>Rainbow = Double + Dueling + PER + n 步 + Noisy + C51。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：图 8-1 里，表格表示 + off-policy 为什么没有发散，但价值 RMS 先变大了？</summary><p>表格情形下每个状态独立更新，不存在“改一个状态牵连别的状态”的泛化，TD 是压缩的，会收敛到真值 0。RMS 先变大是因为状态 1–6 的初值是 3，而它们的目标是 $\gamma V(7)\approx 12$，先被拉高；$V(7)$ 自己只在“当前在状态 7 且选了实线动作”时以很小的速率向 $\gamma V(7)$ 收缩，所以在 3000 步内看起来几乎不动，但不会发散。</p></details>
+<details class="quiz"><summary>自测 2：软更新 τ = 0.005 大约相当于每多少步硬更新一次？</summary><p>Polyak 平均的“记忆长度”约为 $1/\tau=200$ 步：目标网络参数是在线参数的指数加权平均，权重按 $(1-\tau)^k$ 衰减，半衰期约 $\ln2/\tau\approx139$ 步。两者不完全等价——软更新目标每步都在缓慢变化，硬更新是阶梯式的。</p></details>
+<details class="quiz"><summary>自测 3：PER 里新加入缓冲区的转移还没有 TD 误差，优先级设成多少？</summary><p>设成当前的最大优先级 $\max_ip_i$，保证每条新经验至少被采到一次；被采到、算出 TD 误差后再更新成 $|\delta|+\epsilon$。$\epsilon$ 保证误差为 0 的样本也有被抽中的机会。</p></details>
+<details class="quiz"><summary>自测 4：为什么 DQN 可以用回放，而 Sarsa 不行？</summary><p>Q-learning 的目标 $r+\gamma\max_{a'}Q(s',a')$ 与产生数据的行为策略无关，任何策略采到的 $(s,a,r,s')$ 都能用；Sarsa 的目标 $r+\gamma Q(s',a')$ 里的 $a'$ 必须来自当前策略，旧数据里的 $a'$ 是旧策略选的，直接用就成了评估旧策略。要用旧数据需要重要性采样修正（第 6 章）。</p></details>
+</section>

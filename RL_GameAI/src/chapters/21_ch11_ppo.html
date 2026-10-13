@@ -1,0 +1,200 @@
+<section class="chapter" id="ch11">
+<div class="ch-head"><div class="no">CHAPTER 11</div><h1>信任域与 PPO（面试第一高频）</h1><p class="lead">策略梯度只告诉方向，不告诉走多远。步子太小学得慢，太大会让策略崩掉，而且崩了之后采到的都是烂数据，很难救回来。TRPO 从性能差异引理出发，推出“在 KL 信任域内最大化替代目标”能单调改进；PPO 用一个 clip 达到类似效果，实现只需改几行，成了游戏 Bot 训练的事实标准。本章把从理论到工程细节的整条链讲完，并用消融实验看每个组件的作用。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>推出性能差异引理，说清替代目标为什么在小步长时可信、TRPO 的下界在说什么。</li>
+<li>推出 KL 的二阶近似 = Fisher 矩阵，进而得到自然梯度和 TRPO 步长；知道表格 softmax 下自然梯度就是优势。</li>
+<li>逐情形分析 PPO-clip 目标（A 正负 × 比值在区间内外），说清为什么取 min。</li>
+<li>掌握 PPO 的工程细节和训练诊断指标，能根据曲线排查训练问题；能手写 PPO 损失和动作掩码。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>策略更新太大时，新策略访问的状态分布变了，用旧数据估的梯度就不可信，策略可能一步崩掉。TRPO 用性能差异引理把新旧策略的回报差写成“新策略下旧优势的期望”，用旧状态分布近似后得到替代目标 $L(\theta)=\E_{\pi_{\text{old}}}[r_t(\theta)\hat A_t]$，$r_t=\pi_\theta/\pi_{\text{old}}$，并证明在 KL 足够小时最大化它能保证单调改进；实现上是带 KL 约束的优化，用 Fisher 矩阵（KL 的二阶近似）求自然梯度，再用共轭梯度和线搜索。PPO 把约束换成 clip：$L^{\text{CLIP}}=\E\big[\min\big(r_t\hat A_t,\ \clip(r_t,1-\epsilon,1+\epsilon)\hat A_t\big)\big]$。优势为正时 $r$ 超过 $1+\epsilon$ 就不再给梯度，为负时 $r$ 低于 $1-\epsilon$ 就不再给梯度，取 min 让目标成为一个悲观的下界，防止把比值推得太远。这样一批数据可以安全地训练多个 epoch。工程上还要配合 GAE、优势归一化、梯度裁剪、学习率退火、KL 早停和动作掩码；训练时看 approx KL、clipfrac、熵和 explained variance 四条曲线排查问题。PPO 本质上是 on-policy 的，只在“旧策略附近”复用数据。</p></div>
+
+<h2>11.1 步长困境</h2>
+<p>普通策略梯度 $\theta\leftarrow\theta+\alpha\nabla J$ 的问题在于：参数空间的距离和策略空间的距离不对应。同样把某个 logit 改 1，如果当前概率是 0.5，概率变化很大；如果当前概率已经是 0.999，几乎没变化。固定的 α 在一些地方太保守，在另一些地方会让策略剧变。更麻烦的是 RL 的数据由策略自己产生：一次坏更新让 Bot 学会“原地转圈”，之后采到的全是转圈的数据，监督学习里“下一个 batch 会把你拉回来”的机制不存在。所以要限制的是<strong>策略分布的变化</strong>，而不是参数的变化。</p>
+
+<h2>11.2 性能差异引理与替代目标</h2>
+<!--deriv 性能差异引理：J(π′) − J(π) = Σ_s d^{π′}(s) Σ_a π′(a|s) A_π(s,a)
+J(\pi')-J(\pi) & = \E_{\tau\sim\pi'}\Big[\sum_{t\ge0}\gamma^tr_t\Big]-\E_{s_0\sim\rho}\big[V_\pi(s_0)\big] || 两个策略从同一个初始分布 ρ 出发
+& = \E_{\tau\sim\pi'}\Big[\sum_{t\ge0}\gamma^tr_t+\sum_{t\ge0}\big(\gamma^{t+1}V_\pi(s_{t+1})-\gamma^tV_\pi(s_t)\big)\Big] || 后一项是望远镜求和，结果为 $-V_\pi(s_0)$；轨迹由 π′ 产生，但用的是旧策略的价值 $V_\pi$
+& = \E_{\tau\sim\pi'}\Big[\sum_{t\ge0}\gamma^t\big(r_t+\gamma V_\pi(s_{t+1})-V_\pi(s_t)\big)\Big] || 合并：括号里是“用旧价值算的 TD 误差”
+& = \E_{\tau\sim\pi'}\Big[\sum_{t\ge0}\gamma^tA_\pi(s_t,a_t)\Big] || 对 $s_{t+1}$ 取条件期望：$\E[r_t+\gamma V_\pi(s_{t+1})\mid s_t,a_t]-V_\pi(s_t)=A_\pi(s_t,a_t)$
+* & = \sum_sd^{\gamma}_{\pi'}(s)\sum_a\pi'(a\mid s)\,A_\pi(s,a) || 按时间和状态重排；$d^\gamma_{\pi'}$ 是<strong>新策略</strong>的折扣访问分布（未归一化，总和 $\frac{1}{1-\gamma}$）
+-->
+<p>直观含义：新策略的改进量 = 新策略在它自己会去的状态上，平均每步比旧策略“好多少”（用旧策略的优势衡量）。在 5 状态 × 3 动作的表格 MDP 上，沿 21 个不同的 π′ 精确计算两边，最大差 [[ch11.e1.pdl_err|.1e]]（<code>demos/ch11_ppo.cpp</code> E1a）。</p>
+<p>问题在于 $d^\gamma_{\pi'}$ 依赖还没得到的新策略，没法用旧数据估。把它换成旧策略的状态分布，再用重要性采样把动作分布也换回旧策略，就得到<strong>替代目标</strong>：</p>
+$$L_\pi(\pi')\doteq\sum_sd^\gamma_\pi(s)\sum_a\pi'(a\mid s)A_\pi(s,a)=\frac{1}{1-\gamma}\E_{s\sim\bar d_\pi,\,a\sim\pi}\Big[\frac{\pi'(a\mid s)}{\pi(a\mid s)}A_\pi(s,a)\Big]$$
+<p>它在 $\pi'=\pi$ 处的值（都为 0）和梯度都与真实的 $J(\pi')-J(\pi)$ 相同（梯度就是第 9 章的策略梯度），所以<strong>一阶近似准确</strong>；步子走远了，状态分布的差异就不能忽略：</p>
+<!--plot {"x":[0,5],"y":[0,4],"h":270,"xlabel":"沿“自然梯度 + 随机扰动”方向的步长","ylabel":"相对旧策略的改进量","legend":"tl",
+"series":[{"path":"ch11.e1.pdl_true","n":"真实改进 J(π′) − J(π)（= 性能差异引理右边）","c":"b","dots":true,"sw":2.4},{"path":"ch11.e1.pdl_sur","n":"替代目标 L_π(π′)（旧状态分布）","c":"o","dash":true,"dots":true}],
+"cap":"<b>图 11-1</b>　替代目标与真实改进（表格 MDP，构建时读取 C++ 精确计算）。步长小时两者相切（误差是二阶小量）；步长变大后开始分开，而且误差的符号不确定：步长 0.5 时替代目标偏低（[[ch11.e1.pdl_sur.2.1|.3f]] 对 [[ch11.e1.pdl_true.2.1|.3f]]），步长 5 时偏高（[[ch11.e1.pdl_sur.20.1|.3f]] 对 [[ch11.e1.pdl_true.20.1|.3f]]）。"} -->
+<div class="co tip"><span class="h">为什么表格情形里替代目标“看起来很安全”</span><p>在每个状态里精确最大化 $L_\pi(\pi')$，得到的就是对 $A_\pi$ 贪心——这正是第 4 章策略迭代的改进步，策略改进定理保证它不会变差。深度 RL 的麻烦在于：① 参数共享，没法逐状态独立地最大化；② $L$ 是用有限样本估计的，估计误差在大步长下被放大（第 8 章的“max 选择偏差”同理）。这两点都不存在于上图的精确计算中，所以实际训练里比图中更需要信任域。</p></div>
+<p>TRPO 论文（Schulman et al., 2015）给出了误差的上界：</p>
+$$J(\pi')\ \ge\ L_\pi(\pi')-\frac{4\varepsilon\gamma}{(1-\gamma)^2}\,\max_s\KL\big(\pi(\cdot\mid s)\,\Vert\,\pi'(\cdot\mid s)\big),\qquad\varepsilon=\max_{s,a}|A_\pi(s,a)|$$
+<p>右边在 $\pi'=\pi$ 时等于 $J(\pi)$，所以每步最大化右边（MM 算法：找一个处处不高于目标、且在当前点相切的下界，最大化下界），就能保证 $J$ 单调不降。理论上的惩罚系数太大、步子太小，实际做法是把惩罚换成约束：</p>
+$$\max_\theta\ L_{\theta_{\text{old}}}(\theta)\qquad\text{s.t.}\quad\bar D_{\text{KL}}(\theta_{\text{old}},\theta)=\E_{s\sim\bar d_{\text{old}}}\Big[\KL\big(\pi_{\theta_{\text{old}}}(\cdot\mid s)\Vert\pi_\theta(\cdot\mid s)\big)\Big]\le\delta$$
+
+<h2>11.3 TRPO：Fisher 矩阵、自然梯度与共轭梯度</h2>
+<!--deriv KL 的二阶近似 = Fisher 矩阵；约束问题的解 = 自然梯度
+\bar D_{\text{KL}}(\theta_{\text{old}},\theta) & \approx\underbrace{0}_{\theta=\theta_{\text{old}}}+\underbrace{0}_{\text{梯度}}\cdot\Delta+\tfrac12\Delta^\top F\Delta,\qquad\Delta=\theta-\theta_{\text{old}} || KL 在 $\Delta=0$ 处取最小值 0，所以零阶、一阶项都为 0
+F & = \E_{s,a\sim\pi}\big[\nabla\log\pi_\theta(a\mid s)\,\nabla\log\pi_\theta(a\mid s)^\top\big] || KL 的 Hessian 等于 score 的外积期望，即 <strong>Fisher 信息矩阵</strong>（工具箱：$\E[\nabla^2\log p]=-\E[\nabla\log p\nabla\log p^\top]$）
+\max_\Delta\ g^\top\Delta\quad & \text{s.t.}\quad\tfrac12\Delta^\top F\Delta\le\delta || 目标线性化（$g=\nabla L$ 即策略梯度），约束二次化
+\Delta & = \beta\,F^{-1}g || 拉格朗日条件 $g=\mu F\Delta$：方向是<strong>自然梯度</strong> $F^{-1}g$
+* \beta & = \sqrt{\frac{2\delta}{g^\top F^{-1}g}} || 约束取等号 $\tfrac12\beta^2g^\top F^{-1}g=\delta$ 解出步长
+-->
+<p>自然梯度在“策略分布的 KL 距离”下是最速上升方向，不受参数化方式影响。神经网络的 $F$ 有百万维，不能求逆，TRPO 用<strong>共轭梯度</strong>只通过 Fisher-向量积 $Fv$（两次反向传播即可算出，不需要显式构造 $F$）解 $Fx=g$，10 步左右就够；由于二阶近似不精确，最后再沿该方向做<strong>回溯线搜索</strong>，确认 KL 不超过 δ、替代目标确实提升。</p>
+<div class="co tip"><span class="h">一个漂亮的特例：表格 softmax 策略的自然梯度就是优势</span><p>$F$ 按状态分块：$F_s=\bar d(s)\big(\text{diag}(\pi_s)-\pi_s\pi_s^\top\big)$，而策略梯度 $g_s=d(s)\,\pi_s\odot A_s$。直接验证 $\big(\text{diag}(\pi_s)-\pi_s\pi_s^\top\big)A_s=\pi_s\odot A_s-\pi_s(\pi_s^\top A_s)=\pi_s\odot A_s$（因为 $\sum_a\pi A=0$），所以 $F^{-1}g$ 在每个状态里就是 $A_\pi(s,\cdot)/(1-\gamma)$（加任意常数）。也就是说，自然策略梯度把每个 logit 直接加上“该动作的优势”，与状态访问频率无关——这就是“自然”的含义。demo 用共轭梯度 [[ch11.e1.cg_iters]] 步求解，与 $A/(1-\gamma)$ 的最大差 [[ch11.e1.nat_err|.1e]]（E1b）。</p></div>
+<!--dtab {"rows":"ch11.e1.trpo","cols":[["KL 上限 δ","delta",".3f"],["TRPO 步实际 KL","kl",".5f"],["实际 / δ","ratio",".3f"],["TRPO 的 J 提升","dj_nat",".4f"],["替代目标预测","sur",".4f"],["同 KL 普通梯度的 J 提升","dj_van",".4f"]],
+"cap":"<b>表 11-1</b>　TRPO 步长公式的实测（表格 MDP，E1c）。δ 小时二阶近似很准（实际 KL ≈ δ），δ 变大后实际 KL 偏离，需要线搜索兜底；在<strong>同样的实际 KL</strong> 下，自然梯度方向的回报提升始终高于普通梯度方向。"} -->
+
+<h2>11.4 PPO-Clip：逐情形分析</h2>
+<p>TRPO 要算 Fisher-向量积、共轭梯度和线搜索，实现复杂，也不方便和共享网络、dropout 等结构配合。PPO（Schulman et al., 2017）直接改目标函数：</p>
+$$L^{\text{CLIP}}(\theta)=\E_t\Big[\min\big(r_t(\theta)\hat A_t,\ \clip\big(r_t(\theta),1-\epsilon,1+\epsilon\big)\hat A_t\big)\Big],\qquad r_t(\theta)=\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)}$$
+<!--plot {"x":[0,2],"y":[-2.4,2.4],"h":300,"xlabel":"概率比 r = π_θ / π_old","ylabel":"单个样本的目标 L(r)（取 |A| = 1）","legend":"bl","vlines":[[0.8,"1 − ε","s",2.1],[1,"","s"],[1.2,"1 + ε","s",2.1]],"hlines":[[0,"","s"]],
+"series":[{"f":"min(x, max(0.8, min(1.2, x)))","n":"A > 0：r 超过 1+ε 后变平（不再鼓励）","c":"g","sw":2.6},{"f":"min(-x, -max(0.8, min(1.2, x)))","n":"A < 0：r 低于 1−ε 后变平（不再惩罚）","c":"r","sw":2.6},
+{"f":"x","n":"未 clip 的 r·A（A > 0）","c":"g","dash":true,"sw":1.2},{"f":"-x","n":"未 clip 的 r·A（A < 0）","c":"r","dash":true,"sw":1.2}],
+"cap":"<b>图 11-2</b>　PPO-clip 目标随概率比的变化（ε = 0.2，构建时按公式计算）。实线是 clip 目标，虚线是普通 IS 目标。平的部分梯度为 0：这一批数据已经把该动作的概率推得足够远了。"} -->
+<div class="tbl"><table>
+<tr><th>优势</th><th>比值 r 的位置</th><th>min 取到哪一项</th><th>梯度</th><th>含义</th></tr>
+<tr><td rowspan="3">A &gt; 0（好动作）</td><td>r &lt; 1−ε</td><td>rA（未截断）</td><td>有，推高 r</td><td>好动作的概率反而降了很多，赶紧拉回来（不设限）</td></tr>
+<tr><td>1−ε ≤ r ≤ 1+ε</td><td>rA</td><td>有，推高 r</td><td>正常的策略梯度</td></tr>
+<tr><td>r &gt; 1+ε</td><td>(1+ε)A（截断）</td><td><strong>0</strong></td><td>已经提高够了，停止</td></tr>
+<tr><td rowspan="3">A &lt; 0（坏动作）</td><td>r &lt; 1−ε</td><td>(1−ε)A（截断）</td><td><strong>0</strong></td><td>已经降低够了，停止</td></tr>
+<tr><td>1−ε ≤ r ≤ 1+ε</td><td>rA</td><td>有，压低 r</td><td>正常的策略梯度</td></tr>
+<tr><td>r &gt; 1+ε</td><td>rA（未截断）</td><td>有，压低 r</td><td>坏动作的概率反而升了很多，赶紧压下去（不设限）</td></tr>
+</table></div>
+<p class="tcap"><b>表 11-2</b>　PPO-clip 的六种情形。手撕版 <code>ppo_sample_loss</code> 在 4000 个随机样本上覆盖了全部六种情形，梯度与有限差分一致（11.8 节）。</p>
+<p><strong>为什么要取 min，只 clip 不行吗？</strong>如果只用 $\clip(r)\hat A$，那么 A &gt; 0、r &lt; 1−ε 时目标被截成常数，梯度为 0，“好动作概率被意外压低”这种错误就修不回来了。取 min 后，目标总是 $r\hat A$ 和截断版里<strong>更悲观</strong>的那个：只在“改进方向上走太远”时截断，在“变坏方向上”永远保留梯度。所以 $L^{\text{CLIP}}$ 是未截断目标的一个下界，和 TRPO“最大化下界”的思想一致。</p>
+<p><strong>PPO-Penalty</strong> 是另一个变体：最大化 $L-\beta\,\bar D_{\text{KL}}$，每轮根据实测 KL 调 β（KL &gt; 1.5 倍目标值时 β 翻倍，&lt; 目标值 / 1.5 时减半）。效果一般不如 clip，但 RLHF 里“对参考模型的 KL 惩罚”就是这个思路（第 13 章）。</p>
+<div class="co warn"><span class="h">面试注意：clip 并不能严格限制 KL</span><p>clip 只是让越界样本不再产生梯度，但其他样本的梯度仍然会通过共享参数把越界样本的比值推得更远；epoch 多、学习率大时 KL 照样会失控。所以实践中还要加 <strong>KL 早停</strong>（approx KL 超过目标值如 0.015~0.03 就停止本轮剩余的 epoch）。下面 11.7 节的实测中，标准 PPO 的 approx KL 平均 [[ch11.e3.runs.0.klmean|.4f]]、最大 [[ch11.e3.runs.0.klmax|.4f]]。</p></div>
+<h2>11.5 approx KL 怎么估：k1 / k2 / k3</h2>
+<p>训练时要监控新旧策略的 KL，但只能用旧策略采到的样本估计。记 $r=\pi_{\text{new}}(a\mid s)/\pi_{\text{old}}(a\mid s)$，$a\sim\pi_{\text{old}}$，有三种常用估计（Schulman 的博客 “Approximating KL Divergence”）：</p>
+<!--deriv k3 = (r − 1) − log r：无偏且每个样本都非负
+\KL(\pi_{\text{old}}\Vert\pi_{\text{new}}) & = \E_{a\sim\pi_{\text{old}}}\big[-\log r\big] || 定义；所以 $k_1=-\log r$ 无偏，但单个样本可正可负，方差大
+\E_{a\sim\pi_{\text{old}}}[r-1] & = \sum_a\pi_{\text{old}}(a)\frac{\pi_{\text{new}}(a)}{\pi_{\text{old}}(a)}-1=0 || 加上一个期望为 0 的控制变量不改变期望
+k_3 & \doteq(r-1)-\log r,\qquad\E[k_3]=\KL || 无偏
+* k_3 & \ge0 || 因为 $\log r\le r-1$（$\log$ 是凹函数，切线在上方），每个样本都非负，方差也小得多；$k_2=\tfrac12(\log r)^2$ 非负但有偏（是二阶近似）
+-->
+<!--dtab {"rows":"ch11.e2.rows","cols":[["真实 KL","kl",".4f"],["k1 均值","k1",".4f"],["k1 标准差","k1sd",".3f"],["k1 负值占比","k1neg",".0f"],["k2 均值","k2",".4f"],["k2 标准差","k2sd",".3f"],["k3 均值","k3",".4f"],["k3 标准差","k3sd",".3f"]],
+"cap":"<b>表 11-3</b>　三种 KL 估计量（10 个动作的 softmax，每行 [[ch11.e2.N]] 个样本，E2）。k1 无偏但约六成样本为负、标准差最大；k2 在 KL 小时接近无偏，KL 大时明显高估；k3 始终无偏且标准差最小。PPO 实现里的 <code>approx_kl</code> 用的就是 k3；GRPO 的 KL 项也用它（第 13 章）。"} -->
+
+<h2>11.6 完整算法与工程细节</h2>
+<!--flow {"w":900,"h":230,
+"boxes":[
+{"id":"a","x":10,"y":30,"w":160,"h":64,"t":"① 采样","s":"N 个环境 × T 步","s2":"存 s, a, r, logπ_old, V","c":"b"},
+{"id":"b","x":195,"y":30,"w":160,"h":64,"t":"② GAE","s":"Â 与 critic 目标 R̂","s2":"区分终止 / 截断","c":"t"},
+{"id":"c","x":380,"y":30,"w":160,"h":64,"t":"③ 优势归一化","s":"batch 内减均值除标准差","c":"a"},
+{"id":"d","x":565,"y":30,"w":180,"h":64,"t":"④ K 个 epoch × 小批量","s":"clip 策略损失 + 价值损失","s2":"− 熵；梯度裁剪；Adam","c":"o"},
+{"id":"e","x":770,"y":30,"w":120,"h":64,"t":"⑤ KL 早停","s":"approx KL 超标","s2":"就停本轮","c":"r"}],
+"arrows":[
+{"p":[[170,62],[195,62]],"c":"s"},{"p":[[355,62],[380,62]],"c":"s"},{"p":[[540,62],[565,62]],"c":"s"},{"p":[[745,62],[770,62]],"c":"s"},
+{"p":[[830,94],[830,150],[90,150],[90,94]],"c":"p","dash":true,"label":"丢掉这批数据，用新策略重新采样（on-policy）","lx":300,"ly":142}],
+"texts":[
+{"x":450,"y":190,"a":"middle","cls":"sm","t":"同一批数据只在 θ_old 附近复用 K 次（常用 K = 3~10，小批量 4~32 个）；clip 保证比值离 1 不远"},
+{"x":450,"y":212,"a":"middle","cls":"sm","t":"学习率线性退火到 0；观测做滑动均值方差归一化；奖励按回报的标准差缩放"}],
+"cap":"<b>图 11-3</b>　PPO 一次迭代的数据流。"} -->
+<p>“PPO 的效果有一半来自代码层面的细节”（Engstrom et al., 2020；Huang et al., “The 37 Implementation Details of PPO”）。面试常问的有这些：</p>
+<div class="tbl"><table>
+<tr><th>细节</th><th>做法</th><th>为什么</th></tr>
+<tr><td>优势归一化</td><td>每个小批量内 $(\hat A-\mu)/(\sigma+10^{-8})$</td><td>学习率不随奖励尺度变化；正负样本平衡</td></tr>
+<tr><td>value clipping</td><td>价值损失取 clip 前后的较大者</td><td>防止 critic 一步跳太远；研究显示效果不一定好，可选</td></tr>
+<tr><td>观测归一化</td><td>滑动均值 / 方差标准化并裁剪到 ±10</td><td>不同量纲（坐标、血量、冷却）统一尺度；部署时要带上同一套统计量</td></tr>
+<tr><td>奖励缩放</td><td>除以折扣回报的滑动标准差</td><td>让价值目标在合理范围，critic 好学</td></tr>
+<tr><td>正交初始化</td><td>隐藏层增益 √2，策略输出层 0.01，价值输出层 1</td><td>初始策略接近均匀分布，探索充分</td></tr>
+<tr><td>学习率退火</td><td>线性降到 0</td><td>后期减小抖动（第 5 章常数步长的抖动）</td></tr>
+<tr><td>梯度裁剪</td><td>全局范数 0.5</td><td>防止偶发大梯度</td></tr>
+<tr><td>KL 早停</td><td>approx KL &gt; 目标值就停止剩余 epoch</td><td>clip 不能严格限制 KL</td></tr>
+<tr><td>动作掩码</td><td>非法动作 logit 置为 −∞</td><td>不浪费探索、不学无意义的动作（见下）</td></tr>
+</table></div>
+<p class="tcap"><b>表 11-4</b>　PPO 的常见工程细节。</p>
+<!--deriv 动作掩码：把非法动作的 logit 置为 −∞ 后，梯度仍然正确
+\pi(a\mid s) & = \frac{m_a\,e^{z_a}}{\sum_bm_be^{z_b}},\qquad m_a\in\{0,1\} || 等价于把 $m_a=0$ 的 logit 设为 −∞；分母只对合法动作求和
+\frac{\partial\log\pi(a\mid s)}{\partial z_k} & = \mathbb 1[k=a]-\pi(k\mid s)\qquad(m_a=1) || 和普通 softmax 同一个公式；只会采到合法动作，所以 $a$ 总是合法的
+* \frac{\partial\log\pi(a\mid s)}{\partial z_k} & = 0\qquad(m_k=0) || 非法动作 $\pi(k\mid s)=0$ 且 $k\neq a$：<strong>没有梯度流向非法动作的 logit</strong>，相当于在合法动作子集上做 softmax 策略梯度
+-->
+<p>实现要点：① 采样、计算 $\log\pi_{\text{old}}$、计算 $\log\pi_\theta$ 三处必须用<strong>同一个掩码</strong>（掩码要存进 rollout），否则比值是错的；② 熵也只在合法动作上算；③ 用一个很大的负数（如 −1e8）代替 −∞ 时注意半精度溢出。不用掩码而是“选了非法动作就给负奖励”，会浪费大量样本去学“什么不能做”，在 MOBA 这种大部分动作在大部分时刻都非法的场景里尤其低效。</p>
+
+<h2>11.7 实测：CartPole 上的 PPO 与消融</h2>
+<p>设置：8 个环境 × 128 步 = 每次 1024 个样本，10 个 epoch × 小批量 256，ε = 0.2，γ = 0.99，λ = 0.95，Adam 学习率 3e-4，策略 / 价值分离的 4-64-64 网络，梯度裁到 0.5，共 20 万步。在此基础上每次只改一项，各 5 个种子（<code>demos/ch11_ppo.cpp</code> E3，30 个训练并行约 40 秒）。</p>
+<!--plot {"x":[0,200000],"y":[0,520],"h":280,"xlabel":"环境步数","ylabel":"训练回合平均长度（5 种子平均）","legend":"br",
+"series":[{"path":"ch11.e3.runs.0.mean","n":"标准 PPO","c":"b","sw":2.6},{"path":"ch11.e3.runs.1.mean","n":"去 clip（10 epoch 普通 IS 目标）","c":"r"},{"path":"ch11.e3.runs.5.mean","n":"只跑 1 个 epoch","c":"a","dash":true}],
+"cap":"<b>图 11-4</b>　clip 与多 epoch 的作用（C++ 实测）。去掉 clip 后同一批数据训练 10 遍会把策略推得太远；只跑 1 个 epoch 安全但数据利用率低，20 万步内没学满。"} -->
+<!--plot {"x":[0,200000],"y":[0,520],"h":260,"xlabel":"环境步数","ylabel":"训练回合平均长度（5 种子平均）","legend":"br",
+"series":[{"path":"ch11.e3.runs.0.mean","n":"标准 PPO（λ = 0.95，优势归一化）","c":"b","sw":2.6},{"path":"ch11.e3.runs.2.mean","n":"去优势归一化","c":"o"},{"path":"ch11.e3.runs.3.mean","n":"λ = 0","c":"g","dash":true},{"path":"ch11.e3.runs.4.mean","n":"λ = 1","c":"p","dash":true}],
+"cap":"<b>图 11-5</b>　优势归一化与 λ 的消融。"} -->
+<!--dtab {"rows":"ch11.e3.runs","hlif":"i == 0","cols":[["变体","name"],["最后 5 万步平均","final",".1f"],["5 个种子","=' / '.join(f'{x:.0f}' for x in fin)"],["5 种子平均首次 ≥ 450","=('20 万步内未达到' if hit < 0 else f'{hit/1000:.0f}k 步')"],["approx KL 平均","klmean",".4f"],["approx KL 最大","klmax",".4f"]],
+"cap":"<b>表 11-5</b>　PPO 消融汇总（满分 500）。approx KL 是每次更新最后一个 epoch 中的 k3 平均值。"} -->
+<p>如实地读这张表：</p>
+<ol>
+<li><strong>去 clip 的危害最大</strong>：approx KL 最高到 [[ch11.e3.runs.1.klmax|.2f]]（标准 PPO 只有 [[ch11.e3.runs.0.klmax|.3f]]），5 个种子里有 3 个最后停在 300 以下。这正是 11.2 节“替代目标在步长大时过于乐观”的实测版本。</li>
+<li><strong>多 epoch 复用数据是 PPO 样本效率的来源</strong>：只跑 1 个 epoch 时 KL 几乎为 0，非常安全，但 20 万步只学到 [[ch11.e3.runs.5.final|.0f]] 左右。</li>
+<li><strong>优势归一化、λ 在 CartPole 上影响不大</strong>：差异小于种子间差异（去归一化有一个种子掉到 [[ch11.e3.runs.2.fin.3|.0f]]，λ = 0 有一个种子停在 [[ch11.e3.runs.3.fin.0|.0f]]）。CartPole 奖励恒为 1、回合不长，这两项要在奖励尺度多变、回合很长的游戏里才显出作用。消融结论要和环境特性一起说。</li>
+</ol>
+<!--plot {"x":[0,200000],"y":[0.00005,2],"logy":true,"h":250,"xlabel":"环境步数","ylabel":"approx KL（k3，5 种子平均）","legend":"tl","hlines":[[0.015,"常见 KL 早停阈值 0.015","s"]],
+"series":[{"path":"ch11.e3.runs.0.kl","n":"标准 PPO","c":"b","dots":true},{"path":"ch11.e3.runs.1.kl","n":"去 clip","c":"r","dots":true}],
+"cap":"<b>图 11-6</b>　approx KL 曲线（纵轴对数刻度）。去掉 clip 后 KL 高出一到两个数量级。"} -->
+<!--plot {"x":[0,200000],"y":[-2,1],"h":280,"xlabel":"环境步数","ylabel":"标准 PPO 的训练诊断（5 种子平均）","legend":"bl","hlines":[[0,"","s"]],
+"series":[{"path":"ch11.e3.runs.0.ev","n":"explained variance（critic 解释了多少回报方差）","c":"g","dots":true},{"path":"ch11.e3.runs.0.ent","n":"策略熵（上限 ln 2 ≈ 0.693）","c":"p","dots":true},{"path":"ch11.e3.runs.0.cf","n":"clipfrac（被截断样本比例）","c":"o","dots":true}],
+"cap":"<b>图 11-7</b>　标准 PPO 的三条诊断曲线（C++ 实测）。熵从 ln 2 缓慢下降（策略逐渐确定），clipfrac 除第一次更新外都在 0.01~0.1 之间。explained variance 前期升到 0.5 左右，<strong>但在约 15 万步后明显变成负数</strong>：这时大部分回合都撑满 500 步被截断，critic 目标几乎是常数，回报方差很小，分母一小，EV 就被 critic 的微小噪声主导。这是诊断指标的一个典型陷阱，见表 11-6。"} -->
+
+<h2>11.8 训练诊断：看哪些曲线、怎么排查</h2>
+<div class="tbl"><table>
+<tr><th>指标</th><th>正常范围（经验值）</th><th>异常表现</th><th>先查什么</th></tr>
+<tr><td>approx KL</td><td>0.005~0.03</td><td>持续 &gt; 0.05 或突然飙升</td><td>学习率、epoch 数、小批量大小；加 KL 早停</td></tr>
+<tr><td>clipfrac</td><td>0.05~0.3</td><td>接近 0（学不动）或 &gt; 0.5（步子太大）</td><td>同上；接近 0 时可以加大学习率</td></tr>
+<tr><td>策略熵</td><td>缓慢下降</td><td>快速掉到 0（过早收敛）或一直不降（学不到东西）</td><td>熵系数、奖励是否有信号、动作掩码</td></tr>
+<tr><td>explained variance</td><td>逐渐升向 1</td><td>长期 ≤ 0（critic 没用）</td><td>价值学习率 / 系数、奖励缩放、截断处理（第 10 章）。注意：回报本身方差很小时（任务接近满分、奖励几乎恒定），EV 会剧烈波动甚至为负（图 11-7），要结合价值损失的绝对值判断</td></tr>
+<tr><td>价值损失</td><td>先升后降、平稳</td><td>爆炸</td><td>奖励尺度、观测归一化、价值裁剪</td></tr>
+<tr><td>回报 / 胜率</td><td>上升</td><td>先升后崩</td><td>KL 曲线是否同时飙升（策略崩溃）；自博弈时看对手池（第 15 章）</td></tr>
+</table></div>
+<p class="tcap"><b>表 11-6</b>　PPO 训练诊断速查。面试问“训练崩了怎么排查”时，按“先看 KL / clipfrac 判断是不是步子太大，再看熵判断探索，再看 explained variance 判断 critic”这个顺序回答。</p>
+<p><strong>PPO 是 on-policy 还是 off-policy？</strong>本质是 on-policy：替代目标只在旧策略附近可信，数据用完就扔。多 epoch 复用时第 2 个 epoch 起数据已经来自“稍旧的”策略，靠重要性比值修正、靠 clip 限制偏离程度，所以有人称之为“近似 on-policy”。真正的 off-policy 方法（DQN、SAC）可以用很久以前的数据。分布式训练里 actor 的参数比 learner 落后几步，PPO 也能容忍，但落后太多就需要 V-trace 之类的修正（第 19 章）。</p>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch11_interview.py</code> 逐字相同：PPO-clip 单样本损失（含梯度、含掩码）、value clipping、k3。脚本用有限差分在 4000 个随机样本上检查了表 11-2 的全部六种情形：</p>
+<!--code:py:PPO-clip 损失 / 动作掩码 / value clipping / approx KL（Python，面试手撕版）-->
+{{demo:ch11_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch11_interview.py 的输出-->
+{{demo:ch11_interview_output.txt}}
+<!--/code-->
+
+<h2>11.9 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“PPO 的 clip 把比值限制在 [1−ε, 1+ε]”</td><td>clip 不限制比值本身</td><td>越界样本不再产生梯度，但比值仍可能被其他样本带着越界；要配合 KL 早停（图 11-6）</td></tr>
+<tr><td>“取 min 是为了限制更新幅度”</td><td>只说了一半</td><td>min 让目标成为悲观下界：只在改进方向截断，在变坏方向保留梯度（表 11-2）</td></tr>
+<tr><td>“TRPO 用 KL 惩罚”</td><td>和 PPO-Penalty 混了</td><td>TRPO 是 KL 约束（硬约束 + 共轭梯度 + 线搜索）；理论下界里才是惩罚形式</td></tr>
+<tr><td>“自然梯度需要求 Fisher 矩阵的逆”</td><td>实现说错</td><td>用共轭梯度只做 Fisher-向量积</td></tr>
+<tr><td>“PPO 是 off-policy，因为数据用了多次”</td><td>概念混淆</td><td>只在旧策略附近复用，替代目标的可信性依赖新旧策略接近，本质 on-policy</td></tr>
+<tr><td>“approx KL 用 −log r 的平均就行”</td><td>方差大且可为负</td><td>用 k3 = (r−1) − log r：无偏、非负、方差小（表 11-3）</td></tr>
+<tr><td>“非法动作给一个负奖励就好”</td><td>效率低、学偏</td><td>用掩码：logit 置 −∞，梯度不流向非法动作，三处计算用同一掩码</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:PPO 常见追问链-->
+PPO 为什么要 clip？
+├─ 不 clip 会怎样？ → 替代目标只在小步内可信（图 11-1），多 epoch 会把策略推远（实测 KL 0.9，回报掉）
+│   └─ 替代目标从哪来？ → 性能差异引理 + 用旧状态分布近似 + IS；TRPO 下界 L − C·KLmax
+├─ 为什么取 min？ → 悲观下界：A>0 时 r>1+ε 无梯度，A<0 时 r<1−ε 无梯度，反方向保留
+├─ PPO 和 TRPO 区别？ → KL 约束 + 自然梯度 + CG + 线搜索 vs 一阶优化 + clip；TRPO 更严格、PPO 更简单
+│   └─ 自然梯度是什么？ → KL 的 Hessian = Fisher，方向 F⁻¹g；表格 softmax 下就是优势
+├─ PPO 是 on-policy 吗？ → 本质是，只在旧策略附近复用数据
+├─ 训练崩了怎么查？ → KL / clipfrac → 熵 → explained variance → 奖励尺度 / 截断处理
+└─ 无效动作怎么办？多头动作 log-prob？ → 掩码（logit = −∞）；各头 log-prob 相加（第 18 章）
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 11 章</div><ul>
+<li>性能差异引理：$J(\pi')-J(\pi)=\sum_sd^\gamma_{\pi'}(s)\sum_a\pi'(a\mid s)A_\pi(s,a)$；替代目标换成旧分布，一阶准确。</li>
+<li>TRPO：$\max L$ s.t. $\bar D_{\text{KL}}\le\delta$；KL ≈ ½ΔᵀFΔ，$\Delta=\sqrt{2\delta/(g^\top F^{-1}g)}\,F^{-1}g$；共轭梯度 + 线搜索。</li>
+<li>PPO-clip：$\min(r\hat A,\clip(r,1\pm\epsilon)\hat A)$；越界且在改进方向时梯度为 0；min = 悲观下界。</li>
+<li>approx KL 用 $k_3=(r-1)-\log r$：无偏、非负。</li>
+<li>工程：GAE、优势归一化、梯度裁剪、学习率退火、KL 早停、观测 / 奖励归一化、正交初始化、动作掩码。</li>
+<li>诊断：KL 0.005~0.03、clipfrac 0.05~0.3、熵缓降、explained variance 升向 1。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：PPO 第一个 epoch 的第一个小批量，比值 r 是多少？clip 起作用吗？</summary><p>参数还没变，$r=1$，所有样本都在区间内，梯度就是普通的策略梯度（$\nabla r=\nabla\log\pi$ 在 $r=1$ 处）。clip 只在后续小批量 / epoch 中、比值偏离 1 之后才起作用。所以 clipfrac 衡量的是“这一轮复用数据时，有多少样本已经被推到边界外”。</p></details>
+<details class="quiz"><summary>自测 2：ε 取大一些（如 0.5）或小一些（如 0.05）分别会怎样？</summary><p>ε 大：允许每轮更新更多，学得快但更容易不稳定，接近“去 clip”；ε 小：更保守，clipfrac 变大、很多样本没梯度，学得慢，接近“只跑 1 个 epoch”。常用 0.1~0.3，也有随训练线性减小的做法。</p></details>
+<details class="quiz"><summary>自测 3：为什么 TRPO 的约束用 KL(π_old ‖ π_new) 而不是反过来？</summary><p>期望要对旧策略取，才能用旧数据估计；$\KL(\pi_{\text{old}}\Vert\pi_{\text{new}})=\E_{a\sim\pi_{\text{old}}}[\log\pi_{\text{old}}-\log\pi_{\text{new}}]$ 正好满足。二阶近似下两个方向的 KL 都等于 ½ΔᵀFΔ，所以小步时区别不大。</p></details>
+<details class="quiz"><summary>自测 4：MOBA 里某个技能大部分时间在冷却，不加动作掩码直接训练会出现什么现象？</summary><p>策略会给冷却中的技能分配概率，采到后环境要么忽略（等于浪费一步），要么给惩罚；这些样本的优势噪声很大，策略需要很多数据才能学会“冷却时别按”，而且会污染其他动作的梯度。加掩码后这个技能在冷却时概率严格为 0、梯度为 0，网络把容量用在真正的决策上。</p></details>
+</section>

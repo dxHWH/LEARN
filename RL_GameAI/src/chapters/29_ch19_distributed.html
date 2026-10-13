@@ -1,0 +1,150 @@
+<div class="part-head" data-toc="PART V · 工程落地与工具链"><div class="no">PART V</div><h1>工程落地与工具链</h1><p>前四部分讲的是“算法怎么推、Bot 怎么设计”，这一部分讲“怎么真正做出来并上线”：分布式训练系统的吞吐与策略滞后（第 19 章）、把模型接进 UE 并控制每帧推理预算（第 20 章）、以及让策划和 QA 能看懂、调整、验证 AI 的工具链与评测统计（第 21 章）。对应 JD 的职责 3 和要求 3、4、5。</p></div>
+<section class="chapter" id="ch19">
+<div class="ch-head"><div class="no">CHAPTER 19</div><h1>分布式训练系统与样本效率</h1><p class="lead">游戏 Bot 动辄需要上亿乃至上百亿步样本，而 GPU 做一次反向传播只要几毫秒，真正的瓶颈往往是“游戏跑得不够快、开得不够多”。于是训练系统拆成两部分：大量 actor 只管玩游戏产生数据，少数 learner 只管更新参数。解耦带来吞吐，也带来一个新问题：actor 手里的参数总是旧的。V-trace 就是为这个“策略滞后”设计的修正。本章推导 V-trace 的不动点，并用多线程 C++ 实测吞吐、滞后和修正的效果。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>说清 actor-learner 架构的演进：A3C → A2C → Ape-X / R2D2 → IMPALA → SEED RL，每一步解决了什么瓶颈。</li>
+<li>写出 V-trace 目标，推出截断系数 $\bar\rho$ 决定“收敛到哪个策略的价值”、$\bar c$ 只影响收敛速度。</li>
+<li>能估算吞吐与策略滞后：learner 饱和时滞后 ≈（队列容量 + actor 数）/ 每次更新消耗的 rollout 数。</li>
+<li>知道复现性、参数同步、模型版本管理这些工程问题的标准做法。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>RL 的样本来自和环境交互，游戏模拟比 GPU 训练慢得多，所以分布式 RL 的核心是把采样并行化：成百上千个 actor 各自跑游戏、用本地参数推理动作，把轨迹发给 learner；learner 批量训练后把新参数广播回去。actor 用的参数总比 learner 旧若干个版本，数据就成了 off-policy 的。IMPALA 用 V-trace 修正：价值目标 $v_s=V(x_s)+\sum_{t\ge s}\gamma^{t-s}(\prod_{i=s}^{t-1}c_i)\rho_t\delta_t$，其中 $\rho_t=\min(\bar\rho,\pi/\mu)$、$c_i=\min(\bar c,\pi/\mu)$ 是截断的重要性比值。截断防止方差爆炸，代价是 $\bar\rho$ 有限时收敛到的是介于行为策略和目标策略之间的 $\pi_{\bar\rho}$ 的价值；on-policy 时 V-trace 就是普通的 n 步回报。工程上要看三个量：环境步 / 秒（加 actor 直到 learner 饱和）、learner 利用率、策略滞后（learner 饱和时由队列长度决定，Little 定律），再加上参数版本号、种子与确定性仿真来保证可复现。</p></div>
+
+<h2>19.1 为什么瓶颈在采样</h2>
+<p>粗略算一笔账：一局 MOBA 约 15~20 分钟，每 4 帧（约 133 ms）决策一次，一局就是 7000 步左右；OpenAI Five、腾讯绝悟这一级别的 Bot 需要的样本数以十亿到百亿计（公开报道中 OpenAI Five 每天自博弈的游戏时长相当于人类玩 180 年）。单个游戏进程即使关掉渲染、加速运行，每秒也只能产生几百到几千步；而一块 GPU 对一个 batch 做前向 + 反向只要几毫秒。所以：</p>
+<ul>
+<li><strong>采样要横向扩展</strong>：成千上万个 CPU 核跑游戏实例，GPU 集中做训练（和推理）。</li>
+<li><strong>采样和训练要解耦</strong>：同步等待最慢的那个游戏实例会浪费大量算力（游戏一步的耗时长尾很重：团战、技能特效多的帧慢得多）。</li>
+<li><strong>样本效率仍然重要</strong>：样本越省，需要的机器越少。off-policy 复用（回放）、更好的价值估计（GAE、V-trace）、课程和模仿学习预热（第 14、16 章）都在省样本。</li>
+</ul>
+
+<h2>19.2 架构演进</h2>
+<!--flow {"w":900,"h":290,
+"boxes":[
+{"id":"a1","x":20,"y":20,"w":170,"h":56,"t":"actor 1","s":"游戏实例 + 本地策略副本","c":"b"},
+{"id":"a2","x":20,"y":96,"w":170,"h":56,"t":"actor 2","s":"μ = 旧版本参数","c":"b"},
+{"id":"a3","x":20,"y":172,"w":170,"h":56,"t":"actor N","s":"每段 rollout 前拉一次参数","c":"b"},
+{"id":"q","x":340,"y":96,"w":150,"h":56,"t":"轨迹队列","s":"有界；满了 actor 阻塞","c":"a"},
+{"id":"l","x":560,"y":76,"w":180,"h":96,"t":"learner（GPU）","s":"批量 V-trace + 策略梯度","s2":"更新后版本号 +1","c":"o"},
+{"id":"p","x":560,"y":210,"w":180,"h":56,"t":"参数服务器","s":"θ 与版本号","c":"p"}],
+"arrows":[
+{"p":[[190,48],[340,112]],"c":"b"},{"p":[[190,124],[340,124]],"c":"b","label":"轨迹 + μ(a|x) + 版本","lx":204,"ly":118},{"p":[[190,200],[340,136]],"c":"b"},
+{"p":[[490,124],[560,124]],"c":"a","label":"batch","lx":504,"ly":116},
+{"p":[[650,172],[650,210]],"c":"o"},
+{"p":[[560,238],[105,238],[105,228]],"c":"p","dash":true,"label":"广播新参数（actor 下一段 rollout 才用上 → 策略滞后）","lx":200,"ly":256}],
+"cap":"<b>图 19-1</b>　IMPALA 式 actor-learner 架构。actor 只做“玩游戏 + 本地推理”，learner 只做训练；轨迹里要带上行为策略的概率 μ(a|x)，learner 才能做重要性修正。"} -->
+<div class="tbl"><table>
+<tr><th>架构</th><th>做法</th><th>解决的问题</th><th>新的问题</th></tr>
+<tr><td>A3C（2016）</td><td>多个 worker 各自算梯度，异步写入共享参数</td><td>无回放时打破样本相关性；CPU 并行</td><td>陈旧梯度、不可复现、不能合批推理（第 10 章）</td></tr>
+<tr><td>A2C / 同步 PPO</td><td>N 个环境同步走一步，合批推理，凑满 batch 再更新</td><td>GPU 合批、可复现</td><td>要等最慢的环境；单机规模有限</td></tr>
+<tr><td>Ape-X / R2D2（2018 / 2019）</td><td>大量 actor 往分布式优先回放写数据，learner 从回放采样；R2D2 加 LSTM、存隐状态、burn-in</td><td>off-policy 算法（DQN 系）的大规模扩展</td><td>回放里数据新旧混杂；只适用 off-policy 算法</td></tr>
+<tr><td>IMPALA（2018）</td><td>actor 送轨迹、learner 集中训练，V-trace 修正策略滞后</td><td>actor-critic 的大规模异步扩展</td><td>actor 各自推理，CPU 推理贵；参数广播开销</td></tr>
+<tr><td>SEED RL（2020）</td><td>actor 只跑环境，推理也集中在 learner 的加速器上（gRPC 流式传观测 / 动作）</td><td>推理合批、省 CPU、参数不用广播</td><td>对网络延迟敏感，每一步都要往返</td></tr>
+<tr><td>单机高吞吐（Sample Factory 等）</td><td>共享内存 + 双缓冲，采样 / 推理 / 训练流水线化</td><td>单机榨干 CPU / GPU</td><td>规模受单机限制</td></tr>
+</table></div>
+<p class="tcap"><b>表 19-1</b>　分布式 RL 架构的演进。游戏公司的自研框架（以及 Ray / RLlib 这类通用框架）基本都是这几种模式的组合：环境实例池 + 推理服务 + 训练集群 + 模型仓库 + 对手池（第 15 章）。</p>
+
+<h2>19.3 V-trace：截断的重要性修正</h2>
+<p>actor 用旧策略 μ 采样，learner 想估计（并改进）当前策略 π 的价值。第 6 章的全轨迹重要性采样方差会爆炸，第 11 章 PPO 只修正一步动作；V-trace 介于两者之间：每一步都乘一个<strong>截断的</strong>比值。</p>
+$$v_s\doteq V(x_s)+\sum_{t=s}^{s+n-1}\gamma^{t-s}\Big(\prod_{i=s}^{t-1}c_i\Big)\rho_t\,\delta_t,\qquad\delta_t=r_t+\gamma V(x_{t+1})-V(x_t),\quad\rho_t=\min\Big(\bar\rho,\frac{\pi(a_t\mid x_t)}{\mu(a_t\mid x_t)}\Big),\quad c_i=\min\Big(\bar c,\frac{\pi(a_i\mid x_i)}{\mu(a_i\mid x_i)}\Big)$$
+<!--deriv V-trace 的不动点：ρ̄ 决定收敛到哪个策略的价值
+\pi=\mu\ \Rightarrow & \ \rho_t=c_i=1,\quad v_s=V(x_s)+\sum_t\gamma^{t-s}\delta_t=\sum_{t}\gamma^{t-s}r_t+\gamma^nV(x_{s+n}) || on-policy 时就是第 5 章的 n 步回报（第 5 章恒等式 ①）
+\E_\mu\big[\rho_t\delta_t\mid x_t\big] & = \sum_a\mu(a\mid x_t)\min\Big(\bar\rho,\frac{\pi(a\mid x_t)}{\mu(a\mid x_t)}\Big)\big(Q_V(x_t,a)-V(x_t)\big) || $Q_V(x,a)\doteq\E[r+\gamma V(x')\mid x,a]$；对动作和下一状态取期望
+& = \sum_a\min\big(\bar\rho\,\mu(a\mid x_t),\pi(a\mid x_t)\big)\big(Q_V(x_t,a)-V(x_t)\big) || 把 μ 乘进 min
+\text{不动点}:\ \E[\rho_t\delta_t]=0\ \Leftrightarrow & \ V(x)=\sum_a\pi_{\bar\rho}(a\mid x)\,Q_V(x,a) || 令期望增量为 0 并整理
+* \pi_{\bar\rho}(a\mid x) & = \frac{\min\big(\bar\rho\,\mu(a\mid x),\pi(a\mid x)\big)}{\sum_b\min\big(\bar\rho\,\mu(b\mid x),\pi(b\mid x)\big)} || 不动点是 $\pi_{\bar\rho}$ 的价值：$\bar\rho\to\infty$ 时为 π，$\bar\rho\to0$ 时趋向 μ；$c$ 只出现在“把多步误差传回来”的系数里，影响收敛速度和方差，不影响不动点
+-->
+<p>在一个 5 状态 × 3 动作的随机 MDP 上（γ = 0.9，π 与 μ 差别很大：π/μ 最大 [[ch19.e1.wmax|.1f]]，$\max\lvert V_\mu-V_\pi\rvert$ = [[ch19.e1.gap|.2f]]），用 μ 的一条 [[ch19.e1.L|.0f]] 步长轨迹做 [[ch19.e1.n]] 步 V-trace 的随机逼近，比较五种设置最终收敛到哪里（<code>demos/ch19_distributed.cpp</code> E1）：</p>
+<!--dtab {"rows":"ch19.e1.runs","cols":[["设置","name"],["与理论不动点的最大差","d_t",".3f"],["与 V_π 的最大差","d_pi",".3f"],["与 V_μ 的最大差","d_mu",".3f"]],
+"cap":"<b>表 19-2</b>　V-trace 的不动点（C++ 实测，后一半迭代取 Polyak 平均）。理论不动点：不修正 → $V_\\mu$；$\\bar\\rho$ = 1 或 0.5 → $V_{\\pi_{\\bar\\rho}}$；$\\bar\\rho=\\infty$ → $V_\\pi$。$\\bar\\rho$ = 1 时收敛到的价值与 $V_\\pi$ 还差 [[ch19.e1.gap1|.2f]]——IMPALA 论文默认 $\\bar\\rho=\\bar c=1$，接受这个偏差换稳定。全重要性采样理论上无偏，但同样迭代次数下误差最大（[[ch19.e1.runs.4.d_t|.3f]]），这就是方差的代价。"} -->
+<div class="co warn"><span class="h">面试注意：IMPALA 的策略梯度用的是哪个优势</span><p>IMPALA 的 actor 更新是 $\rho_s\nabla\log\pi(a_s\mid x_s)\big(r_s+\gamma v_{s+1}-V(x_s)\big)$：比值 $\rho_s$ 修正“这个动作是旧策略选的”，括号里用 V-trace 目标 $v_{s+1}$ 估计未来。和 PPO 对比：PPO 用 clip 限制新旧策略偏离，只适合“滞后一两个版本”的数据；V-trace 直接修正，能容忍更大的滞后。两者也可以组合（APPO：异步 PPO + V-trace）。</p></div>
+<h2>19.4 实测：吞吐、learner 饱和与策略滞后</h2>
+<p>用 C++ 多线程模拟一个最小的 IMPALA（E2）：每个 actor 线程跑一个“游戏”，每一步约 [[ch19.e2.us|.0f]] μs 的游戏逻辑 + 一次本地 MLP 推理（32-64-64-8，batch = 1），每 64 步打包成一段 rollout，送进有界阻塞队列（mutex + 条件变量，满了 actor 就阻塞——这就是背压）；一个 learner 线程每次取 4 段，做前向 + 反向 + Adam，更新后把参数和版本号写回共享区。actor 每段 rollout 开始时拉一次参数，记下版本号；learner 收到时用“当前版本 − 样本版本”算滞后。本机 [[ch19.e2.hw]] 个硬件线程，每个配置跑 1.5 秒。</p>
+<!--plot {"x":[0,25],"y":[0,420000],"xt":[1,2,4,8,16,24],"h":270,"xlabel":"actor 线程数","ylabel":"环境步 / 秒","legend":"br",
+"series":[{"path":"ch19.e2.sps","n":"实测吞吐","c":"b","dots":true,"sw":2.4}],
+"cap":"<b>图 19-2</b>　吞吐随 actor 数的变化（C++ 实测）。1 个 actor 时 [[ch19.e2.rows.0.sps|.0f]] 步 / 秒；8 个 actor 时 learner 忙碌 [[ch19.e2.rows.3.busy|.0f]]%，16 个时已到 [[ch19.e2.rows.4.busy|.0f]]%——之后再加 actor，吞吐不再上升，只会让队列更满。"} -->
+<!--dtab {"rows":"ch19.e2.rows","cols":[["actor 数","n"],["队列容量","q"],["环境步 / 秒","sps",".0f"],["learner 更新 / 秒","ups",".0f"],["learner 忙碌率（%）","busy",".0f"],["平均滞后（次更新）","lag",".2f"],["p95 滞后","p95",".0f"],["最大滞后","lmax",".0f"]],
+"cap":"<b>表 19-3</b>　actor 数与吞吐、滞后（E2）。计时数字每次运行会有波动。"} -->
+<p>learner 一旦饱和，队列就一直是满的，滞后由排队长度决定：</p>
+<!--deriv learner 饱和时的策略滞后：Little 定律
+L & = \lambda\,W || Little 定律：系统中的平均数量 = 到达率 × 平均停留时间（对任何稳定的排队系统成立）
+L & \approx Q+N || learner 饱和时队列始终满（Q 段），另有 N 个 actor 各自正在生产一段（它们开始时拉取的参数也是旧的）
+\lambda & = B\ \text{段 / 次更新} || 稳态下到达率 = learner 的消耗率；以“更新次数”为时间单位
+* W & \approx\frac{Q+N}{B}\quad\text{次更新} || 一段 rollout 从“actor 拉取参数”到“learner 用它更新”之间，learner 更新了这么多次，就是策略滞后
+-->
+<!--plot {"x":[0,68],"y":[0,22],"xt":[4,8,16,32,64],"h":250,"xlabel":"队列容量 Q（16 个 actor，每次更新 B = 4 段）","ylabel":"平均策略滞后（次更新）","legend":"tl",
+"series":[{"path":"ch19.e2.qlag","n":"C++ 实测","c":"b","dots":true,"sw":2.4},{"f":"(x+16)/4","n":"Little 定律 (Q + N)/B","c":"r","dash":true}],
+"cap":"<b>图 19-3</b>　队列越大滞后越大，吞吐却不变（容量 4 和 64 时分别为 [[ch19.e2.qrows.0.sps|.0f]] 和 [[ch19.e2.qrows.4.sps|.0f]] 步 / 秒）。实测与 Little 定律几乎重合（手撕脚本逐项对比）。"} -->
+<div class="co tip"><span class="h">工程上的结论</span><p>① <strong>加 actor 直到 learner 饱和就停</strong>，之后多出来的 actor 只会增加滞后；② <strong>队列只需要能吸收抖动</strong>（游戏一步的耗时长尾），越大越糟；③ 想再提吞吐，就要提 learner：更大的 batch、多 GPU 数据并行（参数用 all-reduce 同步）、把推理挪到 GPU 上合批（SEED RL）；④ 滞后要监控：在轨迹里带上参数版本号，learner 统计滞后分布，超过阈值的旧数据直接丢弃或降权。</p></div>
+
+<h2>19.5 实测：策略滞后对学习的影响</h2>
+<p>在 CartPole 上直接控制滞后（E3）：A2C（8 个环境 × 16 步），行为策略固定使用 k 次更新之前的参数（k = 0 / 4 / 16 / 64），learner 用当前参数计算。对比“不修正”（把旧数据当成 on-policy，用 n 步回报）与“V-trace 修正”（$\bar\rho=\bar c=1$），各 5 个种子、30 万步，学习率 1e-3：</p>
+<!--plot {"x":[0,300000],"y":[0,760],"yt":[0,100,200,300,400,500],"h":310,"xlabel":"环境步数","ylabel":"训练回合平均长度（5 种子平均）","legend":"tr",
+"series":[{"path":"ch19.e3.runs.0.mean","n":"无滞后","c":"k","sw":2.4},{"path":"ch19.e3.runs.4.mean","n":"滞后 16，不修正","c":"r"},{"path":"ch19.e3.runs.5.mean","n":"滞后 16，V-trace","c":"b","sw":2.4},{"path":"ch19.e3.runs.6.mean","n":"滞后 64，不修正","c":"r","dash":true},{"path":"ch19.e3.runs.7.mean","n":"滞后 64，V-trace","c":"b","dash":true}],
+"cap":"<b>图 19-4</b>　策略滞后与 V-trace 修正（C++ 实测）。"} -->
+<!--dtab {"rows":"ch19.e3.runs","cols":[["设置","name"],["最后 5 万步平均回合长度","final",".1f"],["5 个种子","=' / '.join(f'{x:.0f}' for x in fin)"]],
+"cap":"<b>表 19-4</b>　滞后与修正（学习率 1e-3，满分 500）。“9”是策略塌缩成一直往一个方向推的典型长度。"} -->
+<p>读法：</p>
+<ol>
+<li><strong>滞后不修正会让训练不稳定</strong>：滞后 16 时 5 个种子里有 2 个塌缩（平均 [[ch19.e3.runs.4.final|.0f]]）；加上 V-trace 后 5 个种子全部接近满分（[[ch19.e3.runs.5.final|.0f]]）。旧数据当成 on-policy 用，等于用错误的分布估计梯度，偏差会一路累积到策略塌缩。</li>
+<li><strong>修正不是万能的</strong>：滞后 64 时 V-trace 也有种子失败（[[ch19.e3.runs.7.final|.0f]]）。$\bar\rho=1$ 的截断在新旧策略差别很大时信息损失严重（大部分比值都被截断，学到的是 $\pi_{\bar\rho}$ 而不是 π），方差和偏差都上来了。</li>
+<li><strong>学习率越小，越能容忍滞后</strong>：学习率降到 5e-4 后，滞后 64 不修正也有 [[ch19.e3.lr2.3.raw|.0f]]（V-trace [[ch19.e3.lr2.3.vt|.0f]]）——每次更新走得小，k 次更新之前的策略和现在差得不多。滞后应该按“新旧策略的 KL”而不是“更新次数”来衡量。但同样的学习率下，滞后 4 时修正版（[[ch19.e3.lr2.1.vt|.0f]]）反而比不修正（[[ch19.e3.lr2.1.raw|.0f]]）略低：差距在种子噪声范围内，小滞后时修正的收益并不明显。</li>
+</ol>
+
+<h2>19.6 工程问题：参数同步、版本与复现性</h2>
+<div class="tbl"><table>
+<tr><th>问题</th><th>做法</th></tr>
+<tr><td>参数同步</td><td>learner 定期发布带版本号的快照（参数服务器 / 对象存储 / 广播），actor 按段拉取；多 learner 用数据并行 + all-reduce；SEED 式集中推理则不用广播</td></tr>
+<tr><td>模型版本管理</td><td>每个快照带：版本号、训练步数、配置哈希、代码版本、观测归一化统计量（第 11 章表 11-4，部署必须用同一份）；对手池（第 15 章）也是按版本取</td></tr>
+<tr><td>吞吐估算</td><td>目标样本数 ÷ 期望训练时长 = 需要的步 / 秒；÷ 单实例步 / 秒 = 需要的游戏实例数；learner 端按 batch / 秒和网络大小估 GPU 数；中间留出队列和网络带宽（观测大小 × 步 / 秒）</td></tr>
+<tr><td>复现性</td><td>固定所有随机种子（环境、策略采样、网络初始化）并记录；游戏逻辑用固定步长和确定性随机数（帧同步游戏天然具备，见 Net_Sync 一书）；异步系统本身不可逐位复现，靠“多种子 + 置信区间”比较（第 21 章）</td></tr>
+<tr><td>评测基线</td><td>固定的评测对手集（规则 AI、若干历史版本、人类高手录像）、固定地图 / 阵容集合、固定局数；每个快照自动评测并入库，回归时一键对比</td></tr>
+<tr><td>容错</td><td>actor 是无状态的，挂了就重启；learner 定期存检查点（参数 + 优化器状态 + 归一化统计量 + 对手池）；队列 / 回放服务要能承受 actor 突然大量重连</td></tr>
+</table></div>
+<p class="tcap"><b>表 19-5</b>　分布式训练的工程清单。队列、线程同步和网络传输的细节在本工作区的 OS_Process_Thread 和 Network_TCP_UDP 两本书里有展开。</p>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch19_interview.py</code> 逐字相同；脚本验证了 V-trace 递推与定义一致、on-policy 时退化为 n 步回报，并把 Little 定律的估算与 C++ 实测的滞后逐项对比：</p>
+<!--code:py:V-trace 目标与优势 / learner 饱和时的滞后估算（Python，面试手撕版）-->
+{{demo:ch19_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch19_interview.py 的输出-->
+{{demo:ch19_interview_output.txt}}
+<!--/code-->
+
+<h2>19.7 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“分布式 RL 的瓶颈是 GPU”</td><td>通常相反</td><td>游戏模拟是瓶颈；加 actor 直到 learner 饱和，之后才轮到 GPU</td></tr>
+<tr><td>“actor 越多越好”</td><td>忽略饱和与滞后</td><td>learner 饱和后吞吐不变、滞后线性增长（表 19-3、图 19-3）</td></tr>
+<tr><td>“V-trace 是无偏的”</td><td>截断有偏</td><td>$\bar\rho$ 有限时收敛到 $V_{\pi_{\bar\rho}}$（表 19-2）；用偏差换方差</td></tr>
+<tr><td>“$\bar c$ 也决定收敛到哪个价值”</td><td>混淆两个系数</td><td>不动点只由 $\bar\rho$ 决定；$\bar c$ 控制多步误差的传播（收敛速度、方差）</td></tr>
+<tr><td>“A3C 就是分布式 RL 的标准做法”</td><td>已过时</td><td>异步梯度不可复现、不能合批；主流是 IMPALA / SEED / 同步大 batch PPO</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:分布式 RL 常见追问链-->
+分布式 RL 的瓶颈在哪？
+├─ 为什么要 actor-learner 解耦？ → 游戏模拟慢且耗时长尾，同步等最慢的会浪费；采样横向扩展
+├─ IMPALA 为什么需要 V-trace？ → actor 参数滞后 → off-policy；全 IS 方差爆炸 → 截断比值
+│   ├─ ρ̄ 和 c̄ 的作用？ → ρ̄ 决定不动点 V_{π_ρ̄}；c̄ 控制传播速度 / 方差
+│   └─ on-policy 时是什么？ → n 步回报
+├─ 参数滞后有什么影响？ → 梯度方向偏、可能塌缩（表 19-4）；修正 + 小学习率 + 限制滞后
+│   └─ 滞后有多大？ → learner 饱和时 ≈ (Q + N) / B（Little 定律）
+├─ SEED RL 改了什么？ → 推理集中到 learner 加速器上，actor 只跑环境；代价是每步网络往返
+└─ 怎么保证可复现？ → 种子、确定性仿真、固定评测基线；异步不可逐位复现 → 多种子 + 置信区间
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 19 章</div><ul>
+<li>瓶颈在采样：大量 actor 跑游戏 + 少量 learner 训练；轨迹带 μ(a|x) 和参数版本号。</li>
+<li>演进：A3C → A2C → Ape-X / R2D2（分布式回放）→ IMPALA（V-trace）→ SEED RL（集中推理）。</li>
+<li>V-trace：$v_s=V+\sum\gamma^{t-s}(\prod c_i)\rho_t\delta_t$，$\rho=\min(\bar\rho,\pi/\mu)$；不动点 $V_{\pi_{\bar\rho}}$，$\pi_{\bar\rho}\propto\min(\bar\rho\mu,\pi)$；on-policy 时 = n 步回报。</li>
+<li>learner 饱和后吞吐不变；滞后 ≈ (Q + N)/B；队列只用来吸收抖动。</li>
+<li>工程：版本化快照（含归一化统计量）、多种子评测、固定评测基线、检查点与容错。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：为什么 V-trace 要截断 c，而不是只截断 ρ？</summary><p>$\prod c_i$ 是连乘，即使每个比值只是略大于 1，乘十几步也会爆炸，方差和第 6 章的全轨迹重要性采样一样大。截断到 $\bar c=1$ 后，乘积单调不增，远处的误差只会被衰减，不会被放大（类似 Retrace 的“安全”性质）。</p></details>
+<details class="quiz"><summary>自测 2：表 19-3 中 1 个 actor 时 learner 只忙了约 12%，为什么滞后还不是 0？</summary><p>learner 要攒够 4 段才更新一次。actor 交出第 4 段后立刻开始第 5 段，这时 learner 正在用前 4 段训练，第 5 段拉到的还是更新前的参数，等它被用到时就落后了 1 个版本。平均滞后 [[ch19.e2.rows.0.lag|.2f]] 说明大约四分之一的段落后一个版本。滞后不为 0 是异步架构的固有属性，只有同步架构（等所有 actor 交数据再更新、更新后再采样）才能做到严格 0 滞后。</p></details>
+<details class="quiz"><summary>自测 3：假设要在 3 天内训练 100 亿步，单个游戏实例加速后每秒 500 步，大概需要多少个实例？</summary><p>3 天约 2.6×10⁵ 秒，需要约 3.9×10⁴ 步 / 秒，÷ 500 ≈ 78 个实例——这是理想值。再考虑实例的启动 / 重置开销、长尾帧和 learner 饱和，通常要留 1.5~2 倍余量，并确认 learner 能消化这个吞吐（否则先扩 learner）。</p></details>
+</section>

@@ -1,0 +1,182 @@
+<div class="part-head" data-toc="第二部分 · 面试四问">
+  <div class="no">PART TWO</div>
+  <h1>第二部分　面试四问</h1>
+  <p>先讲绑定（它决定了谁能发什么 RPC），再讲开火到命中、子弹与换弹，最后讲弱网。每章都对照原 Demo 的实现。</p>
+</div>
+
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>问 ②：角色、控制器、武器应该怎么绑定</h1>
+    <p class="lead">绑定不是“把枪挂到手上”这么简单：它决定了 Owner 链、谁能发 Server RPC、COND_OwnerOnly 发给谁、输入在哪台机器上生效。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>讲清 Possess 的完整过程：服务器做什么、客户端什么时候知道“这是我的角色”。</li>
+    <li>武器的生成时机、Owner / Instigator、1P / 3P 挂接、CurrentWeapon 的复制。</li>
+    <li>输入映射、UI、相机这些“只属于本地玩家”的东西应该在哪里初始化。</li>
+  </ul></div>
+
+  <div class="ans">
+    <div class="q">30 秒版</div>
+    <p>服务器上 GameMode 为每个 PC 生成 Pawn 并 Possess，Possess 让 Pawn 的 Owner = PC、在拥有者客户端上成为 AutonomousProxy；武器在服务器生成，<code>SpawnParams.Owner = Pawn</code>、<code>Instigator = Pawn</code>，挂到 3P 模型 Socket，本地再挂一份 1P；<code>CurrentWeapon</code> 复制，在 OnRep 里挂接。输入在拥有者客户端“拿到控制权”时绑定；分数和准备状态放 PlayerState。</p>
+  </div>
+
+  <h2>Possess 到底发生了什么</h2>
+  <div class="tbl"><table>
+    <tr><th>步骤</th><th>在哪一端</th><th>发生了什么</th><th>适合挂什么逻辑</th></tr>
+    <tr><td>1. PostLogin / HandleStartingNewPlayer</td><td>服务器</td><td>新连接有了 PlayerController 和 PlayerState</td><td>记录玩家、初始化 PlayerState</td></tr>
+    <tr><td>2. RestartPlayer → SpawnDefaultPawnFor</td><td>服务器</td><td>在 PlayerStart 生成 Pawn（DefaultPawnClass）</td><td>选出生点</td></tr>
+    <tr><td>3. <code>PC->Possess(Pawn)</code> → <code>Pawn->PossessedBy(PC)</code></td><td>服务器</td><td>SetOwner(PC)；Pawn 在该连接上成为 AutonomousProxy；Pawn->PlayerState 指向 PC 的 PlayerState</td><td><strong>生成默认武器</strong>、初始化服务器端属性</td></tr>
+    <tr><td>4. <code>ClientRestart</code>（Client RPC）</td><td>服务器 → 拥有者</td><td>通知客户端“你现在控制这个 Pawn”</td><td>—</td></tr>
+    <tr><td>5. AcknowledgePossession / <code>PawnClientRestart</code></td><td>拥有者客户端</td><td>建立 InputComponent、调用 <code>SetupPlayerInputComponent</code>；相机切到这个 Pawn</td><td><strong>添加输入映射</strong>、创建本地 UI</td></tr>
+    <tr><td>6. <code>OnRep_Controller</code> / <code>OnRep_PlayerState</code></td><td>客户端</td><td>Controller、PlayerState 引用复制到达</td><td>依赖 PlayerState 的显示（名字、队伍色）</td></tr>
+  </table></div>
+  <p>关键结论：<strong>BeginPlay 不是“我拿到控制权”的时机</strong>。客户端上 Pawn 的 BeginPlay 可能早于 Controller 复制到达，此时 <code>IsLocallyControlled()</code> 还是 false；而且 BeginPlay 会在每一端、每个 Pawn 副本上都执行一次。原 Demo 在 BP_Player 的 BeginPlay 里用 <code>GetPlayerController(0)</code> 加输入映射——两个 Pawn 副本各执行一次，加的都是本地玩家的映射，只是恰好没出错。</p>
+
+  <h2>Owner 链：一张图看懂</h2>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="20" width="200" height="70" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="120" y="46" text-anchor="middle" class="b">UNetConnection</text>
+    <text x="120" y="66" text-anchor="middle" class="xs">玩家 2 的网络连接</text>
+    <text x="120" y="80" text-anchor="middle" class="xs">（只在服务器上）</text>
+    <rect x="270" y="20" width="200" height="70" rx="10" fill="#fff" stroke="#2F5BD3" stroke-width="1.6"/>
+    <text x="370" y="46" text-anchor="middle" class="b">PlayerController</text>
+    <text x="370" y="66" text-anchor="middle" class="xs">服务器 + 玩家 2 本机</text>
+    <text x="370" y="80" text-anchor="middle" class="xs">输入 · 相机 · Client RPC 落点</text>
+    <rect x="270" y="130" width="200" height="70" rx="10" fill="#fff" stroke="#15803D" stroke-width="1.6"/>
+    <text x="370" y="156" text-anchor="middle" class="b">Character（Pawn）</text>
+    <text x="370" y="176" text-anchor="middle" class="xs">Owner = PC（Possess 时设置）</text>
+    <text x="370" y="190" text-anchor="middle" class="xs">玩家 2 本机：AutonomousProxy</text>
+    <rect x="270" y="240" width="200" height="70" rx="10" fill="#fff" stroke="#C2410C" stroke-width="1.6"/>
+    <text x="370" y="266" text-anchor="middle" class="b">Weapon（Actor）</text>
+    <text x="370" y="286" text-anchor="middle" class="xs">Owner = Pawn · Instigator = Pawn</text>
+    <text x="370" y="300" text-anchor="middle" class="xs">bNetUseOwnerRelevancy = true</text>
+    <rect x="560" y="20" width="270" height="70" rx="10" fill="#F3EEFE" stroke="#6D28D9"/>
+    <text x="695" y="46" text-anchor="middle" class="b">PlayerState</text>
+    <text x="695" y="66" text-anchor="middle" class="xs">Owner = PC，复制给所有人</text>
+    <text x="695" y="80" text-anchor="middle" class="xs">分数 · 是否准备 · 击杀（Pawn 死了不丢）</text>
+    <rect x="560" y="130" width="270" height="70" rx="10" fill="#F9FAFB" stroke="#6B7280"/>
+    <text x="695" y="156" text-anchor="middle" class="b">本地专属（不复制）</text>
+    <text x="695" y="176" text-anchor="middle" class="xs">Enhanced Input 映射 · HUD / UMG</text>
+    <text x="695" y="190" text-anchor="middle" class="xs">1P 手臂 + 1P 枪模（OnlyOwnerSee）</text>
+    <rect x="560" y="240" width="270" height="70" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+    <text x="695" y="266" text-anchor="middle" class="b">谁受益于这条链</text>
+    <text x="695" y="286" text-anchor="middle" class="xs">武器上的 ServerFire 能从玩家 2 发出</text>
+    <text x="695" y="300" text-anchor="middle" class="xs">弹药 COND_OwnerOnly 只发给玩家 2</text>
+    <g fill="none" stroke="#4B5563" stroke-width="1.5">
+      <line x1="270" y1="55" x2="224" y2="55" marker-end="url(#a)"/>
+      <line x1="370" y1="130" x2="370" y2="94" marker-end="url(#a)"/>
+      <line x1="370" y1="240" x2="370" y2="204" marker-end="url(#a)"/>
+      <line x1="560" y1="55" x2="474" y2="55" marker-end="url(#a)"/>
+      <path d="M474,165 H520 V165 H556" stroke-dasharray="4 3" marker-end="url(#a)"/>
+      <path d="M474,275 H556" stroke-dasharray="4 3" marker-end="url(#a)"/>
+    </g>
+    <text x="246" y="48" text-anchor="middle" class="xs">属于</text>
+    <text x="384" y="116" class="xs">Owner</text>
+    <text x="384" y="226" class="xs">Owner</text>
+    <text x="516" y="48" text-anchor="middle" class="xs">Owner</text>
+  </svg>
+  <figcaption><b>图 3-1</b>　Owner 链：武器 → Pawn → PlayerController → 网络连接。实线箭头指向 Owner；有了这条链，武器上的 Server RPC 才能从玩家 2 发出，OwnerOnly 属性才知道发给谁</figcaption>
+  </figure>
+
+  <h2>武器：在哪生成、怎么挂、怎么复制</h2>
+  <h3>1. 在服务器生成，生成时就带上 Owner</h3>
+  <p>原 Demo 是 <code>SpawnActor(Owner=∅)</code> → <code>SetOwner(self)</code>。问题在于 <strong>SpawnActor 内部就会调用 BeginPlay</strong>，武器 BeginPlay 里 <code>GetOwner()</code> 还是空的，于是作者又补了一个 <code>for_server</code> 函数再 Cast 一次 Owner。正确做法是把 Owner 放进生成参数；需要在 BeginPlay 前设置更多字段时用 <code>SpawnActorDeferred</code> + <code>FinishSpawning</code>。</p>
+<!--code:cpp:ACoopCharacter：在服务器 PossessedBy 时生成默认武器-->
+// CoopCharacter.h
+UPROPERTY(ReplicatedUsing = OnRep_CurrentWeapon) TObjectPtr<ACoopWeapon> CurrentWeapon;
+UPROPERTY(EditDefaultsOnly) TSubclassOf<ACoopWeapon> DefaultWeaponClass;
+UPROPERTY(VisibleAnywhere) TObjectPtr<USkeletalMeshComponent> Mesh1P;   // 第一人称手臂
+UFUNCTION() void OnRep_CurrentWeapon(ACoopWeapon* OldWeapon);
+
+// CoopCharacter.cpp
+ACoopCharacter::ACoopCharacter() {
+    Mesh1P = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("Mesh1P"));
+    Mesh1P->SetupAttachment(FirstPersonCamera);
+    Mesh1P->SetOnlyOwnerSee(true);            // 只有自己看得见手臂
+    GetMesh()->SetOwnerNoSee(true);           // 自己看不见自己的第三人称身体
+    bUseControllerRotationYaw = true;         // 身体只跟随 Yaw
+    bUseControllerRotationPitch = false;      // 俯仰交给相机 / 手臂 / AimOffset（原 Demo 是 true）
+}
+
+void ACoopCharacter::PossessedBy(AController* NewController) {
+    Super::PossessedBy(NewController);        // 服务器：SetOwner(NewController) 在这里完成
+    if (!CurrentWeapon && DefaultWeaponClass) {
+        FActorSpawnParameters P;
+        P.Owner = this;                       // Owner 链：Weapon → Pawn → PC → Connection
+        P.Instigator = this;                  // 伤害统计、友伤判断都靠 Instigator
+        P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+        ACoopWeapon* W = GetWorld()->SpawnActor<ACoopWeapon>(DefaultWeaponClass, GetActorTransform(), P);
+        EquipWeapon(W);                       // 服务器上直接装备
+    }
+}
+
+void ACoopCharacter::EquipWeapon(ACoopWeapon* W) {
+    check(HasAuthority());
+    ACoopWeapon* Old = CurrentWeapon;
+    CurrentWeapon = W;
+    OnRep_CurrentWeapon(Old);                 // C++ 的 OnRep 服务器不会自动调用，手动调一次
+}
+
+void ACoopCharacter::OnRep_CurrentWeapon(ACoopWeapon* OldWeapon) {
+    if (OldWeapon) OldWeapon->OnUnequipped();
+    if (CurrentWeapon) CurrentWeapon->OnEquipped(this);   // 内部：3P 枪挂 GetMesh() 的 hand_r Socket，
+                                                          //       1P 枪挂 Mesh1P 的 GripPoint；切换动画层
+}
+
+void ACoopCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out) const {
+    Super::GetLifetimeReplicatedProps(Out);
+    DOREPLIFETIME(ACoopCharacter, CurrentWeapon);
+}
+<!--/code-->
+  <h3>2. 两套模型：自己看手臂，别人看全身</h3>
+  <p>单机 FPS 只需要一双手臂；联机后对方看到的是一个人。标准做法（ShooterGame、Lyra 都是这样）：角色有 1P 手臂（<code>OnlyOwnerSee</code>）和 3P 全身（<code>OwnerNoSee</code>）两个网格，武器也有 1P / 3P 两个网格分别挂上去；开火、换弹蒙太奇在本机播 1P，在别人那里播 3P。原 Demo 只有手臂，另一端看到的是漂浮的手臂和枪，而且因为 <code>bUseControllerRotationPitch = true</code>，整个胶囊体会随低头抬头旋转。远端角色的俯仰用 <code>GetBaseAimRotation()</code>（内部读复制的 <code>RemoteViewPitch</code>）驱动 AimOffset。</p>
+  <h3>3. 挂接信息靠 OnRep，不靠“挂接复制”</h3>
+  <p>Actor 的挂接（AttachmentReplication）只在开启 <code>bReplicateMovement</code> 时随移动一起复制。武器一般不需要复制移动，所以要像原 Demo 的 <code>OnRep_WeaponRef</code> 那样，在 <code>CurrentWeapon</code> 的 OnRep 里各端自己挂——这一点原 Demo 是对的。武器再设 <code>bNetUseOwnerRelevancy = true</code>，让它跟随持有者决定是否相关。</p>
+
+  <h2>只属于本地玩家的东西：输入、UI、相机</h2>
+<!--code:cpp:在“成为本地控制者”时添加输入映射（UE 5.x 模板写法）-->
+void ACoopCharacter::NotifyControllerChanged() {
+    Super::NotifyControllerChanged();
+    if (APlayerController* PC = Cast<APlayerController>(Controller)) {
+        if (PC->IsLocalController()) {                       // 服务器上的远端 PC 不是本地的，跳过
+            if (auto* Sub = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer()))
+                Sub->AddMappingContext(DefaultMappingContext, 0);
+        }
+    }
+}
+// SetupPlayerInputComponent 只会在本地控制的 Pawn 上调用，在这里 BindAction 即可。
+// HUD / 准星 / 弹药 UI：放在 PlayerController::BeginPlay（IsLocalController 时）或 AHUD 里创建，
+// 通过 Pawn / PlayerState 的委托刷新，而不是 UMG 绑定函数每帧 Cast GetPlayerPawn(0)。
+<!--/code-->
+
+  <div class="co warn"><span class="h">面试注意：GetPlayerController(0) / GetPlayerCharacter(0) 在联机里是什么</span>
+    <p>它返回的是<strong>这台机器的第一个本地玩家</strong>的控制器 / 角色。在服务器上执行时，它是主机玩家，而不是“当前这个 Pawn 的控制器”。原 Demo 的玩家死亡逻辑在服务器上对死者调用 <code>DisableInput(GetPlayerController(0))</code>：客户端玩家死时，传入的是主机的 PC，<code>APawn::DisableInput</code> 发现不是自己的 Controller，只打一条错误日志、什么也不做（第 10 章有完整分析）；同一段里的 <code>PlaySound2D</code>（死亡惨叫）在主机响。正确做法：服务器只改状态（bIsDead），并在每个 Server RPC 里校验存活；“关输入、播惨叫”放到拥有者客户端的 OnRep 里做——<strong>输入只能在本地关</strong>。</p>
+  </div>
+
+  <h2>原实现 vs 正确实现</h2>
+  <div class="tbl"><table>
+    <tr><th>环节</th><th>原 Demo</th><th>正确做法</th></tr>
+    <tr><td>武器生成</td><td>BeginPlay + SwitchHasAuthority，Owner=∅ 后 SetOwner，再用 for_server 补取 Owner</td><td>PossessedBy（服务器）里生成，SpawnParams 带 Owner / Instigator</td></tr>
+    <tr><td>挂接</td><td>挂到 1P 手臂 R_GunSocket，OnRep_WeaponRef 里再挂一次 ✓</td><td>3P 枪挂全身模型，1P 枪挂手臂；OnRep_CurrentWeapon 里各端挂</td></tr>
+    <tr><td>模型</td><td>只有 1P 手臂；胶囊体随 Pitch 旋转</td><td>1P（OnlyOwnerSee）+ 3P（OwnerNoSee）；身体只跟 Yaw，AimOffset 处理俯仰</td></tr>
+    <tr><td>输入映射</td><td>BeginPlay 里 GetPlayerController(0)</td><td>NotifyControllerChanged / PawnClientRestart，且 IsLocalController</td></tr>
+    <tr><td>武器拿角色</td><td>BeginPlay Cast GetOwner 缓存 As BP Player</td><td>OnEquipped(Character) 时传入；或直接 <code>GetOwner&lt;ACoopCharacter&gt;()</code></td></tr>
+    <tr><td>跟人走的数据</td><td>准备列表放 GameState（存 PC 引用）</td><td>PlayerState：bIsReady、Score、Kills</td></tr>
+    <tr><td>死亡</td><td>服务器上 DisableInput(GetPlayerController(0))</td><td>服务器：改 bIsDead、校验后续请求、通知 GameMode；拥有者客户端：OnRep 里关本地输入</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>Possess（服务器）→ Owner=PC、AutonomousProxy → ClientRestart → 客户端 PawnClientRestart 绑输入。</li>
+    <li>武器：<strong>服务器生成、生成时带 Owner / Instigator</strong>、CurrentWeapon 复制 + OnRep 挂接、bNetUseOwnerRelevancy。</li>
+    <li>1P 手臂 OnlyOwnerSee + 3P 全身 OwnerNoSee；身体跟 Yaw，俯仰靠 RemoteViewPitch + AimOffset。</li>
+    <li>GetPlayerController(0) = 本机第一个本地玩家，服务器上写它就是在操作主机。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：武器的 Owner 不设（为空），会出现哪些现象？</summary>
+    ① 客户端在武器上调用 Server RPC 被丢弃（No owning connection），客户端玩家完全开不了火；② <code>COND_OwnerOnly</code> 的弹药不会发给任何人；③ 武器的相关性无法跟随持有者，可能在不该消失时被裁掉；④ <code>GetOwner()</code> 拿不到角色，伤害的 Instigator 也就无从谈起。原 Demo 因为补了 SetOwner 才没有出现 ①。
+  </details>
+  <details class="quiz"><summary>自测：Possess 之后客户端上 IsLocallyControlled 什么时候变成 true？</summary>
+    客户端要等 Pawn 的 Controller 引用复制到达（或收到 ClientRestart 后 AcknowledgePossession）才知道自己控制它。在此之前的 BeginPlay 里判断 IsLocallyControlled 可能得到 false，所以“本地玩家专属”的初始化放在 PawnClientRestart / NotifyControllerChanged / OnRep_Controller，而不是 BeginPlay。
+  </details>
+</section>

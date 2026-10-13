@@ -1,0 +1,128 @@
+<section class="chapter" id="ch9">
+<div class="ch-head"><div class="no">CHAPTER 09</div><h1>回滚网络：把 Lockstep 推到极限</h1><p class="lead">格斗游戏把“等待”逼到了不可接受的地步：一帧 16.7 ms，目押窗口只有一两帧。回滚的答案是“不等了，先猜”——代价是保存每一帧的世界、并随时准备重写过去。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>写出回滚的核心循环：存快照 → 预测缺失输入 → 推进 → 真值到达 → 回到分歧帧 → 重算到当前帧。</li>
+<li>用实测和公式说清“输入延迟 d 与回滚深度”的关系，理解为什么现代格斗游戏用“回滚 + 2~3 帧输入延迟”。</li>
+<li>知道回滚的四个代价：画面跳变、音频无法回滚、更严苛的确定性、成倍的 CPU 预算——以及各自的缓解方式。</li>
+<li>把回滚思想迁移到状态同步：守望先锋、Rocket League、UE 网络物理、CMC 都在用。</li>
+</ul></div>
+
+<div class="ans30"><span class="h">30 秒面试版答案</span>
+<p>回滚（Rollback，GGPO 2006 年提出、2019 年以 MIT 协议开源）是 P2P 帧同步的一种：每帧保存游戏状态快照；缺远端输入时先预测（通常重复对方上一帧输入）立即推进，本地操作零等待；远端真实输入到达后若与预测不同，就加载分歧那一帧的快照，用正确输入重算到当前帧，画面瞬间修正。回滚深度约等于“单程延迟 + 抖动”折算的帧数减去输入延迟，所以现代格斗游戏会加 2~3 帧输入延迟，用几十毫秒换回滚深度和跳变的大幅下降。代价：每帧快照与多帧重算（模拟必须远快于一帧）、画面跳变、音效收不回来、对确定性要求更高；而且预测窗口用完之后仍要等待，木桶效应只是被推迟了。适合 2 人、状态小、延迟极敏感的格斗；不适合 10 人、状态大、移动网络的 MOBA。</p></div>
+
+<h2>9.1 一段简史</h2>
+<div class="tbl"><table>
+<tr><th>时间</th><th>事件</th><th>来源</th></tr>
+<tr><td>1990s</td><td>严格 Lockstep：星际、魔兽 3、帝国时代</td><td><span class="tag pub">公开资料</span></td></tr>
+<tr><td>2000s</td><td>延迟型 Lockstep：早期格斗游戏联机，用固定输入延迟吸收抖动</td><td><span class="tag pub">公开资料</span></td></tr>
+<tr><td>2006</td><td>Tony Cannon（EVO 联合创始人）不满于当年在线格斗的延迟体验，开发 GGPO，年底发布首版</td><td><span class="tag pub">GGPO 资料</span></td></tr>
+<tr><td>2011–2012</td><td>商用授权版本被《街头霸王 III 3rd Strike Online Edition》《Skullgirls》等采用</td><td><span class="tag pub">GGPO 资料</span></td></tr>
+<tr><td>2019-10</td><td>GGPO 以 MIT 协议开源（github.com/pond3r/ggpo）</td><td><span class="tag pub">GGPO 资料</span></td></tr>
+<tr><td>2020 至今</td><td>回滚成为主流格斗游戏标配；同期 MOBA 收敛到“定频广播不等人”——两条路线并行，各自针对不同约束</td><td><span class="tag pub">公开资料</span> · <span class="tag hok">HOK 文档</span></td></tr>
+</table></div>
+
+<h2>9.2 核心循环</h2>
+<!--seq {"p":["本地（玩家 A）","远端（玩家 B）"],"pc":["o","b"],
+"s":[[0,0,"第 100 帧：B 的输入还没到 → 预测“B 保持上一帧的输入”，立即推进","a"],[0,0,"第 101、102 帧：继续预测推进（每帧保存快照）","a"],
+[1,0,"B 的第 100 帧真实输入到达：B 在第 100 帧按了“下蹲”","net"],[0,0,"比对：第 100 帧预测错了","r"],[0,0,"加载第 100 帧之前的快照","r"],
+[0,0,"用正确输入重算 100、101、102（同一渲染帧内完成）","o"],[0,0,"画面瞬间从“B 站着”跳到“B 蹲着”（回滚跳变）","r"],[0,0,"第 103 帧：照常推进","g"]],
+"cap":"<b>图 9-1</b> 一次回滚。只要预测对了（玩家操作大多是连续的），就什么都不会发生；预测错了，代价是一次“重写过去”和一次画面跳变。"} -->
+<!--code:cpp:回滚核心循环（与 demos/netsync_demo.cpp 中 run_p2p 的逻辑一致，删去了统计代码）-->
+// 每个渲染帧调用一次；frame = 本地已推进到的帧号，d = 输入延迟（帧）
+void RollbackTick() {
+    // ① 收网络包：远端第 n 帧的真实输入到达
+    for (auto& [player, n, input] : net.Receive()) {
+        known[player][n] = input;
+        if (n < frame && used[player][n] != input)          // 当时用的是预测值，而且猜错了
+            firstMismatch = std::min(firstMismatch, n);
+    }
+    // ② 回滚：回到最早的分歧帧，用（新的）最佳输入重算到当前帧
+    if (firstMismatch < frame) {
+        LoadState(snapshot[firstMismatch]);                 // 快照保存的是“执行第 n 帧之前”的状态
+        for (int n = firstMismatch; n < frame; ++n) {
+            snapshot[n] = SaveState();
+            Simulate(InputsFor(n));                         // 已知就用真值，未知仍用预测值
+        }
+        firstMismatch = INT_MAX;
+    }
+    // ③ 推进：本地输入排到 d 帧之后；预测窗口还没用完就继续往前走
+    known[me][frame + d] = SampleLocalInput();
+    if (frame - MinConfirmedFrameOfOthers() > kMaxPrediction)   // 窗口用完：只能等（木桶效应回来了）
+        return;
+    snapshot[frame] = SaveState();
+    Simulate(InputsFor(frame));                             // InputsFor：已知用真值，未知用“上一个已知输入”
+    ++frame;
+    net.SendRecentInputs(me, /*带最近若干帧，抗丢包*/ 24);
+}
+<!--/code-->
+<div class="co net"><span class="h">GGPO 的 API 长什么样</span><p>游戏只需要实现几个回调：<code>save_game_state</code> / <code>load_game_state</code>（快照）、<code>advance_frame</code>（回滚重算时由 GGPO 驱动推进一帧）、<code>free_buffer</code>、<code>on_event</code>；主循环里调 <code>ggpo_add_local_input</code> 提交本地输入、<code>ggpo_synchronize_input</code> 取本帧所有玩家输入（含预测值）、<code>ggpo_advance_frame</code> 通知推进；<code>ggpo_set_frame_delay</code> 设置输入延迟 <span class="tag pub">GGPO 源码</span>。注意 GGPO 完全不关心你的游戏逻辑，它只要求“给定输入就能确定性地推进一帧、并能存取完整状态”——这就是回滚的全部前提。</p></div>
+<p>还有一个容易忽略的机制：<strong>时间同步</strong>。如果一方的时钟持续领先，它会一直在“预测对方”，对方却一直在“等它的输入”，回滚全落在领先方。GGPO 会估算双方的帧领先量，让领先的一方主动等待几帧，把预测负担平摊到两边 <span class="tag pub">GGPO 源码</span>。</p>
+
+<h2>9.3 实测：输入延迟 d 换回滚深度 <span class="tag ex">实测 E9</span></h2>
+<p>模型：2 人、60 帧/秒（16.7 ms）、每帧有 20% 概率改变输入（相当于每秒 12 次操作变化），丢包 1%，单程 = RTT/2、指数抖动均值 1 + 0.04·RTT ms；回滚最多预测 8 帧。对每个 RTT 扫描输入延迟 d = 0~4，并对照“不回滚、只靠输入延迟”的纯延迟型。</p>
+<!--gbars {"groups":{"path":"e9g.groups"},"h":300,"fmt":".1f","title":"平均回滚深度（帧）","series":[{"n":"d = 0","v":{"path":"e9g.depth0"},"c":"r"},{"n":"d = 1","v":{"path":"e9g.depth1"},"c":"o"},{"n":"d = 2","v":{"path":"e9g.depth2"},"c":"a"},{"n":"d = 3","v":{"path":"e9g.depth3"},"c":"b"},{"n":"d = 4","v":{"path":"e9g.depth4"},"c":"g"}],
+"cap":"<b>图 9-2</b> 平均回滚深度：每加 1 帧输入延迟，深度大约少 1 帧；当 d 覆盖了“单程延迟 + 抖动”，回滚就几乎消失（RTT 40 ms、d = 3 时为 0）。"} -->
+<!--gbars {"groups":{"path":"e9g.groups"},"h":280,"fmt":".0f","title":"对照：纯延迟型（不回滚）每分钟卡顿秒数","series":[{"n":"d = 0","v":{"path":"e9g.fzd0"},"c":"r"},{"n":"d = 1","v":{"path":"e9g.fzd1"},"c":"o"},{"n":"d = 2","v":{"path":"e9g.fzd2"},"c":"a"},{"n":"d = 3","v":{"path":"e9g.fzd3"},"c":"b"},{"n":"d = 4","v":{"path":"e9g.fzd4"},"c":"g"}],
+"cap":"<b>图 9-3</b> 同样的网络、不回滚：只要 d 没覆盖单程延迟，几乎每一帧都在等对方输入，一分钟里有几十秒是卡住的（游戏实际以低于 60 fps 的速度运行）。回滚版本在同样条件下的卡顿几乎为 0（RTT 200 ms、d = 0 时也只有 [[e9.200_0.fz|.0f]] ms/分，因为深度偶尔超过 8 帧窗口）。"} -->
+<p>回滚深度可以这样估算：远端在第 $n-d$ 帧采样的输入要排到第 $n$ 帧执行，送到本地需要单程延迟 $\frac{\mathrm{RTT}}{2}$ 加抖动 $J$；本地执行第 $n$ 帧时它还没到，就只能预测，等它到了再回滚：</p>
+<!--deriv 回滚深度的估算
+\text{输入到达本地的时刻} & \approx t_{n-d} + \tfrac{\mathrm{RTT}}{2} + J || 远端在执行第 $n-d$ 帧时采样，并假设两端帧时钟大致对齐
+\text{本地执行第 } n \text{ 帧的时刻} & = t_n = t_{n-d} + d\,T || 每帧 $T = 16.7$ ms
+\text{需要预测的帧数} & \approx \frac{\mathrm{RTT}/2 + J}{T} - d || 两者之差除以帧长
+* D_{\text{rollback}} & \approx \frac{\mathrm{RTT}/2 + J}{T} - d + 1 || 再加约 1 帧的离散化误差（输入在帧首采样、在帧中到达）；结果 ≤ 0 时几乎不回滚
+-->
+<!--dtab {"rows":"e9sel","cols":[["RTT ms","rtt"],["输入延迟 d","d"],["d 折合 ms","dms",".0f"],["回滚 次/秒","rbps",".1f"],["平均深度（实测）","depth",".2f"],["估算","est",".1f"],["p95 深度","p95",".0f"],["重算 帧/秒","resim",".1f"],["卡顿 ms/分","fz",".0f"]],"hlif":"d==2","cap":"<b>表 9-1</b> E9 节选（RTT 80 / 160 ms）。回滚次数基本等于“对方输入发生变化的频率”（约 12 次/秒），输入延迟减少的是<strong>每次回滚的深度</strong>，直到 d 足够大时回滚才消失。"} -->
+<p>为什么不把 d 设得很大、干脆不回滚？因为 d 是<strong>所有人的操作都要等的</strong>：d = 4 帧就是 67 ms 的固定延迟，对格斗游戏的“目押”是不可接受的。现代格斗游戏的做法是 <strong>2~3 帧基础延迟 + 回滚</strong>：几十毫秒的延迟在容忍范围内，却把大多数网络下的回滚深度压到 1~3 帧，跳变几乎看不出来 <span class="tag hok">HOK 文档</span> <span class="tag pub">公开资料</span>。不少游戏还允许玩家在设置里自己调这个值（GGPO 时代起就有）。</p>
+
+<h2>9.4 回滚的四个代价</h2>
+<div class="tbl"><table>
+<tr><th>代价</th><th>表现</th><th>缓解</th></tr>
+<tr><td>画面跳变</td><td>角色瞬移、已经播出的攻击被“收回”、特效突然消失</td><td>限制回滚深度；对<strong>表现层</strong>做位置平滑（逻辑仍然精确）；只在真正分歧时回滚；动画从“重算后的帧”继续播放而不是从头</td></tr>
+<tr><td>音频无法回滚</td><td>该响的没响、不该响的响了、同一音效播两次</td><td>音频不参与回滚：按 (帧号, 事件 id) 去重，重算时已播过的不再播；预测时播出的错误音效通常只能接受</td></tr>
+<tr><td>确定性更严苛</td><td>同一段帧被反复重算，任何不确定都会暴露成“回滚后对不上”</td><td>定点数、确定性随机、状态完整序列化（漏存一个变量 = 重算结果错）</td></tr>
+<tr><td>CPU 预算成倍</td><td>深度 D 时一个渲染帧里要模拟 D + 1 帧</td><td>见下面的预算推导；状态要小、模拟要快</td></tr>
+</table></div>
+<!--deriv 回滚的 CPU 预算
+T_{\text{frame}} & \ge (D_{\max} + 1)\, t_{\text{sim}} + D_{\max}\, t_{\text{load/save}} + t_{\text{render}} || 最坏情况：一帧内回滚 $D_{\max}$ 帧再推进 1 帧
+t_{\text{sim}} & \le \frac{T_{\text{frame}} - t_{\text{render}}}{D_{\max} + 1} || 忽略快照开销
+* t_{\text{sim}} & \le \frac{16.7 - 8}{8 + 1} \approx 0.97\ \text{ms} || 60 fps、渲染占 8 ms、最多回滚 8 帧
+# 所以回滚要求“逻辑模拟比一帧快一个数量级”，格斗游戏（2 个角色 + 判定框）做得到，MOBA（几十单位 + 上百 Buff）做不到——这是 HOK 不选回滚的硬约束之一
+-->
+<p>实测里 RTT 160 ms、d = 0 时每秒要额外重算 [[e9.160_0.resim|.0f]] 帧，相当于在 60 帧/秒之外又多跑了 [[e9.160_0.resim|.0f]] 帧的逻辑；d = 2 时降到 [[e9.160_2.resim|.0f]] 帧。输入延迟不仅减少跳变，也直接降低 CPU 负担。</p>
+
+<h2>9.5 回滚在状态同步里的化身</h2>
+<p>“保存历史 → 回到分歧点 → 用正确数据重算”并不是帧同步独有的。状态同步里只要做了<strong>客户端预测</strong>，就一定有它：</p>
+<div class="tbl"><table>
+<tr><th>系统</th><th>回滚的范围</th><th>“真值”从哪来</th><th>来源</th></tr>
+<tr><td>GGPO / 格斗游戏</td><td>整个游戏状态</td><td>远端玩家的真实输入</td><td><span class="tag pub">GGPO</span></td></tr>
+<tr><td>Unreal CMC</td><td>只回滚<strong>本地角色的移动</strong></td><td>服务器发回的权威位置（ClientAdjustPosition），然后重放未确认的 SavedMoves</td><td><span class="tag ue">UE 源码</span>（第 13 章）</td></tr>
+<tr><td>守望先锋</td><td>本地玩家相关的、由输入驱动的 System 状态</td><td>服务器对这些命令帧的权威结果</td><td><span class="tag pub">GDC 2017</span></td></tr>
+<tr><td>Rocket League</td><td>车与球的物理状态</td><td>服务器物理状态；客户端回滚后重新模拟</td><td><span class="tag pub">GDC 2018</span></td></tr>
+<tr><td>UE 网络物理（Resimulation）</td><td>物理对象</td><td>服务器状态与本地历史不一致超过阈值时触发重模拟；<code>NetworkPhysicsComponent</code> 负责输入 / 状态历史</td><td><span class="tag ue">UE 文档</span>（5.4 起，Resimulation 为实验性）</td></tr>
+</table></div>
+<p>区别在于“真值”：帧同步回滚等的是<strong>别人的输入</strong>，状态同步预测等的是<strong>服务器的结果</strong>。但数据结构完全一样：一个按帧（或时间戳）索引的历史环形缓冲 + 一个“从某帧开始重算”的函数。理解了这一点，第 10、13 章的“预测与和解”就只是换了个名字。</p>
+
+<div class="co warn"><span class="h">面试注意</span><p>被问“王者荣耀为什么不用回滚”时，从回滚的四个前提逐条对照：人数（2 vs 10）、状态规模（快照成本）、每帧重算成本（CPU 预算推导）、网络环境（移动网络抖动会让回滚持续触发、画面持续抽动）。再补一句“回滚并没有消灭木桶效应，只是推迟到超过预测窗口才暴露”，这道题就答满了。</p></div>
+
+<h2>9.6 坑位</h2>
+<div class="tbl"><table>
+<tr><th>坑</th><th>后果</th><th>修正</th></tr>
+<tr><td>快照漏存某个状态（如随机数生成器、技能冷却的小数部分）</td><td>回滚后与对方对不上 → desync</td><td>状态集中管理（ECS / 单块内存），整体拷贝；回归测试：每帧都强制回滚一次再比对 hash（同步测试模式）</td></tr>
+<tr><td>表现层在预测帧里触发了不可撤销的事件（成就、结算、网络请求）</td><td>“幽灵事件”</td><td>不可撤销的副作用只在<strong>确认帧</strong>（所有人的输入都已知）上触发</td></tr>
+<tr><td>输入延迟 d = 0</td><td>回滚频繁且深、CPU 吃紧</td><td>2~3 帧基础延迟，或按网络动态调整</td></tr>
+<tr><td>不做时间同步</td><td>一方长期领先，回滚全落在它身上</td><td>估算帧领先量，领先方等待</td></tr>
+<tr><td>预测策略过于“聪明”</td><td>猜错时跳变更大</td><td>最常用的仍是“重复上一个输入”，简单且错误代价可控</td></tr>
+</table></div>
+
+<div class="recap"><div class="t">本章速记</div><ul>
+<li>回滚 = 每帧快照 + 预测缺失输入 + 真值不符时加载分歧帧快照重算到当前；GGPO 2006 年提出、2019 年 MIT 开源。</li>
+<li>深度 $\approx (\mathrm{RTT}/2+J)/T - d + 1$：每加 1 帧输入延迟深度少约 1 帧；回滚次数 ≈ 对方输入变化频率。</li>
+<li>四个代价：跳变、音频、确定性 + 完整序列化、CPU（$t_{sim} \le (T - t_{render})/(D+1)$，60 fps 回滚 8 帧时约 1 ms）。</li>
+<li>预测窗口用完仍要等；同样的“历史 + 重算”结构就是 CMC / 守望先锋 / Rocket League / UE 网络物理的预测和解。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：回滚的“同步测试模式”（sync test）是什么？为什么有用？</summary>单机运行时，每一帧都强制回滚若干帧再重算，比较重算前后的状态 hash；只要快照漏存了任何状态或有不确定性，hash 立刻对不上。它把“联网偶发 desync”变成了“单机必现的断言失败”，是回滚项目最重要的回归测试。</details>
+<details class="quiz"><summary>自测 2：RTT 120 ms、60 帧/秒、d = 2，估算平均回滚深度。</summary>(60 + 约 6 ms 抖动)/16.7 ≈ 3.95，减 d 得 1.95，再加 1 帧离散化误差 ≈ 3；实测 [[e9.120_2.depth|.2f]]。</details>
+<details class="quiz"><summary>自测 3：为什么说 CMC 的“纠正后重放 SavedMoves”就是回滚？</summary>客户端保存了每一步移动（输入 + 时间戳），服务器发回某个时间戳的权威位置后，客户端把角色设到那个位置（相当于加载快照），再把之后所有未确认的移动重新执行一遍（相当于重算）。区别只是范围只有本地角色、真值来自服务器而不是远端输入。</details>
+</section>

@@ -1,0 +1,216 @@
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>问 ①：从开火到击中僵尸，发生了什么</h1>
+    <p class="lead">把一发子弹拆成“本机表现、服务器裁决、各端表现”三段：本机不等服务器，结果只认服务器，别人看到的是服务器复制的结果。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>按时间顺序讲清一发子弹在三台“视角”（本机 / 服务器 / 另一端）上各发生了什么。</li>
+    <li>对比原 Demo 的时序：反馈延迟、空放、子弹突现从哪来（E1）。</li>
+    <li>写出服务器校验、伤害、僵尸受击与死亡的正确实现。</li>
+  </ul></div>
+
+  <h2>原 Demo 的一次连射，在时间轴上长什么样</h2>
+  <p>下面是 E1 的一次模拟：RTT 200 ms、按住开火 1.5 s、弹匣 10 发。按原蓝图的逻辑：本机计时器每 0.12 s 发一条 <code>Server_Fire</code>，服务器先多播开火动画，再检查弹药、生成复制子弹；弹药变量在下一个网络帧复制回来。</p>
+<!--lanes {"scheme":0,"t1":1.5,"title":"原蓝图方案（RTT 200 ms）","cap":"<b>图 4-1</b>　原 Demo 的开火时序（E1，RTT 200 ms）。本机按下（蓝三角）后要等约一个 RTT 才看到自己的开火动画（橙点）；本机的弹药显示（菱形）也晚一个 RTT，于是打空后还多发了一次请求，服务器照样多播了一次“空放”（红叉）"} -->
+  <p>三个现象都能从这张图读出来：</p>
+  <ul>
+    <li><strong>反馈延迟</strong>：本机看到自己开火的时间 = 上行半个 RTT + 等服务器网络帧 + 下行半个 RTT。RTT 200 ms 时平均 {{v:E1[s=0,rtt=200].own:.0f}} ms；就算 RTT 为 0，也有约 {{v:E1[s=0,rtt=0].own:.0f}} ms（等 30 Hz 网络帧）。</li>
+    <li><strong>空放</strong>：本机判断“还有子弹”用的是复制下来的旧值，最后一发之后还会再发一次请求；服务器的 <code>Server_Fire</code> 先调 <code>Multicast_Fire</code> 再检查弹药，于是两端都播了一次没有子弹的开火动画。这次多播还带着 <code>bStopAllMontages = true</code>，如果玩家此时在换弹，换弹动画会被打断。</li>
+    <li><strong>子弹突现</strong>：子弹是服务器生成的复制 Actor，到达本机时它已经飞了“一个网络帧 + 下行时间”，平均约 {{v:E1[s=0,rtt=200].pop:.1f}} m——玩家看到子弹凭空出现在枪口前几米处。</li>
+  </ul>
+<!--dtab {"src":"E1","cols":[["方案","scheme"],["RTT ms","rtt","g"],["本机看到自己开火 ms","own",".1f"],["另一端看到 ms","rem",".1f"],["本机空放次数","gown",".1f"],["另一端空放","grem",".1f"],["子弹突现距离 m","pop",".2f"]],"cap":"表 4-1　E1：一次按住 1.5 s 的连射（弹匣 10 发、0.12 s/发，抖动 20 ms，5 个随机种子平均）。“预测”两行的另一端延迟和原方案相同——<b>预测只能消除自己的延迟，消除不了别人看到你的延迟</b>"} -->
+
+  <h2>正确的流程：三段式</h2>
+  <figure>
+  <svg viewBox="0 0 860 470" xmlns="http://www.w3.org/2000/svg">
+    <rect x="10" y="10" width="270" height="450" rx="12" fill="#F9FAFB" stroke="#D1D5DB"/>
+    <rect x="295" y="10" width="270" height="450" rx="12" fill="#EAF0FD" stroke="#93C5FD"/>
+    <rect x="580" y="10" width="270" height="450" rx="12" fill="#F9FAFB" stroke="#D1D5DB"/>
+    <text x="145" y="34" text-anchor="middle" class="b">① 本机（开火者，t = 0）</text>
+    <text x="430" y="34" text-anchor="middle" class="b" style="fill:#1E3A8A">② 服务器（t ≈ RTT/2）</text>
+    <text x="715" y="34" text-anchor="middle" class="b">③ 另一端（t ≈ RTT/2 + 帧 + RTT/2）</text>
+    <g class="sm">
+      <rect x="26" y="50" width="238" height="44" rx="7" fill="#fff" stroke="#2F5BD3"/><text x="38" y="70" class="b sm">IA_Fire → Weapon.StartFire</text><text x="38" y="86" class="xs">只在 IsLocallyControlled 的一端</text>
+      <rect x="26" y="104" width="238" height="44" rx="7" fill="#fff" stroke="#2F5BD3"/><text x="38" y="124" class="b sm">本地检查：预测弹药 &gt; 0、未换弹</text><text x="38" y="140" class="xs">预测扣一发，Seq = ++LocalSeq</text>
+      <rect x="26" y="158" width="238" height="58" rx="7" fill="#FFF4EC" stroke="#C2410C"/><text x="38" y="178" class="b sm" style="fill:#C2410C">立刻播表现（不等服务器）</text><text x="38" y="194" class="xs">1P 开火蒙太奇 · 枪口火焰 · 声音</text><text x="38" y="208" class="xs">后坐力（本机 AddControllerPitch）</text>
+      <rect x="26" y="226" width="238" height="44" rx="7" fill="#fff" stroke="#2F5BD3"/><text x="38" y="246" class="b sm">本地射线（相机视点 + 散布）</text><text x="38" y="262" class="xs">只用于命中特效 / 命中提示</text>
+      <rect x="26" y="280" width="238" height="44" rx="7" fill="#fff" stroke="#2F5BD3"/><text x="38" y="300" class="b sm">ServerFireShot(Seq, 起点, 方向, 时间)</text><text x="38" y="316" class="xs">PvE 可附带客户端命中结果</text>
+      <rect x="26" y="380" width="238" height="64" rx="7" fill="#EAF7EF" stroke="#15803D"/><text x="38" y="400" class="b sm" style="fill:#15803D">⑤ 收到 OwnerOnly 弹药（含 AckSeq）</text><text x="38" y="416" class="xs">显示 = 服务器弹数 − (LocalSeq − AckSeq)</text><text x="38" y="432" class="xs">→ 不回跳；被拒的那发在这里被纠正</text>
+
+      <rect x="311" y="104" width="238" height="58" rx="7" fill="#fff" stroke="#1E3A8A"/><text x="323" y="124" class="b sm">校验</text><text x="323" y="140" class="xs">存活 · 未换弹 · 射速 · 弹药</text><text x="323" y="154" class="xs">起点距离 · 方向与服务器视角夹角</text>
+      <rect x="311" y="172" width="238" height="44" rx="7" fill="#fff" stroke="#1E3A8A"/><text x="323" y="192" class="b sm">扣弹 · AckSeq = Seq · ++BurstCounter</text><text x="323" y="208" class="xs">被拒：不扣弹，AckSeq 照样推进</text>
+      <rect x="311" y="226" width="238" height="58" rx="7" fill="#fff" stroke="#1E3A8A"/><text x="323" y="246" class="b sm">判定命中</text><text x="323" y="262" class="xs">PvE：校验客户端命中（容差 + 视线）</text><text x="323" y="276" class="xs">PvP：按开火时刻回溯目标再射线</text>
+      <rect x="311" y="294" width="238" height="58" rx="7" fill="#FDEEEE" stroke="#B91C1C"/><text x="323" y="314" class="b sm" style="fill:#B91C1C">ApplyPointDamage</text><text x="323" y="330" class="xs">Instigator = 开火者 Controller</text><text x="323" y="344" class="xs">Causer = 武器 · 爆头看 BoneName</text>
+      <rect x="311" y="362" width="238" height="82" rx="7" fill="#fff" stroke="#1E3A8A"/><text x="323" y="382" class="b sm">僵尸 TakeDamage（仅服务器）</text><text x="323" y="398" class="xs">Health −= Damage；LastHit 计数 +1</text><text x="323" y="414" class="xs">Health ≤ 0 → bIsDead、停 AI、清计时器</text><text x="323" y="430" class="xs">PlayerState 加分；GameMode 决定补刷</text>
+
+      <rect x="596" y="172" width="238" height="58" rx="7" fill="#FFF4EC" stroke="#C2410C"/><text x="608" y="192" class="b sm" style="fill:#C2410C">OnRep_BurstCounter（SkipOwner）</text><text x="608" y="208" class="xs">3P 开火蒙太奇 · 枪口火焰 · 声音</text><text x="608" y="222" class="xs">本地画一条曳光</text>
+      <rect x="596" y="294" width="238" height="58" rx="7" fill="#fff" stroke="#6B7280"/><text x="608" y="314" class="b sm">OnRep_Health / OnRep_LastHit</text><text x="608" y="330" class="xs">受击蒙太奇 · 血迹 · 命中音效</text><text x="608" y="344" class="xs">（开火者本机也在这里收到）</text>
+      <rect x="596" y="362" width="238" height="58" rx="7" fill="#fff" stroke="#6B7280"/><text x="608" y="382" class="b sm">OnRep_IsDead</text><text x="608" y="398" class="xs">关胶囊碰撞 · 布娃娃 · 停脚步声</text><text x="608" y="412" class="xs">晚加入的客户端也能看到尸体</text>
+    </g>
+    <g fill="none" stroke="#4B5563" stroke-width="1.4">
+      <line x1="145" y1="94" x2="145" y2="100" marker-end="url(#a)"/>
+      <line x1="145" y1="148" x2="145" y2="154" marker-end="url(#a)"/>
+      <line x1="145" y1="216" x2="145" y2="222" marker-end="url(#a)"/>
+      <line x1="145" y1="270" x2="145" y2="276" marker-end="url(#a)"/>
+      <path d="M264,302 C 290,302 285,133 307,133" stroke="#2F5BD3" marker-end="url(#ab)"/>
+      <line x1="430" y1="162" x2="430" y2="168" marker-end="url(#a)"/>
+      <line x1="430" y1="216" x2="430" y2="222" marker-end="url(#a)"/>
+      <line x1="430" y1="284" x2="430" y2="290" marker-end="url(#a)"/>
+      <line x1="430" y1="352" x2="430" y2="358" marker-end="url(#a)"/>
+      <path d="M549,194 H592" stroke="#C2410C" stroke-dasharray="4 3" marker-end="url(#ao)"/>
+      <path d="M549,400 H592" stroke-dasharray="4 3" marker-end="url(#a)"/>
+      <path d="M549,390 C 575,390 575,323 592,323" stroke-dasharray="4 3" marker-end="url(#a)"/>
+      <path d="M311,206 H290 V412 H268" stroke="#15803D" stroke-dasharray="4 3" marker-end="url(#ag)"/>
+    </g>
+    <text x="276" y="150" text-anchor="middle" class="xs" style="fill:#2F5BD3">上行</text><text x="300" y="440" text-anchor="middle" class="xs" style="fill:#15803D">复制</text>
+    <text x="572" y="186" text-anchor="middle" class="xs">复制</text>
+  </svg>
+  <figcaption><b>图 4-2</b>　推荐的开火流程。橙色是表现（各端本地播放），红色是结果（只在服务器发生）；虚线是属性复制，在服务器下一个网络帧发出</figcaption>
+  </figure>
+
+  <h3>第一段：本机（只做表现和预测）</h3>
+<!--code:cpp:ACoopWeapon：本机开火（拥有者客户端 + 主机玩家都走这里）-->
+void ACoopWeapon::StartFire() {                       // 由本地输入调用，只在 IsLocallyControlled 的一端
+    if (bWantsToFire) return;
+    bWantsToFire = true;
+    FireShot();
+    GetWorldTimerManager().SetTimer(RefireTimer, this, &ACoopWeapon::FireShot, FireInterval, true);
+}
+
+void ACoopWeapon::FireShot() {
+    if (!bWantsToFire || IsReloadingLocal()) return;
+    if (GetDisplayedAmmo() <= 0) { StopFire(); PlayDryFireLocal(); TryAutoReload(); return; }
+
+    const uint16 Seq = ++LocalShotSeq;                // 预测：显示弹数 = 服务器弹数 - (LocalShotSeq - AckSeq)
+    FVector Start, Dir;
+    GetAim(Start, Dir, /*SpreadSeed*/ Seq);           // 相机视点 + 散布；用 Seq 做种子，服务器能复现同样的散布
+    PlayFireCosmetics(/*bFirstPerson*/ true);         // 1P 蒙太奇、枪口火焰、声音
+    ApplyRecoilLocal();                               // 后坐力必须在本地控制者上做（原 Demo 在服务器上做，客户端无效）
+
+    FHitResult Hit;
+    const bool bHit = TraceShot(Start, Dir, Hit);     // 本地射线：只用于命中特效 / 准星命中提示
+    if (bHit) PlayImpactCosmetics(Hit);
+
+    FShotRequest R;
+    R.Seq = Seq; R.Start = Start; R.Dir = Dir;
+    R.ClientTime = GetWorld()->GetGameState()->GetServerWorldTimeSeconds();
+    R.HitActor = bHit ? Hit.GetActor() : nullptr;     // PvE：把客户端命中结果一起发上去，服务器做容差校验
+    R.HitBone = bHit ? Hit.BoneName : NAME_None;
+    if (HasAuthority()) ProcessShot(R);               // 主机玩家：直接在服务器处理
+    else ServerFireShot(R);                           // Reliable：低频（8 发/秒）且会造成伤害，不能丢
+}
+<!--/code-->
+  <h3>第二段：服务器（校验、扣弹、判定、伤害）</h3>
+<!--code:cpp:ACoopWeapon：服务器处理一发-->
+void ACoopWeapon::ServerFireShot_Implementation(const FShotRequest& R) { ProcessShot(R); }
+
+void ACoopWeapon::ProcessShot(const FShotRequest& R) {
+    check(HasAuthority());
+    Ammo.AckSeq = R.Seq;                              // 无论接不接受都推进 AckSeq，本机据此纠正预测
+    ACoopCharacter* Shooter = GetOwner<ACoopCharacter>();
+    const float Now = GetWorld()->GetTimeSeconds();
+    const bool bOk = Shooter && Shooter->IsAlive() && !bPendingReload && Ammo.InClip > 0
+        && FVector::Dist(R.Start, Shooter->GetPawnViewLocation()) < MaxOriginError  // 起点：不能离眼睛太远
+        && FVector::DotProduct(R.Dir, Shooter->GetBaseAimRotation().Vector()) > 0.8f // 方向：与服务器视角接近
+        && ConsumeShotBudget(Now);   // 射速：令牌桶，放最后（有副作用：只有其他条件都过了才扣令牌）；不能比较到达间隔，见第 11 章
+    if (!bOk) return;                                 // 被拒：弹数不变、AckSeq 已推进，本机显示会 +1 纠正回来
+
+    --Ammo.InClip;
+    ++BurstCounter;                                   // COND_SkipOwner：另一端据此播开火表现
+    if (!Shooter->IsLocallyControlled() && GetNetMode() == NM_ListenServer)
+        PlayFireCosmetics(/*bFirstPerson*/ false);    // 主机看客户端开火：SkipOwner 的 OnRep 不会在服务器上触发
+
+    FHitResult Hit;
+    if (ResolveHit(R, Hit))                           // PvE：校验 R.HitActor（包围盒 + 容差 + 视线）；PvP：回溯后重新射线（第 6 章）
+        UGameplayStatics::ApplyPointDamage(Hit.GetActor(), BaseDamage, R.Dir, Hit,
+            Shooter->GetController(), this, DamageTypeClass);   // Instigator / Causer 都要填
+}
+<!--/code-->
+  <div class="co net"><span class="h">为什么这里用 Reliable，而不是原 Demo 的“逐发 Reliable 有问题”？</span>
+    <p>原 Demo 的问题不在于 Server_Fire 是 Reliable，而在于<strong>本机的表现要等它往返一圈</strong>，并且多播排在弹药检查之前。改成本机预测后，Reliable 的排队（E2：RTT 200 / 丢包 10% 时 P99 处理延迟 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms）只会推迟伤害生效，不会影响手感；而换成 Unreliable 则会在同样条件下丢掉约 {{v:E2[rtt=200,loss=0.1].ulost:.0f}}% 的命中——“明明打中了没扣血”比“晚 0.3 秒扣血”更难接受。射速很高（如 20 发/秒以上）时，再把同一帧内的多发合并成一个数组发送。</p>
+  </div>
+
+  <h3>第三段：僵尸受击与死亡（只在服务器改状态，各端从 OnRep 播表现）</h3>
+<!--code:cpp:ACoopZombie：伤害与死亡-->
+UPROPERTY(ReplicatedUsing = OnRep_Health) float Health = 100.f;
+UPROPERTY(ReplicatedUsing = OnRep_LastHit) FZombieHitInfo LastHit;   // {uint8 Counter; FVector_NetQuantize Point; bool bHeadshot; ...}
+UPROPERTY(ReplicatedUsing = OnRep_IsDead) bool bIsDead = false;
+
+float ACoopZombie::TakeDamage(float Damage, const FDamageEvent& Ev, AController* InstigatorPC, AActor* Causer) {
+    if (!HasAuthority() || bIsDead) return 0.f;                      // 原 Demo 缺的就是这一行
+    bool bHead = false;
+    if (Ev.IsOfType(FPointDamageEvent::ClassID)) {
+        const auto& PE = static_cast<const FPointDamageEvent&>(Ev);
+        bHead = PE.HitInfo.BoneName == HeadBoneName;
+        LastHit.Point = PE.HitInfo.ImpactPoint;
+    }
+    Damage = bHead ? HeadshotDamage : Damage;                        // 原 Demo：爆头 100，身体 40
+    Health = FMath::Max(0.f, Health - Damage);
+    LastHit.bHeadshot = bHead; ++LastHit.Counter;                    // 计数器：同一网络帧多次命中也能被识别
+    if (Health <= 0.f) Die(InstigatorPC);
+    return Damage;
+}
+
+void ACoopZombie::Die(AController* Killer) {
+    bIsDead = true;
+    OnRep_IsDead();                                                  // 服务器（主机玩家）自己也要播表现
+    if (AAIController* AI = Cast<AAIController>(GetController()))
+        if (UBrainComponent* Brain = AI->GetBrainComponent()) Brain->StopLogic(TEXT("Dead"));
+    GetWorldTimerManager().ClearAllTimersForObject(this);           // 原 Demo 清错了计时器名，尸体还在寻路和攻击检测
+    if (Killer) if (auto* PS = Killer->GetPlayerState<ACoopPlayerState>()) PS->AddKill();
+    if (auto* GM = GetWorld()->GetAuthGameMode<ACoopGameMode>()) GM->OnZombieKilled(this, Killer);   // 补刷只由 GameMode 做
+    SetLifeSpan(5.f);                                                // 服务器销毁，客户端自动跟随
+}
+
+void ACoopZombie::OnRep_IsDead() {
+    GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    GetCharacterMovement()->DisableMovement();
+    GetMesh()->SetCollisionProfileName(TEXT("Ragdoll"));
+    GetMesh()->SetSimulatePhysics(true);                             // 布娃娃各端各算，属于表现，不需要一致
+}
+<!--/code-->
+  <div class="co deep"><span class="h">两个容易被追问的细节</span>
+    <ul>
+      <li><strong>爆头判定用的是哪套骨骼？</strong>服务器用自己的骨骼姿势做射线。Listen Server 的主机会渲染，骨骼每帧更新；Dedicated Server 默认不刷新不可见网格的骨骼，需要把僵尸网格的 <code>VisibilityBasedAnimTickOption</code> 设为 <code>AlwaysTickPoseAndRefreshBones</code>，或者干脆用胶囊体 + 头部球体这类简化碰撞体判定。</li>
+      <li><strong>受击反馈用 Multicast 还是复制属性？</strong>两者都可以。用复制属性（如 <code>LastHit</code> 计数器）能和血量在同一次更新里到达，不会出现“血先掉、动画后播”；Unreliable Multicast 更简单，丢了也只是少播一次受击动作。<strong>绝对不要在客户端调用它</strong>。</li>
+    </ul>
+  </div>
+
+  <h2>改完之后的时间轴</h2>
+<!--lanes {"scheme":2,"t1":1.5,"title":"预测 + 序号对账（RTT 200 ms）","cap":"<b>图 4-3</b>　改造后的开火时序（E1，RTT 200 ms）。本机按下即播表现（橙点与蓝三角重合），服务器接受 10 发、没有空放；另一端靠 BurstCounter 播开火，仍然晚约一个 RTT——这部分延迟只能靠第 6 章的手段缓解，不能消除"} -->
+  <div class="lab nlab firelab" id="lab-fire"></div><!--/lab-->
+
+  <h2>命中扫描还是抛射物？</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>命中扫描（Hitscan）</th><th>服务器抛射物 + 本机假子弹</th><th>原 Demo：复制抛射物</th></tr>
+    <tr><td>适合</td><td>步枪、手枪（子弹飞行时间 &lt; 一帧到几帧）</td><td>火箭筒、榴弹、慢速弓箭</td><td>—</td></tr>
+    <tr><td>本机手感</td><td>立即</td><td>立即（假子弹不复制，只在本机）</td><td>晚一个 RTT 才看到子弹</td></tr>
+    <tr><td>别人看到</td><td>BurstCounter + 本地曳光</td><td>服务器抛射物复制下来（可按 RTT/2 向前外推）</td><td>突然出现在几米外</td></tr>
+    <tr><td>网络开销</td><td>每发几个字节</td><td>每发一个 Actor 通道</td><td>每发一个 Actor 通道（E7）</td></tr>
+    <tr><td>伤害在哪算</td><td>服务器</td><td>服务器抛射物的命中</td><td>每一端都算（错误）</td></tr>
+  </table></div>
+  <p>原 Demo 的子弹 20000 cm/s，打 20 m 外的僵尸只要 0.1 s，本质上就是命中扫描，没必要做成复制 Actor。如果一定要保留“看得见的子弹”，就在每一端本地生成不复制的曳光弹，伤害由服务器射线决定。</p>
+
+  <div class="co warn"><span class="h">面试注意：这道题的高频坑</span>
+    <ul>
+      <li>说“客户端做射线，打中了就调 Server RPC 扣血”——要补上<strong>服务器校验</strong>，否则外挂可以随便上报命中。PvE 合作游戏可以放宽，但射速、弹药、起点、方向这些必须校验。</li>
+      <li>说“服务器多播开火，所有人一起播动画”——开火者自己会晚一个 RTT。开火者本机预测播，别人用 SkipOwner 的计数器或多播。</li>
+      <li>忘了 <strong>Listen Server 主机</strong>：服务器上看客户端开火时，SkipOwner 属性的 OnRep 不会在服务器触发，主机需要在 ProcessShot 里自己播远端表现。</li>
+      <li>伤害不填 Instigator：后续的击杀统计、友伤规则、仇恨（僵尸追击打它的人）都做不了。</li>
+    </ul>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><strong>本机</strong>：检查预测弹药 → 扣一发、Seq+1 → 立即播 1P 表现和后坐力 → 本地射线播命中特效 → ServerFireShot(Seq, 起点, 方向, 时间)。</li>
+    <li><strong>服务器</strong>：校验（存活 / 换弹 / 射速 / 弹药 / 起点 / 方向）→ 扣弹、AckSeq、BurstCounter → 判定命中 → ApplyPointDamage(Instigator, Causer)。</li>
+    <li><strong>僵尸</strong>：TakeDamage 仅服务器；Health / LastHit / bIsDead 复制，OnRep 播受击和布娃娃；死亡时停 AI、清计时器、加分、由 GameMode 补刷。</li>
+    <li>E1：原方案本机反馈 ≈ RTT + 网络帧；预测后本机为 0，<strong>另一端的延迟不变</strong>。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么服务器拒绝一发之后，仍然要把 AckSeq 推进到这一发的序号？</summary>
+    本机的显示值 = 服务器弹数 − (本地已发序号 − 服务器已处理序号)。服务器拒绝时弹数没减，如果 AckSeq 也不推进，本机会一直认为这发“还在路上”，显示值永远少 1；推进之后，未确认发数减 1 而服务器弹数不变，显示值自动 +1，被拒的那发就被纠正回来了。
+  </details>
+  <details class="quiz"><summary>自测：原 Demo 中客户端玩家为什么感觉不到后坐力？</summary>
+    后坐力 Timeline 在服务器的 Server_SpawnBullet 里触发，调用的是 <code>Pawn->AddControllerYawInput / AddControllerPitchInput</code>。这两个函数只在 Controller 是本地玩家控制器时才生效；服务器上客户端玩家的 PC 不是本地的，调用直接被忽略。主机玩家的 PC 在服务器上是本地的，所以只有主机有后坐力。
+  </details>
+</section>

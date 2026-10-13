@@ -1,0 +1,182 @@
+<div class="part-head" data-toc="第四部分 · 面试防守">
+  <div class="no">PART FOUR</div>
+  <h1>第四部分　面试防守</h1>
+  <p>面试官很少只问一句。这一部分按“主问题 → 追问 1 → 追问 2 → 追问 3”的链条准备，每条链的最后给出防守要点：哪些话一定要说、哪些话不要说。</p>
+</div>
+
+<section class="chapter" id="ch15">
+  <div class="ch-head">
+    <div class="no">CHAPTER 15</div>
+    <h1>追问链：十二条面试官最可能走的路</h1>
+    <p class="lead">每条链都从一个“开放问题”开始，越往下越具体。准备的原则：第一层给结构，第二层给机制，第三层给数字或代码，第四层承认边界并说出下一步。</p>
+  </div>
+
+  <div class="co tip"><span class="h">回答追问的“三段式”</span>
+    <p><strong>结论</strong>（一句话）→ <strong>机制</strong>（为什么，引擎里谁负责）→ <strong>证据</strong>（我在 Demo 里怎么做的 / 测到了什么）。被问到不确定的细节时，说“我的理解是……，我会用 X 方法验证”，比硬编一个答案安全得多。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 1　“介绍一下这个 Demo 的架构。”</div>
+    <p>按“规则 / 状态 / 人 / 灵魂 / 身体 / 工具”讲：GM_Coop 只在服务器，负责登录、开局、刷怪、胜负；GS_Coop 复制比赛阶段和结束时刻；PS_Coop 记准备和击杀；PC_Coop 管本地 UI 和请求；Character 是身体，持有武器；武器挂在 Owner 链上；血量是 AC_Health 组件，玩家和僵尸共用；僵尸的 AI 在服务器的 AIController + 行为树里。（第 7、8 章）</p>
+    <div class="q f">追问 1：分数为什么放 PlayerState，不放 Character？</div>
+    <p>Character 是一条命，死了就销毁、重生是新的 Actor；PlayerState 跟人走，整局都在，而且总是复制给所有人（GameState.PlayerArray 每端都有），记分板直接读它。</p>
+    <div class="q f">追问 2：那为什么不能在 GameState 里存一个 PlayerController 数组？</div>
+    <p>PlayerController 只存在于服务器和它自己的客户端；复制到别的客户端时，引用指向一个不存在的对象，变成空。原 Demo 的 ReadyPlayersList 就是这样。要列举玩家，用 PlayerArray 里的 PlayerState。</p>
+    <div class="q f">追问 3：改成 4 人、Dedicated Server，要动哪些地方？</div>
+    <p>规则层基本不用改（本来就不依赖“主机玩家”）：MinPlayers 改 4、会话人数改 4；“只有主机能重开”的判断要换成“所有人投票”或由服务器自动重开；Listen Server 下手动播远端表现的分支在 DS 上不会走到；僵尸的骨骼命中要打开服务器端的骨骼刷新或改用简化碰撞体；再按人数调 NetUpdateFrequency。</p>
+    <div class="q r">防守要点</div>
+    <p>一定要说“谁在哪一端”；不要只背类名。主动提一句“原 Demo 的关卡蓝图承担了开局逻辑，是典型的上帝对象，我把它拆到了 GameMode 和 GameState”。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 2　“从开火到击中僵尸，说一遍。”</div>
+    <p>三段：本机预测表现并发请求 → 服务器校验、扣弹、判定、伤害 → 各端从复制状态播表现。（第 4、11 章）</p>
+    <div class="q f">追问 1：客户端判定命中，不怕外挂吗？</div>
+    <p>怕，所以服务器要校验：射速（令牌桶）、弹药、起点离眼睛的距离、方向与服务器视角的夹角、目标包围盒加容差后是否被射线穿过、视线是否被墙挡。这是 ShooterGame 的做法，适合 PvE 合作；PvP 我会改成服务器回溯，不信任客户端的命中结果。</p>
+    <div class="q f">追问 2：服务器回溯具体怎么做？回溯多少？</div>
+    <p>服务器每个网络帧记录候选目标的胶囊（或关键骨骼 hitbox）位置；收到开火时按客户端看到的时刻（客户端上报的服务器时间估计，减去插值延迟）在相邻两帧之间插值，把目标临时移过去做射线再移回来。最大回溯一般 150~250 ms，超过就不补偿。E3 里 RTT 300 ms 超过 200 ms 上限时，回溯命中率掉回 {{v:E3[v=480,rtt=300].rew:.0f}}%。</p>
+    <div class="q f">追问 3：回溯的代价是什么？</div>
+    <p>被打的人会“躲到墙后还被打中”（E3：480 cm/s、RTT 200 ms 时平均 {{v:E3[v=480,rtt=200].victim:.0f}} cm 的受害者位移）；高延迟玩家占便宜；服务器每帧存历史、每发做回溯有 CPU 和内存开销。所以要设上限，并且只回溯射线附近的候选目标。</p>
+    <div class="q r">防守要点</div>
+    <p>别说“客户端打中了就调 RPC 扣血”；一定要带上“服务器校验”。被问到 PvP 时主动区分 PvE / PvP 的取舍，这是面试官想听的判断力。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 3　“角色、控制器、武器怎么绑定？”</div>
+    <p>服务器 Possess：Pawn 的 Owner = PC；武器在服务器生成，生成参数里 Owner = Pawn、Instigator = Pawn；CurrentWeapon 复制，在 OnRep 里各端挂到 3P 和 1P 网格。（第 3、10 章）</p>
+    <div class="q f">追问 1：Owner 和 Instigator 有什么区别？</div>
+    <p>Owner 是网络归属：决定谁能发 Server RPC、OwnerOnly 发给谁、相关性；Instigator 是责任归属：这件事是谁造成的，用于伤害统计、友伤、仇恨。武器两者都是持有者，但子弹、榴弹这类抛射物的 Owner 可以是武器，Instigator 仍是开火的 Pawn。</p>
+    <div class="q f">追问 2：为什么不先 SpawnActor 再 SetOwner？</div>
+    <p>SpawnActor 内部就会执行 BeginPlay，此时 Owner 还是空的，武器里依赖 Owner 的初始化全部失效——原 Demo 就是这样，作者又补了一个 for_server 函数。生成参数里给 Owner，或者用 SpawnActorDeferred / Begin Deferred Actor Spawn 在 FinishSpawning 前设置。</p>
+    <div class="q f">追问 3：切换武器时旧武器怎么处理？</div>
+    <p>两种：单武器 Demo 直接在服务器 Destroy 旧武器；多武器背包则保留 Actor，隐藏网格、关闭 Tick，必要时设为休眠（Dormant）减少复制开销，切回来时 FlushNetDormancy。无论哪种，切枪前先 CancelReload、StopFire，避免旧武器的计时器继续改弹药。</p>
+    <div class="q r">防守要点</div>
+    <p>说出“挂接（AttachParent）和 Owner 是两回事，挂接信息不随武器复制”，这是能区分“背过”和“做过”的细节。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 4　“弱网卡顿怎么优化？”</div>
+    <p>先复现定位（NetEmulation、stat net、p.NetShowCorrections、Networking Insights），再分四类：反馈慢→预测；拉回→移动预测一致；打不中→延迟补偿；堆积 / 带宽→Reliable 使用、更新频率、相关性。（第 6 章）</p>
+    <div class="q f">追问 1：CharacterMovement 的预测是怎么工作的？</div>
+    <p>拥有者每帧本地移动并保存 SavedMove，通过 ServerMove 把输入发给服务器；服务器用同样输入重放，误差平方超过 MAXPOSITIONERRORSQUARED（默认 3）就发 ClientAdjustPosition；客户端回到服务器位置，重放之后还没被确认的 SavedMove。纠正发送有最小间隔（NetworkMinTimeBetweenClientAdjustments，默认 0.1 s）。</p>
+    <div class="q f">追问 2：为什么冲刺一定要进 SavedMove？Server RPC 不行吗？</div>
+    <p>RPC 和移动包走的是不同的消息，到达时机不同：切换冲刺的那一刻，服务器重放某几帧时用的速度和客户端当时用的不一样，就会纠正。E6 的“半修复”在不丢包时 0 纠正，10% 丢包时每秒仍有 {{v:E6[c=2,rtt=200,loss=0.1].cps:.2f}} 次；放进 SavedMove 后，服务器重放每一帧都用那一帧的标志，时序天然一致。</p>
+    <div class="q f">追问 3：纯蓝图项目怎么办？</div>
+    <p>纯蓝图扩展不了 SavedMove。次优解是本机和服务器同时切换、两端用同一个函数算速度，接受偶发纠正；或者引入约 60 行 C++ 的移动组件子类——这是我在 Demo 里唯一写的 C++。UE 5.4 起还有实验性的 Mover 插件，我了解但没有在项目里用。</p>
+    <div class="q r">防守要点</div>
+    <p>“弱网优化”最忌讳一上来就说“提高 Tick 频率、压缩数据”。先分类、再对症；说出“预测只能消除自己的延迟，消除不了别人看到你的延迟”（E1），会显得你真的想清楚了。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 5　“子弹同步和换弹怎么做的？”</div>
+    <p>弹药 OwnerOnly 复制、本机预测 + 序号对账；别人看开枪靠 SkipOwner 的 BurstCounter；换弹是服务器计时状态机，一次性 Take，取消不动弹药。（第 5、11 章）</p>
+    <div class="q f">追问 1：AckSeq 解决了什么问题？</div>
+    <p>OnRep 收到的服务器弹数是“处理完某一发时”的值，本机这时往往已经多打了几发；直接覆盖会让 UI 往回跳（E5：每次连射平均回跳 {{v:E5.1.rb:.0f}} 次）。服务器把已处理到的序号一起发回来，本机显示 = 服务器弹数 − 还没被处理的发数，就不跳了；被拒的发数也会因此自动加回来。</p>
+    <div class="q f">追问 2：换弹到一半被打死怎么办？</div>
+    <p>死亡时服务器调用 CancelReload：清计时器、复位 bPendingReload，弹药一发不动——因为转移只在计时器到点时一次性发生。原 Demo 一开始就把当前弹数清零，被打断会凭空丢子弹。</p>
+    <div class="q f">追问 3：换弹时长从哪来？为什么不挂 AnimNotify？</div>
+    <p>从 DA_Weapon 的 ReloadDuration（与蒙太奇时长对齐）来。服务器上动画不一定按时更新（Dedicated Server 不刷新不可见网格、URO 降频），蒙太奇被打断时通知也不来；规则用服务器计时，动画只做表现。</p>
+    <div class="q r">防守要点</div>
+    <p>主动说出原 Demo 的换弹 bug（漏连 Return 返回 0），并说“是我把蓝图逐节点移植成测试代码才发现的”——这比任何概念都有说服力。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 6　“Reliable 和 Unreliable 怎么选？”</div>
+    <p>按“丢了怎么办”选：必须到达、低频的用 Reliable（开火请求、换弹请求、准备）；表现类、高频的用 Unreliable 或复制计数器。（第 2、6 章）</p>
+    <div class="q f">追问 1：开火请求用 Reliable，丢包时不会卡吗？</div>
+    <p>会排队：E2 中 RTT 200 ms、丢包 10% 时 P99 处理延迟 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms。但因为本机已经预测了表现，排队只推迟伤害生效，不影响手感；换成 Unreliable 则约 {{v:E2[rtt=200,loss=0.1].ulost:.0f}}% 的命中会直接丢失，“打中了不扣血”更难接受。</p>
+    <div class="q f">追问 2：扎堆到达带来了什么新问题？</div>
+    <p>射速校验如果比较到达间隔，会把重传后挤在一起的正常请求误判为超射速（图 11-7）。我改成令牌桶：允许 2~3 发的短时突发，长期平均不超过射速。</p>
+    <div class="q f">追问 3：射速很高（比如 20 发/秒）怎么办？</div>
+    <p>把同一帧内的多发合并成一个数组参数发送，减少 RPC 数量；或者改成“开始开火 / 停止开火 + 服务器按射速自己模拟”，客户端只上报每发的方向（ShooterGame 的 BurstCounter 思路）。另外不要在 Tick 里发 Reliable，可靠缓冲区满了会被断开连接。</p>
+    <div class="q r">防守要点</div>
+    <p>说出“Reliable 是有序的”——队头阻塞就是从这里来的；很多人只知道“可靠 = 不丢”。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 7　“晚加入的玩家怎么看到正确的状态？”</div>
+    <p>持续状态全部是复制属性：比赛阶段、结束时刻、僵尸的 bIsDead、武器的 bPendingReload、外观种子；新连接建立后服务器会把当前值复制过去，OnRep 里播对应的表现。（第 2、12 章）</p>
+    <div class="q f">追问 1：为什么 RPC 不行？</div>
+    <p>RPC 只对当时在线且相关的客户端执行一次，晚加入的人永远收不到。原 Demo 的死亡、开局都靠多播，晚加入者看到的僵尸永远站着，“游戏是否开始”永远是 false。</p>
+    <div class="q f">追问 2：Initial Only 用在哪？</div>
+    <p>只在 Actor 首次复制时发送、之后不再比较的属性，比如僵尸的外观种子 VariantSeed：出生后不会变，省掉每次复制时的比较开销。</p>
+    <div class="q f">追问 3：尸体用 bIsDead 复制还是 TearOff？</div>
+    <p>两种都可以。bIsDead 复制简单，尸体由服务器 SetLifeSpan 统一销毁；TearOff 让服务器停止复制这个 Actor，各端接管自己的那份（布娃娃各算各的、不再同步），适合大量尸体、节省带宽，但 TearOff 之后服务器就不能再改它了。Demo 里我用 bIsDead + 5 秒销毁。</p>
+    <div class="q r">防守要点</div>
+    <p>一句话总结：<strong>状态用属性，事件用 RPC 或计数器</strong>。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 8　“Listen Server 的主机有什么特殊？”</div>
+    <p>主机既是服务器又是玩家：它的角色 HasAuthority 和 IsLocallyControlled 同时为 true；它调用 Server RPC 时直接在本地执行；SkipOwner 属性的 OnRep 不会在服务器上触发，主机看客户端开火要在服务器上手动播远端表现。（第 2、4 章）</p>
+    <div class="q f">追问 1：主机是不是有延迟优势？</div>
+    <p>有，主机的 RTT 为 0，命中判定和移动都最“准”。合作 PvE 可以接受；竞技 PvP 一般用 Dedicated Server。</p>
+    <div class="q f">追问 2：主机掉线怎么办？</div>
+    <p>UE 不内置主机迁移。合作游戏通常的处理是：客户端收到 NetworkError / 连接关闭，GameInstance 回到主菜单并提示“主机已断开”。要做迁移需要自己同步全部状态到候选主机并重建会话，成本很高，Demo 不做。</p>
+    <div class="q f">追问 3：主机能作弊吗？</div>
+    <p>能，主机就是服务器，规则在它手里。所以 Listen Server 只适合朋友之间的合作；需要公平性时用 Dedicated Server，并把校验逻辑都放在服务器上（本 Demo 的校验在 DS 上照样生效）。</p>
+    <div class="q r">防守要点</div>
+    <p>别说“Listen Server 就是有一个玩家当服务器”就停下，要说出它对代码的影响：权限判断和本地控制判断必须分开写。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 9　“为什么不用 GAS？”</div>
+    <p>Demo 的目标是把复制、RPC、预测这些底层机制讲清楚，用 GAS 会把这些封装起来；功能也只有一把枪、一种伤害，引入 GAS 的成本（AttributeSet、Ability、Effect、Cue、预测键）不划算。</p>
+    <div class="q f">追问 1：那你了解 GAS 的预测吗？</div>
+    <p>Ability 在客户端激活时生成一个 Prediction Key，随激活请求发给服务器；客户端在这个键下预测执行的 GameplayEffect、Tag、Cue，在服务器确认或拒绝后保留或回滚。我的 AckSeq 其实是这个思想的简化版：用序号把“本地预测的东西”和“服务器确认的东西”对上。</p>
+    <div class="q f">追问 2：如果做正式项目呢？</div>
+    <p>会用：开火、换弹做成 Ability，伤害是 GameplayEffect，表现是 GameplayCue，弹药放在物品上的 Tag Stack，参考 Lyra。底层的 Owner、复制条件、移动预测这些知识在 GAS 里同样需要。</p>
+    <div class="q r">防守要点</div>
+    <p>不要贬低 GAS，也不要假装用过；说清“为什么这个规模不用”和“到什么规模会用”。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 10　“僵尸变成 100 只，怎么优化？”</div>
+    <p>分网络、AI、动画三块。</p>
+    <div class="q f">追问 1：网络上？</div>
+    <p>降低僵尸 NetUpdateFrequency（10~20），远处的用距离相关性裁掉；死亡用 TearOff；只复制必要状态（外观种子 Initial Only、攻击计数器）；人更多时考虑 Replication Graph 或 Iris 做空间分区和优先级。</p>
+    <div class="q f">追问 2：AI 和动画上？</div>
+    <p>AI：行为树 Service 降频、远处僵尸切到简化逻辑（只追不打），用 Significance Manager 分级；寻路用 Crowd / RVO 但限制数量。动画：URO（更新频率随距离降低）、远处 LOD 减骨、Visibility Based Anim Tick 设为不可见时不刷新——但服务器上需要判定命中的僵尸要保留骨骼刷新或改用简化碰撞体。</p>
+    <div class="q f">追问 3：怎么知道优化有没有用？</div>
+    <p>先量化：stat net 看带宽、Networking Insights 看哪个 Actor 占字节最多、Unreal Insights 看服务器帧时间；每改一项对比一次。</p>
+    <div class="q r">防守要点</div>
+    <p>先说“先测再改”，再分块列手段；不要一口气背十个名词。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 11　“书里这些数字是怎么来的？可信吗？”</div>
+    <p>两类证据：蓝图连线是从 .uasset 解析出来的事实（每个节点都有编号可查）；性能 / 时序数字来自我写的离散事件模拟，它按 UE 的默认参数（30 Hz 网络帧、Reliable 有序重传、纠正阈值和最小间隔）复现相关行为。（附录 A）</p>
+    <div class="q f">追问 1：模拟和真实引擎有什么差距？</div>
+    <p>没有模拟带宽限制、包合并、优先级调度、移动平滑；抖动是均匀分布；所以只用来比较方案的相对好坏，绝对值以引擎里实测为准。</p>
+    <div class="q f">追问 2：那在引擎里怎么测？</div>
+    <p>PIE 网络模拟 + 录屏逐帧看；p.NetShowCorrections 数纠正次数；Networking Insights 看 RPC 的发出与到达时间；自动化测试可以用 Gauntlet 跑多进程。</p>
+    <div class="q r">防守要点</div>
+    <p>主动说出局限，比被问出来好。</p>
+  </div>
+
+  <div class="ans chain">
+    <div class="q">链 12　“这个 Demo 现在还有什么不足？”</div>
+    <p>诚实列三条：① 只支持局域网 2 人，没有主机迁移；② PvE 的命中采用客户端判定 + 容差，不适合 PvP；③ 冲刺 / 瞄准的移动预测用了少量 C++，纯蓝图版本做不到零纠正。</p>
+    <div class="q f">追问：下一步你会做什么？</div>
+    <p>按优先级：加 Dedicated Server 构建和自动化多进程测试；把开火 / 换弹迁到 GAS；做服务器回溯并支持简单的 PvP 模式；用 Networking Insights 做一次带宽基线。</p>
+    <div class="q r">防守要点</div>
+    <p>“没有不足”是最差的答案。说不足的同时给出下一步，说明你知道“合格之后”是什么。</p>
+  </div>
+
+  <h2>危险说法对照表</h2>
+  <div class="tbl"><table>
+    <tr><th>不要这么说</th><th>问题</th><th>换成</th></tr>
+    <tr><td>“联机就是把变量都勾上复制”</td><td>复制单向、只发最新值、条件不同；事件不能用状态表达</td><td>“状态用复制属性，事件用 RPC 或计数器，表现各端本地做”</td></tr>
+    <tr><td>“用 Multicast 让所有人同步”</td><td>客户端调用只在本地执行；晚加入收不到；开火者也要等</td><td>“持续状态用属性 + OnRep，一次性表现才用 Unreliable 多播”</td></tr>
+    <tr><td>“HasAuthority 判断是不是自己”</td><td>Listen Server 主机两个都是 true</td><td>“改状态看 HasAuthority，本地表现看 IsLocallyControlled”</td></tr>
+    <tr><td>“服务器上禁用玩家输入”</td><td>输入在客户端处理；Pawn 的 DisableInput 只接受自己的 Controller</td><td>“客户端本地关输入，服务器在每个请求里校验”</td></tr>
+    <tr><td>“GameInstance 存全局数据大家共享”</td><td>每个进程一份，不复制</td><td>“跨地图的本地数据放 GameInstance，共享状态放 GameState”</td></tr>
+    <tr><td>“网络卡就提高 Tick / 压缩数据”</td><td>没有分类，抓不住主要矛盾</td><td>“先分反馈慢、拉回、打不中、堆积四类，再对症”</td></tr>
+    <tr><td>“Reliable 不会丢，所以都用 Reliable”</td><td>有序 → 队头阻塞；缓冲溢出会断线</td><td>“按丢了怎么办来选”</td></tr>
+    <tr><td>“我的 Demo 没什么问题”</td><td>面试官一定能找到问题</td><td>“原版有 X 类问题，我是这样发现和修复的”</td></tr>
+  </table></div>
+
+  <div class="co ver"><span class="h">被问住时怎么办</span>
+    <p>说出你知道的上一层机制，再给出验证路径：“这个细节我没有在引擎源码里确认过。我的理解是 X，因为 Y；如果要确认，我会在 Z 函数里下断点 / 用 Networking Insights 看消息到达顺序。”面试官更在意你的推理过程和验证方法，而不是记住了多少 API。</p>
+  </div>
+</section>

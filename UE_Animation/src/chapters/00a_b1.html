@@ -1,0 +1,135 @@
+<div class="part-head" data-toc="前置篇 · 白话基础">
+  <div class="no">PART ZERO</div>
+  <h1>前置篇　用大白话把基础讲清楚</h1>
+  <p>正文默认你知道“骨骼、矩阵、四元数、插值”是什么。这一篇不假设任何前置知识：先建立直觉，再给出每个概念最少需要的数学，配上手算例子和实测数字。读完再看第 1 章起的正文会轻松很多。</p>
+</div>
+
+<section class="chapter" id="b1">
+  <div class="ch-head">
+    <div class="no">BASICS · B1</div>
+    <h1>骨骼动画到底是怎么让模型动起来的</h1>
+    <p class="lead">一句话：骨头动，皮跟着动。动画数据只记录“骨头怎么摆”，皮怎么变形交给显卡算。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>用自己的话说清：网格、骨骼、蒙皮权重、动画四样东西各管什么</li>
+    <li>知道为什么动画只存骨头、不存顶点</li>
+    <li>理解“姿势（Pose）”“关键帧”“插值”这几个最常出现的词</li>
+    <li>能按顺序说出一帧里动画系统做的七件事</li>
+  </ul></div>
+
+  <h2>B1.1 骨头动，皮跟着动</h2>
+  <p>人的皮肉自己不会动，是骨头带着它们动。游戏角色也是这样做的：</p>
+  <ol>
+    <li>美术先做一层<strong>“皮”</strong>：由成千上万个三角形组成的模型，三角形的顶点就叫<strong>顶点</strong>。这层皮叫<strong>网格（Mesh）</strong>。</li>
+    <li>在皮里面放一套<strong>“骨头”</strong>：几十到上百根骨骼，按身体结构连成一棵树（骨盆连脊柱，脊柱连肩膀，肩膀连上臂……）。这叫<strong>骨骼 / 骨架（Skeleton）</strong>。</li>
+    <li>告诉引擎<strong>每个顶点“粘”在哪几根骨头上、各粘多牢</strong>。比如肘部的一个顶点：一半跟上臂走，一半跟前臂走。这组比例叫<strong>蒙皮权重（Skin Weights）</strong>，绑定这个过程叫<strong>蒙皮（Skinning）</strong>。</li>
+    <li>做动画时，只记录<strong>每根骨头在每个时刻怎么摆</strong>。这就是<strong>动画序列（Animation Sequence）</strong>。</li>
+  </ol>
+  <figure>
+  <svg viewBox="0 0 860 252" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="b1g" x1="0" x2="1" y1="0" y2="0">
+        <stop offset="0" stop-color="#DBEAFE"/><stop offset="0.40" stop-color="#DBEAFE"/><stop offset="0.52" stop-color="#EDE9FE"/><stop offset="0.64" stop-color="#FFEDD5"/><stop offset="1" stop-color="#FFEDD5"/>
+      </linearGradient>
+    </defs>
+    <text x="215" y="22" text-anchor="middle" class="b">① 绑定时（参考姿势）</text>
+    <text x="645" y="22" text-anchor="middle" class="b">② 播放动画：肘部弯曲 60°</text>
+    <rect x="45" y="80" width="345" height="62" rx="28" fill="url(#b1g)" stroke="#6B7280" stroke-width="1.4"/>
+    <g stroke="#111827" stroke-width="5" stroke-linecap="round"><line x1="65" y1="111" x2="215" y2="111"/><line x1="215" y1="111" x2="365" y2="111"/></g>
+    <g fill="#111827"><circle cx="65" cy="111" r="6"/><circle cx="215" cy="111" r="6"/><circle cx="365" cy="111" r="6"/></g>
+    <text x="65" y="168" text-anchor="middle" class="xs">肩</text><text x="215" y="168" text-anchor="middle" class="xs">肘</text><text x="365" y="168" text-anchor="middle" class="xs">腕</text>
+    <text x="140" y="104" text-anchor="middle" class="xs b" style="fill:#2F5BD3">上臂骨</text><text x="290" y="104" text-anchor="middle" class="xs b" style="fill:#C2410C">前臂骨</text>
+    <g><circle cx="120" cy="80" r="5" fill="#2F5BD3"/><circle cx="215" cy="80" r="5" fill="#6D28D9"/><circle cx="315" cy="80" r="5" fill="#C2410C"/></g>
+    <line x1="120" y1="75" x2="100" y2="50" stroke="#2F5BD3"/><text x="98" y="46" text-anchor="middle" class="xs" style="fill:#2F5BD3">上臂 1.0</text>
+    <line x1="215" y1="75" x2="215" y2="50" stroke="#6D28D9"/><text x="215" y="46" text-anchor="middle" class="xs" style="fill:#6D28D9">上臂 0.5 / 前臂 0.5</text>
+    <line x1="315" y1="75" x2="335" y2="50" stroke="#C2410C"/><text x="337" y="46" text-anchor="middle" class="xs" style="fill:#C2410C">前臂 1.0</text>
+    <text x="215" y="196" text-anchor="middle" class="sm">每个顶点记录：受哪几根骨头影响 + 各占多少（加起来 = 1）</text>
+
+    <path d="M475,151 H625 A30,30 0 0,1 655,181 A30,30 0 0,1 625,211 H475 A30,30 0 0,1 475,151 Z" fill="#DBEAFE" stroke="#6B7280" stroke-width="1.4"/>
+    <polygon points="614,166 686,41 738,71 666,196" fill="#FFEDD5" stroke="#6B7280" stroke-width="1.4"/>
+    <path d="M610,153 Q652,146 670,181 Q652,216 610,211 Z" fill="#EDE9FE" stroke="none" opacity=".92"/>
+    <g stroke="#111827" stroke-width="5" stroke-linecap="round"><line x1="495" y1="181" x2="640" y2="181"/><line x1="640" y1="181" x2="712" y2="56"/></g>
+    <g fill="#111827"><circle cx="495" cy="181" r="6"/><circle cx="640" cy="181" r="6"/><circle cx="712" cy="56" r="6"/></g>
+    <text x="752" y="104" class="xs">前臂骨转了 60°，</text><text x="752" y="120" class="xs">“前臂 1.0”的顶点</text><text x="752" y="136" class="xs">完全跟着转；</text>
+    <text x="752" y="160" class="xs" style="fill:#6D28D9">肘部 0.5/0.5 的顶点</text><text x="752" y="176" class="xs" style="fill:#6D28D9">各跟一半，</text><text x="752" y="192" class="xs" style="fill:#6D28D9">皮肤被平滑拉开</text>
+    <text x="645" y="240" text-anchor="middle" class="sm">动画只改了“前臂骨的旋转”这一个数据，几千个顶点的位置由显卡按权重算出来</text>
+  </svg>
+  <figcaption><b>图 B1-1</b>　骨骼、网格与蒙皮权重的关系。颜色表示顶点主要跟随哪根骨头：蓝 = 上臂，橙 = 前臂，紫 = 两者各一半</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>东西</th><th>白话</th><th>UE 里对应的资产 / 类</th><th>里面有什么</th></tr>
+    <tr><td>网格</td><td>皮</td><td><code>USkeletalMesh</code>（骨骼网格体）</td><td>顶点、三角形、UV、材质、<strong>蒙皮权重</strong>、LOD</td></tr>
+    <tr><td>骨骼</td><td>骨头 + 它们的连接关系</td><td><code>USkeleton</code>（骨架）</td><td>骨骼名、谁是谁的父亲、绑定时的初始摆法、Socket、曲线名</td></tr>
+    <tr><td>蒙皮权重</td><td>胶水：皮粘在哪根骨头上</td><td>存在 SkeletalMesh 里</td><td>每个顶点：若干个（骨骼编号，权重）</td></tr>
+    <tr><td>动画</td><td>骨头随时间的摆法</td><td><code>UAnimSequence</code>（动画序列）</td><td>每根骨头每个时刻的位置 / 旋转 / 缩放，以及通知、曲线</td></tr>
+    <tr><td>运行实例</td><td>场景里“一个活的角色”</td><td><code>USkeletalMeshComponent</code> + 动画蓝图</td><td>把网格和动画组合起来，每帧算出姿势并交给渲染</td></tr>
+  </table></div>
+
+  <h2>B1.2 为什么动画只记录骨头，不记录顶点</h2>
+  <p>换个方式想：如果直接记录“每一帧每个顶点在哪”，数据量有多大？</p>
+  <!--bars {"title":"每一帧要存的数据量（计算值，非实测）","labw":250,"unit":"B","items":[
+    ["只存骨头：68 根 × 40 B",2720,"g","2,720 B"],["直接存顶点：3 万个 × 12 B",360000,"r","360,000 B（约 132 倍）"]],
+    "cap":"<b>图 B1-2</b>　一根骨头的摆法 = 旋转 16 B + 位置 12 B + 缩放 12 B；一个顶点的位置 = 12 B。只存骨头，数据小两个数量级"} -->
+  <p>除了数据小，只存骨头还有三个好处：</p>
+  <ul>
+    <li><strong>可复用</strong>：同一套骨头的所有模型（不同衣服、不同体型）都能播放同一条动画。顶点动画只属于某一个模型。</li>
+    <li><strong>好混合</strong>：走和跑各取一半，只需要混合 68 根骨头的摆法；混合 3 万个顶点则贵得多，而且没有“关节”的概念，混合结果容易变形。</li>
+    <li><strong>好修改</strong>：程序可以在运行时改某根骨头（让头看向敌人、让脚贴住台阶），顶点自动跟上。</li>
+  </ul>
+  <div class="co tip"><span class="h">例外：什么时候真的存顶点</span>
+    <p>面部表情常用 <strong>Morph Target（变形目标）</strong>：存“笑的时候每个顶点偏移多少”，用一个 0~1 的权重控制强度。远处成百上千的群众可以用 <strong>顶点动画贴图（VAT）</strong>：把顶点偏移烘焙进贴图，完全不跑骨骼动画。它们都是骨骼动画的补充，而不是替代。</p>
+  </div>
+
+  <h2>B1.3 姿势、关键帧与插值</h2>
+  <ul>
+    <li><strong>姿势（Pose）</strong>：某一瞬间所有骨头的摆法，在代码里就是一个数组，每根骨头一个“变换”（位置 + 旋转 + 缩放，见 B2）。动画系统里的“混合”“修正”，都是在姿势这个数组上做运算。</li>
+    <li><strong>关键帧（Key）</strong>：动画数据不是连续的，而是按固定频率（常见 30 次/秒）存的一组姿势。</li>
+    <li><strong>插值（Interpolation）</strong>：游戏可能跑 120 帧/秒，比数据频率高。两个关键帧之间的姿势按时间比例“补”出来。例如肘部在第 10 帧弯 40°、第 11 帧弯 46°，当前时间落在两帧之间 1/4 处，就取 40 + (46 − 40) × 1/4 = 41.5°。所以动画数据是 30 帧，画面照样流畅。</li>
+    <li><strong>骨骼是一棵树</strong>：每根骨头只有一个父亲（根骨骼没有）。父亲动了，孩子全部跟着动：肩膀一转，肘、手、手指都跟着走。所以计算时必须<strong>先算父亲、再算孩子</strong>（B2 会手算一遍）。</li>
+  </ul>
+
+  <h2>B1.4 一帧里发生了什么（白话版）</h2>
+  <figure>
+  <svg viewBox="0 0 860 230" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm">
+      <rect x="20" y="20" width="190" height="66" rx="10" fill="#F3F4F6" stroke="#6B7280"/>
+      <text x="115" y="46" text-anchor="middle" class="b">① 问状态</text><text x="115" y="66" text-anchor="middle" class="xs">速度多快？在不在空中？</text><text x="115" y="80" text-anchor="middle" class="xs" style="fill:#2F5BD3">EventGraph / 线程安全更新</text>
+      <rect x="230" y="20" width="190" height="66" rx="10" fill="#F3EEFE" stroke="#6D28D9"/>
+      <text x="325" y="46" text-anchor="middle" class="b">② 选动画</text><text x="325" y="66" text-anchor="middle" class="xs">现在该站、走、跑还是跳？</text><text x="325" y="80" text-anchor="middle" class="xs" style="fill:#2F5BD3">状态机 / 蒙太奇</text>
+      <rect x="440" y="20" width="190" height="66" rx="10" fill="#EAF7EF" stroke="#15803D"/>
+      <text x="535" y="46" text-anchor="middle" class="b">③ 取姿势</text><text x="535" y="66" text-anchor="middle" class="xs">从动画数据里读出当前时刻</text><text x="535" y="80" text-anchor="middle" class="xs" style="fill:#2F5BD3">序列播放器（解压 + 插值）</text>
+      <rect x="650" y="20" width="190" height="66" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="745" y="46" text-anchor="middle" class="b">④ 混合</text><text x="745" y="66" text-anchor="middle" class="xs">走跑各取一部分；上半身换弹</text><text x="745" y="80" text-anchor="middle" class="xs" style="fill:#2F5BD3">混合空间 / 分层骨骼混合</text>
+      <rect x="125" y="130" width="190" height="66" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+      <text x="220" y="156" text-anchor="middle" class="b">⑤ 修正</text><text x="220" y="176" text-anchor="middle" class="xs">脚踩住台阶、左手握住枪</text><text x="220" y="190" text-anchor="middle" class="xs" style="fill:#2F5BD3">IK 节点 / Control Rig</text>
+      <rect x="335" y="130" width="190" height="66" rx="10" fill="#FEF6E4" stroke="#B45309"/>
+      <text x="430" y="156" text-anchor="middle" class="b">⑥ 算矩阵</text><text x="430" y="176" text-anchor="middle" class="xs">每根骨头相对整个角色在哪</text><text x="430" y="190" text-anchor="middle" class="xs" style="fill:#2F5BD3">FK（组件空间）→ 蒙皮矩阵</text>
+      <rect x="545" y="130" width="190" height="66" rx="10" fill="#111827"/>
+      <text x="640" y="156" text-anchor="middle" class="b wt">⑦ 显卡蒙皮</text><text x="640" y="176" text-anchor="middle" class="xs wt">每个顶点按权重挪到新位置</text><text x="640" y="190" text-anchor="middle" class="xs wt">GPU Skinning（顶点着色器）</text>
+    </g>
+    <g fill="none" stroke="#4B5563" stroke-width="1.5">
+      <line x1="210" y1="53" x2="226" y2="53" marker-end="url(#a)"/><line x1="420" y1="53" x2="436" y2="53" marker-end="url(#a)"/><line x1="630" y1="53" x2="646" y2="53" marker-end="url(#a)"/>
+      <path d="M745,86 V108 H220 V126" marker-end="url(#a)"/>
+      <line x1="315" y1="163" x2="331" y2="163" marker-end="url(#a)"/><line x1="525" y1="163" x2="541" y2="163" marker-end="url(#a)"/>
+    </g>
+    <text x="430" y="222" text-anchor="middle" class="xs">①② 决定“用哪些动画、各占多少”；③④⑤ 得到最终姿势；⑥⑦ 把姿势变成屏幕上变形后的模型</text>
+  </svg>
+  <figcaption><b>图 B1-3</b>　一帧里动画系统做的七件事。蓝字是正文里对应的 UE 术语；第 6 章会把它们对应到具体函数和线程</figcaption>
+  </figure>
+  <div class="co warn"><span class="h">面试注意：三句话区分三个资产</span>
+    <ul>
+      <li><strong>Skeleton 里没有顶点</strong>：它只是骨头的名字、父子关系和初始摆法，是动画和网格之间的“共同语言”。</li>
+      <li><strong>SkeletalMesh 里有蒙皮权重</strong>：这是它和普通静态模型（StaticMesh）最大的区别。</li>
+      <li><strong>AnimSequence 里没有顶点</strong>：只有骨头随时间的变换，所以能被同骨架的所有模型复用。</li>
+    </ul>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>网格 = 皮，骨骼 = 骨头树，蒙皮权重 = 皮粘在哪根骨头上，动画 = 骨头随时间的摆法。</li>
+    <li>只存骨头：数据小约 132 倍（68 骨 vs 3 万顶点），可复用、好混合、好在运行时修改。</li>
+    <li>姿势 = 一个时刻所有骨头的变换数组；关键帧之间按时间比例插值，所以 30 帧数据也能流畅播放。</li>
+    <li>一帧七步：问状态 → 选动画 → 取姿势 → 混合 → 修正 → 算矩阵 → 显卡蒙皮。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：同一个角色换了一件更宽松的外套（新的 SkeletalMesh），需要重新做动画吗？</summary><p>不需要，只要外套用的是同一个 Skeleton（骨头名字和层级一致）。动画只描述骨头怎么动，外套的顶点按它自己的蒙皮权重跟着骨头走。需要注意的是宽松衣服可能需要额外的布料骨骼或物理模拟，那是另一回事。</p></details>
+  <details class="quiz"><summary>自测：为什么手指骨骼在远处可以不算？</summary><p>远处角色在屏幕上只有几十个像素，手指的细节看不见。去掉手指骨骼后，原本粘在手指上的顶点改为粘在手掌上（制作低精度模型时完成），每帧要算的骨头少了，解压、混合、矩阵计算都同比变少。这就是第 9 章的 LOD 减骨。</p></details>
+</section>

@@ -1,0 +1,85 @@
+<section class="chapter" id="b5">
+  <div class="ch-head">
+    <div class="no">BASICS · B5</div>
+    <h1>名词白话词典：一句话 + 一个类比</h1>
+    <p class="lead">正文里出现的术语，在这里各用一句大白话解释。面试时一个词卡住，整段回答就断了；先保证每个词都能用自己的话说出来。</p>
+  </div>
+
+  <h2>B5.1 资产与数据</h2>
+  <div class="tbl"><table>
+    <tr><th>名词</th><th>一句话白话</th><th>类比 / 例子</th><th>详见</th></tr>
+    <tr><td>Skeleton 骨架</td><td>骨头的名字、父子关系和初始摆法</td><td>一份“人体骨骼名册”，所有衣服和动画都按它对号入座</td><td>第 1 章</td></tr>
+    <tr><td>SkeletalMesh 骨骼网格体</td><td>带蒙皮权重的模型</td><td>皮 + 皮粘在哪根骨头上的说明书</td><td>B1、第 1 章</td></tr>
+    <tr><td>蒙皮 / 蒙皮权重</td><td>每个顶点跟随哪几根骨头、各跟多少</td><td>肘部的皮一半跟上臂、一半跟前臂</td><td>B1、第 2 章</td></tr>
+    <tr><td>参考姿势 Reference Pose</td><td>美术绑定时骨头的摆法（T-Pose / A-Pose）</td><td>量体裁衣时站的那个姿势</td><td>B2、第 1 章</td></tr>
+    <tr><td>Socket 插槽</td><td>挂在某根骨头上的一个“挂钩点”</td><td>手上的挂钩，用来挂武器、特效</td><td>第 1 章</td></tr>
+    <tr><td>Virtual Bone 虚拟骨骼</td><td>在引擎里额外加的、不参与蒙皮的骨头：挂在源骨骼下，位置跟着目标骨骼</td><td>“左手相对右手在哪”的一根参考线，做 IK 目标</td><td>第 1 章、附录 A</td></tr>
+    <tr><td>重定向 Retargeting</td><td>把动画用到体型或骨架不同的角色上</td><td>同一套舞蹈，高个子和矮个子跳出来步幅不同</td><td>第 1 章</td></tr>
+    <tr><td>AnimSequence 动画序列</td><td>一段动画：每根骨头随时间的变换</td><td>一卷胶片，每一格记录骨头怎么摆</td><td>第 2 章</td></tr>
+    <tr><td>关键帧 / 采样 / 插值</td><td>按固定频率存的姿势；播放时在两帧之间按比例补出中间值</td><td>30 帧的数据，在 120 帧的游戏里也流畅</td><td>B1、B4</td></tr>
+    <tr><td>动画压缩</td><td>去掉不动的轨道、降低精度、删掉能插值出来的帧</td><td>把视频压成 mp4</td><td>第 2 章</td></tr>
+    <tr><td>曲线 Curve</td><td>动画里随时间变化的一个数字</td><td>“脸红程度”“脚离地多高”，用来驱动材质、表情、逻辑</td><td>第 2 章</td></tr>
+    <tr><td>Notify / Notify State</td><td>动画时间轴上的事件 / 一段时间区间</td><td>“第 0.3 秒播脚步声”/“0.2~0.5 秒开启伤害判定”</td><td>第 2、7 章</td></tr>
+  </table></div>
+
+  <h2>B5.2 数学与空间</h2>
+  <div class="tbl"><table>
+    <tr><th>名词</th><th>一句话白话</th><th>类比 / 例子</th><th>详见</th></tr>
+    <tr><td>变换 Transform（TRS）</td><td>多大、朝哪、在哪</td><td>FTransform = 缩放 + 四元数旋转 + 平移</td><td>B2</td></tr>
+    <tr><td>局部 / 组件 / 世界空间</td><td>相对父骨骼 / 相对角色根 / 相对地图原点</td><td>“前臂末端 28 cm”/“角色前方 40 cm”/“地图坐标”</td><td>B2</td></tr>
+    <tr><td>FK 正向运动学</td><td>给每节的角度，算末端在哪</td><td>肩转 30°、肘再转 45° → 手在 (33.23, 42.05)</td><td>B2、第 1 章</td></tr>
+    <tr><td>IK 逆向运动学</td><td>给末端目标，反算每节怎么转</td><td>“手要碰到门把手，肩和肘该转多少”</td><td>第 8 章</td></tr>
+    <tr><td>矩阵</td><td>把变换打包成一张表，乘一次就完成变换</td><td>GPU 蒙皮用 3×4 矩阵</td><td>B2</td></tr>
+    <tr><td>欧拉角 / FRotator</td><td>用三个角度描述朝向</td><td>Pitch 抬头低头、Yaw 左右转、Roll 侧翻</td><td>B3</td></tr>
+    <tr><td>万向节锁</td><td>pitch 到 ±90° 时，yaw 和 roll 变成绕同一根轴</td><td>三层陀螺仪的两个环转到了同一平面</td><td>B3</td></tr>
+    <tr><td>四元数 / FQuat</td><td>把“绕哪根轴、转多少”编码成 4 个数</td><td>q = (cos θ/2, n·sin θ/2)</td><td>B3</td></tr>
+    <tr><td>lerp / nlerp / slerp</td><td>直线插值 / 直线插值后拉回球面 / 沿球面匀速插值</td><td>nlerp 快，slerp 匀速</td><td>B3、第 3 章</td></tr>
+    <tr><td>归一化</td><td>把长度调回 1，或把权重调成和为 1</td><td>四元数每隔一段时间要归一化一次</td><td>B3、B4</td></tr>
+    <tr><td>蒙皮矩阵 / 逆绑定矩阵</td><td>“先变成相对骨头的位置，再按骨头当前摆法放回去”</td><td>顶点 55 → 相对手骨 +5 → 手骨移到 70、转 90° → (70, 25)</td><td>B2</td></tr>
+  </table></div>
+
+  <h2>B5.3 混合</h2>
+  <div class="tbl"><table>
+    <tr><th>名词</th><th>一句话白话</th><th>类比 / 例子</th><th>详见</th></tr>
+    <tr><td>Pose 姿势</td><td>某一时刻所有骨头的变换数组</td><td>一张定格照片</td><td>B1</td></tr>
+    <tr><td>混合 Blend / 权重</td><td>几个姿势按票数合成一个，票数和为 1</td><td>走 0.7 + 跑 0.3</td><td>B4、第 3 章</td></tr>
+    <tr><td>交叉淡化 Cross Fade</td><td>过渡期间权重从 0 慢慢变到 1</td><td>视频转场的淡入淡出</td><td>第 7 章</td></tr>
+    <tr><td>加性动画 Additive</td><td>只存“比基准姿势多了多少”，可以叠在任何姿势上</td><td>修图的调整图层</td><td>B4、第 3 章</td></tr>
+    <tr><td>Aim Offset 瞄准偏移</td><td>按瞄准角度挑选并叠加加性姿势</td><td>边跑边把枪口抬高</td><td>第 3 章</td></tr>
+    <tr><td>Blend Space 混合空间</td><td>按 1~2 个参数自动给几条动画分配权重</td><td>速度 290 → 走 0.5 + 慢跑 0.5</td><td>第 4 章</td></tr>
+    <tr><td>重心坐标 / 三角剖分</td><td>三角形里的点按“对面小三角形面积”给三个顶点分票 / 把采样点连成三角形</td><td>图 B4-2</td><td>B4、第 4 章</td></tr>
+    <tr><td>Sync Group 同步组 / Leader / Follower</td><td>让几条循环动画按同一个节奏走；权重最高的定节奏，其余跟着</td><td>齐步走，排头兵喊口令</td><td>第 4 章</td></tr>
+    <tr><td>Sync Marker 同步标记</td><td>在动画里标出左右脚落地，按标记对齐</td><td>“都在左脚落地那一刻对齐”</td><td>第 4 章</td></tr>
+    <tr><td>Layered Blend per Bone 分层骨骼混合</td><td>不同骨头用不同的混合权重</td><td>上半身换弹，下半身照跑</td><td>第 5 章</td></tr>
+    <tr><td>Blend Depth 混合深度</td><td>权重从过滤骨骼开始，花几层骨头从小渐变到 1；负数表示排除这个分支</td><td>腰部逐节过渡，不会“折断”</td><td>第 5 章</td></tr>
+    <tr><td>Mesh Space Rotation Blend</td><td>旋转按“相对角色”的朝向混合，而不是“相对父骨骼”</td><td>不管腿怎么扭，枪口一直对准前方</td><td>第 5 章</td></tr>
+  </table></div>
+
+  <h2>B5.4 动画蓝图与运行时</h2>
+  <div class="tbl"><table>
+    <tr><th>名词</th><th>一句话白话</th><th>类比 / 例子</th><th>详见</th></tr>
+    <tr><td>Animation Blueprint / AnimInstance</td><td>决定“这一帧放什么动画、怎么混”的程序</td><td>动画导演</td><td>第 6 章</td></tr>
+    <tr><td>EventGraph</td><td>收集角色状态、算出变量（游戏线程）</td><td>导演助理去问演员现在跑多快</td><td>第 6 章</td></tr>
+    <tr><td>AnimGraph</td><td>用变量驱动节点，算出最终姿势</td><td>导演按剧本把镜头剪出来</td><td>第 6 章</td></tr>
+    <tr><td>Update / Evaluate</td><td>先推进时间、算权重；再真正采样、混合出姿势</td><td>先排好“谁占多少戏份”，再拍</td><td>第 6 章</td></tr>
+    <tr><td>Proxy 代理</td><td>动画计算用的一份数据拷贝，让它能在别的线程算</td><td>把资料复印一份带走，不占用原件</td><td>第 6 章</td></tr>
+    <tr><td>Fast Path 快速路径</td><td>节点引脚直接读变量，不走蓝图虚拟机</td><td>直接抄答案，不现场演算</td><td>第 6 章、附录 A</td></tr>
+    <tr><td>Property Access / 线程安全函数</td><td>在工作线程里安全读取角色数据 / 可在工作线程运行的函数</td><td>UE5 推荐替代 EventGraph 的写法</td><td>第 6 章</td></tr>
+    <tr><td>Cached Pose 缓存姿势</td><td>把一段子图的结果存起来，多处使用只算一次</td><td>复印件</td><td>第 5 章</td></tr>
+    <tr><td>Compact Pose / RequiredBones</td><td>本帧真正需要计算的那些骨头</td><td>远处角色不算手指</td><td>第 1、9 章</td></tr>
+    <tr><td>State Machine 状态机</td><td>“站、走、跑、跳”这些状态，以及什么条件下切换</td><td>交通信号灯的切换规则</td><td>第 7 章</td></tr>
+    <tr><td>Conduit / State Alias</td><td>状态机里的“路口”/“一组状态的别名”</td><td>减少连线</td><td>第 7 章</td></tr>
+    <tr><td>Inertialization 惯性化</td><td>切换时只算新动画，把新旧之间的差距平滑衰减掉</td><td>急转弯时身体惯性地“甩”过去</td><td>第 7 章</td></tr>
+    <tr><td>Montage 蒙太奇 / Section / Slot</td><td>代码触发的一次性动画 / 它的分段 / 它在 AnimGraph 里插入的位置</td><td>连招：Combo1 → Combo2 → Combo3</td><td>第 7 章</td></tr>
+    <tr><td>Branching Point</td><td>蒙太奇里精确到帧、同步触发的事件</td><td>连招输入窗口</td><td>第 7 章</td></tr>
+    <tr><td>Root Motion 根运动</td><td>由动画里根骨骼的位移来移动角色</td><td>翻滚多远由动画说了算</td><td>第 7 章</td></tr>
+    <tr><td>In-Place 原地动画</td><td>动画原地踏步，移动由代码决定</td><td>跑步机上跑步</td><td>第 7 章</td></tr>
+    <tr><td>Pole / Joint Target</td><td>两骨骼 IK 里决定肘、膝朝哪边弯的参考点</td><td>“膝盖要朝前弯”</td><td>第 8 章</td></tr>
+    <tr><td>Control Rig / IK Rig</td><td>UE5 的节点化绑定与 IK 工具 / IK 目标与重定向设置</td><td>在引擎里做“绑定”</td><td>第 8 章</td></tr>
+    <tr><td>距离匹配 / 步幅调整 / 朝向调整</td><td>按剩余距离选播放位置 / 拉伸步幅贴合速度 / 扭转下半身贴合方向</td><td>减少滑步、减少动画数量</td><td>第 8 章</td></tr>
+    <tr><td>Motion Matching</td><td>每帧在动画库里搜“最像现在、最符合接下来要走的路”的那一帧</td><td>从海量动作捕捉里自动挑镜头</td><td>第 8 章</td></tr>
+    <tr><td>URO / Budget Allocator</td><td>远处角色降低更新频率 / 按总预算分配更新频率</td><td>远处的人少看几眼</td><td>第 9 章</td></tr>
+    <tr><td>LOD</td><td>远处用更简单的模型、更少的骨头</td><td>远景画得粗一点</td><td>第 9 章</td></tr>
+    <tr><td>Leader Pose（旧称 Master Pose）</td><td>部件直接复用主模型的骨骼结果，自己不算</td><td>衣服、头发跟着身体走</td><td>第 9 章</td></tr>
+  </table></div>
+</section>

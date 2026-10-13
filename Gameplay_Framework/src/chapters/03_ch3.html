@@ -1,0 +1,218 @@
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>World 与 Actor 统一 Tick</h1>
+    <p class="lead">一个 List、一个 pending 队列、一次倒序遍历——这就是整个 World 的驱动核心。它解决了什么，倒序遍历到底防住了哪种修改、没防住哪几种，以及它离 UE 的 TickGroup 还差什么。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能逐行讲清 World.Update 的两步：处理 pending、倒序 Tick</li>
+    <li>说出“统一 Tick”相对每个 MonoBehaviour 自己 Update 的好处与代价</li>
+    <li>用 10 种实测情况回答“遍历时删除为什么安全”，并指出倒序遍历的三个真实漏洞</li>
+    <li>说清 IsTickEnabled 与 Unity 的 enabled / activeSelf 为什么是脱钩的</li>
+    <li>知道注册与注销是 O(N²)，以及什么规模下它会成为问题</li>
+    <li>能对照 UE 的 TickGroup、Tick 依赖、TickInterval 讲出改进方向</li>
+  </ul></div>
+
+  <h2>3.1 这一章解决什么问题</h2>
+  <p>“统一 Tick”几乎是每个自研框架都会做的事，面试官对它的追问也非常固定：<strong>好处是什么、新加入的什么时候开始 Tick、遍历中删除怎么办、顺序谁说了算</strong>。项目代码里有一句注释“倒序遍历，安全删除，保证补位索引的元素是已经被遍历过的元素，不会漏读”——这句话只在一种情况下成立。本章用移植版跑了 10 种情况，把它的边界讲清楚。</p>
+
+  <h2>3.2 World.Update 逐行看</h2>
+  <!--code:cs:World.cs:51-88-->
+private void Update()
+{
+    // 1. 处理新增的 AActor
+    if (_pendingAActors.Count > 0)
+    {
+        var newAActors = new List<AActor>(_pendingAActors);   // 拷贝：BeginPlay 里可能再注册新 Actor
+        _pendingAActors.Clear();
+        foreach (var newAActor in newAActors)
+        {
+            if (!_actors.Contains(newAActor))                  // 线性查找
+            {
+                _actors.Add(newAActor);
+                newAActor.BeginPlay();
+            }
+        }
+    }
+    // 2. 驱动所有 AActor 的 Tick
+    float dt = Time.deltaTime;                                 // scaled，且被 maximumDeltaTime 截断
+    for (int i = _actors.Count - 1; i >= 0; i--)               // 倒序
+    {
+        if (_actors[i] == null) { _actors.RemoveAt(i); continue; }   // Unity 的 == 能识别已销毁对象
+        if (_actors[i].HasBegunPlay && _actors[i].IsTickEnabled)
+            _actors[i].Tick(dt);
+    }
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>细节</th><th>作用</th><th>注意</th></tr>
+    <tr><td>先拷贝 pending 再 Clear</td><td>BeginPlay 里新注册的 Actor 进入新的 pending，下一帧处理，不会边遍历边修改</td><td>每帧有新 Actor 时分配一个 List（GC）</td></tr>
+    <tr><td><code>!_actors.Contains</code></td><td>防止重复加入</td><td>O(N)，见 3.6 节</td></tr>
+    <tr><td>BeginPlay 之后同一次 Update 就 Tick</td><td>新 Actor 不用再等一帧</td><td>BeginPlay 与第一次 Tick 之间没有任何其它系统的 Update</td></tr>
+    <tr><td><code>_actors[i] == null</code></td><td>清理“已销毁但没注销”的条目（例如子类 OnDestroy 没调 base）</td><td>依赖 Unity 的 fake null；纯 C# 对象没有这个效果</td></tr>
+    <tr><td><code>HasBegunPlay</code></td><td>没 BeginPlay 的不 Tick</td><td>pending 里的 Actor 不在 _actors，这个条件实际总为 true</td></tr>
+    <tr><td><code>Time.deltaTime</code></td><td>所有 Actor 共用同一个 dt</td><td>暂停时 dt=0 但 Tick 照常调用；Controller 自己判断 <code>timeScale == 0</code></td></tr>
+  </table></div>
+
+  <h2>3.3 统一 Tick：好处与代价</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>每个 MonoBehaviour 自己 Update</th><th>World 统一 Tick（本项目）</th></tr>
+    <tr><td>调用开销</td><td>每个 Update 都是引擎原生层到托管层的一次消息调用</td><td>只有 World 一次原生调用，其余是托管层的虚函数调用</td></tr>
+    <tr><td>开始时刻</td><td>各自的 Start 之后</td><td>统一在 BeginPlay 之后</td></tr>
+    <tr><td>顺序</td><td>Script Execution Order，按<strong>脚本类型</strong>配置</td><td>按注册顺序倒序；可以改成按优先级排序（目前没有）</td></tr>
+    <tr><td>开关</td><td><code>enabled</code> / <code>SetActive</code></td><td><code>IsTickEnabled</code>（与前两者脱钩，3.5 节）</td></tr>
+    <tr><td>统一暂停 / 慢动作 / 分帧</td><td>每个脚本自己处理</td><td>可以在 World 一处实现（目前只是传 dt）</td></tr>
+    <tr><td>覆盖范围</td><td>—</td><td><strong>只覆盖 AActor</strong>：TimerSystem、EventSystem、UI、物理回调都不经过 World</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">【扩展知识】“10000 次 Update”</span>
+    <p>Unity 官方博客《10000 Update() calls》测过：大量 MonoBehaviour 各自 Update 时，开销主要在引擎原生层逐个调用托管方法的过程，而不是 Update 里的代码；改成一个管理器用托管循环调用所有对象，能明显降低这部分开销。本项目的 World 正是这种结构。面试时可以把它作为“统一 Tick 的性能理由”，但要说清：<strong>本项目的 Actor 数量很少，这个收益没有被测量过</strong>，统一 Tick 在这里的主要价值是控制时机和顺序。</p>
+  </div>
+
+  <h2>3.4 遍历中修改列表：倒序遍历到底防住了什么</h2>
+  <p>移植版 F2 在一个按 R1～R3 建模的迷你帧循环里复刻 World.Update：场景里预置 A0～A4（注册顺序即列表顺序，倒序遍历先 Tick A4），第 2 帧触发动作，共跑 3 帧。表中“Tick 次数”依次是第 1/2/3 帧（demo 从 1 计帧）。</p>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>第 2 帧在 Tick 里做了什么</th><th>实测 Tick 次数（第 1/2/3 帧）</th><th>结论</th></tr>
+    <tr><td>C1</td><td>A2 <code>Destroy(自己)</code>（Unity 默认，延迟）</td><td>A2 = 1/1/0，其余 1/1/1</td><td class="yes">安全：帧末才注销，不在遍历中修改</td></tr>
+    <tr><td>C2</td><td>A2 <code>DestroyImmediate(自己)</code></td><td>A2 = 1/1/0，其余 1/1/1</td><td class="yes">安全：删的是当前下标，后面的都已遍历</td></tr>
+    <tr><td>C3</td><td>A2 <code>DestroyImmediate(A3)</code>（下标更高，已 Tick）</td><td>A3 = 1/1/0，其余 1/1/1</td><td class="yes">安全</td></tr>
+    <tr><td>C4</td><td>A3 <code>DestroyImmediate(A1)</code>（下标更低，未 Tick）</td><td><strong>A3 = 1/2/1</strong>，A1 = 1/0/0</td><td class="no">当前 Actor 被 Tick 两次</td></tr>
+    <tr><td>C5</td><td>A3 <code>Destroy(A1)</code>（延迟）</td><td><strong>A1 = 1/1/0</strong></td><td class="mid">被“打死”的 A1 本帧仍 Tick</td></tr>
+    <tr><td>C6</td><td>A4 一次 <code>DestroyImmediate</code> A0、A1、A2</td><td>A3 = 1/<strong>0</strong>/1；日志：“第 2 帧下标 3 越界（List 只剩 2 个）”</td><td class="no">C# 抛 ArgumentOutOfRangeException，本帧剩余 Actor 全部不 Tick</td></tr>
+    <tr><td>C7</td><td>A2 生成新 Actor N</td><td>N：BeginPlay@3，Tick = 0/0/1</td><td class="yes">安全：下一帧 BeginPlay 并 Tick</td></tr>
+    <tr><td>C8</td><td>A4 把 A1 <code>SetActive(false)</code>、A2 <code>enabled=false</code></td><td>A1、A2 = 1/1/1</td><td class="mid">照样 Tick（3.5 节）</td></tr>
+    <tr><td>C9</td><td>同一批 pending：P.BeginPlay 里 <code>DestroyImmediate(Q)</code></td><td>Q 仍执行了 BeginPlay、被加入 _actors，第 3 帧被 null 检查清掉</td><td class="no">已销毁的对象被“复活”执行 BeginPlay</td></tr>
+    <tr><td>C10</td><td>A2 的子类 OnDestroy 没调 base，然后 Destroy(自己)</td><td>A2 = 1/1/0；第 3 帧末列表里没有残留</td><td class="yes">被 <code>== null</code> 检查兜住</td></tr>
+  </table></div>
+  <h3>3.4.1 为什么只对“删自己 / 删已遍历的”安全</h3>
+  <!--code:text:倒序遍历的下标推演（C2 与 C4）-->
+C2：i=2 时删自己                       C4：i=3 时删 A1（下标更低）
+  删前 [A0 A1 A2 A3 A4]   i=2            删前 [A0 A1 A2 A3 A4]   i=3
+  删后 [A0 A1 A3 A4]                     删后 [A0 A2 A3 A4]      ← A3 从下标 3 移到 2
+  下一步 i=1 → A1  ✓                     下一步 i=2 → A3 又被 Tick 一次 ✗
+  被移动的 A3、A4 都已经遍历过             A1 本帧没有被 Tick
+<!--/code-->
+  <p>倒序遍历的本质是：<strong>删除某个下标只会移动它后面的元素，而倒序时“后面”都已经访问过</strong>。所以删自己、删更高下标都安全；删更低下标会把当前元素（以及中间的元素）整体前移一格，下一次 <code>i--</code> 又落到当前元素上。一次删多个更低下标的元素时，列表长度可能小于 <code>i</code>，直接越界。</p>
+  <h3>3.4.2 那项目里实际会不会发生</h3>
+  <p>看真实的调用路径：项目里所有 Actor 都用 <code>Destroy</code>（延迟），注销发生在帧末的 OnDestroy，<strong>不在遍历之内</strong>；整个仓库唯一的 <code>DestroyImmediate</code> 在 SphereSpawner 的计时器回调里，那个对象也不是 AActor，SphereSpawner 也没有挂在任何场景。所以<strong>当前代码里，遍历中真正发生的删除只有循环自己那行 <code>RemoveAt</code></strong>，倒序遍历在“现在”是够用的。问题在于它给人“随便删都安全”的错觉：以后有人在 Tick 里 DestroyImmediate、或者直接调 UnregisterAActor，就会遇到 C4、C6、C9。</p>
+  <div class="co warn"><span class="h">【问题】C9：BeginPlay 里销毁同批的另一个 Actor</span>
+    <p>处理 pending 时遍历的是拷贝出来的 <code>newAActors</code>。P 的 BeginPlay 里 DestroyImmediate(Q)：Q 的 OnDestroy 调 UnregisterAActor，但 Q 此时既不在 <code>_actors</code>（还没轮到它），也不在 <code>_pendingAActors</code>（已经 Clear），注销什么也没做；随后循环轮到 Q，<code>Contains</code> 为 false，于是 Q 被加入列表并执行 BeginPlay——在一个已经销毁的对象上。C# 对象还在，BeginPlay 能执行，但访问 <code>transform</code> 之类就会抛 MissingReferenceException。</p>
+  </div>
+  <div class="co tip"><span class="h">面试注意：说清楚“现在安全”和“结构安全”</span>
+    <p>不要说“倒序遍历所以删除是安全的”。准确的说法是：“倒序遍历保证删除当前元素和已遍历元素是安全的；我们的 Actor 都用延迟销毁，注销发生在帧末，所以当前不会在遍历中删除别人。但如果有人在 Tick 里同步删除更低下标的 Actor，当前 Actor 会被 Tick 两次，批量删除还会越界——我用移植版测过。结构上更稳妥的做法是延迟删除：遍历中只做标记，遍历结束后统一清理。”</p>
+  </div>
+
+  <h2>3.5 IsTickEnabled 与 enabled / activeSelf 脱钩</h2>
+  <p>F2-C8：把 A1 的 GameObject 设为不激活、A2 的组件 <code>enabled = false</code>，World 照样 Tick 它们。原因很简单：World 只检查自己定义的 <code>IsTickEnabled</code>，从不读 Unity 的 <code>isActiveAndEnabled</code>。</p>
+  <ul>
+    <li><b>好处</b>：Tick 开关和 Unity 的显示 / 组件开关可以独立控制，例如一个隐藏起来的管理者仍然需要 Tick。</li>
+    <li><b>代价</b>：习惯 Unity 的人会以为“禁用组件 = 不再更新”。对象池的包装类 <code>GameObjectWrapper</code> 就意识到了这一点：回收时先 <code>SetActorTickEnabled(false)</code> 再 <code>SetActive(false)</code>，出池时反过来——字段注释写着“兼容对象池”。但对象池目前没有启用（第 11 章），所以这段配合没有被真实运行过。</li>
+  </ul>
+  <div class="co warn"><span class="h">【问题】三种“停用”语义并存</span>
+    <p>SetActive(false)：Unity 停止该对象所有 Update 和渲染，但 World 照常 Tick；enabled=false：同上；SetActorTickEnabled(false)：World 停止 Tick，但 Unity 的其它回调（物理碰撞）照常。一个对象可以处在“看不见但在 Tick”或“在 Tick 但不碰撞”的组合状态，排查时很容易漏掉其中一个开关。</p>
+  </div>
+
+  <h2>3.6 注册与注销：O(N²) 在什么规模下成为问题</h2>
+  <p><code>List.Contains</code> 和 <code>List.Remove</code> 都是线性查找。注册 N 个 Actor 时，每次都要扫描 <code>_actors</code> 和 <code>_pendingAActors</code>；首帧处理 pending 时每个都要再扫一遍 <code>_actors</code>；切场景时 N 个 OnDestroy 各做一次查找加搬移。三者都是 O(N²)。移植版 F1 的实测：</p>
+  <!--bars {"title":"F1 · World 的注册 / 首帧 BeginPlay / 注销耗时（C++ 移植，ms）","items":[["N=1000 注册",0.041,"b"],["N=1000 首帧 pending",0.038,"b"],["N=1000 全部注销",0.024,"b"],["N=5000 注册",0.691,"o"],["N=5000 首帧 pending",0.673,"o"],["N=5000 全部注销",0.353,"o"],["N=20000 注册",10.662,"r"],["N=20000 首帧 pending",9.558,"r"],["N=20000 全部注销",7.944,"r"],["N=20000 哈希集合注册",0.902,"g"],["N=20000 一帧 Tick",0.021,"g"]],"labw":190,"unit":"ms","cap":"<b>图 3-1</b>　实测 F1（demos/framework_output.txt）。N 从 5000 增加到 20000（4 倍），三项分别增加 15、14、22 倍，与 O(N²) 的 16 倍同一量级。2 万个 Actor 时，开局注册和首帧 BeginPlay 各约 10 ms，切场景注销约 8 ms；换成哈希集合判重，注册降到 0.9 ms。相比之下一帧 Tick 2 万个只要 0.021 ms"} -->
+  <p>结论要分规模说：SoulDecay 同时存在的 Actor 只有几十个，这里完全不是瓶颈；但如果拿这个 World 去做“开局生成上万个单位”的玩法（弹幕、RTS、大量子弹），开局那一帧会多出十几毫秒，切场景也会卡一下。C++ 移植的绝对数字比 C# 小，但增长趋势是一样的。</p>
+
+  <h2>3.7 顺序：谁先 Tick</h2>
+  <ul>
+    <li><b>Actor 之间</b>：注册顺序的倒序。SoulDecay 每刷一个 AI 都是先生成肉体、再生成灵魂，所以列表里是 [..., AI 肉体, AI 灵魂]，倒序遍历时<strong>灵魂（Controller）先于肉体（Pawn）Tick</strong>。这恰好是“先读输入再移动”的顺序，但它是生成顺序的副作用，不是规则；同一帧内多个对象的 Start 顺序（从而注册顺序）Unity 也不保证。</li>
+    <li><b>World 与其它系统</b>：World、TimerSystem、EventSystem、UI 四个 Update 之间没有配置 Script Execution Order，<strong>不保证先后</strong>。同一帧里 Trigger 的事件是本帧派发还是下一帧派发，取决于 EventSystem 排在 World 前面还是后面（第 7 章）。</li>
+    <li><b>Tick 与物理</b>：CombatPawn 带 Rigidbody，却由 Controller 在 Tick（Update 阶段）里直接改 Transform；碰撞回调在物理阶段，不经过 World（第 15 章）。</li>
+  </ul>
+
+  <h2>3.8 离 UE 的 Tick 系统还差什么</h2>
+  <div class="tbl"><table>
+    <tr><th>UE 的机制</th><th>作用</th><th>本项目</th></tr>
+    <tr><td>TickGroup（PrePhysics / DuringPhysics / PostPhysics / PostUpdateWork …）</td><td>按与物理的先后分阶段</td><td>只有一个阶段（Update），物理在外面</td></tr>
+    <tr><td>Tick 前置依赖（AddTickPrerequisiteActor / Component）</td><td>显式声明“A 在 B 之后 Tick”</td><td>靠注册顺序的副作用</td></tr>
+    <tr><td>TickInterval</td><td>每 N 秒 Tick 一次，降低远处对象开销</td><td>无</td></tr>
+    <tr><td>BeginPlay 时注册 Tick、EndPlay 时注销</td><td>Tick 与生命周期绑定</td><td>HasBegunPlay 检查（一致）</td></tr>
+    <tr><td>组件各自的 TickFunction</td><td>Actor 和组件可以分开 Tick</td><td>AActor 本身就是组件，没有子组件 Tick</td></tr>
+    <tr><td>TickTaskManager 可并行执行部分 Tick</td><td>多核利用</td><td>单线程</td></tr>
+    <tr><td>Significance Manager / Tick LOD</td><td>按重要性降频</td><td>无</td></tr>
+  </table></div>
+
+  <h2>3.9 Code Review：World 遍历相关问题</h2>
+  <div class="tbl"><table>
+    <tr><th>当前设计</th><th>问题</th><th>影响</th><th>改进方向（不写代码）</th></tr>
+    <tr><td>倒序遍历 + 遍历中直接删除</td><td>只防删自己 / 已遍历元素</td><td>同步删更低下标：重复 Tick（C4）、越界中止整帧（C6）</td><td>延迟删除：遍历中只标记，遍历后统一清理；或 swap-and-pop + 墓碑</td></tr>
+    <tr><td>处理 pending 时遍历拷贝</td><td>不检查 Actor 是否已销毁</td><td>已销毁对象被 BeginPlay（C9）</td><td>BeginPlay 前判断 <code>== null</code></td></tr>
+    <tr><td>List.Contains / Remove 判重</td><td>O(N²)</td><td>2 万个 Actor 时开局约 10 ms × 2、注销约 8 ms（F1）</td><td>Actor 上记录自己在列表中的下标或状态；或哈希集合判重</td></tr>
+    <tr><td>IsTickEnabled 独立于 enabled / activeSelf</td><td>三种停用语义并存</td><td>“禁用了还在 Tick”（C8）</td><td>明确文档约定，或在 World 里同时检查 <code>isActiveAndEnabled</code></td></tr>
+    <tr><td>Destroy 延迟</td><td>被销毁的 Actor 本帧仍 Tick</td><td>“死后出手”（C5）</td><td>Destroy 时同步关闭 Tick / 标记 PendingKill</td></tr>
+    <tr><td>单一 Update 阶段、注册顺序决定先后</td><td>没有分组和依赖</td><td>Controller 先于 Pawn 只是巧合</td><td>引入 TickGroup / 优先级；World 自己用 PlayerLoop 注册到确定阶段</td></tr>
+    <tr><td>每帧有新 Actor 时 <code>new List</code></td><td>分配</td><td>刷怪频繁时的 GC</td><td>复用一个缓存 List（TimerSystem 已经这样做）</td></tr>
+  </table></div>
+
+  <h2>3.10 面试追问树</h2>
+  <!--code:text:追问树 · World Tick-->
+Q3-1 为什么要统一 Tick？好处是什么？
+ ├── Q3-2 统一之后，谁先 Tick？Controller 和 Pawn 谁先？           ← 注册顺序的副作用
+ └── Q3-3 TimerSystem / UI 也是 World 驱动的吗？                   ← 覆盖范围
+Q3-4 新加入的 Actor 什么时候开始 Tick？
+Q3-5 Tick 中删除 Actor 为什么不会出错？                            ← 本章核心
+ ├── Q3-6 删一个下标更低的会怎样？删三个呢？                        ← C4 / C6
+ ├── Q3-7 那项目里到底会不会遇到？                                  ← 只有延迟销毁
+ └── Q3-8 你会怎么改？标记删除和 swap-and-pop 各有什么代价？
+Q3-9 SetActive(false) 的 Actor 还会 Tick 吗？                     ← 脱钩
+Q3-10 有一万个 Actor 时，World 的哪一步最慢？                      ← O(N²) 注册
+Q3-11 物理对象为什么不应该在 Tick 里改 Transform？                 ← 发散到 FixedUpdate
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q3-1 → Q3-3　为什么统一 Tick？</div>
+    <p><b>L1 · 30 秒</b>　让所有 Actor 在同一个入口、同一个开始时刻被驱动：World 先统一 BeginPlay 新 Actor，再遍历 Tick，暂停、开关 Tick、排序都可以集中处理。</p>
+    <p><b>L2 · 正常回答</b>　每个 MonoBehaviour 自己 Update 时，顺序只能按脚本类型配置，开始时刻由各自的 Start 决定；统一之后，World 一个 Update 驱动全部 Actor，新 Actor 在下一帧开头统一 BeginPlay，Tick 只发给已 BeginPlay 且 IsTickEnabled 的。另外 Unity 官方测过，大量 Update 的开销主要在原生层到托管层的消息调用，一个管理器循环调用能省掉这部分——不过我的 Demo 规模太小，没有测这个收益。</p>
+    <p><b>L3 · 深入</b>　要说清它覆盖的范围：只覆盖 AActor。TimerSystem、EventSystem、UI 各有自己的 Update，四者之间没有配置执行顺序；物理回调也不经过 World。所以“统一”目前只统一了 Actor 之间，没有统一系统之间——这是我想改的：用 PlayerLoop 把 World、Timer、Event 注册成固定顺序的阶段。</p>
+    <p><b>L4 · 面试官攻击</b>　“你说可以统一暂停，那你实现了吗？” → 没有。现在暂停靠 timeScale=0 让 dt 变成 0，Tick 照常调用，Controller 里自己判断 timeScale 后 return。真正的统一暂停应该在 World 里按对象类别决定是否 Tick（比如 UI 动画继续、游戏逻辑停止），这一点我的框架还没做到。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q3-5 → Q3-8　Tick 中删除为什么不出错？</div>
+    <p><b>L1</b>　倒序遍历：删除一个元素只会移动它后面的元素，倒序时后面的都已经遍历过，所以删自己是安全的。</p>
+    <p><b>L2</b>　但它只对删自己和删已遍历元素成立。我用移植版测了 10 种情况：同步删一个下标更低的，当前 Actor 会被 Tick 两次；一次删三个，下标越界，C# 抛异常，本帧剩下的 Actor 全部不 Tick；BeginPlay 里销毁同批 pending 的另一个 Actor，那个已经销毁的对象还会被 BeginPlay。</p>
+    <p><b>L3</b>　为什么项目没出事：所有 Actor 都用 Destroy，Unity 把销毁推迟到本帧 Update 之后，注销发生在 OnDestroy，不在遍历里；整个仓库唯一的 DestroyImmediate 也不作用于 Actor。所以“现在安全”，但不是“结构安全”。</p>
+    <p><b>L4 攻击</b>　“你会怎么改？” → 延迟删除：注销只标记，遍历结束后统一清理，代价是一个标记位和一次额外遍历。如果还想 O(1) 删除，可以用 swap-and-pop，但它会打乱 Tick 顺序——我的 TimerSystem 就是这样，同帧回调顺序不等于创建顺序；对于需要稳定顺序的 Actor Tick，标记删除更合适。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q3-9　SetActive(false) 的 Actor 还会 Tick 吗？</div>
+    <p><b>L2</b>　会。World 只看自己定义的 IsTickEnabled，不看 Unity 的 isActiveAndEnabled，实测把 GameObject 设成不激活、把组件 enabled 设成 false，都照样 Tick。这是有意脱钩的：对象池的包装类在回收时会先关 Tick 再 SetActive(false)。但这意味着项目里有三个独立的开关，排查“为什么它还在动”时要三个都看。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q3-10　一万个 Actor 时哪一步最慢？</div>
+    <p><b>L2</b>　不是 Tick，而是注册和注销。List.Contains 和 Remove 都是线性查找，注册 N 个、首帧 BeginPlay N 个、切场景注销 N 个都是 O(N²)。移植版实测 2 万个时三项分别约 10.7、9.6、7.9 毫秒，而一帧 Tick 2 万个只要 0.02 毫秒。改进是让 Actor 记住自己在列表里的位置或状态，或者用哈希集合判重，同样规模注册降到 0.9 毫秒。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“我用倒序遍历，所以 Tick 里删除任何 Actor 都是安全的。”</p>
+    <p><b>问题</b>：删更低下标会重复 Tick，批量删除会越界（实测 C4、C6）。</p>
+    <p><b>更好的回答</b>：“倒序遍历保证删除当前和已遍历的元素安全；项目里统一用延迟销毁，注销在帧末发生。如果要支持遍历中同步删除，应该改成标记删除。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“统一 Tick 之后，整个游戏的更新顺序就确定了。”</p>
+    <p><b>问题</b>：只确定了 Actor 之间（而且是注册顺序的副作用）；World、Timer、Event、UI 四个 Update 之间仍然不确定，物理回调也在外面。</p>
+    <p><b>更好的回答</b>：“Actor 之间按注册顺序倒序 Tick；系统之间没有配置执行顺序，这是我想用 PlayerLoop 显式固定的。”</p>
+  </div>
+
+  <h2>3.11 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">C++ 迭代器失效</div><p><code>vector::erase</code> 使被删位置及之后的迭代器失效，正确写法是 <code>it = v.erase(it)</code>，批量删除用 erase-remove 惯用法（C++20 有 <code>std::erase_if</code>）。为什么会追过去：遍历中删除是所有语言共同的问题，C++ 岗一定会问到这里。</p></div>
+    <div class="card"><div class="t">C# 的 foreach 版本号</div><p>List 内部有一个版本号，每次增删都会 +1；foreach 的枚举器每次 MoveNext 都会检查，不一致就抛 InvalidOperationException。下标循环没有这个检查，所以是“静默出错”。</p></div>
+    <div class="card"><div class="t">ECS 的结构性修改</div><p>遍历组件时不能增删实体或组件，通常记录到命令缓冲（Command Buffer），在系统之间统一回放。这和 World 的 pending 队列是同一种思路：把结构修改推迟到遍历之外。</p></div>
+    <div class="card"><div class="t">固定步长</div><p>物理和需要确定性的逻辑用固定 dt（FixedUpdate / 累加器），渲染和表现用可变 dt。带 Rigidbody 的 Pawn 在 Update 里改 Transform，会和物理模拟互相覆盖（第 15 章）。</p></div>
+    <div class="card"><div class="t">Tick 降频与分帧</div><p>远处的 AI 每 0.2 秒更新一次、一万个单位分 10 帧轮流更新——这是 TickInterval 和 Significance 的思想，也是“统一 Tick”之后才容易实现的优化。</p></div>
+    <div class="card"><div class="t">数据导向的更新</div><p>同类对象的数据放进连续数组批量更新（第 9 章 B1 的 cache 实测），比遍历一个存放各种 Actor 的 List 并逐个虚函数调用更友好。统一 Tick 是向这个方向演进的第一步。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>World.Update = <strong>拷贝 pending → 判重加入 → BeginPlay；倒序遍历 → 清理 fake null → HasBegunPlay && IsTickEnabled 才 Tick</strong>。</li>
+    <li>倒序遍历只防<strong>删自己 / 删已遍历</strong>；同步删更低下标重复 Tick（C4：A3 = 2 次），一次删三个越界中止整帧（C6），BeginPlay 中销毁同批对象会被“复活”（C9）。</li>
+    <li>项目里所有 Actor 用延迟 Destroy，注销在帧末，所以<strong>现在安全、结构上不安全</strong>；被 Destroy 的 Actor 本帧仍 Tick（C5）。</li>
+    <li>IsTickEnabled 与 enabled / activeSelf <strong>脱钩</strong>（C8）。注册、首帧、注销都是 <strong>O(N²)</strong>：2 万个约 10.7 / 9.6 / 7.9 ms（F1）。</li>
+    <li>顺序：Actor 之间是注册顺序倒序（Controller 先于 Pawn 只是副作用），系统之间不确定；没有 TickGroup、依赖、TickInterval。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：列表是 [A0..A4]，A4 在 Tick 中 DestroyImmediate(A3)，本帧每个 Actor 被 Tick 几次？</summary><p>A4 是倒序遍历的第一个（i=4），A3 是更低下标、本帧还没 Tick。删除 A3 后 A4 从下标 4 移到 3，下一步 i=3 又 Tick 一次 A4。结果：A4 两次，A3 零次，其余一次。规律与 C4 相同。</p></details>
+  <details class="quiz"><summary>自测 2：为什么 <code>_actors[i] == null</code> 这一行对纯 C# 对象没用、对 MonoBehaviour 有用？</summary><p>UnityEngine.Object 重载了 ==，原生对象被销毁后与 null 比较返回 true；纯 C# 对象只要还被列表引用就不会是 null。这一行实际清理的是“已销毁但没注销”的 Actor（例如子类 OnDestroy 没调 base，实测 C10）。</p></details>
+  <details class="quiz"><summary>自测 3：要让“同帧删除”在结构上安全、又保持 Tick 顺序稳定，用 swap-and-pop 还是标记删除？为什么？</summary><p>标记删除。swap-and-pop 删除是 O(1)，但会把末尾元素换到被删位置，改变遍历顺序；标记删除只设标志，遍历时跳过，遍历结束后用一次保序压缩清理，顺序不变。</p></details>
+</section>

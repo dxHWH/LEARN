@@ -1,0 +1,43 @@
+
+==================== H1 借条安全：原 ObjectPool vs 带 generation 的新池（同一操作序列） ====================
+a) 陈旧拷贝归还：原池 Recycle=成功（b 的对象 inUse=false，被别人回收了）｜新池 Release=拒绝（b 仍在用=true，句柄 a=(0,1) b=(0,2)）
+b) default 借条：原池 通过两项检查后对 null 调 OnRecycle（C# 中 NullReferenceException）｜新池 IsValid(default)=false（generation 从 1 开始）
+c) OnRecycle 里再回收自己：原池 同一槽位被压栈两次 → 接下来两次借出拿到同一对象=true｜新池 内层 Release=拒绝，两次借出是同一对象=false
+d) 同一借条归还两次：新池 第一次=成功 第二次=拒绝（原池同样能拦截，靠 IsAvailable）
+
+==================== H2 在 World Tick 里回收 Actor：立即回收 vs 标记 PendingKill、帧末统一回收 ====================
+A3 的 Tick 回收 A1（玩家夺舍 → 踢出的 AI 灵魂被回收）
+   立即回收 Tick 次数：A0=1 A1=0 A2=1 A3=2 A4=1 ｜本帧正常结束｜帧末名单 4 个
+   延迟回收 Tick 次数：A0=1 A1=0 A2=1 A3=1 A4=1 ｜本帧正常结束｜帧末名单 4 个
+A4 的 Tick 回收 A0、A1、A2（一次结算回收多个）
+   立即回收 Tick 次数：A0=0 A1=0 A2=0 A3=0 A4=1 ｜本帧越界中止｜帧末名单 2 个
+   延迟回收 Tick 次数：A0=0 A1=0 A2=0 A3=1 A4=1 ｜本帧正常结束｜帧末名单 2 个
+A2 的 Tick 回收自己
+   立即回收 Tick 次数：A0=1 A1=1 A2=1 A3=1 A4=1 ｜本帧正常结束｜帧末名单 4 个
+   延迟回收 Tick 次数：A0=1 A1=1 A2=1 A3=1 A4=1 ｜本帧正常结束｜帧末名单 4 个
+
+==================== H3 延迟回收：尸体被提前回收并被复用后，3 秒前安排的回收计时器到期 ====================
+【朴素做法】计时器捕获对象引用，到期时只检查“对象是否活跃”
+   t=0.0 生成 X(0,1)  t=0.5 安排 3 秒后回收 X  t=1.0 X 被提前回收（清场 / 被碾碎）  t=1.5 刷怪：拿到同一个对象 Y(0,2)  t=3.5 计时器回收了“红队 AI 肉体Y”  
+   → Y 仍在场上=false（一只活着的 AI 被凭空回收）
+【新设计】计时器捕获的是安排时的 PoolHandle
+   t=0.0 生成 X(0,1)  t=0.5 安排 3 秒后回收 X  t=1.0 X 被提前回收（清场 / 被碾碎）  t=1.5 刷怪：拿到同一个对象 Y(0,2)  t=3.5 计时器：借条已失效，忽略  
+   → Y 仍在场上=true
+
+==================== H4 同一具肉体被复用 3 次：BeginPlay、World 名单与状态复位 ====================
+【原方案】GameObjectWrapper：SetActive + IsTickEnabled 开关（不注销、不复位）
+   第 1 轮：出池时 isDying=false 碰撞体=开 被玩家抛弃会延迟回收=true ｜累计 BeginPlay=1｜闲置时仍在 World 名单=true
+   第 2 轮：出池时 isDying=true  碰撞体=关 被玩家抛弃会延迟回收=false｜累计 BeginPlay=1｜闲置时仍在 World 名单=true
+   第 3 轮：出池时 isDying=true  碰撞体=关 被玩家抛弃会延迟回收=false｜累计 BeginPlay=1｜闲置时仍在 World 名单=true
+【新设计】SpawnActor / DestroyActor：EndPlay + 注销 + OnReturnToPool 复位，出池重新注册
+   第 1 轮：出池时 isDying=false 碰撞体=开 被玩家抛弃会延迟回收=true ｜累计 BeginPlay=1｜闲置时仍在 World 名单=false
+   第 2 轮：出池时 isDying=false 碰撞体=开 被玩家抛弃会延迟回收=true ｜累计 BeginPlay=2｜闲置时仍在 World 名单=false
+   第 3 轮：出池时 isDying=false 碰撞体=开 被玩家抛弃会延迟回收=true ｜累计 BeginPlay=3｜闲置时仍在 World 名单=false
+
+==================== H5 模拟一局 10 分钟 SoulDecay：GameObject 创建 / 销毁次数（无池 vs 有池） ====================
+种类   | 借出次数 | 归还次数 | 峰值同时 | 有池·创建 | 有池·溢出销毁
+轻型肉体 |      117 |      115 |        8 |          8 |            0
+重型肉体 |       84 |       78 |        6 |          6 |            0
+AI 灵魂 |      200 |      194 |        7 |          7 |            0
+无池：Instantiate/AddComponent 共 401 次，Destroy 共 387 次
+有池（prewarm=0, maxIdle=32）：创建 21 次（= 各池峰值之和），销毁 0 次；若 prewarm 取峰值，局内创建 0 次

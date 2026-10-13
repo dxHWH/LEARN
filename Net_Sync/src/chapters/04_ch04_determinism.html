@@ -1,0 +1,143 @@
+<section class="chapter" id="ch4">
+<div class="ch-head"><div class="no">CHAPTER 04</div><h1>确定性工程：让十台设备算出同一个比特</h1><p class="lead">帧同步最危险的故障不是卡，而是“静默分叉”：某一帧某个浮点数末位不同，之后每一帧都在放大，最后变成“我明明打中了却没伤害”。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>说清浮点“不确定”的真正来源：不是 IEEE 754 本身，而是编译器、指令集、数学库和运算顺序。</li>
+<li>亲眼看到：同一份源码、同一台机器，只换编译选项，600 帧群体模拟的 hash 就不同；定点版三份完全一致。</li>
+<li>会写 Q16.16 定点数的乘除、开方、正弦，知道精度和溢出的代价。</li>
+<li>掌握随机、容器顺序、时间累加等其他确定性陷阱，以及 desync 的检测和定位方法。</li>
+</ul></div>
+
+<div class="ans30"><span class="h">30 秒面试版答案</span>
+<p>帧同步要求相同输入得到逐位相同的结果。IEEE 754 的加减乘除开方本身是确定的，问题出在<strong>编译器重排和 FMA 收缩（/fp:fast）、不同指令集、各平台数学库的 sin/cos 实现、并行归约顺序</strong>，所以跨平台帧同步一般用<strong>定点数</strong>（如 Q16.16 / Q32.32，整数运算处处一致）。其他陷阱：随机数要用同步种子的确定性生成器，且表现层不能偷用逻辑随机；不能依赖 unordered_map / 指针地址的遍历顺序；逻辑不能读墙钟、不能用浮点累加时间；逻辑层单线程；不用引擎物理。出了 desync 靠<strong>周期性上报帧 hash</strong>发现，靠分层 hash、逐帧日志 diff 和录像重放定位。HOK 把战斗逻辑整体放进独立的 C++ GameCore，物理上隔绝了引擎的浮点、时钟、随机和容器。</p></div>
+
+<h2>4.1 确定性的敌人</h2>
+<div class="tbl"><table>
+<tr><th>敌人</th><th>典型例子</th><th>对策</th></tr>
+<tr><td>浮点差异</td><td><code>/fp:fast</code> 重排、FMA、x87 80 位中间结果、sin/cos 库不同、SIMD 归约顺序</td><td>定点数；或锁死编译器 + 指令集 + 自研数学函数（只在同平台成立）</td></tr>
+<tr><td>随机</td><td>各端种子不同；表现层（特效、UI）调用了逻辑随机，导致调用次数不同</td><td>可播种的同步随机源，种子随开局下发；逻辑随机与表现随机严格分开</td></tr>
+<tr><td>遍历顺序</td><td><code>unordered_map</code>、按指针地址排序的 <code>set</code>、<code>std::hash&lt;string&gt;</code> 跨标准库不同</td><td>有序容器或稳定 id 排序；自定义哈希</td></tr>
+<tr><td>时间依赖</td><td>逻辑里读本地时钟、用 <code>deltaTime</code>、浮点累加时间</td><td>只用逻辑帧号</td></tr>
+<tr><td>多线程</td><td>并行更新单位，写入顺序不定</td><td>逻辑层单线程串行（或严格的确定性 Job 划分）</td></tr>
+<tr><td>未定义行为</td><td>未初始化变量、越界读、有符号溢出</td><td>静态检查、ASan、确定性回归测试</td></tr>
+<tr><td>第三方物理</td><td>PhysX / Chaos 的求解器、多线程岛屿、浮点</td><td>自研定点碰撞（圆、胶囊、格子），或只用于表现</td></tr>
+<tr><td>版本差异</td><td>客户端版本 / 配置表不一致</td><td>开局校验版本与配置 hash；录像绑定版本</td></tr>
+</table></div>
+
+<h2>4.2 浮点为什么会“不一样”</h2>
+<p>先澄清一个常见误解：<strong>IEEE 754 规定加、减、乘、除、开方必须正确舍入</strong>，同样的指令、同样的操作数，在任何符合标准的硬件上结果都一样。不一样来自“指令序列不一样”：</p>
+<ul>
+<li><strong>结合律</strong>：浮点加法不满足结合律，<code>(a+b)+c ≠ a+(b+c)</code>。编译器在 <code>/fp:fast</code> / <code>-ffast-math</code> 下会重排、向量化求和。</li>
+<li><strong>FMA 收缩</strong>：<code>a*b+c</code> 被融合成一条指令，只舍入一次，结果和分两步不同；是否生成取决于编译选项和目标指令集（AVX2 / ARMv8 都有 FMA）。</li>
+<li><strong>中间精度</strong>：老的 32 位 x87 用 80 位寄存器保存中间结果，何时溢出到内存（截断成 32 / 64 位）取决于寄存器分配。</li>
+<li><strong>超越函数</strong>：<code>sin / cos / exp / pow</code> 不要求正确舍入，各平台、各版本的数学库实现不同。</li>
+</ul>
+<h3>实测 D1：同一组数，三种求和顺序 <span class="tag ex">实测 D1</span></h3>
+<!--dtab {"rows":"detc.d1","cols":[["编译选项","opt"],["正序累加","fwd",".1f"],["倒序累加","bwd",".1f"],["两两归约","pair",".1f"],["double 参考值","exact",".1f"]],"cap":"<b>表 4-1</b> 100 万个 float 求和（determinism_demo.cpp D1）。同一份代码里换个顺序结果就差几十万；<code>/fp:fast /arch:AVX2</code> 下编译器把正序累加向量化了，结果又变了。"} -->
+<h3>实测 D2 / D3：600 帧群体模拟的逐帧 hash <span class="tag ex">实测 D2 · D3</span></h3>
+<p>48 个单位在 20 m × 20 m 场地里转向、互相排斥、撞墙反弹（有 <code>sin / cos / sqrt</code> 和大量 <code>a*b+c</code>），每帧把所有坐标的比特做 FNV-1a 哈希。同一份源码编译三次：</p>
+<div class="tbl"><table>
+<tr><th>编译选项</th><th>浮点版 600 帧 hash</th><th>定点版（Q16.16）600 帧 hash</th></tr>
+<tr><td><code>/O2 /fp:precise</code></td><td><code>[[detc.fp]]</code></td><td><code>[[detc.fixed]]</code></td></tr>
+<tr><td><code>/Od /fp:strict</code>（关优化）</td><td><code>[[det.strict.D2.final]]</code>（与 precise 逐帧一致）</td><td><code>[[det.strict.D3.final]]</code></td></tr>
+<tr><td><code>/O2 /fp:fast /arch:AVX2</code></td><td class="no"><code>[[detc.ff]]</code>（第 [[detc.firstdiff]] 帧起就不同）</td><td class="yes"><code>[[det.fast.D3.final]]</code></td></tr>
+</table></div>
+<p>三个观察：① <code>/fp:precise</code> 和 <code>/fp:strict</code> 即使优化级别不同，结果也逐帧相同——说明“开优化”本身不是问题，<strong>允许改变浮点语义的选项</strong>才是；② <code>/fp:fast /arch:AVX2</code> 第一帧就分叉了（三角函数和 FMA 的差异在第一次计算就出现）；③ 定点版三份完全相同。现实中，Android 用 Clang、iOS 用 Apple Clang、PC 用 MSVC，CPU 有 ARM 有 x86，同一份浮点代码要逐位一致几乎不可能——这就是移动端帧同步普遍上定点数的原因。</p>
+
+<h2>4.3 定点数：用整数表示小数</h2>
+<p>Q16.16：用 32 位有符号整数 $v$ 表示实数 $v / 2^{16}$，整数部分 16 位（约 ±32768）、小数精度 $1/65536 \approx 1.5\times10^{-5}$。加减就是整数加减；乘除要借 64 位中间结果：</p>
+$$a \cdot b \;\to\; \frac{a_{\text{raw}} \cdot b_{\text{raw}}}{2^{16}},\qquad \frac{a}{b} \;\to\; \frac{a_{\text{raw}} \cdot 2^{16}}{b_{\text{raw}}}$$
+<!--code:cpp:Q16.16 定点数核心运算（与 demos/determinism_demo.cpp 完全一致，只用整数）-->
+typedef int32_t fx;                                   // 实数 = raw / 65536
+const fx ONE = 1 << 16;
+inline fx fmul(fx a, fx b) { return (fx)(((int64_t)a * b) >> 16); }   // 64 位中间结果防溢出
+inline fx fdiv(fx a, fx b) { return (fx)(((int64_t)a << 16) / b); }
+
+uint32_t isqrt64(uint64_t v) {                         // 逐位开方：结果向下取整，处处一致
+    uint64_t r = 0, bit = 1ULL << 62;
+    while (bit > v) bit >>= 2;
+    while (bit) { if (v >= r + bit) { v -= r + bit; r = (r >> 1) + bit; } else r >>= 1; bit >>= 2; }
+    return (uint32_t)r;
+}
+inline fx fsqrt(fx a) { return a <= 0 ? 0 : (fx)isqrt64((uint64_t)a << 16); }
+
+const fx PI = 205887, TWO_PI = 411775, HALF_PI = 102944;
+fx fsin(fx x) {                                        // 区间规约到 [-π/2, π/2] + 7 次泰勒多项式
+    x %= TWO_PI;
+    if (x > PI) x -= TWO_PI;
+    if (x < -PI) x += TWO_PI;
+    if (x > HALF_PI) x = PI - x;
+    if (x < -HALF_PI) x = -PI - x;
+    fx x2 = fmul(x, x), x3 = fmul(x2, x), x5 = fmul(x3, x2), x7 = fmul(x5, x2);
+    return x - x3 / 6 + x5 / 120 - x7 / 5040;
+}
+<!--/code-->
+<p>精度实测：<code>fsin</code> 最大误差 [[det.precise.D7.sin|.2e]]，<code>fsqrt</code> 最大误差 [[det.precise.D7.sqrt|.2e]]（约 1 个最低位）<span class="tag ex">实测 D7</span>。定点数的代价：</p>
+<div class="tbl"><table>
+<tr><th>代价</th><th>说明</th><th>常见处理</th></tr>
+<tr><td>范围 vs 精度</td><td>Q16.16 若以厘米为单位只有 ±327 m；距离平方会溢出 32 位</td><td>平方、点积用 int64；大地图用 Q32.32（int64）或分块局部坐标</td></tr>
+<tr><td>除法精度</td><td>小数除以大数会被截断成 0</td><td>调整运算顺序（先乘后除）；必要时临时提高精度</td></tr>
+<tr><td>三角 / 开方</td><td>不能用 CRT</td><td>查表（表必须是常量，不能运行时用 <code>std::sin</code> 生成）或纯整数多项式</td></tr>
+<tr><td>生态</td><td>物理、寻路、动画曲线都要定点版</td><td>逻辑层自研：简单几何碰撞、格子寻路；动画只用于表现</td></tr>
+</table></div>
+<div class="co deep"><span class="h">不用定点数行不行？</span><p>可以，但条件苛刻：所有端<strong>同一编译器、同一版本、同一指令集、禁止 fast-math 和 FMA 收缩、自带超越函数</strong>。单平台（比如同一主机平台）或全 PC 的项目有人这么做；跨 iOS / Android / PC 的移动 MOBA 基本都选定点数。另一个折中是软件模拟浮点（soft float），确定但慢一个数量级。</p></div>
+
+<h2>4.4 随机数：同一个种子，同样的调用次数</h2>
+<!--code:cpp:逻辑层随机数：xorshift64*（与 demos 中所有实验使用的同一个生成器）-->
+struct LogicRng {                       // 只给逻辑层用；种子由服务器下发（HOK 文档：随帧下发）
+    uint64_t s;
+    explicit LogicRng(uint64_t seed) : s(seed * 0x9E3779B97F4A7C15ULL + 1) {}
+    uint64_t Next() { s ^= s >> 12; s ^= s << 25; s ^= s >> 27; return s * 2685821657736338717ULL; }
+    int32_t Range(int32_t lo, int32_t hi) { return lo + (int32_t)(Next() % (uint64_t)(hi - lo)); }
+};
+<!--/code-->
+<p>种子一致只是必要条件。更隐蔽的 bug 是<strong>调用次数不一致</strong>：例如某个特效、UI 或“只在本地玩家执行”的逻辑也调了逻辑随机，于是本地端比别人多消耗一次随机数，从此所有随机结果都错位。规则是：<strong>表现层永远不碰逻辑随机源</strong>，需要随机就用自己的；凡是“只对本地玩家执行”的代码都不能改逻辑状态。HOK 把帧随机放在 C++ 逻辑层，种子随帧 hash 一起上报校验 <span class="tag hok">HOK 文档</span>。</p>
+
+<h2>4.5 容器顺序与时间累加</h2>
+<p><strong>实测 D5</strong>：同样 12 个实体 id，插入 <code>unordered_map</code>：默认桶数时遍历顺序是 <code>[[det.precise.D5.um1]]</code>；预留 1024 个桶并倒序插入后变成 <code>[[det.precise.D5.um2]]</code>；<code>std::map</code> 永远是升序。逻辑里“遍历所有单位结算伤害”如果依赖前者，一端扩容一次，结算顺序就变了。</p>
+<p><strong>实测 D6</strong>：每帧 <code>t += 1.0f/15</code> 累加 20 分钟：</p>
+<!--dtab {"rows":"detc.d6","cols":[["编译选项","opt"],["float 累加（s）","tf",".4f"],["double 累加（s）","td",".6f"],["帧号 × 帧长（s）","exact",".4f"],["float 误差（ms）","errms",".1f"]],"cap":"<b>表 4-2</b> 浮点累加时间的漂移（D6）。<code>/fp:precise</code> 下 20 分钟漂了约 [[det.precise.D6.errms|.0f]] ms，而且不同编译选项漂移量不同——这正是 HOK 要求“逻辑层禁用墙钟、只用逻辑帧号、倍速用有理数”的原因。"} -->
+
+<h2>4.6 蝴蝶效应与 desync 检测</h2>
+<p>把一个单位的 x 坐标改动 <strong>1 个 ulp</strong>（float 能表示的最小改动，约 0.0001 cm），再跑同样的模拟 <span class="tag ex">实测 D4</span>：</p>
+<!--plot {"x":[1,600],"y":[0.00001,3000],"logy":true,"h":290,"xlabel":"逻辑帧","ylabel":"两份模拟的最大位置差（cm）","legend":"br",
+"series":[{"n":"最大位置差","path":"detc.d4","c":"r","sw":2}],
+"hlines":[[1,"1 cm","a"],[100,"1 m","p"]],
+"cap":"<b>图 4-1</b> 1 ulp 的扰动：hash 在第 [[det.precise.D4s.first]] 帧就不同；差异通过排斥力在单位间传染、指数放大，第 [[det.precise.D4s.f1]] 帧超过 1 cm，第 [[det.precise.D4s.f100]] 帧超过 1 m——之后两份世界已经是两场不同的战斗。"} -->
+<p>这张图说明了两件事：<strong>desync 无法自愈</strong>（没有任何权威状态去纠正它）；<strong>越早发现越好</strong>（hash 第一帧就能看出来，而肉眼要到几十秒后）。工程上的检测与定位手段：</p>
+<div class="tbl"><table>
+<tr><th>手段</th><th>做法</th><th>成本</th></tr>
+<tr><td>帧 hash 上报比对</td><td>逻辑层周期性计算世界状态摘要，连同帧号、随机种子、KDA 等上报，服务器横向比对；HOK 用的就是这个，而不是“服务器养一个影子客户端” <span class="tag hok">HOK 文档</span></td><td>极低，顺带反作弊</td></tr>
+<tr><td>分层 hash</td><td>按系统（移动 / 技能 / Buff / 随机）或按实体分别算 hash，分歧时立刻知道是哪个系统</td><td>低</td></tr>
+<tr><td>详细追踪开关</td><td>出问题时开启逐帧逻辑日志（输入、关键变量），两端日志 diff 找第一处不同</td><td>高，只在排查时开（HOK 有这个开关）</td></tr>
+<tr><td>录像重放 + 二分</td><td>用录像在不同平台 / 版本重放，二分定位第一个分歧帧</td><td>离线，适合回归测试</td></tr>
+<tr><td>确定性回归测试</td><td>CI 中跨编译器 / 平台跑同一份录像比对 hash（Riot 的 Delta Checker 就是从这类测试起步的 <span class="tag pub">Riot 技术博客</span>）</td><td>一次搭建，长期受益</td></tr>
+</table></div>
+
+<h2>4.7 HOK 的工程约束：把不确定的东西关在门外</h2>
+<p>HOK 的战斗逻辑整体放在不依赖 Unity 的 C++ GameCore 里 <span class="tag hok">HOK 文档</span>：定点数、可播种同步随机源、逻辑层单线程、禁用墙钟、倍速用有理数（分子 / 分母）、避免依赖不稳定遍历顺序。这些约束之所以能被<strong>严格执行</strong>，是因为逻辑层在物理上就访问不到引擎的浮点时间、随机数和容器——比代码规范和 Code Review 可靠得多。顺带的收益是同一份逻辑既能跑在手机上也能跑在服务器上（CS 模式，第 8 章）。</p>
+
+<div class="co warn"><span class="h">面试注意</span><p>“帧同步为什么要用定点数”是必考题。答题要点：① IEEE 754 基本运算本身确定，不确定来自编译器 / 指令集 / 数学库 / 运算顺序；② 跨平台无法锁死这些，所以用整数模拟小数；③ 定点数的代价（范围、精度、生态）以及怎么处理。能补一句“随机数调用次数也必须一致、表现层不能用逻辑随机”，说明你真踩过坑。</p></div>
+
+<h2>4.8 坑位清单</h2>
+<div class="tbl"><table>
+<tr><th>坑</th><th>症状</th><th>修正</th></tr>
+<tr><td>定点查找表用 <code>std::sin</code> 在运行时生成</td><td>各平台的表本身就不同</td><td>表作为常量编译进去，或用整数算法生成</td></tr>
+<tr><td>逻辑里用 <code>float</code> 做配置读取后再转定点</td><td>字符串 → float → 定点的舍入跨平台不同</td><td>配置表直接存定点整数，或用整数解析</td></tr>
+<tr><td>按指针地址排序 / 用 <code>unordered_map</code> 遍历</td><td>偶发 desync，难复现</td><td>按稳定 id 排序</td></tr>
+<tr><td>只对本地玩家执行的代码改了逻辑状态</td><td>本地端独有的分支 → 立刻分叉</td><td>本地分支只能改表现</td></tr>
+<tr><td>表现层调用逻辑随机</td><td>随机序列错位</td><td>两套随机源</td></tr>
+<tr><td>多线程更新单位</td><td>时好时坏</td><td>逻辑单线程，或确定性分片 + 固定合并顺序</td></tr>
+</table></div>
+
+<div class="recap"><div class="t">本章速记</div><ul>
+<li>浮点不确定的来源：<strong>重排 / FMA / 中间精度 / 超越函数库 / 归约顺序</strong>；实测 <code>/fp:fast /arch:AVX2</code> 第 [[detc.firstdiff]] 帧就分叉，定点三份一致。</li>
+<li>Q16.16：乘除借 int64，开方逐位法，三角函数纯整数多项式；注意范围、除法精度、生态。</li>
+<li>随机：同种子 + 同调用次数；表现层不碰逻辑随机。容器：按稳定 id 排序。时间：只用帧号。</li>
+<li>desync 无法自愈：1 ulp 扰动第 [[det.precise.D4s.f100]] 帧变成米级差异；靠帧 hash 发现、分层 hash 和日志 diff 定位。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：同一台 PC 上，Debug 和 Release 版本的浮点结果会不同吗？</summary>取决于浮点模型选项而不是优化级别本身。实测 <code>/Od /fp:strict</code> 与 <code>/O2 /fp:precise</code> 逐帧一致；但如果 Release 开了 <code>/fp:fast</code> 或启用了 AVX2 并允许收缩，就可能不同。x86 32 位用 x87 时，寄存器分配不同也会导致差异。</details>
+<details class="quiz"><summary>自测 2：Q16.16 下计算两点距离，有什么坑？</summary>dx² + dy² 会溢出 32 位（dx 超过 181 就溢出 raw 值 2³¹），要用 int64 累加；开方后再转回 Q16.16。另外距离很小时精度只有 1/65536，比较“是否相等”要用阈值。</details>
+<details class="quiz"><summary>自测 3：发现线上有 0.1% 的对局 desync，怎么定位？</summary>先看 hash 分歧的帧号与上报的分层 hash，确定是哪个子系统；拿到该局的录像（输入序列）在多平台重放，二分找到第一个分歧帧；在该帧打开详细追踪，diff 两端的逐变量日志；常见根因是表现层改了逻辑状态、随机调用次数不一致、容器遍历顺序、未初始化变量。</details>
+</section>

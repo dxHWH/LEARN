@@ -1,0 +1,145 @@
+<section class="chapter" id="ch13">
+  <div class="ch-head">
+    <div class="no">CHAPTER 13</div>
+    <h1>Log 与工具：编译期剥离、缓冲落盘与线上排查</h1>
+    <p class="lead">日志看起来不是 Gameplay，但它是线上排查的唯一窗口。这一章讲清 [Conditional] 到底剥离了什么、为什么项目里的日志在手机上会全部消失、缓冲落盘为什么快以及它丢的是哪几行。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清 <code>[Conditional]</code> 与 <code>#if</code> 的区别，以及“调用连同参数一起被删除”的含义</li>
+    <li>发现项目宏只对 Standalone 平台定义带来的后果</li>
+    <li>说清缓冲落盘的收益（实测）与代价（崩溃丢日志、主线程 IO、锁内 IO）</li>
+    <li>找出 Log 与 LogTest 之间的三处不一致</li>
+    <li>回答“线上怎么排查问题”：分级、采样、环形缓冲、崩溃上报</li>
+  </ul></div>
+
+  <h2>13.1 两层开关：[Conditional] 和 #if</h2>
+  <!--code:cs:Log.cs（节选）-->
+public static class Log {
+    [Conditional("ENABLE_CONSOLELOG"), Conditional("ENABLE_LOGSAVE")]     // ① 调用点：两个宏都没定义 → 整个调用被删除
+    public static void N(string s) {
+#if ENABLE_CONSOLELOG                                                     // ② 方法体：按宏编译不同的实现
+        UnityEngine.Debug.Log($"<color=green>系统信息:{s}</color>");
+#endif
+#if ENABLE_LOGSAVE
+        AppendToFile($"[Notice] {s}");
+#endif
+    }
+    // D(string) / E(string) 同理；E 用 Debug.LogError
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th></th><th><code>[Conditional("X")]</code></th><th><code>#if X</code></th></tr>
+    <tr><td>作用位置</td><td>标在方法上，影响<strong>所有调用这个方法的地方</strong></td><td>包住任意代码块</td></tr>
+    <tr><td>判断依据</td><td><strong>调用方</strong>所在程序集编译时是否定义了 X（多个 Conditional 是“或”关系）</td><td>当前文件编译时是否定义了 X</td></tr>
+    <tr><td>未定义时</td><td>方法本身还在，但调用语句被删除，<strong>实参表达式也不会求值</strong></td><td>代码不存在</td></tr>
+    <tr><td>限制</td><td>方法返回值必须是 void</td><td>无</td></tr>
+  </table></div>
+  <p>“实参不求值”是关键收益：<code>Log.N($"[GameState] 玩家得分！当前分数: {PlayerScore}")</code> 在宏未定义时，连字符串插值的分配都不会发生。如果只用 <code>#if</code> 包住方法体，调用方仍然会先拼好字符串再传进一个空方法。</p>
+  <div class="co deep"><span class="h">这和 C++ 的日志宏是同一个思路</span>
+    <p>C++ 里写 <code>#define LOG(...) ((void)0)</code>，或者 UE 的 <code>UE_LOG</code> 在 Shipping 下按 Verbosity 编译期剔除，目的都是“连参数一起删掉”。函数版本的空实现做不到这一点（参数在调用前已经求值，除非编译器能证明没有副作用）。</p>
+  </div>
+
+  <h2>13.2 宏只对 Standalone 定义：手机上日志全部消失</h2>
+  <p>【源码事实】<code>ProjectSettings.asset</code> 里的定义是 <code>scriptingDefineSymbols: Standalone: ENABLE_CONSOLELOG</code>——只有 PC 平台定义了 ENABLE_CONSOLELOG，ENABLE_LOGSAVE 在任何平台都没有定义。</p>
+  <ul>
+    <li>切到 Android / iOS 构建：两个宏都没定义，项目里 32 处 <code>Log.N/D/E</code> 调用<strong>全部被删除</strong>，包括 <code>Log.E</code>——比如 World 的“场景中存在多个裁判”“越权注册计分板”这类错误，在手机上不会有任何输出。</li>
+    <li>编辑器使用<strong>当前活动构建目标</strong>的宏：在编辑器里切换平台到 Android，编辑器里的日志也会一起消失，容易让人误以为代码没执行。</li>
+    <li>项目里另有 10 处直接调用 <code>Debug.Log</code>（Demo 与菜单脚本），它们不受这两个宏控制——同一个项目里两套日志开关。</li>
+  </ul>
+  <div class="co warn"><span class="h">面试注意：错误日志不应该和调试日志一起剥离</span>
+    <p>合理的分级是：Debug 级在发布版剥离；Notice 级按需保留；Error 级永远保留（并上报）。现在三个级别用同一组宏，等于“要么全有，要么全无”。UE 的做法是按 Verbosity（Fatal / Error / Warning / Display / Log / Verbose / VeryVerbose）分级，并能按日志类别和构建配置分别设置编译期与运行期的阈值。</p>
+  </div>
+
+  <h2>13.3 缓冲落盘：快在哪，丢在哪</h2>
+  <!--code:cs:Log.cs（ENABLE_LOGSAVE 部分，节选）-->
+private const int BUFFER_SIZE = 2048;                       // 字符数（StringBuilder.Length）
+private static bool _deleteOldWhenRestart = true;
+public static void InitLogSave() {
+    if (_isInitialized) return;                             // 双重检查（字段不是 volatile）
+    lock (_lock) {
+        if (_isInitialized) return;
+        _logPath = Path.Combine(Application.persistentDataPath, "Log.txt");   // 只能在主线程访问
+        if (_deleteOldWhenRestart && File.Exists(_logPath)) File.Delete(_logPath);   // ← 每次启动删掉上一次的日志
+        Application.quitting += Flush;                      // 只有正常退出才刷盘
+        _isInitialized = true;
+    }
+}
+private static void AppendInternal(string msg) {
+    string time = DateTime.Now.ToString("HH:mm:ss.fff");    // 锁外格式化 ✔
+    lock (_lock) {
+        _buffer.AppendLine($"[{time}][T:{threadId}]{msg}");
+        if (_buffer.Length >= BUFFER_SIZE) FlushInternal(); // 锁内做文件 IO
+    }
+}
+private static void FlushInternal() { File.AppendAllText(_logPath, _buffer.ToString()); _buffer.Clear(); }
+<!--/code-->
+  <!--bars {"title":"G10 · 写 10000 行日志（每行约 61 字节）的总耗时（ms）","items":[["每行打开-追加-关闭",9209.6,"r","9209.6 ms"],["攒满 2048 字符再写",304.9,"g","304.9 ms（写盘 294 次）"]],"labw":200,"cap":"<b>图 13-1</b>　实测 G10（demos/infra_output.txt；Windows 11 + NTFS，含杀毒软件实时扫描，绝对值受环境影响很大，只看比例）。<code>File.AppendAllText</code> 每次都要打开、定位、写入、关闭文件，系统调用和文件系统开销远大于写入本身；按 2048 字符攒批后约快 30 倍（逐行写平均每行 921 µs）"} -->
+  <div class="tbl"><table>
+    <tr><th>代价</th><th>说明</th></tr>
+    <tr><td><b>崩溃丢日志</b></td><td>缓冲区最多攒约 33 行（G10：2048 ÷ 61）；只在攒满或 <code>Application.quitting</code> 时写盘，崩溃、被系统杀进程时不会触发 quitting——<strong>最需要的那几行恰好丢了</strong></td></tr>
+    <tr><td><b>启动时删除旧日志</b></td><td><code>_deleteOldWhenRestart = true</code>：崩溃后玩家重新打开游戏，上一次的日志在初始化时被删除。“崩溃 → 重启 → 拿日志”这条排查路径被切断</td></tr>
+    <tr><td><b>Log.E 不会立即写盘</b></td><td>错误和普通日志走同一个缓冲；LogTest 的“测试 Log.E 立即落盘”期望与实现不符</td></tr>
+    <tr><td><b>主线程同步 IO</b></td><td>谁写满了缓冲区谁就负责写盘；主线程打日志恰好触发时，这一帧多出一次文件 IO</td></tr>
+    <tr><td><b>锁内 IO</b></td><td>FlushInternal 在锁里执行：一个线程写盘时，其他所有线程打日志都要等</td></tr>
+    <tr><td>双重检查锁</td><td><code>_isInitialized</code> 不是 volatile。在 .NET 的内存模型和 x86 上通常没问题，但按规范应该用 volatile 或 <code>Lazy&lt;T&gt;</code>；另外第一次在工作线程打日志时会访问 <code>Application.persistentDataPath</code>（主线程 API），注释也提醒了要在主线程先初始化</td></tr>
+    <tr><td>时间戳</td><td><code>DateTime.Now</code> 每次都要做时区换算；高频日志可用 <code>DateTime.UtcNow</code> 或启动以来的单调时钟</td></tr>
+  </table></div>
+  <p>成熟方案：专门的日志线程 + 无锁或双缓冲队列（主线程只入队，不碰文件）；Error 级立即刷盘；进程内保留最近 N 条的环形缓冲，崩溃时随崩溃报告一起上传；按启动时间生成文件名并保留最近几份，而不是删除上一份。</p>
+
+  <h2>13.4 Debug.Log 本身的成本</h2>
+  <ul>
+    <li>每次调用都会捕获托管堆栈（可在 Player Settings 的 Stack Trace Logging 里按级别关掉），并把消息送到原生层的日志系统，是项目里最贵的“看不见的”开销之一。</li>
+    <li>Log 给每条消息包了 <code>&lt;color&gt;</code> 富文本标签，调用方（如 CombatPawn）又包了一层，控制台里是嵌套标签；写进文件时这些标签会原样保留（文件路径下 AppendToFile 收到的是未包装的 <code>[Notice] {s}</code>，但 s 本身可能已经含有调用方加的标签）。</li>
+    <li>只要 ENABLE_CONSOLELOG 定义了，所有 Log 调用的字符串插值都会执行——第 10 章 GC 审计里“每次夺舍的日志字符串分配”就是这个。</li>
+  </ul>
+
+  <h2>13.5 Code Review：Log 问题表</h2>
+  <div class="tbl"><table>
+    <tr><th>级别</th><th>问题</th><th>影响</th></tr>
+    <tr><td>P1</td><td>宏只定义在 Standalone，Error 级与调试级一起剥离</td><td>手机包没有任何框架日志，包括错误</td></tr>
+    <tr><td>P1</td><td>启动删除旧日志 + 崩溃不刷盘</td><td>崩溃现场的日志不可得</td></tr>
+    <tr><td>P2</td><td>主线程同步写盘、锁内 IO</td><td>偶发卡顿；多线程打日志互相阻塞</td></tr>
+    <tr><td>P2</td><td>Debug.Log 与 Log 两套开关并存</td><td>统一剥离、统一上报都做不到</td></tr>
+    <tr><td>P3</td><td>DCL 字段非 volatile、DateTime.Now、富文本标签进日志</td><td>规范性与开销</td></tr>
+    <tr><td>测试</td><td>LogTest 是 OnGUI 手动面板；期望 Log.E 立即落盘（与实现不符）；多线程测试最后提示“请人工检查是否乱码”</td><td>手动工具，不是自动化测试</td></tr>
+  </table></div>
+
+  <h2>13.6 面试追问树</h2>
+  <!--code:text:追问树 · Log-->
+Q13-1 你的 Log 和直接用 Debug.Log 有什么区别？
+ ├── Q13-2 [Conditional] 和 #if 有什么区别？                     ← 实参不求值
+ └── Q13-3 打包到手机上，你的日志还在吗？                         ← 只对 Standalone 定义
+Q13-4 为什么日志要先缓冲再写盘？
+ ├── Q13-5 游戏崩溃了，最后几行日志在哪？                          ← 丢失 + 启动时删除
+ └── Q13-6 写盘在哪个线程？会不会卡主线程？
+Q13-7 线上玩家反馈 bug，你怎么拿到现场信息？                       ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q13-1 → Q13-3　和 Debug.Log 的区别？手机上还有吗？</div>
+    <p><b>L1 · 30 秒</b>　包了一层带分级的静态类，用 Conditional 特性做编译期开关：宏没定义时，调用连同参数一起被删掉，字符串拼接也不会发生；另有一个宏控制缓冲落盘。</p>
+    <p><b>L2 · 正常回答</b>　Conditional 和 #if 的区别是：#if 删的是它包住的代码；Conditional 标在方法上，删的是所有调用点，而且实参不求值，这是零成本剥离的关键。限制是方法必须返回 void，判断以调用方程序集的宏为准。</p>
+    <p><b>L3 · 深入（主动说问题）</b>　我复盘时发现宏只给 Standalone 平台定义了，打 Android 包时所有框架日志都会消失，包括错误级。错误日志应该永远保留并上报，只有调试级才剥离；现在三个级别共用一组宏，这是要改的。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q13-4 → Q13-6　为什么缓冲？崩溃时最后几行在哪？</div>
+    <p><b>L2</b>　逐行写文件每次都要打开、追加、关闭，系统调用开销远大于写入本身；我测过一万行，逐行写约 9.2 秒、攒 2048 字符再写约 0.3 秒（环境里有杀毒扫描，只看比例，约 30 倍）。</p>
+    <p><b>L3</b>　代价是崩溃时缓冲区里最多三十几行没写出去——而且只在正常退出时刷盘，崩溃不会触发；更糟的是初始化时会删掉上一次的日志文件，崩溃后重启连之前写出去的部分也没了。写盘发生在“谁写满了缓冲就由谁写”，主线程可能因此卡一下，并且是在锁里写，其他线程都要等。改进是独立日志线程、错误级立即刷盘、保留多份历史文件，以及进程内环形缓冲随崩溃报告上传。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q13-7　线上玩家反馈 bug，怎么拿到现场信息？（发散）</div>
+    <p><b>L2</b>　几层手段：崩溃时由崩溃收集 SDK 上报调用栈和最近 N 条日志（进程内环形缓冲）；非崩溃问题靠关键流程埋点（如“开始夺舍 / 夺舍成功 / 比赛结束”）和错误日志上报，按版本、机型聚合；需要复现时用远程开关临时提高某个玩家的日志级别，或者打开录像 / 输入回放。还要注意日志里不能有隐私数据，量要可控（采样、限频）。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“发布版本我把日志宏关掉，所以日志零开销。”</p>
+    <p><b>问题</b>：项目里还有 10 处直接 Debug.Log 不受宏控制；而且关掉的同时连错误日志也没了，线上出问题无从查起。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><code>[Conditional]</code>：删除<strong>调用点</strong>，<strong>实参不求值</strong>，按调用方程序集的宏判断；<code>#if</code>：删除代码块。</li>
+    <li>宏<strong>只对 Standalone 定义</strong>：手机包里 32 处 Log 调用全部消失（包括 Error）；编辑器跟随活动构建目标。</li>
+    <li>缓冲落盘约快 <strong>30 倍</strong>（G10），但崩溃<strong>最多丢约 33 行</strong>、只在正常退出时刷盘、<strong>启动时删除旧日志</strong>、主线程且锁内 IO。</li>
+    <li>LogTest 是手动面板，期望 Log.E 立即落盘——<strong>与实现不符</strong>。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：<code>Log.N(BuildExpensiveReport())</code> 在两个宏都没定义时，BuildExpensiveReport 会被调用吗？如果把 [Conditional] 去掉、只保留方法体里的 #if 呢？</summary><p>有 [Conditional] 时整个调用被删除，BuildExpensiveReport 不会执行；去掉后，调用照常发生，实参先求值（BuildExpensiveReport 执行并分配），再传进一个空方法体。</p></details>
+</section>

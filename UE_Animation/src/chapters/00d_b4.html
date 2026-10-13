@@ -1,0 +1,102 @@
+<section class="chapter" id="b4">
+  <div class="ch-head">
+    <div class="no">BASICS · B4</div>
+    <h1>插值、权重与混合：动画系统最常做的运算</h1>
+    <p class="lead">混合空间、状态机过渡、分层混合、加性叠加，说到底都是“按比例把几个姿势合成一个”。把 lerp、权重、重心坐标这几个词弄懂，第 3~5 章就是在讲它们的不同用法。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>会算 lerp，知道“权重”和“归一化”是什么意思</li>
+    <li>知道混合两个姿势时，每根骨头的位置、旋转、缩放各怎么混</li>
+    <li>用“调整图层”的类比理解加性动画</li>
+    <li>用“小三角形面积”的直观方法理解混合空间的重心坐标和三角剖分</li>
+  </ul></div>
+
+  <h2>B4.1 lerp：从 A 走到 B 的百分之几</h2>
+  <p><strong>lerp（线性插值）</strong>：从 A 出发，朝 B 走全程的 α（0~1）那么远。</p>
+<!--code:text:lerp-->
+lerp(A, B, α) = A + (B − A)·α  =  (1 − α)·A + α·B
+例：A = 10，B = 50，α = 0.25  →  10 + 40 × 0.25 = 20
+<!--/code-->
+  <figure>
+  <svg viewBox="0 0 860 120" xmlns="http://www.w3.org/2000/svg">
+    <line x1="80" y1="60" x2="780" y2="60" stroke="#9CA3AF" stroke-width="1.5"/>
+    <line x1="196.7" y1="60" x2="313.3" y2="60" stroke="#15803D" stroke-width="6"/>
+    <circle cx="196.7" cy="60" r="8" fill="#2F5BD3"/><circle cx="663.3" cy="60" r="8" fill="#C2410C"/><circle cx="313.3" cy="60" r="8" fill="#15803D"/>
+    <text x="196.7" y="40" text-anchor="middle" class="sm b" style="fill:#2F5BD3">A = 10</text><text x="663.3" y="40" text-anchor="middle" class="sm b" style="fill:#C2410C">B = 50</text>
+    <text x="313.3" y="40" text-anchor="middle" class="sm b" style="fill:#15803D">结果 = 20</text>
+    <text x="255" y="88" text-anchor="middle" class="xs">走了全程的 25%</text>
+    <text x="430" y="108" text-anchor="middle" class="xs">也可以读成“A 占 0.75 票、B 占 0.25 票”：0.75 × 10 + 0.25 × 50 = 20</text>
+  </svg>
+  <figcaption><b>图 B4-1</b>　lerp 的两种读法：“从 A 往 B 走 α”，或者“A 和 B 按权重 (1−α, α) 投票”。后一种读法推广到三个、四个参与者，就是多路混合</figcaption>
+  </figure>
+
+  <h2>B4.2 权重与归一化：大家投票，总票数是 1</h2>
+  <p>动画混合里的<strong>权重</strong>就是每个参与者的“票数”，规定加起来等于 1。如果某一步算出来不是 1（比如 Walk 0.6、Run 0.6，合计 1.2），就各自除以总和，变成 0.5、0.5，这叫<strong>归一化</strong>。</p>
+  <p>为什么一定要等于 1？举个反例：两条动画里同一根骨头的位置都是 (0, 0, 10)（就是骨长），按 0.6 + 0.6 加起来是 (0, 0, 12)，骨头凭空长了 20%。权重和为 1，才能保证“大家都一样时，结果也一样”。</p>
+
+  <h2>B4.3 混合一个姿势 = 每根骨头分别插值</h2>
+  <p>一个姿势是一组骨头的变换（B2）。混合两个姿势，就是对<strong>每一根骨头</strong>分别做：位置 lerp、缩放 lerp、旋转用四元数 nlerp（B3.8），旋转插值前检查点积符号。</p>
+  <div class="tbl"><table>
+    <tr><th>某根骨头</th><th>位置</th><th>旋转（绕竖直轴）</th></tr>
+    <tr><td>Walk 姿势</td><td>(0, 0, 10)</td><td>20°</td></tr>
+    <tr><td>Run 姿势</td><td>(0, 0, 14)</td><td>60°</td></tr>
+    <tr><td>α = 0.25（Walk 0.75 / Run 0.25）</td><td>(0, 0, 11)</td><td>nlerp 约 29.9°（slerp 正好 30°，两者只差 0.08°）</td></tr>
+  </table></div>
+  <p><strong>交叉淡化</strong>（状态机过渡、Blend 节点）只是让 α 随时间从 0 走到 1；<strong>混合空间</strong>是根据速度、方向算出几个 α；<strong>分层混合</strong>是让不同骨头用不同的 α（上半身 1、下半身 0）。运算本身都一样。</p>
+
+  <h2>B4.4 加性：只保存“差多少”</h2>
+  <p>类比修图软件的<strong>调整图层</strong>：它不存一整张图，只存“亮度 +20”，叠到哪张图上都能用。加性动画也是这样：只存“相对某个基准姿势多弯了几度、多移了几厘米”，可以叠加到走、跑、蹲任何姿势上。</p>
+  <div class="tbl"><table>
+    <tr><th>步骤</th><th>例子：呼吸动画叠到跑步上（胸椎前倾角）</th></tr>
+    <tr><td>制作时：加性 = 动画 − 基准</td><td>基准姿势胸椎 0°，呼吸最高点 4° → 差值 Δ = +4°</td></tr>
+    <tr><td>运行时：结果 = 目标 + α·Δ</td><td>跑步时胸椎前倾 15° → 叠上去 19°；α = 0.5 时 17°</td></tr>
+  </table></div>
+  <p>旋转的“差”不能直接相减，要用四元数乘逆：Δ = R<sub>动画</sub> · R<sub>基准</sub>⁻¹，应用时 R = Δ<sup>α</sup> · R<sub>目标</sub>（B3.7、第 3 章）。上表只是绕同一根轴的特例，所以看起来像加减法。</p>
+
+  <h2>B4.5 重心坐标：三角形里的点怎么分票</h2>
+  <p>二维混合空间（第 4 章）里，输入点落在某个三角形内，三个顶点各对应一条动画，要决定三条动画各占多少权重。答案是<strong>重心坐标</strong>，有一个很直观的算法：</p>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(70,0)">
+    <polygon points="168,192 60,48 288,300" fill="#DBEAFE" stroke="none"/>
+    <polygon points="168,192 60,204 288,300" fill="#DCFCE7" stroke="none"/>
+    <polygon points="168,192 60,204 60,48" fill="#FFEDD5" stroke="none"/>
+    <polygon points="60,204 60,48 288,300" fill="none" stroke="#111827" stroke-width="2"/>
+    <g stroke="#6B7280" stroke-dasharray="4 3"><line x1="168" y1="192" x2="60" y2="204"/><line x1="168" y1="192" x2="60" y2="48"/><line x1="168" y1="192" x2="288" y2="300"/></g>
+    <circle cx="60" cy="204" r="7" fill="#2F5BD3"/><circle cx="60" cy="48" r="7" fill="#15803D"/><circle cx="288" cy="300" r="7" fill="#C2410C"/><circle cx="168" cy="192" r="7" fill="#6D28D9"/>
+    <text x="50" y="208" text-anchor="end" class="sm b" style="fill:#2F5BD3">Walk_F (0,160)</text>
+    <text x="50" y="52" text-anchor="end" class="sm b" style="fill:#15803D">Jog_F (0,420)</text>
+    <text x="280" y="324" text-anchor="end" class="sm b" style="fill:#C2410C">Jog_R (380,0)</text>
+    <text x="178" y="188" class="sm b" style="fill:#6D28D9">输入 (180,180)</text>
+    </g>
+    <g class="sm">
+      <text x="380" y="40" class="b">规则：顶点的权重 = 它“对面”那块小三角形的面积占比</text>
+      <text x="380" y="68">输入点把大三角形切成三块，每块正对一个顶点：</text>
+      <rect x="380" y="82" width="14" height="14" fill="#DBEAFE"/><text x="400" y="94">蓝块（对着 Walk_F）占 15.8% → Walk_F 权重 0.158</text>
+      <rect x="380" y="106" width="14" height="14" fill="#DCFCE7"/><text x="400" y="118">绿块（对着 Jog_F）占 36.8% → Jog_F 权重 0.368</text>
+      <rect x="380" y="130" width="14" height="14" fill="#FFEDD5"/><text x="400" y="142">橙块（对着 Jog_R）占 47.4% → Jog_R 权重 0.474</text>
+      <text x="380" y="174">点越靠近某个顶点，它对面那块就越大，那条动画的票就越多；</text>
+      <text x="380" y="196">点正好在顶点上，那条动画的权重就是 1。</text>
+      <text x="380" y="226" class="b">两个保证：</text>
+      <text x="380" y="250">① 三个权重加起来正好是 1；</text>
+      <text x="380" y="274">② 按权重平均三个顶点的坐标，正好回到输入点：</text>
+      <text x="400" y="296" class="mono">0.158·(0,160) + 0.368·(0,420) + 0.474·(380,0) = (180, 180)</text>
+      <text x="380" y="320" class="xs">所以混合出的“速度”就是想要的速度——这是不滑步的前提（数字与实测 E5 一致）</text>
+    </g>
+  </svg>
+  <figcaption><b>图 B4-2</b>　重心坐标的面积解释。三个颜色块分别正对三个顶点，面积占比就是该顶点（该动画）的权重</figcaption>
+  </figure>
+  <p>输入点落在<strong>哪个</strong>三角形里，取决于采样点事先被连成了什么样的三角网——这一步叫<strong>三角剖分</strong>。UE 用 <strong>Delaunay 三角剖分</strong>：尽量连成“胖”的三角形，规则是每个三角形的外接圆里不能有别的采样点。为什么要胖？细长的三角形里，输入只要移动一点点，权重就会剧烈变化，动画看起来会抖。</p>
+
+  <h2>B4.6 同步：两个人一起走路，要踩同一个点</h2>
+  <p>混合两条循环动画（走和跑）时，如果它们各播各的，一条在迈左脚，另一条在迈右脚，混出来就是两只脚都悬空。<strong>同步</strong>就是让它们按同样的节奏走：要么按“走到一个周期的百分之几”对齐（归一化时间），要么在动画里标出“左脚落地”“右脚落地”，按这些标记对齐（同步标记）。第 4 章的实测：不同步时 50.4% 的时间支撑脚不一致，按标记同步后为 0%。</p>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>lerp(A, B, α) = (1−α)A + αB；权重 = 票数，<strong>总和必须为 1</strong>，否则姿势会被放大缩小。</li>
+    <li>混合姿势 = 每根骨头：位置 / 缩放 lerp，旋转 nlerp（检查符号）。过渡、混合空间、分层混合只是 α 的来源不同。</li>
+    <li>加性 = 调整图层：只存“差多少”，可叠到任何姿势；旋转的差用乘逆。</li>
+    <li>重心坐标：<strong>顶点权重 = 对面小三角形的面积占比</strong>，和为 1，加权坐标 = 输入；Delaunay 让三角形尽量胖，权重变化更平稳。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：交叉淡化 0.2 秒，过渡的第 0.05 秒，源动画和目标动画各占多少？</summary><p>线性淡化下 α = 0.05 / 0.2 = 0.25，源动画占 0.75，目标动画占 0.25。如果用了 SmoothStep 等曲线，α = 3t² − 2t³（t = 0.25）≈ 0.156，开头更慢、更柔和。</p></details>
+  <details class="quiz"><summary>自测：混合空间的输入点落在三角网外面会怎样？</summary><p>没有三角形包含它，UE 会把它投影到最近的边界边上，用那条边两端的两个采样混合（第 4 章 E5 的 (500, 500) 例子）。所以混合空间的轴范围要覆盖角色可能出现的所有输入，否则角色速度超出范围时，动画会停在边界上，表现为滑步。</p></details>
+</section>

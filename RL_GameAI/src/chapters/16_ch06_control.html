@@ -1,0 +1,154 @@
+<section class="chapter" id="ch6">
+<div class="ch-head"><div class="no">CHAPTER 06</div><h1>无模型控制：Sarsa、Q-learning 与 off-policy</h1><p class="lead">第 5 章只是“评估一个给定的策略”，这一章要在评估的同时改进策略，也就是在没有模型的情况下做第 4 章的广义策略迭代。Sarsa 学的是“自己正在用的那个带探索的策略”，Q-learning 学的是“贪心策略”。这一字之差决定了 on-policy 和 off-policy、悬崖边走哪条路、为什么 DQN 能用回放，以及 Q 值为什么会高估。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>说清无模型控制为什么要学 Q 而不是 V，以及探索为什么必不可少；证明 ε-greedy 策略改进定理。</li>
+<li>写出 Sarsa / Expected Sarsa / Q-learning 的更新目标，并在 Cliff Walking 上实测三者学到的路线和在线回报。</li>
+<li>讲透 on-policy 与 off-policy：行为策略、目标策略、重要性采样，以及一步 Q-learning 为什么不需要重要性采样。</li>
+<li>用 Jensen 不等式解释最大化偏差，实测它随动作数增长、Double Q-learning 如何修正。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>无模型控制要学动作价值 Q，因为没有模型时无法从 V 推出贪心动作。Sarsa 用五元组 $(S,A,R,S',A')$ 更新：$Q(S,A)\leftarrow Q+\alpha[R+\gamma Q(S',A')-Q]$，其中 $A'$ 是行为策略（比如 ε-greedy）真正要执行的下一动作，所以它评估并改进的是“带探索的策略本身”，是 on-policy。Q-learning 的目标是 $R+\gamma\max_{a'}Q(S',a')$，评估的是贪心策略，与产生数据的行为策略无关，所以是 off-policy，可以用任意数据（回放、人类录像）学习。Cliff Walking 是经典对比：Q-learning 学到贴着悬崖的最短路，但探索时常掉下去，在线回报差；Sarsa 把探索的风险算进价值，走远离悬崖的安全路。Q-learning 的 max 会带来最大化偏差（$\E[\max\hat Q]\ge\max Q$），动作越多越严重，Double Q-learning 用一张表选动作、另一张表估值来修正。Expected Sarsa 对下一动作求期望，方差更小、对步长更鲁棒，行为策略取贪心时就退化成 Q-learning。</p></div>
+
+<h2>6.1 从预测到控制：为什么学 Q、为什么要探索</h2>
+<p>有模型时，知道 $V_*$ 就能贪心地选动作：$\pi(s)=\argmax_a\sum p(s',r\mid s,a)[r+\gamma V(s')]$。无模型时这个式子算不出来，所以控制算法学的都是<strong>动作价值</strong> $Q(s,a)$，贪心只需 $\argmax_aQ(s,a)$。</p>
+<p>但只用贪心策略采样会出问题：没被选过的动作永远得不到估计，可能一直被低估而永远不被尝试。解决办法是让策略保持一定的随机性：</p>
+<ul>
+<li><strong>探索性开端</strong>（exploring starts）：每个回合从随机的 $(s,a)$ 开始。理论上干净，但游戏里不可能把角色随便放到任意状态。</li>
+<li><strong>ε-soft 策略</strong>：每个动作的概率至少 $\epsilon/|\mathcal A|$。最常用的是 <strong>ε-greedy</strong>：以 $1-\epsilon$ 选贪心动作，以 ε 均匀随机。</li>
+</ul>
+<p>那么“评估 ε-greedy 策略、再对它做 ε-greedy 改进”还能保证变好吗？可以，只是改进的范围限制在 ε-soft 策略之内：</p>
+<!--deriv ε-greedy 策略改进定理：对任意 ε-soft 策略 π，关于 Q_π 的 ε-greedy 策略 π′ 满足 v_π′ ≥ v_π
+\sum_a\pi'(a\mid s)Q_\pi(s,a) & = \frac{\epsilon}{|\mathcal A|}\sum_aQ_\pi(s,a)+(1-\epsilon)\max_aQ_\pi(s,a) || π′ 的定义：均匀部分 + 贪心部分
+\max_aQ_\pi(s,a) & \ge\sum_a\frac{\pi(a\mid s)-\epsilon/|\mathcal A|}{1-\epsilon}\,Q_\pi(s,a) || π 是 ε-soft，所以权重 $\frac{\pi(a\mid s)-\epsilon/|\mathcal A|}{1-\epsilon}$ 非负、和为 1，最大值不小于任何加权平均
+\sum_a\pi'(a\mid s)Q_\pi(s,a) & \ge\frac{\epsilon}{|\mathcal A|}\sum_aQ_\pi(s,a)+\sum_a\Big(\pi(a\mid s)-\frac{\epsilon}{|\mathcal A|}\Big)Q_\pi(s,a)=v_\pi(s) || 代入：两个 $\frac{\epsilon}{|\mathcal A|}\sum_aQ$ 相互抵消
+* v_{\pi'}(s) & \ge v_\pi(s)\quad\forall s || 再套用第 4 章的策略改进定理（逐步展开）即得；等号成立 ⇔ π 已是 ε-soft 策略中最优的
+-->
+<p>在一个 12 状态 × 4 动作的随机 MDP 上（γ = 0.9，ε = [[ch06.e5.eps]]），从随机的 ε-soft 策略出发反复“精确评估 + ε-greedy 改进”（<code>demos/ch06_control.cpp</code> E5）：[[ch06.e5.rounds]] 轮后策略不再变化，每一轮所有状态价值的最小增量为 [[ch06.e5.mind|.3f]]（非负）；收敛点与“最优 ε-soft 策略”方程 $v(s)=(1-\epsilon)\max_aq(s,a)+\frac{\epsilon}{|\mathcal A|}\sum_aq(s,a)$ 的解最大相差 [[ch06.e5.diff|.0e]]；但它和真正的最优价值 $v_*$ 最多差 [[ch06.e5.gap|.3f]]——这是“一直保持探索”的代价。</p>
+<div class="co tip"><span class="h">工具箱：GLIE 与 Robbins-Monro 条件</span><p>想收敛到真正的 $\pi_*$，需要 <strong>GLIE</strong>（Greedy in the Limit with Infinite Exploration）：每个 (s, a) 被访问无穷多次，同时策略在极限下变成贪心，比如 $\epsilon_k=1/k$。再加上步长满足 Robbins-Monro 条件 $\sum_t\alpha_t=\infty,\ \sum_t\alpha_t^2<\infty$，表格 Sarsa 以概率 1 收敛到最优（Singh et al., 2000）。注意这是<strong>渐近</strong>结论，6.4 节会看到实际训练长度里差得很远。</p></div>
+
+<h2>6.2 Sarsa、Expected Sarsa 与 Q-learning</h2>
+<p>把第 5 章的 TD(0) 用在 Q 上，就得到三种控制算法，它们只在“下一状态的价值怎么估”上不同：</p>
+<div class="tbl"><table>
+<tr><th>算法</th><th>TD 目标</th><th>评估的是哪个策略</th><th>类型</th></tr>
+<tr><td>Sarsa</td><td>$R+\gamma\,Q(S',A')$，$A'\sim\pi(\cdot\mid S')$ 是真正要执行的动作</td><td>行为策略本身（ε-greedy）</td><td>on-policy</td></tr>
+<tr><td>Expected Sarsa</td><td>$R+\gamma\sum_{a'}\pi(a'\mid S')Q(S',a')$</td><td>目标策略 π（可以等于也可以不等于行为策略）</td><td>两者皆可</td></tr>
+<tr><td>Q-learning</td><td>$R+\gamma\max_{a'}Q(S',a')$</td><td>贪心策略</td><td>off-policy</td></tr>
+</table></div>
+<p class="tcap"><b>表 6-1</b>　三种 TD 控制算法的目标。Expected Sarsa 取目标策略为贪心时就是 Q-learning。</p>
+<!--deriv 三种目标的关系：期望相同，方差不同
+\E_{A'\sim\pi}\big[R+\gamma Q(S',A')\,\big|\,S,A,S'\big] & = R+\gamma\sum_{a'}\pi(a'\mid S')Q(S',a') || Sarsa 目标对下一动作取期望，就是 Expected Sarsa 的目标
+\Var_{\text{Sarsa}} & = \Var_{\text{Expected}}+\gamma^2\,\E\big[\Var_{A'\sim\pi}Q(S',A')\big] || 全方差公式：Sarsa 多了一项“下一动作随机”带来的方差
+* \pi(\cdot\mid S')=\text{greedy}(Q)\ \Rightarrow & \sum_{a'}\pi(a'\mid S')Q(S',a')=\max_{a'}Q(S',a') || Expected Sarsa 以贪心为目标策略时，就是 Q-learning
+-->
+<p>为什么一步 Q-learning 不需要重要性采样？因为 $(S,A,R,S')$ 中只有 A 来自行为策略，而 $Q(S,A)$ 本来就是“在 S 执行 A 之后”的价值，A 是条件而不是随机变量；之后的价值用 $\max_{a'}Q(S',a')$ 计算，不再依赖行为策略选了什么。n 步 Q-learning 就不同了：中间几步的动作由行为策略选出，需要修正（或者容忍偏差，Rainbow 的做法）。</p>
+
+<h2>6.3 Cliff Walking：安全路与最短路</h2>
+<p>Sutton 例 6.6：4×12 的网格，从左下角 S 走到右下角 G，每步 −1；底边中间 10 格是悬崖，掉下去 −100 并回到起点。γ = 1，ε = [[ch06.e1.eps]]，α = [[ch06.e1.alpha]]，三种算法各跑 [[ch06.e1.RUNS]] 次、每次 [[ch06.e1.EP]] 回合（C++ 实测，Python 用同一个随机数生成器重跑 run 0 的前 100 回合，逐回合奖励与 C++ 完全相同）。</p>
+<!--gpath {"rows":{"path":"ch06.e1.rows"},"cell":56,
+"paths":[{"path":"ch06.e1.runs.0.path","n":"Sarsa","c":"b","off":-6},{"path":"ch06.e1.runs.1.path","n":"Expected Sarsa","c":"g","off":0},{"path":"ch06.e1.runs.2.path","n":"Q-learning","c":"r","off":6}],
+"cap":"<b>图 6-1</b>　三种算法在 run 0 学到的贪心路线（C++ 实测，<code>demos/ch06_control.cpp</code> E1）。Q-learning 贴着悬崖走最短路（[[ch06.e1.runs.2.plen|.0f]] 步）；Sarsa 绕到最上面一行（[[ch06.e1.runs.0.plen|.0f]] 步）；Expected Sarsa 走中间一行（[[ch06.e1.runs.1.plen|.0f]] 步）。200 次运行里，Sarsa 有 [[ch06.e1.runs.0.safe]] 次走最上一行，Q-learning 每次都是 13 步的最短路。"} -->
+<!--plot {"x":[0,500],"y":[-110,0],"h":290,"xlabel":"回合数","ylabel":"每回合奖励和（200 次运行平均，每 10 回合）","legend":"br","hlines":[[-13,"最短路（不探索时）−13","s"]],
+"series":[{"path":"ch06.e1.runs.0.curve","n":"Sarsa","c":"b","sw":2.4},{"path":"ch06.e1.runs.1.curve","n":"Expected Sarsa","c":"g","sw":2.4},{"path":"ch06.e1.runs.2.curve","n":"Q-learning","c":"r","sw":2.4}],
+"cap":"<b>图 6-2</b>　在线回报（带 ε = 0.1 的探索）。最后 100 回合平均：Sarsa [[ch06.e1.runs.0.last|.1f]]，Expected Sarsa [[ch06.e1.runs.1.last|.1f]]，Q-learning [[ch06.e1.runs.2.last|.1f]]。Q-learning 学到的路线最好，但它执行时有 10% 的随机动作，贴着悬崖走时常掉下去。"} -->
+<p>这张图是面试最常引用的例子，要讲清楚背后的逻辑：</p>
+<ol>
+<li><strong>Q-learning 学的是“如果以后都贪心”的价值</strong>。在悬崖边一格，贪心策略不会往下走，所以这一格的价值很高，最优路线就是贴边走。它的估计是对的，只是对“实际执行的带探索策略”来说并不安全。</li>
+<li><strong>Sarsa 学的是“以后也会以 10% 概率乱走”的价值</strong>。悬崖边一格的 $Q$ 包含了“下一步随机掉下去”的风险，于是离悬崖越远价值越高，它选择绕远路。如果部署时也带探索（或者执行有噪声），Sarsa 的路线更好。</li>
+<li><strong>Expected Sarsa 介于两者之间</strong>：同样把探索风险算进价值，但方差更小，在线回报最好。</li>
+</ol>
+<div class="co warn"><span class="h">面试注意：“Sarsa 更保守”到底是什么意思</span><p>不是 Sarsa 天生保守，而是它评估的对象不同：它学的是行为策略（含探索）的价值，所以探索带来的风险会体现在价值里。如果把 ε 降到 0（6.4 节），Sarsa 评估的策略也趋于贪心，理论上最终也会走最短路。游戏里的对应：<strong>部署时执行有噪声</strong>（操作延迟、反应时间限制、网络抖动）时，学 on-policy 的价值更贴近实际表现；只在训练时探索、部署时贪心时，off-policy 的贪心价值才是要的东西。</p></div>
+<h2>6.4 步长与 GLIE：理论条件和实际训练的距离</h2>
+<p>把 α 从 0.1 扫到 1.0，分别看前 100 回合（学得快不快）和前 1000 回合（最终表现）的平均每回合奖励（Sutton 图 6.3 的复现；前者 200 次运行、后者 20 次运行，E2）：</p>
+<!--plot {"x":[0.1,1.0],"y":[-160,-30],"h":250,"title":"前 100 回合（学得快不快，200 次运行）","xlabel":"步长 α","ylabel":"平均每回合奖励","legend":"br",
+"series":[{"path":"ch06.e2.runs.0.interim","n":"Sarsa","c":"b","dots":true,"sw":2.4},{"path":"ch06.e2.runs.1.interim","n":"Expected Sarsa","c":"g","dots":true,"sw":2.4},{"path":"ch06.e2.runs.2.interim","n":"Q-learning","c":"r","dots":true,"sw":2.4}]} -->
+<!--plot {"x":[0.1,1.0],"y":[-150,-10],"h":250,"title":"前 1000 回合（最终表现，20 次运行）","xlabel":"步长 α","ylabel":"平均每回合奖励","legend":"bl",
+"series":[{"path":"ch06.e2.runs.0.asym","n":"Sarsa","c":"b","dots":true,"sw":2.4},{"path":"ch06.e2.runs.1.asym","n":"Expected Sarsa","c":"g","dots":true,"sw":2.4},{"path":"ch06.e2.runs.2.asym","n":"Q-learning","c":"r","dots":true,"sw":2.4}],
+"cap":"<b>图 6-3</b>　Cliff Walking 上的步长扫描（C++ 实测，上图前 100 回合、下图前 1000 回合）。Sarsa 的最终表现在 α 大时急剧变差（α = 1 时 [[ch06.e2.runs.0.asym_a1|.1f]]）；Expected Sarsa 在 α = 1 时反而最好（[[ch06.e2.runs.1.asym_a1|.1f]]）——这个环境的转移是确定性的，唯一的随机性来自下一动作，而 Expected Sarsa 把它期望掉了。Q-learning 的在线表现始终受“贴着悬崖探索”的拖累。"} -->
+<p>再看 GLIE：让 ε 在前 400 回合从 0.1 线性降到 0（α = 0.5 不变），理论上 Sarsa 应该逐渐变成贪心、改走最短路。实测（E3，200 次运行）：最后 50 回合平均奖励 [[ch06.e3.last|.1f]]，正好是最上一行那条 17 步的路；200 次里改走最短路的是 [[ch06.e3.opt]] 次。即使把条件凑全——步长 $\alpha=1/N(s,a)$（满足 Robbins-Monro）、$\epsilon_k=\min(0.1,1/k)$（满足 GLIE）、训练 [[ch06.e3.epb]] 回合——[[ch06.e3.rb]] 次运行里贪心路线是 13 步最短路的只有 [[ch06.e3.c13]] 次，15 步 [[ch06.e3.c15]] 次，17 步 [[ch06.e3.c17]] 次，另有 [[ch06.e3.cfail]] 次贪心路线（按 argmax 取第一个最大值）甚至在 60 步内到不了终点。</p>
+<p>原因有两个，都值得在面试里讲：</p>
+<ol>
+<li><strong>探索变少后，旧估计没人纠正</strong>。悬崖边那一行的 Q 值是在 ε = 0.1 时学的，包含“掉下去”的风险；ε 变小后 agent 几乎不再去那一行（每回合在那一行的步数从前 1000 回合的 [[ch06.e3.edge_first|.2f]] 降到最后 1000 回合的 [[ch06.e3.edge_last|.2f]]），这些悲观的估计就一直留着。收敛定理要求的是“无穷多次访问”，实际训练给不了。</li>
+<li><strong>1/N 步长在控制问题里太小</strong>。策略在变，TD 目标是非平稳的；1/N 把早期糟糕策略下的估计平均进去，之后几乎无法改动。所以实践中控制算法都用常数步长（或缓慢衰减），代价是估计一直在抖动（第 5 章）。</li>
+</ol>
+<div class="co tip"><span class="h">面试注意：收敛条件 ≠ 实际能收敛</span><p>被问“Q-learning 的收敛条件”时，标准答案是：表格表示、所有 (s, a) 被无限次访问、步长满足 $\sum\alpha=\infty$、$\sum\alpha^2<\infty$（Watkins &amp; Dayan, 1992）。加分的说法是补一句：这些都是渐近条件，实际训练长度有限，探索不足会让部分状态的估计长期停在旧值；函数近似下连这些保证都没有（第 8 章致命三角）。</p></div>
+
+<h2>6.5 off-policy：行为策略、目标策略与重要性采样</h2>
+<p><strong>on-policy</strong>：评估 / 改进的策略就是产生数据的策略（Sarsa、PPO）。<strong>off-policy</strong>：用行为策略 b 采数据，评估另一个目标策略 π（Q-learning、DQN、离线 RL）。off-policy 的好处是能用别人的数据：回放缓冲区里的旧数据、人类玩家的录像、规则 AI 的对局，也能边探索边学最优策略。代价是需要修正分布差异，方差更大、更难稳定。</p>
+<p>MC 方法要用 b 的回合估计 π 的价值，需要<strong>重要性采样</strong>：</p>
+<!--deriv off-policy MC 的重要性采样比值
+\Pr_\pi(A_t,S_{t+1},\dots,S_T\mid S_t) & = \prod_{k=t}^{T-1}\pi(A_k\mid S_k)\,p(S_{k+1}\mid S_k,A_k) || 轨迹概率 = 策略 × 转移
+\rho_{t:T-1} & \doteq\frac{\Pr_\pi(\cdots)}{\Pr_b(\cdots)}=\prod_{k=t}^{T-1}\frac{\pi(A_k\mid S_k)}{b(A_k\mid S_k)} || 转移概率在分子分母中抵消：比值只依赖两个策略，<strong>不需要模型</strong>；要求覆盖性：π > 0 处 b > 0
+\E_b\big[\rho_{t:T-1}G_t\,\big|\,S_t=s\big] & = v_\pi(s) || 换测度：按 b 采样、乘比值，期望等于按 π 采样
+* V^{\text{普通}}(s) & = \frac{\sum_i\rho_iG_i}{n},\qquad V^{\text{加权}}(s)=\frac{\sum_i\rho_iG_i}{\sum_i\rho_i} || 普通 IS 无偏但方差可能无穷；加权 IS 有偏（偏差随样本数趋于 0）但方差有界，实践中几乎总用加权版
+-->
+<p>Sutton 例 5.5 把这个问题推到极端：只有一个非终止状态，动作 left 以 0.1 的概率结束（奖励 +1）、0.9 的概率回到原地，动作 right 直接结束（奖励 0）。目标策略总选 left（真值 $v_\pi=1$），行为策略均匀。回合越长，比值 $2^{\text{步数}}$ 越大，普通 IS 的二阶矩发散（E4，10 次运行，每次 [[ch06.e4.EP|.0f]] 个回合）：</p>
+<!--plot {"x":[1,1000000],"logx":true,"y":[0,2.5],"h":280,"xlabel":"回合数（对数刻度）","ylabel":"v_π 的估计（真值 = 1）","legend":"tr","hlines":[[1,"","s"]],
+"series":[{"path":"ch06.e4.ord.0","n":"普通 IS（6 次独立运行）","c":"r","sw":1.4},{"path":"ch06.e4.ord.1","c":"r","sw":1.4},{"path":"ch06.e4.ord.2","c":"r","sw":1.4},{"path":"ch06.e4.ord.3","c":"r","sw":1.4},{"path":"ch06.e4.ord.4","c":"r","sw":1.4},{"path":"ch06.e4.ord.5","c":"r","sw":1.4},
+{"path":"ch06.e4.wtd.0","n":"加权 IS","c":"b","sw":2.6}],
+"cap":"<b>图 6-4</b>　普通 vs 加权重要性采样（C++ 实测）。10⁶ 个回合之后普通 IS 的 10 个估计仍散布在 [[ch06.e4.ord_min|.2f]] ~ [[ch06.e4.ord_max|.2f]]，曲线隔一阵就被一个比值高达 [[ch06.e4.maxrho|.2g]] 的长回合“踢”一下；加权 IS 从第一个有效回合起就等于 1。"} -->
+<p>RL 里用到重要性采样的地方：off-policy MC、n 步 off-policy TD、PPO 的概率比 $r_t(\theta)$（第 11 章，只修正一步动作，比值被 clip 限制在 1 附近）、PER 的 IS 权重（第 8 章）、IMPALA 的 V-trace（截断的比值，第 19 章）。共同的教训：<strong>比值连乘会让方差爆炸，所以要么只修正一步，要么截断比值</strong>。</p>
+
+<h2>6.6 最大化偏差：动作越多越严重</h2>
+<p>第 8 章（图 8-3、8-4）已经推过 $\E[\max_a\hat Q(a)]\ge\max_a\E[\hat Q(a)]$（Jensen），并在 Sutton 例 6.7 上看到 Q-learning 早期会大量“走错方向”。这里换一个角度：让 B 状态的动作数从 1 增加到 50（每个动作的奖励都是 $N(-0.1,1)$，向左的真实价值 −0.1，最优是一直向右，ε-greedy 下最优的向左比例是 5%），统计第 250~300 回合选择向左的比例（3000 次运行，E6）：</p>
+<!--plot {"x":[0,52],"y":[0,90],"xt":[1,5,10,20,50],"h":270,"xlabel":"B 状态的动作数","ylabel":"第 250~300 回合选择 left 的比例（%）","legend":"tl","hlines":[[5,"最优 5%","s"]],
+"series":[{"path":"ch06.e6.runs.0.pts","n":"Q-learning","c":"r","dots":true,"sw":2.4},{"path":"ch06.e6.runs.1.pts","n":"Expected Sarsa","c":"a","dots":true,"dash":true},{"path":"ch06.e6.runs.2.pts","n":"Double Q-learning","c":"b","dots":true,"sw":2.4}],
+"cap":"<b>图 6-5</b>　最大化偏差随动作数增长（C++ 实测）。B 有 50 个动作时，Q-learning 在第 300 回合附近仍有 [[ch06.e6.runs.0.v.5|.0f]]% 的时间走错方向；Expected Sarsa 也好不到哪去（[[ch06.e6.runs.1.v.5|.0f]]%）——ε-greedy 下它的目标仍然被最大值主导；Double Q-learning 始终在 [[ch06.e6.runs.2.v.5|.0f]]% 左右。"} -->
+<p>为什么 Expected Sarsa 也会高估？它的目标是 $(1-\epsilon)\max_aQ+\frac{\epsilon}{|\mathcal A|}\sum_aQ$，90% 的权重仍然在 max 上。真正消除选择偏差需要“选动作”和“估值”用独立的估计，也就是 Double Q-learning（手撕代码 <code>double_q_update</code>）。动作数大的游戏（技能 × 目标的组合）里，这个问题直接迁移到 DQN，于是有了 Double DQN（第 8 章）。</p>
+
+<h2>6.7 在游戏里怎么用</h2>
+<div class="tbl"><table>
+<tr><th>场景</th><th>选择</th><th>理由</th></tr>
+<tr><td>小状态空间的离散决策（回合制小游戏、简单 NPC 行为选择、教学 Demo）</td><td>表格 Q-learning / Sarsa</td><td>可解释、可直接看 Q 表；状态要先离散化</td></tr>
+<tr><td>部署时执行有噪声（反应延迟、操作抖动）</td><td>on-policy（Sarsa / PPO）</td><td>学到的价值包含执行噪声的风险，路线更稳</td></tr>
+<tr><td>有大量现成数据（玩家录像、旧版本 Bot 对局）</td><td>off-policy（Q-learning / DQN / 离线 RL）</td><td>能复用数据；注意分布外动作（第 14 章）</td></tr>
+<tr><td>状态太多、需要泛化</td><td>函数近似 → DQN（第 8 章）</td><td>Q 表存不下，也没有泛化</td></tr>
+</table></div>
+<p class="tcap"><b>表 6-2</b>　本章算法在游戏中的定位。</p>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch06_interview.py</code> 逐字相同；脚本用与 C++ 相同的随机数生成器重跑 Cliff Walking 的 run 0，三种算法前 100 回合的奖励与 C++ 完全一致：</p>
+<!--code:py:ε-greedy / Sarsa / Expected Sarsa / Q-learning / Double Q / IS 比值（Python，面试手撕版）-->
+{{demo:ch06_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch06_interview.py 的输出-->
+{{demo:ch06_interview_output.txt}}
+<!--/code-->
+
+<h2>6.8 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“Q-learning 是 off-policy，因为它用了 ε-greedy 探索”</td><td>因果说反</td><td>off-policy 是因为目标里的 max 评估的是贪心策略，与行为策略无关；Sarsa 也用 ε-greedy，却是 on-policy</td></tr>
+<tr><td>“Sarsa 比 Q-learning 好，因为它在悬崖上回报高”</td><td>只看在线回报</td><td>Q-learning 学到的贪心路线更短；在线回报差是因为执行时带探索。看部署时是否还有随机性</td></tr>
+<tr><td>“Q-learning 需要重要性采样修正”</td><td>混淆一步与多步</td><td>一步 Q-learning 不需要；n 步 off-policy 和 MC 才需要</td></tr>
+<tr><td>“满足收敛条件就一定能学到最优”</td><td>渐近 vs 有限</td><td>条件都是渐近的；实测 GLIE Sarsa 在有限训练里几乎都停在安全路（6.4 节）</td></tr>
+<tr><td>“普通重要性采样无偏，所以比加权的好”</td><td>忽略方差</td><td>普通 IS 方差可能无穷（图 6-4），实践中用加权 IS 或截断比值</td></tr>
+<tr><td>“Expected Sarsa 没有最大化偏差”</td><td>ε-greedy 下仍被 max 主导</td><td>目标 90% 的权重在 max 上，动作多时同样高估（图 6-5）；要用 Double 估计</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:Sarsa / Q-learning 常见追问链-->
+Sarsa 和 Q-learning 的区别？
+├─ 为什么 Q-learning 是 off-policy？ → 目标用 max，评估贪心策略，与行为策略无关
+│   └─ 那为什么不需要重要性采样？ → 一步更新里 A 是条件，之后用 max 估值；n 步才需要
+├─ Cliff Walking 上为什么路线不同？ → Sarsa 价值包含探索风险 → 安全路；Q-learning 贪心价值 → 最短路但在线回报差
+│   └─ ε 衰减到 0 呢？ → 理论上 Sarsa 也趋向最短路；实测有限训练里旧估计没人纠正，仍走安全路
+├─ Q-learning 收敛条件？ → 表格、无限次访问、Robbins-Monro 步长；实践用常数 α
+├─ Q-learning 为什么高估？怎么缓解？ → E[max] ≥ max E；动作越多越严重；Double Q / Double DQN
+└─ on-policy 和 off-policy 各自优缺点？ → on：稳定、贴近执行；off：数据复用、能学最优，需修正分布、方差大
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 6 章</div><ul>
+<li>无模型控制学 Q；ε-greedy 改进定理：在 ε-soft 策略类内单调改进，最优 ε-soft ≠ 最优。</li>
+<li>Sarsa：$R+\gamma Q(S',A')$（on-policy）；Expected Sarsa：$R+\gamma\sum\pi Q$（方差更小）；Q-learning：$R+\gamma\max Q$（off-policy）。</li>
+<li>Cliff Walking：Q-learning 最短路但在线回报差，Sarsa 安全路；差别来自评估的策略是否含探索。</li>
+<li>收敛：GLIE + Robbins-Monro 是渐近条件；实践用常数 α，探索不足会留下旧估计。</li>
+<li>IS 比值 $\rho=\prod\pi/b$ 与模型无关；普通 IS 无偏但方差可能无穷，加权 IS 有偏但稳定。</li>
+<li>最大化偏差随动作数增长；Double Q 用一张表选、另一张表估。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：把 Cliff Walking 的 ε 设为 0（纯贪心），Sarsa 和 Q-learning 还有区别吗？</summary><p>行为策略变成贪心后，Sarsa 的 $A'$ 就是 $\argmax_{a'}Q(S',a')$，两者的更新完全相同。但纯贪心没有探索，Q 初值为 0、每步 −1 时，没走过的动作看起来更好，agent 会靠“乐观初值”被动探索（第 7 章），能否找到最短路取决于初值和平局处理。</p></details>
+<details class="quiz"><summary>自测 2：DQN 用经验回放，为什么 PPO 不能直接用？</summary><p>DQN 的目标是 off-policy 的（max），旧数据里的 $(s,a,r,s')$ 照样能用；PPO 的策略梯度是对当前策略取期望的 on-policy 估计，旧数据来自旧策略，必须乘概率比修正，而且比值不能离 1 太远（clip），所以只能在一批数据上复用几个 epoch。</p></details>
+<details class="quiz"><summary>自测 3：例 5.5 中，为什么普通 IS 的方差是无穷大？</summary><p>回合长度为 k 时比值是 $2^k$，概率约为 $0.5^k\cdot0.9^{k-1}\cdot0.1$（行为策略连续选 left 且每次都没结束，最后一次结束）。二阶矩 $\E[\rho^2G^2]\propto\sum_k(0.5\cdot0.9\cdot4)^k=\sum_k1.8^k$，发散。期望 $\E[\rho G]=1$ 仍然有限，所以估计无偏但方差无穷——收敛极慢且不稳定。</p></details>
+<details class="quiz"><summary>自测 4：在 MOBA Bot 中，用人类玩家的对局录像训练 Q 函数，属于 on-policy 还是 off-policy？要注意什么？</summary><p>off-policy（行为策略是人类，目标策略是 Bot 的贪心策略），而且是离线的。要注意：录像只覆盖人类常做的动作，max 会查询录像里没出现过的动作，产生外推误差（第 14 章表 14-2）；人类的动作分布未知时，也没法直接算重要性比值。</p></details>
+</section>

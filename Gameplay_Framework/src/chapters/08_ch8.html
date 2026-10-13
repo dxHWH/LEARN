@@ -1,0 +1,163 @@
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>RingBuffer：环形队列、满与空、清槽与回绕</h1>
+    <p class="lead">70 行代码，面试里常作为热身题出现。真正被追问的不是怎么写，而是：满和空怎么区分、为什么出队要清槽、取模和位与差多少、为什么它是无锁队列的起点。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>手推 head / tail / size 在入队、出队、回绕时的变化，说清满与空的三种判别方式</li>
+    <li>说清“出队清槽”的目的，以及 <code>typeof(T).IsValueType</code> 这个判断漏掉了什么</li>
+    <li>用实测回答“取模和位与差多少”“为什么容量常取 2 的幂”</li>
+    <li>对比 RingBuffer 与 <code>Queue&lt;T&gt;</code>、链表队列的取舍</li>
+    <li>知道测试为什么没覆盖到它，以及要补哪些用例</li>
+  </ul></div>
+
+  <h2>8.1 这一章解决什么问题</h2>
+  <p>EventSystem 需要一个 FIFO 队列，要求：入队出队 O(1)、不在每帧路径上分配、容量可控。链表每个节点一次分配；<code>List&lt;T&gt;</code> 从头部删除是 O(n)；<code>Queue&lt;T&gt;</code> 本身就是环形数组，只是会自动扩容。项目选择了自己写一个<strong>固定容量</strong>的环形数组。</p>
+
+  <h2>8.2 当前实现</h2>
+  <!--code:cs:RingBuffer.cs（全文节选）-->
+public class RingBuffer<T> {                       // 注意：不在 GamePlayArchitecture 命名空间里
+    private readonly T[] _buffer; private readonly int _capacity;
+    private int _head, _tail, _size;               // head：下一个出队位置；tail：下一个入队位置
+    public bool TryEnqueue(T e) {
+        if (_size >= _capacity) return false;      // 满：拒绝（不覆盖、不扩容）
+        _buffer[_tail++] = e;
+        _tail %= _capacity;                        // 回绕
+        _size++; return true;
+    }
+    public bool TryDequeue(out T e) {
+        if (_size == 0) { e = default; return false; }
+        e = _buffer[_head];
+        if (!typeof(T).IsValueType) _buffer[_head] = default;   // 引用类型：清槽，让 GC 能回收
+        _head = (_head + 1) % _capacity;
+        --_size; return true;
+    }
+    public bool TryPeek(out T e) { ... }           // 只读队头
+    public int Count => _size;
+}
+<!--/code-->
+
+  <h2>8.3 手推一遍：回绕与满 / 空</h2>
+  <!--code:text:capacity = 3（实测 G4，与源码逐行一致）-->
+操作                     buffer        head  tail  size
+初始                     [ _  _  _ ]    0     0     0      ← head == tail，空
+入队 1,2,3               [ 1  2  3 ]    0     0     3      ← head == tail，满
+再入队 4                 → false（size >= capacity）
+出队 → 1                 [ _  2  3 ]    1     0     2      （引用类型时 1 号槽被清成 default）
+入队 4                   [ 4  2  3 ]    1     1     3      ← tail 回绕到 0 后写入，再 +1
+全部出队 → 2 3 4         [ _  _  _ ]    1     1     0      ← head == tail，又是空
+<!--/code-->
+  <p>“满”和“空”时都有 <code>head == tail</code>，光看两个指针分不出来。三种常见解法：</p>
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>做法</th><th>代价</th><th>典型使用</th></tr>
+    <tr><td><b>额外计数 size（本项目）</b></td><td>size==0 空，size==capacity 满</td><td>多一个字段；入队出队都要改 size——多线程下 size 成了生产者和消费者<strong>共同写</strong>的变量</td><td>单线程队列</td></tr>
+    <tr><td>浪费一个槽</td><td>(tail+1)%cap == head 视为满</td><td>实际只能存 cap−1 个</td><td>教科书写法</td></tr>
+    <tr><td>单调递增计数</td><td>head、tail 只增不回绕，下标用 <code>tail &amp; (cap−1)</code>；<code>tail−head</code> 就是元素数</td><td>容量必须是 2 的幂；计数溢出要靠无符号回绕保证正确</td><td>Linux kfifo、无锁 SPSC（第 12 章 G7）</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">面试注意：为什么无锁队列不用 size</span>
+    <p>size 被生产者 ++、被消费者 −−，两个线程写同一个变量，必须用原子操作或锁。单调递增计数让 head 只被消费者写、tail 只被生产者写，各写各的，这正是 SPSC 无锁的前提。所以“满空用 size 判断”这个设计在单线程下最简单，到了多线程就是瓶颈——ThreadSafeRingBuffer 沿用了它，只能整体加锁。</p>
+  </div>
+
+  <h2>8.4 出队清槽：为了 GC，但判断条件不完整</h2>
+  <p>如果出队不清槽，被取走的元素仍然被数组引用着，GC 认为它还活着。对 EventSystem 来说，队列里存的是闭包委托，闭包又引用着事件对象和多播委托（进而引用所有监听者）——不清槽的话，这些对象要等到这一格被下一轮覆盖才释放。作者在这里是清楚这个问题的（对比第 10 章 E13：TimerSystem 停止时没有清尾部槽位）。</p>
+  <p>但判断条件 <code>!typeof(T).IsValueType</code> 漏了一种情况：<strong>T 是含引用字段的结构体</strong>。比如第 7 章提到的低 GC 方案 <code>struct EventEnvelope { int typeId; object payload; }</code>，IsValueType 为 true，不清槽，payload 被钉住。【实测 G5】按源码逻辑，出队并丢弃后 payload 仍然存活；改成“含引用就清槽”后被释放。</p>
+  <ul>
+    <li>【改进方案】判断改为“是否是引用或含引用”：.NET 提供 <code>RuntimeHelpers.IsReferenceOrContainsReferences&lt;T&gt;()</code>（Unity 2021 起的 .NET Standard 2.1 配置可用，使用前请在目标版本确认）；或者干脆无条件清槽——对纯值类型写一次 default 的成本可以忽略。</li>
+    <li>【扩展知识】.NET Core 的 <code>Queue&lt;T&gt;</code> 源码就是用这个判断决定出队是否清槽的；Mono 沿用的 .NET Framework 参考源码则是无条件清槽。</li>
+  </ul>
+  <div class="co deep"><span class="h">C++ 视角：同一个问题叫“析构时机”</span>
+    <p>C++ 的环形队列如果存的是 <code>std::shared_ptr</code> 或带资源的对象，出队时不 reset / 不调用析构，资源同样不会释放。<code>std::deque</code> 的 pop_front 会析构元素；自己用裸数组 + placement new 实现时，要在出队时手动调用析构函数。“容器负责元素的生命周期”在两种语言里是同一件事。</p>
+  </div>
+
+  <h2>8.5 取模 vs 位与：为什么容量常取 2 的幂</h2>
+  <!--bars {"title":"G6 · 每次入队 + 出队的下标回绕开销（C++ /O2，ns/次）","items":[["capacity=2000 取模",2.20,"o"],["capacity=2048 取模",2.18,"o"],["capacity=2048 位与",0.40,"g"]],"labw":190,"unit":"ns","cap":"<b>图 8-1</b>　实测 G6（demos/infra_output.txt）。容量是运行期变量时，取模要用整数除法指令；容量是 2 的幂时可以用 <code>&amp; (cap−1)</code> 代替，约快 5 倍。但这是每次 2 ns 和 0.4 ns 的差别——EventSystem 每帧几十个事件，完全无关紧要"} -->
+  <ul>
+    <li>整数除法在 x86 上要几十个周期，位与只要 1 个周期。编译器只有在除数是编译期常量时才能自动把 % 换成乘法 / 位运算。</li>
+    <li>源码的 2000 不是 2 的幂；改成 2048 能用位与，但前提是用位与重写下标计算，单改数字没用（实测：2048 取模仍是 2.18 ns）。</li>
+    <li>2 的幂的另一个好处是配合“单调递增计数”（8.3），计数器溢出回绕时 <code>&amp; mask</code> 仍然正确。</li>
+  </ul>
+  <div class="co warn"><span class="h">面试注意：说“我把取模换成位与做了优化”之前</span>
+    <p>先说清楚规模：这个队列的瓶颈从来不是下标计算，而是每个元素的闭包分配和回调执行。面试官更想听到“我知道这个技巧，也知道它在这里不值得”。</p>
+  </div>
+
+  <h2>8.6 和其他队列比</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>RingBuffer（本项目）</th><th><code>Queue&lt;T&gt;</code></th><th>链表队列 / <code>LinkedList&lt;T&gt;</code></th></tr>
+    <tr><td>底层</td><td>固定数组</td><td>可扩容的环形数组</td><td>节点 + 指针</td></tr>
+    <tr><td>入队 / 出队</td><td>O(1)</td><td>O(1) 均摊（扩容时 O(n)）</td><td>O(1)</td></tr>
+    <tr><td>分配</td><td>只在构造时</td><td>扩容时</td><td>每个节点一次</td></tr>
+    <tr><td>满了</td><td>拒绝（返回 false）</td><td>扩容</td><td>无上限</td></tr>
+    <tr><td>cache</td><td>连续</td><td>连续</td><td>节点散落，pointer chasing</td></tr>
+    <tr><td>清槽</td><td>只对引用类型（有漏洞）</td><td>引用或含引用（.NET Core）/ 无条件（.NET Framework、Mono）</td><td>节点整体被回收</td></tr>
+    <tr><td>迭代 / 调试</td><td>无迭代器</td><td>有</td><td>有</td></tr>
+  </table></div>
+  <p>坦白说，<code>Queue&lt;T&gt;(2000)</code> 在不超过容量时和这个 RingBuffer 行为几乎一样，而且清槽更正确。自己写的价值在于“容量固定、满了显式拒绝”这一语义，以及作为 ThreadSafeRingBuffer 和无锁版本的起点——前提是满了要报出来（第 7 章 7.7）。</p>
+
+  <h2>8.7 Code Review 与测试</h2>
+  <div class="tbl"><table>
+    <tr><th>级别</th><th>问题</th><th>说明</th></tr>
+    <tr><td>P2</td><td>含引用的结构体出队不清槽</td><td>G5；改用“是否含引用”的判断或无条件清槽</td></tr>
+    <tr><td>P2</td><td>每次出队都执行 <code>typeof(T).IsValueType</code></td><td>泛型按值类型特化时 JIT 通常能常量折叠；引用类型共享代码（Mono / IL2CPP 的泛型共享）时可能是运行期调用。可缓存为静态只读字段</td></tr>
+    <tr><td>P3</td><td>不在命名空间</td><td>全局命名空间里的 <code>RingBuffer&lt;T&gt;</code> 容易和第三方库冲突</td></tr>
+    <tr><td>P3</td><td>没有 Clear / 迭代 / 容量查询</td><td>切场景时无法统一清空并释放引用</td></tr>
+    <tr><td>测试</td><td><strong>没有直接测试</strong></td><td><code>RingBufferTests.cs</code> 的类名叫 RingBufferTest，测的却是 ThreadSafeRingBuffer，而且 T 都是 int——清槽逻辑根本不会执行；EventSystem 真正用的这个类零覆盖</td></tr>
+  </table></div>
+  <p>应补的用例：引用类型出队后被 GC 回收（用 WeakReference 验证）；含引用结构体同上；容量 1 的边界；连续回绕多圈后顺序正确；满时 TryEnqueue 返回 false 且不改变状态；构造容量 ≤ 0 抛异常。</p>
+
+  <h2>8.8 面试追问树</h2>
+  <!--code:text:追问树 · RingBuffer-->
+Q8-1 手写一个环形队列
+ ├── Q8-2 满和空怎么区分？
+ │    └── Q8-3 为什么无锁队列不用 size？                          ← 引到第 12 章
+ ├── Q8-4 为什么出队要把槽位清成 default？                         ← GC
+ │    └── Q8-5 值类型就不用清了吗？                                ← G5 反例
+ ├── Q8-6 % 和 & 差多少？为什么容量常取 2 的幂？
+ └── Q8-7 满了为什么不覆盖最老的？为什么不扩容？
+Q8-8 为什么不直接用 Queue<T>？
+Q8-9 环形缓冲区在游戏里还用在哪？                                 ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q8-1 → Q8-3　手写环形队列；满和空怎么区分？</div>
+    <p><b>L1 · 30 秒</b>　固定数组加 head、tail 两个下标，入队写 tail 再前进，出队读 head 再前进，到末尾取模回绕。满和空时 head 都等于 tail，我用一个 size 计数区分。</p>
+    <p><b>L2 · 正常回答</b>　另外两种做法是浪费一个槽（tail 的下一个是 head 就算满），或者 head、tail 只增不回绕、用位与取下标、用差值算元素个数，后者要求容量是 2 的幂。</p>
+    <p><b>L3 · 深入</b>　单线程下 size 最简单；多线程下 size 被生产者和消费者同时修改，必须加锁或原子操作。单调递增计数让 head 只归消费者写、tail 只归生产者写，单生产者单消费者时可以不加锁，只用 acquire/release 内存序保证可见性——我实测过，同样传 400 万个数，加锁版约 168 ms，无锁 SPSC 约 18 ms。</p>
+    <p><b>L4 · 面试官攻击</b>　“单调递增的计数器溢出了怎么办？” → 用无符号整数，溢出按 2⁶⁴（或 2³²）取模回绕；只要容量是 2 的幂、且元素数不超过容量，<code>tail − head</code> 的无符号差和 <code>&amp; mask</code> 取下标在回绕后都仍然正确。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q8-4 / Q8-5　为什么要清槽？值类型就不用了吗？</div>
+    <p><b>L2</b>　出队后数组还引用着这个元素，GC 认为它活着，要等这一格被覆盖才释放。EventSystem 队列里放的是闭包，闭包引用事件对象和监听者，不清槽就会延长它们的寿命。</p>
+    <p><b>L3</b>　源码只对引用类型清槽，这有漏洞：结构体里有引用字段时 IsValueType 是 true，但引用照样被钉住，我用移植版验证过。应该判断“是否是引用或含引用”，.NET Core 的 Queue 就是这么做的；或者像 .NET Framework 的 Queue 那样无条件清。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q8-7　满了为什么不覆盖最老的？为什么不扩容？</div>
+    <p><b>L2</b>　覆盖最老的适合日志、录像、网络抖动缓冲这类“只要最近 N 个”的场景；扩容适合不能丢的。事件队列里两种事件都有，所以单一策略都不对。我选择“满了拒绝”，本意是让异常的事件量暴露出来，但 Trigger 没处理返回值，暴露这一步没做——这是第 7 章的 P0。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q8-9　环形缓冲区在游戏里还用在哪？（发散）</div>
+    <p><b>L2</b>　很多地方：网络的收发缓冲和 jitter buffer；音频混音缓冲区（生产者是解码线程、消费者是声卡回调，典型 SPSC）；输入历史（格斗游戏的指令缓冲、帧同步回滚时保留最近 N 帧状态）；帧时间统计（最近 120 帧的平均 FPS）；GPU 每帧的动态常量缓冲（按帧轮转，避免 CPU 改 GPU 正在读的那块）；日志的最近 N 条，崩溃时一起上报。共同点是“只关心最近一段”或“一个写一个读”。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“环形队列 head==tail 就是空。”</p>
+    <p><b>问题</b>：满的时候 head 也等于 tail（G4）。必须说出用什么额外信息区分。</p>
+  </div>
+
+  <h2>8.9 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">Linux kfifo</div><p>容量 2 的幂、in/out 两个无符号计数只增不减、单生产者单消费者无锁，配合内存屏障——是 8.3 第三种方案的工业实现。</p></div>
+    <div class="card"><div class="t">LMAX Disruptor</div><p>预分配的环形数组 + 序列号 + 缓存行填充，避免 false sharing 和分配；多消费者按依赖关系排队。第 12 章 G8 的 false sharing 就是它要解决的问题之一。</p></div>
+    <div class="card"><div class="t">std::deque 与 std::queue</div><p>deque 是分段数组（块 + 中控数组），不是环形数组；std::queue 是适配器，默认底层 deque。追问“deque 头部插入为什么是 O(1)”时会用到。</p></div>
+    <div class="card"><div class="t">GPU 的 ring buffer</div><p>命令缓冲、上传堆按帧轮转；用 fence 判断 GPU 是否已经消费完某一段，没消费完 CPU 就等——本质是“满了怎么办”的另一种答案：阻塞生产者。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>head 出、tail 入、取模回绕；<strong>满和空都是 head==tail</strong>，项目用 size 区分（G4）；另两法：浪费一槽、单调递增计数 + 2 的幂。</li>
+    <li>size 是两端共写的变量 → 多线程只能加锁；单调计数让两端各写各的 → SPSC 可无锁。</li>
+    <li>出队清槽是为了 GC；<strong>只判 IsValueType 会漏掉“含引用的结构体”</strong>（G5）。</li>
+    <li>取模 2.2 ns vs 位与 0.4 ns（G6），<strong>只是数量级上快，在这里无意义</strong>。</li>
+    <li>RingBufferTests 测的是 ThreadSafe 版、T=int，<strong>EventSystem 真正用的这个类零覆盖</strong>。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：capacity=4，依次入队 a b c，出队 2 次，再入队 d e f，写出 head、tail、size 和数组内容。</summary><p>入队 a b c：head=0 tail=3 size=3。出队 2 次（a b）：head=2 size=1。入队 d：写 [3]，tail=0；入队 e：写 [0]，tail=1；入队 f：写 [1]，tail=2，size=4（满）。数组 [e f c d]，head=2 tail=2 size=4，出队顺序 c d e f。</p></details>
+  <details class="quiz"><summary>自测 2：把容量从 2000 改成 2048，下标计算就自动变快了吗？</summary><p>不会。代码里写的仍是 % _capacity，_capacity 是运行期字段，编译器无法替换；实测 2048 取模仍是 2.18 ns。必须把下标计算改写成 &amp; (cap−1)。</p></details>
+</section>

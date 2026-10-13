@@ -1,0 +1,14 @@
+sizeof(TimerData)=40 字节（C# 版本字段相同，含 2 个对象引用）
+
+== B1 每帧遍历 Tick，单元素耗时（取多轮最小值） ==
+N=     100 (dense        4 KB)  dense=  0.36 ns  指针·按序=  0.38 ns  指针·打乱=  0.38 ns  打乱/dense=  1.1x
+N=    1000 (dense       39 KB)  dense=  0.37 ns  指针·按序=  0.48 ns  指针·打乱=  0.44 ns  打乱/dense=  1.2x
+N=   10000 (dense      391 KB)  dense=  0.37 ns  指针·按序=  0.47 ns  指针·打乱=  0.56 ns  打乱/dense=  1.5x
+N=  100000 (dense     3906 KB)  dense=  0.37 ns  指针·按序=  0.61 ns  指针·打乱=  1.00 ns  打乱/dense=  2.7x
+N= 1000000 (dense    39062 KB)  dense=  0.90 ns  指针·按序=  3.66 ns  指针·打乱=  6.07 ns  打乱/dense=  6.7x
+
+== B2 随机位置删除一个计时器的耗时 ==
+N=     100  erase(保序)=      25.7 ns/次  swap-and-pop=   2.6 ns/次  比值=      10x
+N=    1000  erase(保序)=      82.1 ns/次  swap-and-pop=   2.7 ns/次  比值=      30x
+N=   10000  erase(保序)=    1035.2 ns/次  swap-and-pop=   2.7 ns/次  比值=     383x
+N=  100000  erase(保序)=   48680.9 ns/次  swap-and-pop=   4.3 ns/次  比值=   11321x

@@ -1,0 +1,98 @@
+<section class="chapter" id="ch15">
+<div class="ch-head"><div class="no">CHAPTER 15</div><h1>面试追问 50 题与速记卡</h1><p class="lead">每题先给能直接说出口的答案，括号里是展开时去哪一章找论据和数字。</p></div>
+
+<h2>15.1 一棵追问树</h2>
+<!--code:text:面试官最常见的追问路径-->
+帧同步和状态同步的区别？（Ch1）
+├─ 帧同步为什么要确定性？浮点为什么不确定？（Ch4）
+│   ├─ 定点数怎么实现乘除 / 开方 / 三角？范围和精度怎么取舍？（Ch4.3）
+│   └─ 出了 desync 怎么发现、怎么定位？（Ch4.6 · Ch8.4）
+├─ 一个人卡了，其他人会卡吗？（Ch3）
+│   ├─ 严格 Lockstep / 定频广播不等人 / 回滚各自怎样？（Ch3.3 实测）
+│   └─ 回滚为什么王者不用？（Ch9.4 · Ch3.4）
+├─ 丢包怎么办？（Ch6 · Ch7）
+│   ├─ 下行：冗余 → 补发 → 追帧，各自的边界？k 设多大？（Ch6.2 推导）
+│   ├─ 上行：短冗余 vs 技能全量冗余？技能顺序怎么保证？（Ch7）
+│   └─ 断线重连怎么做？追帧要多久？（Ch6.5）
+├─ 逻辑和表现怎么分离？（Ch5）
+└─ 状态同步怎么解决延迟？（Ch10）
+    ├─ 插值延迟设多少？（Ch10.2）
+    ├─ 预测错了怎么办？（Ch10.4 · Ch13.1 CMC）
+    ├─ 延迟补偿回溯多少？隔墙杀？（Ch10.5）
+    └─ Unreal：Role / 所有权 / 复制管线 / 属性 vs RPC / GAS 预测（Ch11 · Ch12 · Ch13）
+<!--/code-->
+
+<h2>15.2 基础概念（1–10）</h2>
+<details class="quiz"><summary>1. 用一句话说清帧同步和状态同步的本质区别。</summary>帧同步：各端跑同一份确定性逻辑，网上只传输入，服务器只定序；状态同步：服务器跑权威逻辑，网上传状态与事件，客户端插值播放并预测自己。（Ch1.2）</details>
+<details class="quiz"><summary>2. 帧同步一定比状态同步省带宽吗？</summary>不一定。帧同步带宽与单位数无关，单位多时优势巨大（E1：100 单位时全量快照是帧同步的约 30 倍）；但单位少时，增量快照 + 兴趣管理也很便宜（10 单位时甚至更低）。（Ch1.4）</details>
+<details class="quiz"><summary>3. 为什么实时游戏多用 UDP 而不是 TCP？</summary>TCP 可靠有序，丢一个包后面全部等重传（队头阻塞），延迟突增；游戏要的是按需可靠：状态发最新值、输入带冗余、只有关键事件才可靠。（Ch2.2）</details>
+<details class="quiz"><summary>4. 抖动和延迟哪个更伤体验？</summary>抖动。稳定的延迟可以用缓冲 / 预测吸收，抖动会让推进忽快忽慢；突发丢包同理。HOK 的冗余、补发、卡顿统计主要都在对付抖动和突发丢包。（Ch2.1）</details>
+<details class="quiz"><summary>5. 为什么逻辑要固定步长？</summary>帧同步要求各端在相同时间步上算出相同结果；状态同步要求客户端预测与服务器模拟步调一致。渲染帧率任意，用插值平滑，代价是多一帧显示延迟。（Ch2.3）</details>
+<details class="quiz"><summary>6. 渲染插值有什么代价？</summary>显示比最新逻辑状态晚约一个逻辑帧（E2：15 Hz 时约 [[E2.lagInt|.0f]] ms），换来平滑（速度抖动从 [[E2.jRaw|.0f]] 降到 [[E2.jInt|.0f]] cm/s）。（Ch2.3）</details>
+<details class="quiz"><summary>7. 客户端怎么和服务器对时？</summary>NTP 式：$\theta = \frac{(t_1-t_0)+(t_2-t_3)}{2}$，误差来自上下行不对称，所以多次采样取 RTT 最小的样本，再平滑；校正时拉伸时间而不跳变。（Ch2.4）</details>
+<details class="quiz"><summary>8. “权威”是什么意思？</summary>某个数据以谁的计算结果为准。状态同步里服务器权威；帧同步里没有单点权威，“输入序列 + 确定性逻辑”就是真相；客户端预测的东西是“暂定的”，以权威结果为准。（Ch1 · Ch10）</details>
+<details class="quiz"><summary>9. 录像在两种方案里有何不同？</summary>帧同步录输入序列，极小，回放复用实战路径，依赖确定性与版本；状态同步录复制数据流（UE DemoNetDriver），较大，可做检查点跳转，不依赖确定性。（Ch8.5）</details>
+<details class="quiz"><summary>10. 帧同步能防作弊吗？</summary>能防改数值（hash 比对会发现少数派），防不了透视 / 全图（客户端本就有全量数据）和脚本（输入合法）。状态同步可以按可见性裁剪数据防透视，但同样防不了脚本。（Ch8.4）</details>
+
+<h2>15.3 帧同步与 HOK（11–25）</h2>
+<details class="quiz"><summary>11. 帧同步的三块基石？</summary>定帧（拿到第 N 帧才推进第 N 帧）、确定性（相同输入相同输出）、广播输入不广播结果（输入序列 = 录像 = 重连 = 观战 = 校验）。（Ch3.1）</details>
+<details class="quiz"><summary>12. 王者荣耀一个人卡了，其他人会卡吗？</summary>不会。服务器定频广播、不等人：卡的人上行丢包丢的是自己的操作，下行丢包停的是自己的画面。对比严格 Lockstep 一人卡全员卡（E3：好玩家卡顿 [[e3.strict.gfz|.0f]] ms vs [[e3.relay.gfz|.0f]] ms）。（Ch3.3）</details>
+<details class="quiz"><summary>13. 回滚是不是就没有木桶效应了？</summary>只是推迟了：卡顿短于预测窗口时别人只是轻微跳变；超过窗口，P2P 下所有人都缺他的真实输入，全员等待（E3：好玩家也卡了 [[e3.rollback.gfz|.0f]] ms）。（Ch3.3 · Ch9）</details>
+<details class="quiz"><summary>14. 为什么帧同步要用定点数？</summary>IEEE 754 基本运算本身确定，但编译器重排 / FMA 收缩、指令集、超越函数库、归约顺序会导致跨平台结果不同（实测 /fp:fast /arch:AVX2 第 [[detc.firstdiff]] 帧就分叉，定点三份一致）；跨 iOS / Android / PC 无法锁死这些，就用整数模拟小数。（Ch4.2）</details>
+<details class="quiz"><summary>15. 除了浮点，还有哪些确定性陷阱？</summary>随机（同种子 + 同调用次数，表现层不能用逻辑随机）、容器遍历顺序（unordered_map / 指针排序）、时间（墙钟、deltaTime、浮点累加时间：20 分钟漂 [[det.precise.D6.errms|.0f]] ms）、多线程、未定义行为、引擎物理、版本 / 配置不一致。（Ch4.1）</details>
+<details class="quiz"><summary>16. desync 怎么发现和定位？</summary>各端周期性上报帧 hash 横向比对（不是服务器养影子客户端）；定位用分层 hash、详细追踪日志 diff、录像多平台重放二分找第一个分歧帧。（Ch4.6 · Ch8.4）</details>
+<details class="quiz"><summary>17. HOK 为什么让 C++ 独立承担逻辑？</summary>确定性（脱离引擎浮点、调度、容器）、可脱离 Unity 运行（服务器、测试）、服务器复用同一份代码（CS 模式）、性能可控。（Ch5.1）</details>
+<details class="quiz"><summary>18. 一条帧命令的“三条命运”？</summary>OnReceive 立即写入 C++ 共享缓冲区（逻辑必须准点）；ExecLocal 等本地帧号追上再执行（多数为空）；战斗表现走第三条路：C++ 演算完推回结果事件，C# 的 AGE 执行。（Ch5.2）</details>
+<details class="quiz"><summary>19. 为什么技能指示器可以不等帧，伤害飘字必须等？</summary>指示器不依赖演算结果（预表现），伤害依赖演算结果——提前播就可能和十端一致的逻辑矛盾。（Ch5.2）</details>
+<details class="quiz"><summary>20. 下行冗余为什么倒序排列？</summary>从最新帧往旧帧解，遇到已处理过的帧就停，平时只解一帧；正序的话每个包都要解 k 帧。（Ch6.2）</details>
+<details class="quiz"><summary>21. 一包带几帧冗余合适？</summary>随机丢包下失败率 $p^k$，k=3 就把 5% 丢包压到约万分之一；突发丢包下失败率 $p(1-1/L)^{k-1}$，每多一帧只乘 $1-1/L$，收益很低——所以 k 适中，剩下交给补发。（Ch6.2 推导 + E5）</details>
+<details class="quiz"><summary>22. 900 帧接收窗口做什么？期待帧有什么双重身份？</summary>循环数组缓存、排序、去重、定序；入窗即连续消费，维护只找洞、要洞、记账。期待帧既是“下一个要处理的帧”，也写进上行包头充当 ACK。（Ch6.3）</details>
+<details class="quiz"><summary>23. 补发请求怎么设计？</summary>两种触发（有空洞即请求 / 90 ms 没推进），两级频率（约 120 ms → 持续卡顿后约 1000 ms，防请求风暴），缺失帧合并成区间、末区间留给窗口外（−1 开放区间）；补回的帧走正常路径。（Ch6.3）</details>
+<details class="quiz"><summary>24. 断线重连的完整流程？</summary>退避重连（最多 8 次、地址逐级降级）→ 先问大厅是否仍在对局 → 重连 Relay、确认阶段 → 1090 请求缓存帧、1091 分片返回 → 顺序回放（开头可能是开局 / 开打协议）→ 缺口 &lt; 15 帧算追上 → 1093 上报；期间实时包在包层暂存，快速恢复模式只放行帧推进通知。（Ch6.5）</details>
+<details class="quiz"><summary>25. 上行技能怎么保证不丢、不重、不乱？</summary>全量冗余：每约 200 ms 重发所有未确认技能（1 s 超时、队满丢最老）；单调技能序号，服务器按序号去重保序；确认 = 在下行帧里看到自己的技能；追帧后序号 +100 隔离迟到指令。实测突发丢包下送达率 [[e7.g10.2.deliv|.1f]]%，平均只发 [[e7.g10.2.copies|.2f]] 份。（Ch7）</details>
+
+<h2>15.4 状态同步与 Unreal（26–40）</h2>
+<details class="quiz"><summary>26. 状态同步怎么解决延迟？</summary>三件套：插值（别人，渲染过去）、预测 + 和解（自己，本地先动、服务器纠正后重放）、延迟补偿（命中，服务器回溯）。（Ch10）</details>
+<details class="quiz"><summary>27. 插值延迟设多少？</summary>约“快照间隔 ×（1 + 容忍连丢份数）+ 抖动高分位”；20 Hz 快照常见 100 ms。E10：抖动 40 ms 时 100 ms 仍有 [[e10.40_100.ext|.1f]]% 的帧要外推。（Ch10.2）</details>
+<details class="quiz"><summary>28. 预测错了怎么办？为什么不能直接覆盖？</summary>回到服务器的权威状态，再重放序号 / 时间戳之后未确认的输入；直接覆盖会把角色拉回一个 RTT 之前（E11：纠正 [[e11.1.corr|.0f]] 次 vs 和解 [[e11.2.corr|.0f]] 次）。（Ch10.4）</details>
+<details class="quiz"><summary>29. 延迟补偿回溯多少？有什么副作用？</summary>回溯约 RTT + 插值延迟（射手看到的是“下行 + 插值”之前的敌人，命令又走了一个上行）；副作用是低 ping 受害者被“隔墙杀”、先手优势，所以要设上限并校验客户端声称的时刻。（Ch10.5）</details>
+<details class="quiz"><summary>30. Unreal 的 Role 有哪些？</summary>Authority（服务器）、AutonomousProxy（拥有者客户端，本地控制、预测、发 Server RPC）、SimulatedProxy（其他客户端，插值）、None。同一 Actor 在不同客户端上的 Role 可以不同。（Ch11.2）</details>
+<details class="quiz"><summary>31. 为什么客户端调 Server RPC 没执行？</summary>Server RPC 只能对“归调用方连接所有”的 Actor 发起（Owner 链最终是自己的 PlayerController）；对场景里的门、别人的 Pawn 调用会被丢弃。要通过自己的 PlayerController / Pawn 转发。（Ch11.2 · Ch12.3）</details>
+<details class="quiz"><summary>32. GameMode、GameState、PlayerController、PlayerState 分别在哪一端？</summary>GameMode 仅服务器；GameState、PlayerState 服务器 + 所有客户端；PlayerController 服务器 + 拥有者客户端；HUD / UMG 仅本地。（Ch11.2）</details>
+<details class="quiz"><summary>33. 服务器每个网络 tick 的复制流程？</summary>NetUpdateFrequency 门控 → PreReplication → 每连接判相关性 → 休眠 → 按 NetPriority × 等待时间排序（距离 / 视野加权）→ 逐个复制变化属性 → 带宽饱和就停，剩下的下 tick 优先级更高。（Ch11.3）</details>
+<details class="quiz"><summary>34. 为什么优先级要乘以等待时间？</summary>老化调度防饿死：静态优先级下低优先级对象可能永远发不出去（E13：拾取物最长 [[e13.1_2.max|.0f]] ms 没更新），乘以等待时间后迟早轮到。（Ch11.4）</details>
+<details class="quiz"><summary>35. 属性复制有哪些语义？</summary>只保证最终一致：短时间内多次修改被合并（E14：5 次变化平均 [[E14.onrep|.2f]] 次 OnRep），丢包后发最新值，新加入 / 新相关的客户端能拿到当前值。（Ch12.2）</details>
+<details class="quiz"><summary>36. OnRep 在服务器会调用吗？</summary>C++ 不会（只在客户端收到变化时调用，服务器要手动调）；蓝图 RepNotify 会。Listen Server 主机玩家经常因此缺表现。（Ch12.1）</details>
+<details class="quiz"><summary>37. Reliable RPC 有什么风险？</summary>Actor 通道内有序，丢包时后面的要等（队头阻塞，E14 平均 [[E14.relLat|.0f]] ms）；可靠缓冲有上限，持续高频发送（如 Tick 里发）会溢出导致断线。（Ch12.3）</details>
+<details class="quiz"><summary>38. 开枪特效怎么同步？</summary>开枪者本地预测播放；服务器递增一个 COND_SkipOwner 的开火计数器，其他客户端在 OnRep 里根据差值播放（ShooterGame 的 BurstCounter）；不用可靠多播。（Ch12.4）</details>
+<details class="quiz"><summary>39. CMC 怎么做网络同步？</summary>SavedMove 保存加速度 / 标志 / 时间戳并本地执行 → 不可靠 ServerMove（带旧移动冗余）→ 服务器按时间戳重放、误差超阈值发 ClientAdjustPosition 否则 Ack → 客户端设到权威位置后重放未确认 SavedMoves；模拟代理插值 + 网格平滑。（Ch13.1）</details>
+<details class="quiz"><summary>40. GAS 怎么预测技能？</summary>LocalPredicted 技能在客户端立即激活，生成 Prediction Key 随 ServerTryActivateAbility 发出；预测的 GE / Cue / 蒙太奇都挂在 key 上；服务器拒绝整体撤销，接受时用复制回来的 key 去掉本地预测副本防止重复。（Ch13.4）</details>
+
+<h2>15.5 设计与综合（41–50）</h2>
+<details class="quiz"><summary>41. 在 CMC 上加冲刺，怎么做才不会被拉回？</summary>把“想冲刺”放进 SavedMove（压缩标志 FLAG_Custom_0 或自定义移动数据），实现 SetMoveFor / PrepMoveFor / CanCombineWith / UpdateFromCompressedFlags，两端用同一个 GetMaxSpeed 计算；不要用 RPC 改速度。（Ch13.2）</details>
+<details class="quiz"><summary>42. 王者荣耀为什么不用回滚？</summary>10 人要预测 9 路输入、状态大（几十单位 + 上百 Buff）快照与重算贵（60 fps 回滚 8 帧时模拟需 ≤ 约 1 ms）、移动网络抖动会让回滚持续触发、画面持续抽动；定频广播不等人已经把故障局部化。（Ch3.4 · Ch9.4）</details>
+<details class="quiz"><summary>43. 格斗游戏为什么要加 2~3 帧输入延迟？</summary>回滚深度 ≈ (RTT/2 + 抖动)/T − d + 1，每加 1 帧深度少约 1 帧（E9），跳变和 CPU 重算都随之下降；几十毫秒的延迟在格斗容忍范围内。（Ch9.3）</details>
+<details class="quiz"><summary>44. 怎么测 ping 才准？</summary>用网络线程（或协议栈）打的到达时间戳，不要用主线程取包时刻——后者混入排队等待，平均多算最多约一帧，长帧时 p95 偏差可达 [[e8.60_1.p95|.0f]] ms（E8）。（Ch8.1）</details>
+<details class="quiz"><summary>45. 玩家反馈“卡”，你怎么定位？</summary>拆维度：帧推进抖动分布（普遍抖还是偶发长卡）、卡顿事件档案（前后收发包量、空洞长度、网络制式）、包到达到处理的滞留（网络慢还是本机慢）、帧到达序列（零散丢包还是断流）；再结合 ping、丢包、帧率。（Ch8.2）</details>
+<details class="quiz"><summary>46. 让你在 Unreal 里做帧同步，怎么做？</summary>UE 只做表现 / 输入 / 传输：逻辑层自写纯 C++ 确定性模块（定点数、确定性随机、ECS 式存储），不用 Chaos / 动画驱动逻辑；Actor 订阅结果事件做表现；不可靠通道 + 冗余 + 序号传命令；Relay 定频广播；hash 校验 + 录像 + 跨平台 CI。（Ch14.5）</details>
+<details class="quiz"><summary>47. 设计一个 5v5 MOBA 的网络同步方案。</summary>约束：10 人、单位多、移动网络、要录像观战、成本敏感 → 定频广播帧同步：定点数 C++ 逻辑层、逻辑表现分离、下行冗余 + 窗口 + 补发 + 追帧、上行分级冗余 + 技能序号、hash 校验、网络质量度量；可选 CS 模式应对高反作弊需求。（Part II）</details>
+<details class="quiz"><summary>48. 设计一个 5v5 战术射击游戏的网络同步方案。</summary>状态同步：服务器权威、较高 tick（缩小先手优势）、移动预测 + 和解、他人插值（自适应插值延迟）、延迟补偿带上限、按可见性裁剪复制防透视、开火事件用计数器 / 不可靠多播、关键结算可靠。（Part III）</details>
+<details class="quiz"><summary>49. 帧同步和状态同步的“回滚”有什么共同点？</summary>都是“保存历史 → 回到分歧点 → 用正确数据重算”：GGPO 的真值是远端输入、范围是整个世界；CMC / GAS / 网络物理的真值是服务器结果、范围是本地相关的部分。（Ch9.5）</details>
+<details class="quiz"><summary>50. 如果只能记一句话？</summary>同步的本质是对“谁说了算、传什么、何时推进”做取舍：帧同步把难题放在确定性和抗丢包，状态同步把难题放在带宽和延迟；两者最终都靠“缓冲吸收抖动、冗余对抗丢包、预测换手感、历史支持回滚”。（全书）</details>
+
+<h2>15.6 速记卡</h2>
+<div class="cards">
+<div class="card"><div class="t">HOK 一句话</div><p>服务器定帧汇总 + 三层冗余抗丢包 + 900 帧窗口定序 + 本地确定性模拟 + 逻辑表现彻底解耦。</p></div>
+<div class="card"><div class="t">三条路线</div><p>收齐才走（严格）/ 到点就发（不等人）/ 先猜后改（回滚）；只有“不等人”把一人卡顿关在他自己身上。</p></div>
+<div class="card"><div class="t">下行三层</div><p>n ≤ k 冗余；k &lt; n &lt; 900 补发 1036；超窗 / 断线 Recover 1090 / 1091 / 1093。</p></div>
+<div class="card"><div class="t">冗余公式</div><p>随机丢包 $p^k$；突发丢包 $p(1-1/L)^{k-1}$——挨得近的副本会一起丢。</p></div>
+<div class="card"><div class="t">上行两种冗余</div><p>短冗余：当前 + 前 2 条、约 33 ms；技能全量：所有未确认、约 200 ms、1 s 超时、序号保序。</p></div>
+<div class="card"><div class="t">确定性清单</div><p>定点数 · 同种子同调用次数 · 有序容器 · 只用帧号 · 单线程 · 不用引擎物理 · 版本 / 配置校验。</p></div>
+<div class="card"><div class="t">状态同步三件套</div><p>插值看别人（约 100 ms）· 预测 + 和解看自己（回到权威 + 重放）· 延迟补偿打别人（回溯 RTT + D，设上限）。</p></div>
+<div class="card"><div class="t">UE 复制管线</div><p>频率门控 → 相关性 → 休眠 → 优先级 × 等待时间 → 变化属性 → 饱和停止。</p></div>
+<div class="card"><div class="t">属性 vs RPC</div><p>状态用属性（最终一致、可合并、新人可见）；可丢表现用不可靠多播；高频计数用计数器 + OnRep；可靠 RPC 少用。</p></div>
+<div class="card"><div class="t">CMC 五步</div><p>SavedMove → 本地执行 → ServerMove（+旧移动）→ Ack / Adjust → 重放未确认移动。</p></div>
+<div class="card"><div class="t">回滚深度</div><p>$\approx (\mathrm{RTT}/2 + J)/T - d + 1$；CPU：$t_{sim} \le (T - t_{render})/(D+1)$。</p></div>
+<div class="card"><div class="t">两个旋钮</div><p>权威在哪 × 网上传什么；HOK CC / CS、LoL、守望先锋都是中间位置。</p></div>
+</div>
+</section>

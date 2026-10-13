@@ -1,0 +1,44 @@
+# /Game/Blueprints/Zombie/BP_ZombieSpawn  (Blueprint)
+ParentClass: /Script/Engine.Actor
+
+## BP_ZombieSpawn_C Default__BP_ZombieSpawn_C
+
+## SceneComponent BP_ZombieSpawn_C.DefaultSceneRoot_GEN_VARIABLE
+   bVisualizeComponent = True
+
+## SCS_Node BP_ZombieSpawn_C.SimpleConstructionScript_0.SCS_Node_0
+   ComponentClass = SceneComponent
+   ComponentTemplate = DefaultSceneRoot_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = DefaultSceneRoot
+
+## Custom events / RPC
+- CustomEvent 开始游戏   (graph BP_ZombieSpawn.EventGraph)
+- CustomEvent 重新生成   (graph BP_ZombieSpawn.EventGraph)
+
+## Graph BP_ZombieSpawn.EventGraph
+
+CustomEvent 开始游戏():  #14
+  Macro Switch Has Authority()  #21
+    [Authority]:
+      GetAllActorsOfClass(ActorClass=TargetPoint)  -> OutActors  #10
+      Macro ForLoop(FirstIndex=0, LastIndex=9)  #20
+        [LoopBody]:
+          Array_Random(TargetArray=GetAllActorsOfClass#10.OutActors)  -> OutItem  #9
+          SpawnActor(Class=BP_Zombie_C, SpawnTransform=Conv_VectorToTransform(InLocation=Add_VectorVector(A=K2_GetRandomReachablePointInRadius(Origin=K2_GetActorLocation(self=Array_Random#9.OutItem), Radius=200.000000, NavData=None, FilterClass=None).RandomLocation, B=0.000000,0.000000,88.000000)), CollisionHandlingOverride=Undefined, TransformScaleMethod=MultiplyWithRoot, Owner=∅, Instigator=None)  #23
+
+CustomEvent 重新生成():  #15
+  goto Array_Random #9
+
+Event ReceiveBeginPlay():  #16
+
+Event ReceiveActorBeginOverlap(OtherActor):  #17
+
+Event ReceiveTick(DeltaSeconds):  #18
+  // node #16 Event ReceiveBeginPlay EnabledState=ENodeEnabledState::Disabled
+  // node #17 Event ReceiveActorBeginOverlap EnabledState=ENodeEnabledState::Disabled
+  // node #18 Event ReceiveTick EnabledState=ENodeEnabledState::Disabled
+
+## Graph BP_ZombieSpawn.UserConstructionScript
+
+FunctionEntry():  #19

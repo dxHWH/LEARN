@@ -1,0 +1,82 @@
+<section class="chapter" id="ch14">
+  <div class="ch-head">
+    <div class="no">CHAPTER 14</div>
+    <h1>验收：测试清单、调试工具与演示方式</h1>
+    <p class="lead">“合格”最后要落在可复现的测试上。本章给出每次改网络代码都要跑的清单、按症状查问题的工具表，以及面试前怎么把这个 Demo 录成一段有说服力的演示。</p>
+  </div>
+
+  <h2>1. 四种运行模式，各测什么</h2>
+  <div class="tbl"><table>
+    <tr><th>模式</th><th>PIE 设置</th><th>能暴露的问题</th></tr>
+    <tr><td>Listen Server</td><td>Number of Players = 2，Net Mode = Play As Listen Server</td><td>主机特殊性：主机玩家既 HasAuthority 又 IsLocallyControlled；SkipOwner 的 OnRep 不在服务器触发</td></tr>
+    <tr><td>Dedicated Server</td><td>Net Mode = Play As Client（后台启动专用服务器）</td><td>依赖“主机玩家存在”的逻辑（原 Demo 的开局链路）；服务器不渲染：动画通知、骨骼命中盒</td></tr>
+    <tr><td>独立进程</td><td>取消 Run Under One Process</td><td>同进程共享的单例、静态变量掩盖的问题；更接近真实的加载时序</td></tr>
+    <tr><td>Standalone 双开 / 打包</td><td>两个独立游戏进程，局域网会话</td><td>会话（主持 / 查找 / 加入）、断线回菜单、ServerTravel 带人换图</td></tr>
+  </table></div>
+
+  <h2>2. 测试清单</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>设置</th><th>步骤</th><th>预期</th><th>原 Demo</th></tr>
+    <tr><td>1</td><td>Listen Server</td><td>两人各自开火、换弹、冲刺、开镜</td><td>两边都能看到对方的 3P 开火 / 换弹 / 开镜姿势</td><td class="mid">只能看到漂浮手臂</td></tr>
+    <tr><td>2</td><td>Dedicated Server + 2 客户端</td><td>打完一整局</td><td>开局、刷怪、爆头、结算全部正常</td><td class="no">开局依赖主机</td></tr>
+    <tr><td>3</td><td>网络模拟 Bad（或 200 ms / 10%）</td><td>连射打空、换弹、冲刺来回切</td><td>开火零延迟；弹药单调；<code>p.NetShowCorrections 1</code> 无纠正</td><td class="no">E1 / E5 / E6</td></tr>
+    <tr><td>4</td><td>同上</td><td>对横移的冲刺僵尸连射</td><td>命中率与 0 延迟时接近</td><td class="no">E3</td></tr>
+    <tr><td>5</td><td>Allow Late Joining</td><td>开局 30 s 后第二人加入</td><td>直接观战；看到正确的阶段、倒计时、已死僵尸的尸体</td><td class="no">游戏是否开始 = false</td></tr>
+    <tr><td>6</td><td>Listen Server</td><td>客户端玩家先死；再测主机先死</td><td>死者不能操作、进入观战；活着的人继续；全灭才失败</td><td class="no">死者仍能操作；主机 3 s 后冻结全员</td></tr>
+    <tr><td>7</td><td>任意</td><td>弹匣 3 / 备弹 7 时换弹；换弹中按开火；换弹中被打死</td><td>换完 10 / 0；开火无效；死亡时弹药不变</td><td class="no">E4：0 / 0</td></tr>
+    <tr><td>8</td><td>任意</td><td>两人同时打同一只僵尸的最后一滴血</td><td>只死一次、只补刷一只、击杀算给先到服务器的一发</td><td class="no">客户端本地多刷</td></tr>
+    <tr><td>9</td><td>Listen Server</td><td>两人并排看同一只僵尸</td><td>跑姿、待机、攻击动作一致</td><td class="no">各端各自随机</td></tr>
+    <tr><td>10</td><td>Standalone 双开</td><td>客户端按 Esc；客户端点重开；主机点重开</td><td>暂停只影响自己；客户端看不到重开按钮；主机重开带上客户端</td><td class="no">暂停无效 / OpenLevel 断线</td></tr>
+    <tr><td>11</td><td>Standalone 双开</td><td>对局中关闭主机</td><td>客户端回到主菜单并提示“主机已断开”</td><td class="no">无处理</td></tr>
+    <tr><td>12</td><td>任意</td><td>过滤日志 LogNet、LogNetPlayerMovement、LogPawn、LogScript</td><td>无 No owning connection、无 Accessed None、无持续纠正、无 DisableInput 错误</td><td class="no">均有</td></tr>
+  </table></div>
+
+  <h2>3. 按症状查问题</h2>
+  <div class="tbl"><table>
+    <tr><th>症状</th><th>先看</th><th>工具 / 命令</th></tr>
+    <tr><td>客户端调用没反应</td><td>RPC 是否被丢弃（Actor 不属于这个客户端）</td><td>日志 <code>No owning connection for actor</code>；检查 Owner 链</td></tr>
+    <tr><td>某个变量客户端不更新</td><td>Actor / 组件是否 Replicates；变量是否标了复制；条件是否把这个客户端排除了</td><td>Networking Insights 的属性 / RPC 视图；在 OnRep 里打 Print 确认是否到达</td></tr>
+    <tr><td>主机正常、客户端不正常</td><td>是否用了 GetPlayerController(0)、HasAuthority 代替 IsLocallyControlled</td><td>全局搜索；在节点前打 Print（会带 Server / Client 前缀）</td></tr>
+    <tr><td>角色被拉回 / 抖动</td><td>两端移动参数是否一致</td><td><code>p.NetShowCorrections 1</code>、<code>p.NetCorrectionLifetime 4</code>、LogNetPlayerMovement</td></tr>
+    <tr><td>AI 不动 / 卡住</td><td>行为树当前分支、黑板值</td><td>Gameplay Debugger（按 <code>'</code>）、Behavior Tree 调试视图、Visual Logger</td></tr>
+    <tr><td>延迟高、带宽高</td><td>哪个 Actor / 属性 / RPC 占了带宽</td><td><code>stat net</code>、启动参数 <code>-NetTrace=1 -trace=net</code> 录 Networking Insights</td></tr>
+    <tr><td>帧卡（不是网络）</td><td>游戏线程 / 渲染线程耗时</td><td><code>stat unit</code>、<code>stat game</code>、Unreal Insights（CPU）</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">一个省时间的小习惯：给 Print String 加上“我是谁”</span>
+    <p>PIE 多人时 Print String 自带 <code>Server:</code> / <code>Client 1:</code> 前缀，但自定义日志没有。写一个函数库函数 <code>NetTag(Actor)</code>，返回 “NetMode + LocalRole + 是否本地控制”，所有调试输出都带上它，排查“这段代码到底在哪一端跑”会快很多。</p>
+  </div>
+
+  <h2>4. 面试前：把 Demo 录成一段有说服力的演示</h2>
+  <div class="tbl"><table>
+    <tr><th>段落</th><th>时长</th><th>画面</th><th>旁白要点</th></tr>
+    <tr><td>1. 架构</td><td>20 s</td><td>Content/Coop 目录 + 类清单表</td><td>“规则在 GameMode，状态在 GameState / PlayerState，武器挂在 Owner 链上，血量是组件”</td></tr>
+    <tr><td>2. 正常联机</td><td>30 s</td><td>两个窗口并排，主机 + 客户端，打一波僵尸</td><td>两边看到同一只僵尸的同一个动作、同一个死亡</td></tr>
+    <tr><td>3. 弱网</td><td>40 s</td><td>开启 Bad 网络模拟，左上角 <code>stat net</code></td><td>开火零延迟、弹药不跳、冲刺不拉回（开着 p.NetShowCorrections）</td></tr>
+    <tr><td>4. 边界</td><td>30 s</td><td>客户端先死 → 观战；晚加入</td><td>“死亡和阶段都是复制状态，晚加入也看得到”</td></tr>
+    <tr><td>5. 前后对比</td><td>30 s</td><td>原 Demo 同条件录屏 + E1 / E6 图</td><td>“原来开火要等 {{v:E1[s=0,rtt=200].own:.0f}} ms、冲刺每秒被纠正 {{v:E6[c=0,rtt=200].cps:.1f}} 次，现在都是 0”（数字来自本书的模拟；录屏时用自己测到的值）</td></tr>
+  </table></div>
+<!--code:text:README 模板（放在仓库首页）-->
+# Coop Zombie Shooter（UE 5.5 · Listen Server · 2 人合作）
+## 我做了什么
+- 服务器权威：伤害 / 死亡 / 弹药 / 比赛阶段 / 刷怪只在服务器；客户端只发请求、只播表现
+- 客户端预测：开火表现、弹药（序号对账）、换弹动画、冲刺 / 瞄准（自定义 CharacterMovement）
+- 弱网：200 ms / 10% 丢包下开火零延迟、弹药不回跳、移动无纠正；PvE 命中采用客户端判定 + 服务器容差校验
+## 类结构
+GM_Coop（规则）· GS_Coop（全局状态）· PS_Coop（玩家状态）· PC_Coop（UI 与请求）· BP_CoopCharacter · BP_WeaponBase · AC_Health · BP_Zombie + AIC_Zombie + BT_Zombie
+## 同步清单
+16 个复制变量 / 8 个 RPC + 2 个 Unreliable 组播；每个变量的复制条件与接收方、每个事件的执行端（见 Docs/Replication.md）
+## 测试
+Listen Server / Dedicated Server / 独立进程 / 网络模拟 Bad / 晚加入 / 死亡顺序（见 Docs/TestPlan.md）
+## 演示视频
+（链接）
+## 已知限制与下一步
+- 只支持 2 人、局域网会话；未做主机迁移
+- PvP 需改为服务器回溯；GAS 化
+<!--/code-->
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>四种模式：Listen Server（主机特殊性）、Dedicated Server（无主机玩家、无渲染）、独立进程、Standalone 双开（会话）。</li>
+    <li>12 条测试：弱网三件套、晚加入、死亡顺序、换弹边界、同时击杀、随机一致、暂停 / 重开、断线、日志干净。</li>
+    <li>演示：架构 → 正常联机 → 弱网 → 边界 → 前后对比，每段都有一个可量化的结论。</li>
+  </ul></div>
+</section>

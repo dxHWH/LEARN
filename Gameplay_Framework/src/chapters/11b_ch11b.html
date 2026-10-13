@@ -1,0 +1,623 @@
+<section class="chapter" id="ch11b">
+  <div class="ch-head">
+    <div class="no">CHAPTER 11B</div>
+    <h1>对象池落地设计：把半成品接进框架和 SoulDecay</h1>
+    <p class="lead">第 11 章说清了“为什么没启用”。这一章回答“具体怎么做”：池放在框架的哪一层、Actor 的生命周期要补哪几个钩子、World 怎样成为唯一的出生和死亡入口、延迟回收怎样避免 ABA，以及 SoulDecay 每个文件改哪几行。所有关键行为都用逐行移植的 C++ 跑过（H1～H5）。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>指出原有半成品（ObjectPool / GameObjectWrapper / SurvivalGameMode 接入代码）每一处具体缺什么</li>
+    <li>给出一个分四层的设计：L0 带 generation 的 <code>ObjectPool&lt;T&gt;</code> → L1 <code>ActorPool</code> → L2 <code>World.SpawnActor / DestroyActor</code> → L3 Demo</li>
+    <li>说清 Actor 池化后的完整状态机，以及 <code>EndPlay</code>、<code>OnReturnToPool</code>、<code>OnTakeFromPool</code> 各自负责什么</li>
+    <li>理解为什么回收必须延迟到帧末，为什么延迟回收的计时器必须捕获借条而不是对象引用</li>
+    <li>能逐文件说出 SoulDecay 的改动，并用实测数据说明收益</li>
+    <li>知道怎么分步迁移、怎么测试，以及面试官会怎么追问这套设计</li>
+  </ul></div>
+  <div class="co ver"><span class="h">关于本章的代码</span>
+    <p>前面各章按你的要求没有给修复代码；这一章的问题本身就是“具体怎么实现”，所以给出<strong>关键代码骨架</strong>。本机无法编译 C#，这些代码<strong>没有在 Unity 中编译运行过</strong>；其中的逻辑（借条校验、帧末回收、延迟回收、状态复位、整局创建次数）已在 <code>demos/pool_design_verify.cpp</code> 中逐行移植验证，输出见 <code>demos/pool_design_output.txt</code>。依赖 Unity 引擎规则的部分标为【Unity 规则】，请以官方文档和实际运行为准。</p>
+  </div>
+
+  <h2>11B.1 先看半成品：原代码的四个缺口</h2>
+  <p>仓库里已经有三块对象池相关代码，思路是对的——“出池打开 Tick、入池关掉 Tick、重置刚体速度”说明作者意识到了生命周期问题——但每一块都停在半路：</p>
+  <!--code:cs:原代码 · SurvivalGameMode.cs（节选，均未启用）-->
+private ObjectPool<GameObjectWrapper> _heavyPawnPool, _lightPawnPool, _aiControllerPool;
+private Dictionary<GameObject, PoolObject<GameObjectWrapper>> _activeWrappers = new ...;   // GameObject → 借条
+
+private CombatPawn GetOrCreatePawn(Vector3 position, bool isHeavy) {
+    var pool = isHeavy ? _heavyPawnPool : _lightPawnPool;
+    if (pool.Acquire(out var wrapper)) {
+        if (wrapper.elem.Instance == null) {               // 池里存的是“空壳 wrapper”，第一次用才真正创建
+            GameObject bodyObj = ... CreatePrimitive ...; ... AddComponent<CombatPawn>();
+            p.MaxLifespan = isHeavy ? 8f : 4.5f;           // ← 与实际在用的 CreatePawn（30 s / 5 s）已经分叉
+            wrapper.elem.Init(bodyObj);
+        }
+        GameObject go = wrapper.elem.Instance;
+        go.name = isHeavy ? "HeavyPawn" : "LightPawn";     // 只恢复了名字
+        if (go.GetComponent<Collider>() == null) ...       // 碰撞体只是被 disable，这个判断永远不成立
+        _activeWrappers[go] = wrapper;                     // 借条被拷贝进字典
+        return go.GetComponent<CombatPawn>();
+    }
+    return null;
+}
+public void RecycleObject(GameObject go, bool isHeavyPawn) { ... pool.Recycle(ref wrapper); _activeWrappers.Remove(go); }   // 无调用方
+<!--/code-->
+  <!--code:cs:原代码 · GameObjectWrapper.cs（节选）-->
+public void OnSpawn()   { Instance.SetActive(true);  actor.SetActorTickEnabled(true); }
+public void OnRecycle() { actor.SetActorTickEnabled(false); Instance.SetActive(false); rb.velocity = Vector3.zero; ... }
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>#</th><th>缺口</th><th>原代码的表现</th><th>后果（实测）</th></tr>
+    <tr><td>①</td><td><b>借条不安全</b></td><td>PoolObject 只有 index，没有 generation；借条是 struct，会被拷贝进字典</td><td>H1：旧拷贝能回收别人正在用的对象；default 借条对 null 调 OnRecycle；在 OnRecycle 里再回收自己会让同一槽位入栈两次，之后两次借出拿到<strong>同一个对象</strong></td></tr>
+    <tr><td>②</td><td><b>生命周期没接上</b></td><td>Actor 只在 <code>Start</code> 注册、只在 <code>OnDestroy</code> 注销；池化用 SetActive，两者都不会再触发</td><td>H4：复用的肉体<strong>不会再 BeginPlay</strong>；闲置时<strong>仍留在 World 名单</strong>里，只靠 IsTickEnabled 跳过</td></tr>
+    <tr><td>③</td><td><b>状态没有复位点</b></td><td>wrapper 只管 SetActive 和速度；CombatPawn 的 isDying、碰撞体、名字、颜色、寿命句柄没人管</td><td>H4：第二轮起出池时 <code>isDying=true</code>、碰撞体是关的，被玩家抛弃后<strong>不会再安排回收</strong>（尸体永久残留）</td></tr>
+    <tr><td>④</td><td><b>死亡出口写死了 Destroy</b></td><td>CombatPawn.Die、OnUnPossess 和 SimpleAIController.OnUnPossess 直接 <code>Destroy</code>；要回收就得找到 GameMode 调 RecycleObject</td><td>池子与销毁路径完全脱节，所以 RecycleObject 一直没有调用方</td></tr>
+  </table></div>
+  <p>①是数据结构问题，②③④是<strong>框架问题</strong>。所以只修 ObjectPool 是不够的：要让池化“接进框架”，必须改 Actor 的生命周期和 World 的职责。</p>
+
+  <h2>11B.2 设计目标</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>目标</th><th>对应缺口</th></tr>
+    <tr><td>G1</td><td>借条安全：旧借条、默认借条、重入归还都被拒绝</td><td>①</td></tr>
+    <tr><td>G2</td><td>池化 Actor 每次出池都完整走一遍 BeginPlay → Tick → EndPlay，闲置时不在 World 名单里</td><td>②</td></tr>
+    <tr><td>G3</td><td>状态复位有固定的、由框架调用的位置</td><td>③</td></tr>
+    <tr><td>G4</td><td>业务代码只表达“这个 Actor 该死了”，不需要知道它是不是来自对象池</td><td>④</td></tr>
+    <tr><td>G5</td><td>在 Tick、物理回调、计时器回调里调用都安全（重入、遍历中修改）</td><td>第 3、10 章的教训</td></tr>
+    <tr><td>G6</td><td>改动尽量小；底层数据结构可以脱离 Unity 做单元测试</td><td>第 20 章</td></tr>
+  </table></div>
+
+  <h2>11B.3 池放在哪一层：三种方案</h2>
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>谁拥有池</th><th>优点</th><th>问题</th></tr>
+    <tr><td>A · GameMode 自己持有（原代码的思路）</td><td>SurvivalGameMode</td><td>直观</td><td>每个 GameMode 重写一遍；Pawn / Controller 死亡时得反过来找 GameMode（RecycleObject + _activeWrappers 字典）；规则对象兼做工厂，职责混乱</td></tr>
+    <tr><td>B · 全局 PoolManager 单例</td><td>DontDestroyOnLoad 的单例</td><td>任何地方都能用</td><td>闲置对象是场景物体，切场景要么被销毁、要么全部跨场景常驻；World 是场景级的，池里的 Actor 会引用已销毁的 World；单例的所有问题（第 6 章）</td></tr>
+    <tr><td><b>C · World 拥有机制，GameMode 配置策略（推荐）</b></td><td>World（场景级）</td><td>生命周期和场景一致；World 本来就管 Actor 的注册注销，变成“唯一的出生和死亡入口”顺理成章；对应 UE 的 <code>UWorld::SpawnActor / DestroyActor</code></td><td>World 职责变多；需要改 AActor</td></tr>
+  </table></div>
+  <p>World.cs 里作者自己写过一句注释：“GameMode 注册，以后可以改成 World 直接 Spawn 一个对应的 GameMode 实例”——方案 C 就是把这个想法推广到所有 Actor：<strong>World 提供机制（怎么生成、怎么回收），GameMode 决定策略（哪些类型池化、预热多少、闲置上限多少）</strong>。</p>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm b"><text x="20" y="62">L3 业务</text><text x="20" y="160">L2 框架入口</text><text x="20" y="258">L1 Actor 池</text><text x="20" y="352">L0 数据结构</text></g>
+    <g class="xs"><text x="20" y="78">Demo</text><text x="20" y="176">World</text><text x="20" y="274">ActorPool</text><text x="20" y="368">纯 C#</text></g>
+    <rect x="120" y="20" width="720" height="78" rx="10" fill="#F3F4F6" stroke="#9CA3AF"/>
+    <rect x="132" y="34" width="165" height="50" rx="8" fill="#fff" stroke="#6B7280"/><text x="214" y="55" text-anchor="middle" class="b sm">SurvivalGameMode</text><text x="214" y="73" text-anchor="middle" class="xs">注册池 · 预热 · SpawnActor</text>
+    <rect x="309" y="34" width="165" height="50" rx="8" fill="#fff" stroke="#6B7280"/><text x="391" y="55" text-anchor="middle" class="b sm">CombatPawn</text><text x="391" y="73" text-anchor="middle" class="xs">死亡 / 被抛弃 → DestroyActor</text>
+    <rect x="486" y="34" width="165" height="50" rx="8" fill="#fff" stroke="#6B7280"/><text x="568" y="55" text-anchor="middle" class="b sm">SimpleAIController</text><text x="568" y="73" text-anchor="middle" class="xs">失去肉体 → DestroyActor</text>
+    <rect x="663" y="34" width="165" height="50" rx="8" fill="#fff" stroke="#9CA3AF" stroke-dasharray="4 3"/><text x="745" y="55" text-anchor="middle" class="b sm">SoulPlayerController</text><text x="745" y="73" text-anchor="middle" class="xs">只有一个，不池化</text>
+    <rect x="120" y="118" width="720" height="78" rx="10" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <rect x="132" y="132" width="520" height="50" rx="8" fill="#fff" stroke="#2F5BD3" stroke-width="1.6"/><text x="392" y="153" text-anchor="middle" class="b sm">World（场景级）：Actor 唯一的出生和死亡入口</text><text x="392" y="171" text-anchor="middle" class="xs mono">SpawnActor&lt;T&gt;(key,pos) · DestroyActor(a,delay) · 帧末回收</text>
+    <rect x="668" y="132" width="160" height="50" rx="8" fill="#fff" stroke="#2F5BD3"/><text x="748" y="153" text-anchor="middle" class="b sm">TimerSystem</text><text x="748" y="171" text-anchor="middle" class="xs">delay&gt;0：计时器捕获借条</text>
+    <line x1="652" y1="157" x2="664" y2="157" stroke="#2F5BD3" stroke-width="1.4" marker-end="url(#ab)"/>
+    <rect x="120" y="216" width="720" height="78" rx="10" fill="#EAF7EF" stroke="#15803D"/>
+    <rect x="132" y="230" width="220" height="50" rx="8" fill="#fff" stroke="#15803D"/><text x="242" y="251" text-anchor="middle" class="b sm">ActorPool「LightPawn」</text><text x="242" y="269" text-anchor="middle" class="xs">Take / Return · 闲置挂在 [Pool] 节点</text>
+    <rect x="365" y="230" width="220" height="50" rx="8" fill="#fff" stroke="#15803D"/><text x="475" y="251" text-anchor="middle" class="b sm">ActorPool「HeavyPawn」</text><text x="475" y="269" text-anchor="middle" class="xs">工厂：先失活再挂组件</text>
+    <rect x="598" y="230" width="230" height="50" rx="8" fill="#fff" stroke="#15803D"/><text x="713" y="251" text-anchor="middle" class="b sm">ActorPool「AIController」</text><text x="713" y="269" text-anchor="middle" class="xs">maxIdle 之外的直接销毁</text>
+    <rect x="120" y="314" width="720" height="70" rx="10" fill="#FFF4EC" stroke="#C2410C"/>
+    <rect x="132" y="326" width="696" height="46" rx="8" fill="#fff" stroke="#C2410C"/><text x="480" y="345" text-anchor="middle" class="b sm">ObjectPool&lt;T&gt;（纯 C#，可在 EditMode 单元测试）</text><text x="480" y="363" text-anchor="middle" class="xs mono">Slot{Item,Gen,InUse}[] + 空闲栈 → PoolHandle(Index,Gen)，Gen 从 1 开始</text>
+    <g fill="none" stroke="#4B5563" stroke-width="1.4">
+      <line x1="214" y1="84" x2="214" y2="128" marker-end="url(#a)"/>
+      <line x1="391" y1="84" x2="391" y2="128" marker-end="url(#a)"/>
+      <line x1="568" y1="84" x2="568" y2="128" marker-end="url(#a)"/>
+      <line x1="392" y1="182" x2="392" y2="226" marker-end="url(#a)"/>
+      <line x1="242" y1="280" x2="242" y2="322" marker-end="url(#a)"/>
+      <line x1="475" y1="280" x2="475" y2="322" marker-end="url(#a)"/>
+      <line x1="713" y1="280" x2="713" y2="322" marker-end="url(#a)"/>
+    </g>
+    <g class="xs"><text x="220" y="112">SpawnActor</text><text x="397" y="112">DestroyActor</text><text x="574" y="112">DestroyActor</text><text x="398" y="210">Take / Return（按 key 找池）</text><text x="248" y="306">Acquire</text><text x="481" y="306">Release(handle)</text><text x="719" y="306">Release(handle)</text></g>
+  </svg>
+  <figcaption><b>图 11-1</b>　四层结构。业务代码只认识 L2 的两个入口；L1 负责“GameObject 怎么出池入池”；L0 只负责“槽位和借条”，不依赖 Unity，可以单独测试。原代码把 L0～L3 混在 SurvivalGameMode 和 GameObjectWrapper 里，这是它接不进去的根本原因</figcaption>
+  </figure>
+
+  <h2>11B.4 L0：带 generation 的 ObjectPool&lt;T&gt;</h2>
+  <p>在原 ObjectPool 的基础上改四件事：借条带代数；工厂由调用方提供（不再要求 <code>new()</code> 和 IPoolable，从而可以池化 MonoBehaviour）；归还时先失效再回调；闲置数有上限。思路和第 9 章 TimerSystem 的 Slot Map 一致，只是不需要 dense 数组（池子不需要每帧遍历）。</p>
+  <!--code:cs:新 · Framework/ObjectPool.cs（骨架，未在 Unity 中编译）-->
+public readonly struct PoolHandle : IEquatable<PoolHandle> {
+    public readonly int Index, Generation;                  // Generation 从 1 开始：default(0,0) 永远无效
+    public PoolHandle(int index, int generation) { Index = index; Generation = generation; }
+    public bool Equals(PoolHandle o) => Index == o.Index && Generation == o.Generation;
+    public override int GetHashCode() => HashCode.Combine(Index, Generation);
+}
+
+public sealed class ObjectPool<T> where T : class {
+    private struct Slot { public T Item; public int Generation; public bool InUse; }
+    private Slot[] _slots = new Slot[8];
+    private int _slotCount;
+    private readonly Stack<int> _free = new Stack<int>();   // 仍是 LIFO：刚还的最先借出（缓存友好）
+    private int _idleItems;
+    private readonly Func<T> _create; private readonly Action<T> _onRelease, _onDestroy; private readonly int _maxIdle;
+
+    public ObjectPool(Func<T> create, Action<T> onRelease = null, Action<T> onDestroy = null, int prewarm = 0, int maxIdle = 64) {
+        _create = create ?? throw new ArgumentNullException(nameof(create));
+        _onRelease = onRelease; _onDestroy = onDestroy; _maxIdle = maxIdle;
+        for (int k = 0; k < prewarm; k++) { int i = NewSlot(); T item = _create(); _slots[i].Item = item; _free.Push(i); _idleItems++; }
+    }
+    private int NewSlot() {
+        if (_slotCount == _slots.Length) Array.Resize(ref _slots, _slots.Length * 2);
+        _slots[_slotCount].Generation = 1;
+        return _slotCount++;
+    }
+    public PoolHandle Acquire(out T item) {
+        int i = _free.Count > 0 ? _free.Pop() : NewSlot();
+        if (_slots[i].Item != null) _idleItems--;
+        else { T created = _create(); _slots[i].Item = created; }   // 先求值再写回：见下方说明
+        _slots[i].InUse = true;
+        item = _slots[i].Item;
+        return new PoolHandle(i, _slots[i].Generation);
+    }
+    public bool IsValid(PoolHandle h) =>
+        (uint)h.Index < (uint)_slotCount && _slots[h.Index].InUse && _slots[h.Index].Generation == h.Generation;
+    public bool TryGet(PoolHandle h, out T item) { bool ok = IsValid(h); item = ok ? _slots[h.Index].Item : null; return ok; }
+    public bool Release(PoolHandle h) {
+        if (!IsValid(h)) return false;                      // 旧借条 / 默认借条 / 重复归还 → 拒绝
+        T item = _slots[h.Index].Item;
+        _slots[h.Index].InUse = false;
+        if (++_slots[h.Index].Generation == 0) _slots[h.Index].Generation = 1;   // 回绕时跳过 0
+        _onRelease?.Invoke(item);                           // 回调在失效之后：回调里重入 Release 同一借条会被拒绝
+        if (_idleItems >= _maxIdle) { _slots[h.Index].Item = null; _onDestroy?.Invoke(item); }
+        else _idleItems++;
+        _free.Push(h.Index);
+        return true;
+    }
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>原 ObjectPool.cs</th><th>新设计</th><th>为什么</th></tr>
+    <tr><td><code>where T : class, IPoolable, new()</code></td><td><code>Func&lt;T&gt; create</code> + 回调</td><td>MonoBehaviour 不能 <code>new</code>；回调非侵入，T 不必实现接口（与 UnityEngine.Pool 的设计一致）</td></tr>
+    <tr><td><code>PoolObject { elem, index }</code></td><td><code>PoolHandle { Index, Generation }</code>，对象由池按句柄取出</td><td>借条里不放对象引用，也就不会出现“elem 和 index 来自不同租借”的错配（第 11 章 G9）</td></tr>
+    <tr><td>只检查 <code>IsAvailable</code></td><td>检查 InUse + Generation</td><td>拦截旧拷贝和默认借条（H1-a、H1-b）</td></tr>
+    <tr><td>先 OnRecycle，再标记可用</td><td>先失效（代数 +1），再回调</td><td>回调里重入归还不会让槽位入栈两次（H1-c）</td></tr>
+    <tr><td>容量翻倍时预先 new 满</td><td>按需创建 + 可选预热</td><td>扩容那一帧不再集中分配；预热数量由业务决定</td></tr>
+    <tr><td>只增不减</td><td><code>maxIdle</code>：超出的直接销毁</td><td>峰值过后内存能还回去</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">两个容易写错的细节（都和第 10 章的“ref 跨扩容”是同一类问题）</span>
+    <p><b>① <code>_slots[i].Item = _create();</code> 不安全。</b>C# 对数组元素赋值时，会<strong>先</strong>读取 <code>_slots</code> 字段和下标 i，<strong>再</strong>执行右边的 <code>_create()</code>，最后写回。如果工厂里间接触发了同一个池的扩容（<code>Array.Resize</code> 替换了 <code>_slots</code>），结果会写进<strong>旧数组</strong>，新数组里这一格仍然是 null。所以先用局部变量接住，再写回。</p>
+    <p><b>② 不要在回调前后持有 <code>ref Slot</code>。</b>Release 里调用 <code>_onRelease</code> 之后，如果用之前取到的 <code>ref</code> 去写 <code>Item = null</code>，同样可能写进旧数组。上面的骨架每次都用 <code>_slots[h.Index]</code> 重新索引。</p>
+  </div>
+  <p>【实测 H1】同一组操作，原池与新池的对比：</p>
+  <div class="tbl"><table>
+    <tr><th>操作</th><th>原 ObjectPool</th><th>新 ObjectPool</th></tr>
+    <tr><td>a) 借 a → 拷贝借条 → 归还 a → 借 b（LIFO 拿到同一槽）→ 用旧拷贝归还</td><td class="no">成功：b 正在用的对象被回收</td><td class="yes">拒绝：a=(0,1)、b=(0,2)，代数对不上</td></tr>
+    <tr><td>b) 槽 0 在用时归还 default 借条</td><td class="no">通过检查，对 null 调 OnRecycle（C# 中 NullReferenceException）</td><td class="yes">拒绝：代数从 1 开始</td></tr>
+    <tr><td>c) OnRecycle 回调里再归还同一个对象</td><td class="no">槽位入栈两次，接下来两次借出拿到同一对象</td><td class="yes">内层归还被拒绝</td></tr>
+    <tr><td>d) 同一借条归还两次</td><td class="yes">拒绝（IsAvailable）</td><td class="yes">拒绝</td></tr>
+  </table></div>
+
+  <h2>11B.5 Actor 的池化生命周期</h2>
+  <h3>11B.5.1 先确认三条 Unity 规则</h3>
+  <div class="tbl"><table>
+    <tr><th>【Unity 规则】</th><th>对设计的影响</th></tr>
+    <tr><td>挂在<strong>未激活</strong> GameObject 上的脚本，Awake 要等到 GameObject 第一次被激活时才调用；OnEnable / OnDisable 随 SetActive 触发</td><td>工厂必须<strong>先 SetActive(false) 再 AddComponent</strong>，否则预热出来的对象会立刻 Awake、Start，并在 Start 里被 World 当成活 Actor 注册（原 AActor.Start 无条件注册）</td></tr>
+    <tr><td>Start 每个组件一生只调用一次</td><td>不能靠 Start 做“每次出池”的初始化，也不能靠它注册——池化 Actor 的注册要由 SpawnActor 显式完成</td></tr>
+    <tr><td>SetActive(false) 不会触发 OnDestroy</td><td>不能靠 OnDestroy 注销——回收时 World 要显式注销</td></tr>
+  </table></div>
+
+  <h3>11B.5.2 AActor 新增的成员</h3>
+  <!--code:cs:新 · GamePlayCore/AActor.cs（在原文件上增加的部分）-->
+public enum EEndPlayReason { Destroyed, ReturnedToPool, LevelUnload }
+
+public class AActor : MonoBehaviour {
+    public bool HasBegunPlay { get; private set; }
+    public bool IsTickEnabled { get; set; } = true;
+
+    // ---------- 新增：销毁与池化 ----------
+    public bool IsPendingKill { get; private set; }          // 已被 DestroyActor，等待帧末处理：不 Tick、不参与结算
+    public PoolHandle PoolHandle { get; internal set; }      // default = 不来自对象池（或已归还）
+    internal ActorPool OwnerPool { get; set; }                // null = 普通 Actor，帧末走 Destroy
+
+    protected virtual void Start() {
+        if (OwnerPool == null) World.RegisterAActor(this);    // ★ 池化 Actor 只由 SpawnActor 注册
+    }
+    protected virtual void OnDestroy() { if (World.HasInstance) World.UnregisterAActor(this); }   // 不变
+
+    public virtual void BeginPlay() { HasBegunPlay = true; }
+    public virtual void EndPlay(EEndPlayReason reason) { HasBegunPlay = false; }   // ★ 与 BeginPlay 成对；下次出池会再次 BeginPlay
+    protected internal virtual void OnTakeFromPool() { }      // 出池：SetActive(true) 之后、BeginPlay 之前
+    protected internal virtual void OnReturnToPool() { }      // 入池：EndPlay 之后、SetActive(false) 之前——复位并清掉引用
+
+    internal void MarkPendingKill()  => IsPendingKill = true;
+    internal void ClearPendingKill() => IsPendingKill = false;
+}
+
+// APawn：离开游戏前先解除附身（Pawn 死了，灵魂必须知道）
+public override void EndPlay(EEndPlayReason r) { if (Controller != null) Controller.UnPossess(); base.EndPlay(r); }
+// AController：灵魂离开游戏，肉体变回无主
+public override void EndPlay(EEndPlayReason r) { if (ControlledPawn != null) UnPossess(); base.EndPlay(r); }
+<!--/code-->
+  <p>三个钩子分工明确，面试时最好能一句话说清：</p>
+  <div class="tbl"><table>
+    <tr><th>钩子</th><th>何时调用</th><th>负责什么</th><th>SoulDecay 里放什么</th></tr>
+    <tr><td><code>EndPlay(reason)</code></td><td>销毁和入池<strong>都会</strong>调用</td><td>“离开游戏”：解除 Possess、停止计时器、注销事件——和是否池化无关的清理</td><td>CombatPawn 停寿命计时器；APawn / AController 解除附身</td></tr>
+    <tr><td><code>OnReturnToPool()</code></td><td>只在入池时</td><td>“清理残留”：复位字段、去掉对外引用，让闲置对象不钉住别的东西</td><td>isDying、碰撞体、名字、颜色、阵营</td></tr>
+    <tr><td><code>OnTakeFromPool()</code></td><td>只在出池时</td><td>“准备上场”：与位置相关、必须在激活后做的设置</td><td>清刚体速度</td></tr>
+    <tr><td><code>BeginPlay()</code></td><td>每次出池后的下一次 World.Update</td><td>游戏逻辑的初始化（和非池化 Actor 完全一样）</td><td>SimpleAIController 重新随机 Perlin 偏移</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">复位放在入池时还是出池时</span>
+    <p>两种都有人用。这里的建议是：<strong>清引用放在入池时</strong>（否则闲置对象会钉住它引用的东西，第 10 章 E13、第 8 章 G5 是同类问题），<strong>与新位置、新主人相关的设置放在出池时</strong>。只在一处复位也可以，但要保证覆盖所有字段——漏掉一个，就是“上一任的残留”。</p>
+  </div>
+
+  <h3>11B.5.3 状态机</h3>
+  <figure>
+  <svg viewBox="0 0 860 400" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="20" class="xs">工厂创建（预热 / 不够时）：先 SetActive(false) 再挂 AActor</text>
+    <line x1="110" y1="26" x2="110" y2="38" stroke="#4B5563" stroke-width="1.4" marker-end="url(#a)"/>
+    <rect x="20" y="40" width="180" height="70" rx="10" fill="#F3F4F6" stroke="#6B7280" stroke-width="1.6"/>
+    <text x="110" y="64" text-anchor="middle" class="b sm">闲置 Pooled</text><text x="110" y="84" text-anchor="middle" class="xs">SetActive(false)</text><text x="110" y="100" text-anchor="middle" class="xs">不在 World 名单</text>
+    <rect x="340" y="40" width="180" height="70" rx="10" fill="#FEF6E4" stroke="#B45309" stroke-width="1.6"/>
+    <text x="430" y="64" text-anchor="middle" class="b sm">待开始 Pending</text><text x="430" y="84" text-anchor="middle" class="xs">在 _pendingAActors</text><text x="430" y="100" text-anchor="middle" class="xs">此时就可以 Possess</text>
+    <rect x="660" y="40" width="180" height="70" rx="10" fill="#EAF7EF" stroke="#15803D" stroke-width="1.6"/>
+    <text x="750" y="64" text-anchor="middle" class="b sm">游戏中 Playing</text><text x="750" y="84" text-anchor="middle" class="xs">Tick · 碰撞 · 计时器</text><text x="750" y="100" text-anchor="middle" class="xs">HasBegunPlay = true</text>
+    <rect x="660" y="200" width="180" height="70" rx="10" fill="#FDEEEE" stroke="#B91C1C" stroke-width="1.6"/>
+    <text x="750" y="224" text-anchor="middle" class="b sm">待回收 PendingKill</text><text x="750" y="244" text-anchor="middle" class="xs">不 Tick、不参与结算</text><text x="750" y="260" text-anchor="middle" class="xs">本帧仍在场上</text>
+    <polygon points="480,205 545,235 480,265 415,235" fill="#fff" stroke="#6B7280" stroke-width="1.4"/>
+    <text x="480" y="239" text-anchor="middle" class="xs b">闲置已满？</text>
+    <rect x="200" y="300" width="140" height="44" rx="10" fill="#fff" stroke="#6B7280" stroke-dasharray="4 3"/>
+    <text x="270" y="327" text-anchor="middle" class="b sm">Destroy 销毁</text>
+    <g fill="none" stroke="#4B5563" stroke-width="1.5">
+      <line x1="200" y1="66" x2="336" y2="66" marker-end="url(#a)"/>
+      <line x1="520" y1="66" x2="656" y2="66" marker-end="url(#a)"/>
+      <line x1="750" y1="110" x2="750" y2="196" marker-end="url(#a)"/>
+      <line x1="660" y1="235" x2="549" y2="235" marker-end="url(#a)"/>
+      <path d="M415,235 H110 V114" marker-end="url(#a)"/>
+      <path d="M480,265 V322 H344" marker-end="url(#a)"/>
+    </g>
+    <text x="268" y="58" text-anchor="middle" class="xs b">Take（出池）</text>
+    <text x="268" y="84" text-anchor="middle" class="xs">OnTakeFromPool</text><text x="268" y="98" text-anchor="middle" class="xs">→ RegisterAActor</text>
+    <text x="588" y="58" text-anchor="middle" class="xs b">下一次 World.Update</text>
+    <text x="588" y="84" text-anchor="middle" class="xs">BeginPlay</text>
+    <text x="742" y="142" text-anchor="end" class="xs b">DestroyActor(a)</text>
+    <text x="742" y="158" text-anchor="end" class="xs">delay&gt;0 时先经 TimerSystem</text>
+    <text x="742" y="174" text-anchor="end" class="xs">（计时器捕获借条）</text>
+    <text x="604" y="227" text-anchor="middle" class="xs b">LateUpdate</text>
+    <text x="300" y="227" text-anchor="middle" class="xs b">否：入池，generation++</text>
+    <text x="488" y="292" class="xs b">是</text>
+    <rect x="380" y="356" width="460" height="34" rx="6" fill="#F9FAFB" stroke="#E5E7EB"/>
+    <text x="392" y="377" class="xs">帧末：EndPlay(ReturnedToPool) → 注销 → OnReturnToPool → SetActive(false)</text>
+  </svg>
+  <figcaption><b>图 11-2</b>　池化 Actor 的状态机。与原方案（SetActive + 开关 Tick）相比，多出了“待开始”和“待回收”两个状态：前者保证每次出池都重新 BeginPlay，后者保证“死亡”在帧内只是一个标记、真正的回收统一在帧末执行</figcaption>
+  </figure>
+  <p>【实测 H4】同一具肉体被复用 3 次：</p>
+  <div class="tbl"><table>
+    <tr><th>轮次</th><th>原方案：出池时 isDying / 碰撞体</th><th>原方案：累计 BeginPlay / 闲置时在 World 名单</th><th>新设计：出池时 isDying / 碰撞体</th><th>新设计：累计 BeginPlay / 闲置时在 World 名单</th></tr>
+    <tr><td>1</td><td>false / 开</td><td>1 / 是</td><td>false / 开</td><td>1 / 否</td></tr>
+    <tr><td>2</td><td class="no">true / 关</td><td class="no">1 / 是</td><td class="yes">false / 开</td><td class="yes">2 / 否</td></tr>
+    <tr><td>3</td><td class="no">true / 关</td><td class="no">1 / 是</td><td class="yes">false / 开</td><td class="yes">3 / 否</td></tr>
+  </table></div>
+  <p>原方案第二轮开始，出池的肉体已经“死了”：<code>isDying</code> 为 true，所以被玩家抛弃时 <code>if (!isDying) Destroy(gameObject, 3f)</code> 不执行，尸体永远留在场上；碰撞体是关的，不能碾压也不能被碾压，而且射线点不中它，无法被夺舍。</p>
+
+  <h2>11B.6 World：唯一的出生和死亡入口</h2>
+  <!--code:cs:新 · GamePlayCore/World.cs（增加的部分）-->
+private readonly Dictionary<string, ActorPool> _pools = new Dictionary<string, ActorPool>();
+private readonly List<AActor> _pendingKill = new List<AActor>(32);
+
+public static void RegisterPool(string key, Func<AActor> factory, int prewarm = 0, int maxIdle = 32)
+    => Instance._pools[key] = new ActorPool(key, factory, prewarm, maxIdle);
+
+public static T SpawnActor<T>(string poolKey, Vector3 pos, Quaternion rot) where T : AActor {
+    var actor = (T)Instance._pools[poolKey].Take(pos, rot);   // 出池：设位置 → SetActive(true) → OnTakeFromPool
+    RegisterAActor(actor);                                    // 进入 pending：下一次 World.Update BeginPlay
+    return actor;
+}
+
+public static void DestroyActor(AActor actor, float delay = 0f) {
+    if (actor == null || actor.IsPendingKill) return;         // ★ 幂等：重复调用无害
+    if (!HasInstance) { Destroy(actor.gameObject); return; }  // 场景卸载 / 退出中
+    if (delay > 0f) { Instance.ScheduleDestroy(actor, delay); return; }
+    actor.MarkPendingKill();                                  // 立刻“逻辑死亡”
+    Instance._pendingKill.Add(actor);                         // 真正的回收推迟到帧末
+}
+
+private void ScheduleDestroy(AActor actor, float delay) {
+    PoolHandle h = actor.PoolHandle; ActorPool pool = actor.OwnerPool;   // ★ 捕获“此刻的借条”
+    TimerSystem.Instance.CreateTimer(delay, () => {
+        bool stillSame = pool != null ? pool.IsAlive(h) : actor != null; // 池化对象比借条，不比引用
+        if (stillSame) DestroyActor(actor);
+    });
+}
+
+private void LateUpdate() {                                   // 所有 Update（含计时器、事件回调）之后
+    for (int i = 0; i < _pendingKill.Count; i++) {            // 用下标：EndPlay 里新标记的也在本轮处理
+        AActor a = _pendingKill[i];
+        if (a == null) continue;                              // 已被 Unity 销毁（假 null）
+        a.EndPlay(a.OwnerPool != null ? EEndPlayReason.ReturnedToPool : EEndPlayReason.Destroyed);
+        UnregisterAActor(a);
+        if (a.OwnerPool != null) a.OwnerPool.Return(a);       // 入池（或超过 maxIdle 时销毁）
+        else Destroy(a.gameObject);
+    }
+    _pendingKill.Clear();
+}
+// World.Update 里两处小改：处理 pending 时跳过 IsPendingKill 的；Tick 条件加上 && !IsPendingKill
+<!--/code-->
+  <h3>11B.6.1 为什么回收要延迟到帧末</h3>
+  <p>原代码之所以“在 Tick 里 Destroy 没出事”，是因为 Unity 的 Destroy 本身就是延迟到帧末的——OnDestroy（进而 List.Remove）不会在 World 的遍历中途发生。池化之后如果立即 SetActive(false) + 注销，就等于在倒序遍历中途修改 <code>_actors</code>，第 3 章的问题全部回来。【实测 H2】：</p>
+  <div class="tbl"><table>
+    <tr><th>场景（Tick 中回收）</th><th>立即回收</th><th>标记 PendingKill，帧末回收</th></tr>
+    <tr><td>A3 回收 A1（玩家夺舍 → 被踢出的 AI 灵魂回收）</td><td class="no">A3 被 Tick 2 次</td><td class="yes">每个 Actor 至多 1 次；A1 已“逻辑死亡”，本帧不再 Tick</td></tr>
+    <tr><td>A4 一次回收 A0、A1、A2</td><td class="no">越界，本帧 World.Update 中止，A3 没有被 Tick</td><td class="yes">正常结束，A3、A4 各 1 次</td></tr>
+    <tr><td>A2 回收自己</td><td class="yes">正常</td><td class="yes">正常</td></tr>
+  </table></div>
+  <p>同样的道理也适用于另外两个调用时机：物理回调（OnCollisionEnter 里碾碎对方）和计时器回调（寿命到期 → Die）。在帧末统一处理，这三处都不用关心“我现在是不是在别人的遍历里”。这和 Unity 的 Destroy、UE 的“标记待销毁、之后再真正清理”是同一个思路。</p>
+  <div class="co tip"><span class="h">IsPendingKill 顺带修好了第 15 章的“重复计分”</span>
+    <p>第 15 章指出：同一物理步里两具大肉体撞同一具小肉体，Die 会被调用两次、加两次分。现在 Die 和 OnCollisionEnter 都先检查 <code>IsPendingKill</code>，第二次结算直接返回；DestroyActor 本身也是幂等的。</p>
+  </div>
+
+  <h2>11B.7 延迟回收与 ABA：尸体为什么要用借条</h2>
+  <p>原代码里玩家抛弃的旧肉体用 <code>Destroy(gameObject, 3.0f)</code> 延迟销毁。Unity 的延迟销毁没有 ABA 问题，因为被销毁的对象永远不会回来。<strong>池化之后，“3 秒后回收这个对象”就变成了“3 秒后回收这个槽位上的东西”</strong>——如果这 3 秒内它被提前回收并借给了别人，到期时回收的就是别人。</p>
+  <figure>
+  <svg viewBox="0 0 860 290" xmlns="http://www.w3.org/2000/svg">
+    <text x="20" y="80" class="b sm">池里的同一个对象</text>
+    <g stroke="#9CA3AF" stroke-dasharray="3 3"><line x1="242" y1="50" x2="242" y2="96"/><line x1="325" y1="50" x2="325" y2="120"/><line x1="408" y1="50" x2="408" y2="96"/><line x1="738" y1="30" x2="738" y2="240"/></g>
+    <rect x="160" y="62" width="82" height="30" fill="#DBEAFE" stroke="#2F5BD3"/><text x="201" y="82" text-anchor="middle" class="xs b">玩家肉体 X</text>
+    <rect x="242" y="62" width="83" height="30" fill="#E5E7EB" stroke="#6B7280"/><text x="283" y="82" text-anchor="middle" class="xs b">尸体</text>
+    <rect x="325" y="62" width="83" height="30" fill="#fff" stroke="#9CA3AF" stroke-dasharray="4 3"/><text x="366" y="82" text-anchor="middle" class="xs">闲置</text>
+    <rect x="408" y="62" width="412" height="30" fill="#FDEEEE" stroke="#B91C1C"/><text x="560" y="82" text-anchor="middle" class="xs b">红队 AI 肉体 Y：借条 (0,2)，正在场上</text>
+    <text x="236" y="24" class="xs">t=0.5 抛弃 X → 安排 3 秒后回收（借条 (0,1)）</text>
+    <text x="402" y="44" class="xs">t=1.5 刷怪：LIFO 拿回同一个对象</text>
+    <text x="319" y="114" class="xs">t=1.0 X 被提前回收（清场 / 被碾碎）：generation 1→2</text>
+    <text x="732" y="24" text-anchor="end" class="xs b">t=3.5 计时器到期</text>
+    <text x="20" y="166" class="b sm">朴素：捕获对象引用</text><text x="20" y="182" class="xs">到期检查“对象活跃吗？”→ 活跃</text>
+    <rect x="652" y="148" width="172" height="40" rx="8" fill="#FDEEEE" stroke="#B91C1C" stroke-width="1.6"/><text x="738" y="173" text-anchor="middle" class="sm b" style="fill:#B91C1C">回收了 Y ✘</text>
+    <text x="20" y="220" class="b sm">新设计：捕获借条 (0,1)</text><text x="20" y="236" class="xs">到期检查 IsAlive((0,1)) → false</text>
+    <rect x="652" y="202" width="172" height="40" rx="8" fill="#EAF7EF" stroke="#15803D" stroke-width="1.6"/><text x="738" y="227" text-anchor="middle" class="sm b" style="fill:#15803D">忽略，Y 安然无恙 ✔</text>
+    <line x1="160" y1="262" x2="820" y2="262" stroke="#9CA3AF"/>
+    <g class="xs" text-anchor="middle"><text x="160" y="278">0</text><text x="325" y="278">1</text><text x="490" y="278">2</text><text x="655" y="278">3</text><text x="820" y="278">4 s</text></g>
+  </svg>
+  <figcaption><b>图 11-3</b>　实测 H3 的时间线。原 Demo 里还没有“提前回收尸体”的路径，所以今天不会触发；但只要以后加一个“清场”或“尸体可以被吃掉”，而池又是 LIFO（刚还回来的对象最先被借出），这个 bug 几乎必然出现。借条让这类“延迟操作”天然安全——这正是第 9 章 generation 的价值，换了一个地方再次出现</figcaption>
+  </figure>
+  <p>同样需要用借条（或 generation）的地方，在这个项目里还有：UI 持有的寿命 <code>TimerHandle</code>（已经有 generation，所以安全）；以后如果 GameMode 用列表记录“场上所有 AI”，列表里也应该存句柄而不是引用。</p>
+
+  <h2>11B.8 ActorPool：GameObject 怎么出池、入池</h2>
+  <!--code:cs:新 · Framework/ActorPool.cs（骨架）-->
+public sealed class ActorPool {
+    private readonly ObjectPool<AActor> _pool;
+    private readonly Transform _root;                         // 闲置对象挂在 “[Pool] key” 下，Hierarchy 整洁
+    public string Key { get; }
+
+    public ActorPool(string key, Func<AActor> factory, int prewarm, int maxIdle) {
+        Key = key;
+        _root = new GameObject($"[Pool] {key}").transform;    // 场景物体：随场景卸载一起销毁
+        _pool = new ObjectPool<AActor>(
+            create:    () => { AActor a = factory(); a.transform.SetParent(_root, false); return a; },
+            onRelease: a  => { a.OnReturnToPool(); a.gameObject.SetActive(false); a.transform.SetParent(_root, false); },
+            onDestroy: a  => { if (a) Object.Destroy(a.gameObject); },
+            prewarm: prewarm, maxIdle: maxIdle);
+    }
+
+    internal AActor Take(Vector3 pos, Quaternion rot) {
+        PoolHandle h = _pool.Acquire(out AActor a);
+        a.PoolHandle = h; a.OwnerPool = this; a.ClearPendingKill();
+        a.transform.SetParent(null, false);
+        a.transform.SetPositionAndRotation(pos, rot);           // 先摆好位置再激活，避免物理在旧位置上跑一帧
+        a.gameObject.SetActive(true);                           // 第一次：Awake → OnEnable（Start 稍后）；之后：只有 OnEnable
+        a.OnTakeFromPool();
+        return a;
+    }
+    internal void Return(AActor a) { PoolHandle h = a.PoolHandle; a.PoolHandle = default; _pool.Release(h); }
+    internal bool IsAlive(PoolHandle h) => _pool.IsValid(h);
+}
+<!--/code-->
+  <p>ActorPool 只做三件和 Unity 有关的事：父节点、位置、激活状态。复位逻辑通过 <code>OnReturnToPool</code> 交给 Actor 自己——ActorPool 不知道 CombatPawn 有哪些字段。</p>
+
+  <h2>11B.9 在 SoulDecay 中落地：逐文件改动</h2>
+  <h3>11B.9.1 SurvivalGameMode：配置池，生成走 SpawnActor</h3>
+  <!--code:cs:新 · SurvivalGameMode.cs（节选）-->
+const string LightKey = "LightPawn", HeavyKey = "HeavyPawn", AIKey = "AIController";
+[System.Serializable] public struct PawnConfig { public float Scale, MoveSpeed, Lifespan; }
+public PawnConfig LightConfig = new PawnConfig { Scale = 0.8f, MoveSpeed = 8f, Lifespan = 5f };
+public PawnConfig HeavyConfig = new PawnConfig { Scale = 1.5f, MoveSpeed = 3f, Lifespan = 30f };   // 唯一的数值来源
+
+public override void BeginPlay() {
+    base.BeginPlay();
+    World.RegisterPool(LightKey, () => BuildPawn(false), prewarm: 8, maxIdle: 16);   // 预热数量来自 H5 的峰值
+    World.RegisterPool(HeavyKey, () => BuildPawn(true),  prewarm: 6, maxIdle: 16);
+    World.RegisterPool(AIKey,    BuildAIController,      prewarm: 8, maxIdle: 16);
+    _spawnAIAction = SpawnRandomAI;
+    StartMatch();
+    var playerBody = World.SpawnActor<CombatPawn>(LightKey, Vector3.zero, Quaternion.identity);   // 原：CreatePawn(...)
+    var playerSoul = new GameObject("Player_Controller").AddComponent<SoulPlayerController>();    // 只有一个，不池化
+    playerSoul.FactionId = EFaction.Player;
+    playerSoul.Possess(playerBody);
+    TimerSystem.Instance.CreateTimer(3.0f, _spawnAIAction, timerName: "AISpawner", isLoop: true);
+}
+
+private void SpawnRandomAI() {
+    if (GameState.MatchState == AGameState.EMatchState.WaitingPostMatch) return;
+    Vector3 pos = new Vector3(Random.Range(-10f, 10f), 0, Random.Range(-10f, 10f));
+    bool isHeavy = Random.value > 0.5f;
+    var aiBody = World.SpawnActor<CombatPawn>(isHeavy ? HeavyKey : LightKey, pos, Quaternion.identity);   // 原：CreatePawn
+    var aiSoul = World.SpawnActor<SimpleAIController>(AIKey, Vector3.zero, Quaternion.identity);         // 原：new GameObject().AddComponent
+    aiSoul.FactionId = Random.value > 0.5f ? EFaction.RedAI : EFaction.BlueAI;
+    aiSoul.Possess(aiBody);
+}
+
+private AActor BuildPawn(bool isHeavy) {                       // 工厂：只在预热或池空时调用
+    GameObject go = GameObject.CreatePrimitive(isHeavy ? PrimitiveType.Cube : PrimitiveType.Sphere);
+    go.SetActive(false);                                       // ★ 先失活：Awake / Start 推迟到第一次出池
+    go.name = isHeavy ? HeavyKey : LightKey;
+    var rb = go.AddComponent<Rigidbody>();
+    rb.constraints = RigidbodyConstraints.FreezeRotation | RigidbodyConstraints.FreezePositionY;
+    var p = go.AddComponent<CombatPawn>();
+    PawnConfig c = isHeavy ? HeavyConfig : LightConfig;        // 这些值整个生命期都不变，创建时设一次即可
+    go.transform.localScale = Vector3.one * c.Scale; p.MoveSpeed = c.MoveSpeed; p.MaxLifespan = c.Lifespan;
+    return p;
+}
+private AActor BuildAIController() {
+    var go = new GameObject(AIKey); go.SetActive(false);
+    return go.AddComponent<SimpleAIController>();
+}
+// 删除：三个 ObjectPool 字段、_activeWrappers、GetOrCreatePawn、GetOrCreateAIController、RecycleObject、CreatePawn
+<!--/code-->
+  <h3>11B.9.2 CombatPawn：死亡出口换成 DestroyActor，补复位</h3>
+  <div class="tbl"><table>
+    <tr><th>位置</th><th>原代码</th><th>改为</th><th>为什么</th></tr>
+    <tr><td>字段</td><td><code>private TimerHandle _decayTimer;</code></td><td><code>= TimerHandle.Invalid;</code></td><td>顺手修掉第 9 章的 P0（默认句柄会命中首个计时器）</td></tr>
+    <tr><td>Awake</td><td>只取 Renderer</td><td>再缓存 Collider、Rigidbody 和 <code>_onExploded = OnBodyExploded</code></td><td>对象常驻之后，缓存委托就是一次性的成本（第 10 章：方法组每次转换都会分配）</td></tr>
+    <tr><td>OnPossess</td><td><code>CreateTimer(MaxLifespan, OnBodyExploded)</code></td><td><code>CreateTimer(MaxLifespan, _onExploded)</code></td><td>同上</td></tr>
+    <tr><td>OnUnPossess</td><td><code>if (!isDying) Destroy(gameObject, 3.0f);</code></td><td><code>if (!isDying) World.DestroyActor(this, 3.0f);</code></td><td>延迟回收改为捕获借条的计时器（11B.7）</td></tr>
+    <tr><td>OnCollisionEnter</td><td>只判断 Controller 和体型</td><td>开头 <code>if (IsPendingKill || isDying) return;</code>，对方同样判断</td><td>防止同帧重复结算</td></tr>
+    <tr><td>Die</td><td><code>isDying = true; … Destroy(gameObject);</code></td><td><code>if (isDying) return; isDying = true; … World.DestroyActor(this);</code></td><td>幂等；出口统一</td></tr>
+    <tr><td>新增 EndPlay</td><td>—</td><td>停止寿命计时器，然后 <code>base.EndPlay</code>（APawn 负责解除附身）</td><td>销毁和入池共用的清理</td></tr>
+    <tr><td>新增 OnReturnToPool</td><td>—</td><td><code>isDying = false;</code> 碰撞体 enabled；名字恢复；颜色恢复为灰色；<code>_decayTimer = Invalid</code></td><td>H4 里原方案缺的全部状态</td></tr>
+    <tr><td>新增 OnTakeFromPool</td><td>—</td><td>刚体 <code>velocity / angularVelocity</code> 清零</td><td>原来在 GameObjectWrapper 里（Unity 6 中属性名改为 linearVelocity）</td></tr>
+  </table></div>
+  <p>注意 EndPlay 与 OnUnPossess 的交互：入池时 APawn.EndPlay 会调用 <code>Controller.UnPossess()</code>，进而触发 CombatPawn.OnUnPossess——如果离开的是玩家，它会再调用 <code>World.DestroyActor(this, 3f)</code>。此时 <code>IsPendingKill</code> 已经是 true，这次调用直接返回。幂等让这条回调链不需要任何特判。</p>
+  <div class="co tip"><span class="h">顺手可以改的：颜色用 MaterialPropertyBlock</span>
+    <p><code>_renderer.material.color</code> 第一次访问时会为这个 Renderer 复制一份材质实例。池化后对象常驻，复制只发生一次，反而比原来“每具新肉体复制一份”省；用 <code>MaterialPropertyBlock</code> 改颜色可以完全不产生材质实例（项目用的是内置渲染管线；若换成 URP / HDRP，要注意 MaterialPropertyBlock 会让该 Renderer 退出 SRP Batcher）。</p>
+  </div>
+  <h3>11B.9.3 SimpleAIController / GameObjectWrapper</h3>
+  <div class="tbl"><table>
+    <tr><th>文件</th><th>改动</th></tr>
+    <tr><td>SimpleAIController.cs</td><td>OnUnPossess 里 <code>Destroy(gameObject)</code> → <code>World.DestroyActor(this)</code>；新增 OnReturnToPool：<code>FactionId = EFaction.Neutral</code>。BeginPlay 不用改——每次出池都会重新执行，Perlin 偏移自动重新随机</td></tr>
+    <tr><td>GameObjectWrapper.cs、IPoolable</td><td><strong>删除</strong>。它们的职责分别被 ActorPool（SetActive）、World（注册注销，替代 IsTickEnabled 开关）和 Actor 的复位钩子接管</td></tr>
+    <tr><td>SoulPlayerController / UI</td><td>不改。UI 只持有 TimerHandle，肉体回收时寿命计时器已停止，句柄自动失效显示 DIE</td></tr>
+  </table></div>
+
+  <h3>11B.9.4 EndPlay 清理清单</h3>
+  <p>池化最常见的 bug 是“回收时漏清了某个对外关系”。按资源列一张表，每加一种资源就补一行：</p>
+  <div class="tbl"><table>
+    <tr><th>对外关系</th><th>谁清理</th><th>漏清的后果</th></tr>
+    <tr><td>Possess 双向引用</td><td>APawn / AController.EndPlay</td><td>闲置的肉体仍被某个灵魂控制，灵魂每帧 Tick 去移动一个看不见的对象</td></tr>
+    <tr><td>寿命计时器</td><td>CombatPawn.EndPlay</td><td>闲置对象的计时器到期，回调 Die → 回收一个已经被别人借走的对象</td></tr>
+    <tr><td>延迟回收计时器</td><td>借条自动失效（11B.7）</td><td>H3：回收别人</td></tr>
+    <tr><td>事件订阅</td><td>订阅方在 EndPlay 中 UnRegister（Demo 中的 Actor 都没有订阅事件）</td><td>闲置对象继续收到事件；叠加第 7 章的快照语义</td></tr>
+    <tr><td>业务集合里的引用</td><td>存句柄，或在 EndPlay 时从集合移除</td><td>集合里出现“已经变成别人”的对象</td></tr>
+    <tr><td>物理与表现</td><td>OnTakeFromPool / OnReturnToPool</td><td>出池带着上一任的速度、颜色、名字</td></tr>
+  </table></div>
+
+  <h2>11B.10 两条调用链：夺舍与死亡</h2>
+  <!--code:text:玩家夺舍红队 AI 的肉体 Target（第 N 帧）-->
+World.Update（倒序 Tick）
+  SoulPlayerController.Tick → ExecuteSoulTransfer → Possess(Target)
+    ① UnPossess(Old)  → Old.OnUnPossess：变黑、关碰撞 → World.DestroyActor(Old, 3s)
+                         → 建计时器，捕获 Old 当前借条 (i,g)
+    ② AI.UnPossess()  → SimpleAIController.OnUnPossess → World.DestroyActor(AI)
+                         → AI.IsPendingKill = true，加入 _pendingKill（不碰 _actors 列表）
+    ③ Target.PossessedBy(玩家) → 新寿命计时器 + 事件
+  ……倒序遍历继续：轮到 AI 时 IsPendingKill → 跳过 Tick
+TimerSystem.Update / EventSystem.Update（照常）
+World.LateUpdate
+  AI.EndPlay(ReturnedToPool)：ControlledPawn 已为空 → 无事
+  UnregisterAActor(AI) → ActorPool「AIController」.Return → generation++ → OnReturnToPool（阵营归中立）→ SetActive(false)
+第 N 帧 + 3 秒：计时器到期 → IsAlive((i,g))? 是 → DestroyActor(Old) → 当帧 LateUpdate 入池
+<!--/code-->
+  <!--code:text:寿命耗尽（TimerSystem 完成回调里）-->
+TimerSystem 阶段二B → OnBodyExploded → Die(isExplosion: true)
+  isDying = true → EndMatch()（停 AISpawner）→ Controller.UnPossess() → StopTimer(自己)
+  → World.DestroyActor(this)：标记 PendingKill
+回调返回 → TimerSystem 二次校验：句柄已失效，跳过（第 10 章）
+World.LateUpdate → EndPlay → 注销 → Return → OnReturnToPool（isDying=false、碰撞体打开、恢复名字和颜色）→ 闲置
+<!--/code-->
+
+  <h2>11B.11 收益：一局 10 分钟要创建多少次</h2>
+  <p>【实测 H5，C++ 事件模拟】规则按源码：每 3 秒刷一只 AI（一半重型）；假设每具 AI 肉体存活 8～60 秒（均匀分布）后被碾碎；玩家每 4 秒夺舍一次（被踢出的 AI 灵魂立即回收，旧肉体 3 秒后回收）。存活时间和夺舍频率是假设，结论看量级：</p>
+  <div class="tbl"><table>
+    <tr><th>种类</th><th>借出次数</th><th>归还次数</th><th>峰值同时存在</th><th>有池时的创建次数</th></tr>
+    <tr><td>轻型肉体</td><td>117</td><td>115</td><td>8</td><td>8</td></tr>
+    <tr><td>重型肉体</td><td>84</td><td>78</td><td>6</td><td>6</td></tr>
+    <tr><td>AI 灵魂</td><td>200</td><td>194</td><td>7</td><td>7</td></tr>
+  </table></div>
+  <!--bars {"title":"H5 · 10 分钟一局的 GameObject 创建 / 销毁次数","items":[["无池 · 创建",401,"r"],["无池 · Destroy",387,"r"],["有池（不预热）· 创建",21,"g"],["有池 · 销毁（超出 maxIdle）",0,"g"],["有池 + 按峰值预热 · 局内创建",0,"g"]],"labw":230,"unit":"次","cap":"<b>图 11-4</b>　实测 H5（demos/pool_design_output.txt）。无池时每次刷怪都是 CreatePrimitive + AddComponent×2（肉体）和 new GameObject + AddComponent（灵魂），每次死亡都是 Destroy；有池时创建次数等于各池峰值之和，按峰值预热后局内为 0。这只是次数——每次创建在 Unity 里的真实耗时请用 Profiler 测"} -->
+  <p>预热和上限怎么定：先不预热跑几局，记录每个池的峰值（在 ActorPool 里加一个统计字段即可）；预热取峰值，maxIdle 取峰值的 1.5～2 倍。<strong>预热放在加载阶段</strong>（GameMode.BeginPlay 发生在场景加载后的第一帧），如果预热数量大，可以分摊到加载界面的多帧里。</p>
+  <div class="co warn"><span class="h">面试注意：收益要说得克制</span>
+    <p>SoulDecay 每 3 秒才刷一只，不池化也不会卡；池化的价值在“规则和框架已经支持了”，以后换成每秒几十发的子弹、伤害数字时可以直接复用。如果面试官问“这个 Demo 需要对象池吗”，诚实的回答是“不需要，我是借它验证框架对池化的支持”。</p>
+  </div>
+
+  <h2>11B.12 还有哪些替代做法</h2>
+  <div class="tbl"><table>
+    <tr><th>做法</th><th>说明</th><th>取舍</th></tr>
+    <tr><td>OnEnable / OnDisable 自动注册注销</td><td>AActor 在 OnEnable 里注册、OnDisable 里 EndPlay + 注销，SetActive 自动驱动生命周期</td><td>改动更少；但会改变<strong>所有</strong> Actor 的注册时机（OnEnable 在创建调用内部就执行，比 Start 早），影响第 2 章“先 Possess 后 BeginPlay”的时序；场景卸载时 OnDisable 也会触发 EndPlay，需要区分原因</td></tr>
+    <tr><td>用 UnityEngine.Pool.ObjectPool 作为 L0</td><td>createFunc / actionOnRelease / maxSize 都现成</td><td>少写代码；但它直接返回对象、没有句柄。可以在 AActor 上加一个每次出池自增的 <code>SpawnSerial</code>，对外用 (对象, 序号) 作为句柄——这正是 UE 弱对象指针的思路</td></tr>
+    <tr><td>预制体为键</td><td>RegisterPool(prefab) 代替字符串 key</td><td>真实项目里 Actor 来自 Prefab，用 Prefab 引用做键更安全；Demo 是代码生成的原始体，用字符串更直接</td></tr>
+  </table></div>
+
+  <h2>11B.13 分四步迁移（每一步都能运行）</h2>
+  <ol>
+    <li><b>替换 L0</b>：新 ObjectPool + PoolHandle，补 EditMode 单元测试（清单见 11B.14）。此时不接入任何东西。</li>
+    <li><b>统一死亡出口</b>：AActor / APawn / AController 加 EndPlay 和 IsPendingKill，World 加 DestroyActor + LateUpdate；把项目里所有对 Actor 的 <code>Destroy</code> 换成 <code>World.DestroyActor</code>。这一步还没有池化，但已经修好了 Die 不幂等、Tick 中销毁的问题。</li>
+    <li><b>接入池</b>：World 加 RegisterPool / SpawnActor 和 ActorPool；SurvivalGameMode 改为 SpawnActor（先不预热）；CombatPawn / SimpleAIController 实现 OnReturnToPool / OnTakeFromPool。</li>
+    <li><b>调参与清理</b>：记录峰值后设定预热和 maxIdle；用 Profiler 确认 GC Alloc 和创建次数；删除 GameObjectWrapper 和 SurvivalGameMode 里的死代码。</li>
+  </ol>
+
+  <h2>11B.14 测试</h2>
+  <div class="tbl"><table>
+    <tr><th>层</th><th>测试方式</th><th>用例</th></tr>
+    <tr><td>L0 ObjectPool</td><td>EditMode（NUnit，纯 C#）</td><td>归还后句柄失效；旧拷贝归还被拒绝；default 句柄无效；LIFO 复用时代数 +1；onRelease 里重入归还被拒绝；超过 maxIdle 调 onDestroy；预热数量正确；工厂里触发扩容时结果仍正确</td></tr>
+    <tr><td>L2 World</td><td>PlayMode</td><td>SpawnActor 后下一帧 BeginPlay 恰好一次；Tick 中 DestroyActor 自己 / 更低下标 / 多个，每个 Actor 每帧至多 Tick 一次；DestroyActor 两次只回收一次；延迟回收期间对象被提前回收并复用，到期不误伤</td></tr>
+    <tr><td>L3 Demo</td><td>PlayMode 冒烟</td><td>固定随机种子跑 60 秒：无异常日志；每个池的创建次数 ≤ 预热数；所有闲置对象不在 World 名单中；复用的肉体出池时 isDying=false、碰撞体打开</td></tr>
+  </table></div>
+
+  <h2>11B.15 与 UE 对照</h2>
+  <div class="tbl"><table>
+    <tr><th>本设计</th><th>UE【扩展知识】</th></tr>
+    <tr><td><code>World.SpawnActor / DestroyActor</code></td><td><code>UWorld::SpawnActor</code> / <code>AActor::Destroy</code>（内部走 <code>UWorld::DestroyActor</code>）</td></tr>
+    <tr><td><code>EndPlay(EEndPlayReason)</code></td><td><code>AActor::EndPlay(EEndPlayReason)</code>：Destroyed、LevelTransition、EndPlayInEditor、RemovedFromWorld、Quit——本设计照搬了“销毁和其他离开方式共用一个出口、用原因区分”的思路</td></tr>
+    <tr><td>IsPendingKill + 帧末处理</td><td>Actor 被 Destroy 后标记为待销毁，对象真正释放由之后的 GC 完成；访问时用 <code>IsValid()</code> 判断</td></tr>
+    <tr><td>Actor 池</td><td>UE 没有通用的 Actor 池（Spawn 和 Destroy 都很重），项目通常自己实现；引擎内置的池化见于 Niagara 特效组件（<code>ENCPoolMethod</code>）等</td></tr>
+    <tr><td>PoolHandle / SpawnSerial</td><td><code>FWeakObjectPtr</code>：对象数组下标 + 序列号</td></tr>
+  </table></div>
+
+  <h2>11B.16 面试追问树</h2>
+  <!--code:text:追问树 · 对象池落地-->
+Q11B-1 如果要把你的对象池真正接进框架，你会怎么设计？
+ ├── Q11B-2 池放在哪？为什么不是全局单例？为什么不是 GameMode？
+ ├── Q11B-3 Start 只调用一次，出池后怎么重新 BeginPlay？
+ │    └── Q11B-4 为什么不用 OnEnable / OnDisable 自动注册？
+ ├── Q11B-5 在 Tick 里回收一个 Actor 会怎样？                     ← 遍历中修改
+ │    └── Q11B-6 那 Unity 的 Destroy 为什么没这个问题？
+ ├── Q11B-7 玩家的旧肉体 3 秒后回收，这 3 秒里它被复用了怎么办？   ← ABA
+ ├── Q11B-8 复位放在出池还是入池？漏了一个字段怎么发现？
+ └── Q11B-9 业务代码要知道对象来自池吗？
+Q11B-10 这个 Demo 真的需要对象池吗？收益怎么证明？
+Q11B-11 多线程能从池里借对象吗？                                   ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q11B-1 / Q11B-2　怎么设计？池放在哪？</div>
+    <p><b>L1 · 30 秒</b>　分四层：底层是带代数的通用池，借条是槽位加代数；上面是按类型的 Actor 池，负责激活和父节点；再上面是 World 的 SpawnActor 和 DestroyActor，作为 Actor 唯一的出生和死亡入口；业务层只调用这两个函数，不知道对象是不是来自池。</p>
+    <p><b>L2 · 正常回答</b>　池归 World 所有、由 GameMode 在 BeginPlay 里配置。归 World 是因为生命周期一致——都是场景级的，闲置对象是场景物体，切场景一起销毁；而且 World 本来就管 Actor 的注册注销。不放全局单例，是因为闲置对象跨场景会引用已经销毁的 World；不放 GameMode，是因为 Pawn 和 Controller 死亡时还得反过来找 GameMode，原来的接入代码就卡在这里，RecycleObject 一直没有调用方。</p>
+    <p><b>L3 · 深入</b>　关键改动在 Actor 生命周期：加 EndPlay，与 BeginPlay 成对，销毁和入池都调用，负责解除附身、停计时器；加入池和出池两个钩子负责复位；加 IsPendingKill，DestroyActor 只做标记，真正的回收在 World 的 LateUpdate 统一执行。</p>
+    <p><b>L4 · 面试官攻击</b>　“World 越来越胖了。” → 同意，它现在同时是注册表、调度器和工厂。我会把工厂和池拆成 World 持有的一个子系统（类似 UE 的 WorldSubsystem），World 只暴露 SpawnActor 和 DestroyActor 两个入口。接口不变，内部可以拆。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11B-3 / Q11B-4　出池后怎么重新 BeginPlay？为什么不用 OnEnable？</div>
+    <p><b>L2</b>　EndPlay 把 HasBegunPlay 清回 false，入池时 World 把它从名单里注销；出池时 SpawnActor 重新注册到 pending，下一次 World.Update 就会再次 BeginPlay，和新生成的 Actor 走同一条路径。池化 Actor 的注册只走 SpawnActor，AActor.Start 里遇到池化对象就不注册，避免它被重复注册或者在闲置时被注册。</p>
+    <p><b>L3</b>　OnEnable / OnDisable 自动注册改动最少，但会改变所有 Actor 的注册时机：OnEnable 在 AddComponent 调用内部就执行，比 Start 早，会影响现在“先 Possess 后 BeginPlay”的时序；而且场景卸载时 OnDisable 也会触发，要另外区分。显式的入口更容易推理。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11B-5 / Q11B-6　在 Tick 里回收会怎样？</div>
+    <p><b>L2</b>　如果立即 SetActive(false) 并从名单里移除，就是在倒序遍历中途修改列表：回收一个下标更小的 Actor，当前 Actor 会被 Tick 两次；一次回收多个，会越界、整帧中止。我用移植版测过这两种情况。所以 DestroyActor 只做标记：被标记的 Actor 本帧不再 Tick、不参与碰撞结算，在 LateUpdate 统一回收。</p>
+    <p><b>L3</b>　原来用 Destroy 没出事，是因为 Unity 的 Destroy 本身就推迟到帧末，OnDestroy 不会在遍历中途发生。池化相当于把这个保护去掉了，所以要自己补回来。顺带 DestroyActor 变成幂等的，原来“两具大肉体同时撞一具小肉体会重复加分”的问题也一起修了。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11B-7　旧肉体 3 秒后回收，这 3 秒里它被复用了怎么办？（压力题）</div>
+    <p><b>L2</b>　延迟回收的计时器不能捕获对象引用，要捕获安排那一刻的借条。到期时用借条问池子“它还是不是那一任”，代数不对就忽略。我测过：如果尸体在这 3 秒内被提前回收、又被刷怪借走变成一只红队 AI，只检查“对象是否活跃”的写法会把这只活着的 AI 回收掉；用借条的写法会忽略。</p>
+    <p><b>L3</b>　池是 LIFO 的，刚还回来的对象最先被借出，所以一旦有提前回收的路径，这个问题几乎必然发生。这和计时器句柄是同一个问题：只要“延迟操作”指向一个可能被复用的东西，就需要代数。Unity 的 Destroy(obj, 3) 没这个问题，是因为被销毁的对象永远不会回来。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11B-8 / Q11B-9　复位放哪？业务要不要知道对象来自池？</div>
+    <p><b>L2</b>　分两类：离开游戏的清理放 EndPlay，销毁和入池都调用；清残留引用放入池时，避免闲置对象钉住别的东西；与新位置相关的放出池时。漏字段的问题靠两件事兜：一张按资源列的清理清单；一个冒烟测试——同一对象复用多次后检查关键状态。业务层不需要知道：CombatPawn 只调用 DestroyActor，是销毁还是入池由 World 根据它有没有归属的池决定。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11B-10　这个 Demo 真的需要对象池吗？</div>
+    <p><b>L2</b>　不需要。每 3 秒刷一只，不池化也不会卡。我按源码的刷怪规则、加上存活时间和夺舍频率的假设模拟了一局 10 分钟：不池化要创建约 400 次、销毁约 390 次；池化后只创建 21 次，按峰值预热后局内是 0。这说明的是次数，真实耗时要在 Profiler 里看。我做这件事的目的是让框架支持池化，以后接子弹、特效这种高频对象时可以直接用。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11B-11　多线程能从池里借对象吗？（发散）</div>
+    <p><b>L2</b>　Actor 池不行：激活、改父节点、改位置都是 Unity API，只能在主线程。纯数据的池（比如网络消息包、寻路请求）可以做成线程安全的：最简单是加锁；高频时用每线程一个本地缓存、批量和全局池交换，这就是 tcmalloc 这类分配器“线程本地缓存”的思路，也和第 12 章“每个工作线程一个 SPSC 队列”是一个道理。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“对象池就是 SetActive(false) 存起来、SetActive(true) 拿出来。”</p>
+    <p><b>问题</b>：只说了激活状态。没说生命周期（Start 不会再调用、OnDestroy 不会触发）、状态复位、对外引用清理、借条安全——原 GameObjectWrapper 就停在这一步，H4 显示第二轮起出池的肉体已经是“死的”。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“回收时我立刻把它放回池里，这样最省事。”</p>
+    <p><b>问题</b>：回收经常发生在别人的遍历中（World 的 Tick、物理回调、计时器回调），立刻修改名单会重复 Tick 或越界（H2）。要么延迟到帧末，要么由遍历方保证安全。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>半成品四个缺口：<strong>借条无代数、生命周期没接上、状态无复位点、死亡出口写死 Destroy</strong>；后三个是框架问题。</li>
+    <li>四层：<strong>L0 ObjectPool&lt;T&gt;（槽位 + 代数，从 1 开始）→ L1 ActorPool → L2 World.SpawnActor / DestroyActor → L3 Demo</strong>；World 提供机制，GameMode 配置策略。</li>
+    <li>Actor 新增：<strong>EndPlay（销毁与入池共用）、OnReturnToPool（清残留）、OnTakeFromPool（准备上场）、IsPendingKill</strong>；池化 Actor 只由 SpawnActor 注册；工厂<strong>先失活再挂组件</strong>。</li>
+    <li>DestroyActor <strong>只标记、幂等</strong>，LateUpdate 统一回收（H2）；延迟回收<strong>捕获借条</strong>（H3）。</li>
+    <li>SoulDecay：生成换成 SpawnActor，三处 Destroy 换成 DestroyActor，补复位；一局 10 分钟创建 <strong>401 次 → 21 次</strong>（H5）。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：工厂里如果不先 SetActive(false) 就 AddComponent&lt;CombatPawn&gt;()，预热 8 个对象会发生什么？</summary><p>GameObject 处于激活状态，Awake、OnEnable 立即执行，Start 随后执行。在新 AActor.Start 中，这时 OwnerPool 还没有被设置（Take 之前），会走 World.RegisterAActor，于是 8 个“闲置”的肉体进入 World 名单、执行 BeginPlay 并开始 Tick，而且还显示在场景里。之后出池时 SpawnActor 再注册一次会被去重，但它们从未经过正确的状态机。</p></details>
+  <details class="quiz"><summary>自测 2：入池时 APawn.EndPlay 调用 Controller.UnPossess()，CombatPawn.OnUnPossess 又调用 World.DestroyActor(this, 3f)。为什么不会出问题？</summary><p>EndPlay 发生在 LateUpdate 的回收流程里，此时该 Actor 的 IsPendingKill 已经是 true，DestroyActor 开头的幂等检查直接返回，不会再建延迟计时器。</p></details>
+  <details class="quiz"><summary>自测 3：ScheduleDestroy 里的 lambda 会分配吗？要不要优化？</summary><p>会：它捕获了 h、pool、actor，每次调用分配一个闭包对象和一个委托。它只在玩家每次夺舍时发生一次，频率很低，不值得优化；需要时可以在 Actor 上存“待回收借条”字段，用一个缓存好的实例方法作为回调。</p></details>
+</section>

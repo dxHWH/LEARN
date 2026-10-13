@@ -1,0 +1,187 @@
+<section class="chapter" id="ch11">
+  <div class="ch-head">
+    <div class="no">CHAPTER 11</div>
+    <h1>ObjectPool：写好了，为什么没启用</h1>
+    <p class="lead">对象池的数据结构很简单，难的是“借出去的东西怎么确认还是你的”和“还回来的东西怎么复位”。这个项目两件事都没做完——前者让第 9 章的 ABA 问题重新出现，后者让池子接不进 Actor 的生命周期。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>准确描述 ObjectPool 的使用状态：实现了、接入代码写了、但没有启用</li>
+    <li>讲清数组 + 可用下标栈的结构、LIFO 复用、翻倍扩容</li>
+    <li>说清 PoolObject 只有 index 带来的三类问题：陈旧拷贝、错配回收、默认值</li>
+    <li>能把第 9 章的 Index + Generation 迁移到对象池上，并说清还缺什么</li>
+    <li>回答“池化到底省了什么”：分配、GC、碎片、初始化成本，以及池化的代价</li>
+    <li>对比 Unity 内置的 <code>UnityEngine.Pool.ObjectPool&lt;T&gt;</code></li>
+  </ul></div>
+
+  <h2>11.1 先把事实说准：它到底用了没有</h2>
+  <div class="tbl"><table>
+    <tr><th>位置</th><th>源码事实</th></tr>
+    <tr><td>Framework/ObjectPool.cs</td><td>泛型池 <code>ObjectPool&lt;T&gt; where T : class, IPoolable, new()</code>，105 行，无测试</td></tr>
+    <tr><td>SoulDecayDemo/GameObjectWrapper.cs</td><td>IPoolable 实现：出池 SetActive(true) + 恢复 Tick；入池关 Tick + SetActive(false) + 清刚体速度</td></tr>
+    <tr><td>SurvivalGameMode.cs</td><td>声明了 3 个池子字段；<strong>初始化语句被注释</strong>；<code>GetOrCreatePawn / GetOrCreateAIController / RecycleObject</code> 已写好，<strong>无调用方</strong>；SpawnRandomAI 里调用池子的两行也被注释</td></tr>
+    <tr><td>实际运行路径</td><td><code>CreatePawn</code>（CreatePrimitive + AddComponent）与 <code>new GameObject().AddComponent&lt;SimpleAIController&gt;()</code>；死亡和被抛弃时 <code>Destroy</code></td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意</span>
+    <p>“我用对象池优化了 Demo”是错误说法。准确说法：“我实现了一个对象池并写了 Demo 的接入代码，但在接入时发现它和 Actor 生命周期冲突，最终没有启用。”——然后讲清冲突在哪（11.6），这比“用了”更有说服力。</p>
+  </div>
+
+  <h2>11.2 结构：数组 + 可用下标栈</h2>
+  <!--code:cs:ObjectPool.cs（节选）-->
+public struct PoolObject<T> { public T elem; public int index; }     // 借条：对象 + 槽位下标（没有 generation）
+public class ObjectPool<T> where T : class, IPoolable, new() {
+    struct Elem { public T elem; public bool IsAvailable; }
+    private int _capacity; private Elem[] _pool; private Stack<int> _availableIndexStack;
+    public ObjectPool(int n) { ... for (i < n) { _pool[i].elem = new T(); _pool[i].IsAvailable = true; stack.Push(i); } }
+    public bool Acquire(out PoolObject<T> obj) {
+        if (stack.TryPop(out int index)) { obj = new(_pool[index].elem, index); _pool[index].IsAvailable = false; obj.elem.OnSpawn(); return true; }
+        if (ReAllocate(_capacity * 2)) { ...同上... }                    // 空了就翻倍
+        obj = default; return false;
+    }
+    public bool Recycle(ref PoolObject<T> obj) {
+        if (obj.index < 0 || obj.index >= _capacity) return false;
+        if (_pool[obj.index].IsAvailable) return false;                   // 只检查“槽位是否已经空闲”
+        obj.elem.OnRecycle(); obj.elem = default;                         // 只清空调用方手里这一份
+        _pool[obj.index].IsAvailable = true; stack.Push(obj.index); return true;
+    }
+}
+<!--/code-->
+  <ul>
+    <li><b>预先 new 满</b>：构造时和每次扩容时，把所有空位都 <code>new T()</code> 填满（【实测 G9】容量 2 连取 5 个，一共 new 了 8 个对象）。<code>new T()</code> 在泛型约束下编译为 <code>Activator.CreateInstance&lt;T&gt;()</code>，比直接 new 慢，但只在预热时发生。</li>
+    <li><b>LIFO 复用</b>：可用下标是 Stack，刚还回来的槽位下一次立刻被借出（G9：归还 a 后再借，拿到的还是 a 的槽位）。好处是“热”的对象更可能还在缓存里；坏处是旧借条立刻就能撞上新主人（11.3）。</li>
+    <li><b>翻倍扩容</b>：新建更大的数组、拷贝旧元素、为新增部分 new 对象并压栈。注释说“深拷贝”，实际是结构体拷贝 = 引用的浅拷贝（这正是想要的，但注释不对）。</li>
+    <li><b>容量 0</b>：【实测 G9】0×2 = 0，ReAllocate 返回 true 却什么也没分配，<strong>永远借不到</strong>，也不报错。</li>
+    <li><b>注释的说法</b>：“只有值类型可以申请连续内存，所以用 struct 包起来而不使用 Tuple”——引用数组本身也是连续的（存的是连续的引用），不连续的是引用指向的对象；用 struct 的真正收益是避免 <code>System.Tuple</code>（class）的额外分配，<code>ValueTuple</code> 同样可以。</li>
+  </ul>
+
+  <h2>11.3 PoolObject 只有 index：第 9 章的问题回来了</h2>
+  <p>借条里只有“对象引用 + 槽位下标”。归还时，池子只能检查“这个槽位现在是不是已经空闲”，无法确认“这张借条是不是当前这一任的”。</p>
+  <div class="tbl"><table>
+    <tr><th>情况</th><th>当前行为（实测 E8 / G9）</th><th>对应第 9 章的</th></tr>
+    <tr><td><b>陈旧拷贝</b>：借条是 struct，存进 Dictionary 或别的字段时被拷贝；用一份归还后，另一份还在</td><td>归还 a 后槽位立刻被 b 借走（LIFO）；再用 a 的旧拷贝归还 → <strong>成功</strong>，b 正在用的对象被 OnRecycle（E8）</td><td>stale handle / ABA 式复用</td></tr>
+    <tr><td><b>错配回收</b>：借条里的 elem 和 index 来自不同的租借</td><td>Recycle 用 index 判断槽位、却对 elem 调 OnRecycle：a 的对象被回收，b 的槽位被标记空闲而 b 还在用；再借一次，同一个对象被两人持有（G9）</td><td>伪造句柄</td></tr>
+    <tr><td><b>默认值</b>：<code>default(PoolObject)</code> 的 index = 0、elem = null</td><td>若 0 号槽正在使用，<code>Recycle(default)</code> 通过两项检查后对 null 调 OnRecycle → NullReferenceException（E8）</td><td>default(TimerHandle) = (0,0)</td></tr>
+    <tr><td><b>重复归还同一份</b></td><td>第一次 Recycle 后调用方那份的 elem 被清空、槽位已空闲，第二次被 IsAvailable 拦截 ✔</td><td>—</td></tr>
+  </table></div>
+  <h3>把 Index + Generation 迁移过来</h3>
+  <!--code:text:迁移思路（只讲设计，不给实现）-->
+槽位：  { T obj; int generation; bool inUse; }
+借出：  inUse = true；返回借条 Handle(index, generation)
+归还：  校验 index 合法 && inUse && slot.generation == handle.generation
+        → OnRecycle → inUse = false → generation++ → 入栈
+访问：  pool.TryGet(handle, out obj)：校验同上，失败返回 false
+generation 从 1 开始，让 default 借条永远无效
+<!--/code-->
+  <p>还缺什么：generation 只能保证“借条 → 池子”这条路径的安全。<strong>业务代码手里如果直接存了对象引用（而不是借条）</strong>，池子管不到——比如 SoulDecay 的 UI 持有某具 CombatPawn 的引用，Pawn 被回收再借出成另一只 AI，UI 拿着引用照样能读写它。所以对池化对象，业务层也应该只持有句柄，或者在对象内部也存一份 generation，访问时比对。这正是 UE 的 <code>FWeakObjectPtr</code>（ObjectIndex + SerialNumber）要解决的问题。</p>
+
+  <h2>11.4 池化到底省了什么</h2>
+  <div class="tbl"><table>
+    <tr><th>收益</th><th>说明</th><th>在本 Demo 里的分量</th></tr>
+    <tr><td>托管分配与 GC</td><td>不再每次 new；GC 触发更少。Unity 的 Boehm GC 不分代，一次回收要扫描整个托管堆</td><td>小：每 3 秒一次刷怪</td></tr>
+    <tr><td>原生对象创建 / 销毁</td><td>GameObject、组件、碰撞体、材质实例的创建和 Destroy 都在原生层，比托管分配贵得多</td><td><strong>这才是主要收益</strong>：CreatePrimitive + AddComponent×2 + Destroy</td></tr>
+    <tr><td>初始化成本</td><td>Awake、GetComponent、加载资源只做一次</td><td>中</td></tr>
+    <tr><td>内存碎片</td><td>Boehm GC 不压缩，频繁分配释放不同大小的对象会让堆碎片化；池化让对象长期驻留、地址稳定</td><td>小</td></tr>
+  </table></div>
+  <div class="tbl"><table>
+    <tr><th>代价</th><th>说明</th></tr>
+    <tr><td>常驻内存</td><td>池子只增不减（项目没有收缩）；峰值过后内存不还</td></tr>
+    <tr><td>复位负担</td><td>对象的每一个状态字段、每一个副作用都要在出池时撤销——漏一个就是“上一任的残留”（11.6）</td></tr>
+    <tr><td>生命周期变复杂</td><td>“销毁”变成“入池”，引擎提供的 Start / OnDestroy 语义不再适用</td></tr>
+    <tr><td>悬垂引用变成 ABA</td><td>不池化时，持有已 Destroy 对象的引用会得到“假 null”（Unity）或报错，问题显性；池化后对象复活成别人，问题静默（11.3）</td></tr>
+    <tr><td>存活对象变多</td><td>GC 每次要标记的对象更多——减少的是“分配次数”，增加的是“存活集合”</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">面试注意：先问“值不值得池化”</span>
+    <p>判断标准是创建频率 × 单次成本，以及是否在帧敏感的时刻创建。子弹、伤害数字、特效、音效源这类“每秒几十个、很快销毁”的对象值得；每 3 秒一个、活几十秒的 AI 收益很小，复位却很复杂。能说出“我当时判断这个 Demo 不值得”，也是一个合格的答案。</p>
+  </div>
+
+  <h2>11.5 和 Unity 内置池对比</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>本项目 ObjectPool</th><th><code>UnityEngine.Pool.ObjectPool&lt;T&gt;</code>（Unity 2021+）【扩展知识】</th></tr>
+    <tr><td>创建方式</td><td><code>new T()</code>，构造时预先 new 满</td><td><code>createFunc</code> 委托，按需创建（可配 defaultCapacity）</td></tr>
+    <tr><td>回调</td><td>IPoolable.OnSpawn / OnRecycle（侵入式，T 必须实现接口）</td><td>actionOnGet / actionOnRelease / actionOnDestroy（非侵入，可池化任何类型，包括 GameObject）</td></tr>
+    <tr><td>上限</td><td>无，只增不减</td><td><code>maxSize</code>：超出的归还对象直接销毁</td></tr>
+    <tr><td>重复归还</td><td>IsAvailable 拦截同一份借条的重复归还</td><td><code>collectionCheck</code>：重复 Release 抛异常（文档说明只在编辑器中检查）</td></tr>
+    <tr><td>借条</td><td>PoolObject（index + elem），无 generation</td><td>直接返回对象本身，没有借条——同样没有 ABA 防护</td></tr>
+    <tr><td>其他</td><td>—</td><td>ListPool / DictionaryPool / HashSetPool / GenericPool，以及 <code>using (ListPool&lt;T&gt;.Get(out var list))</code> 的作用域借用</td></tr>
+  </table></div>
+  <p>结论：数据结构上两者是一个量级的东西；本项目缺的是 maxSize、非侵入回调、按需创建。Unity 内置池同样不防 ABA，这说明业界的普遍做法是“靠约定：归还后不再使用”，需要更强保证时才上句柄。</p>
+
+  <h2>11.6 接入 SoulDecay 时会遇到的生命周期冲突</h2>
+  <p>第 15 章 15.9 列过清单，这里按“根因”重新归类，这才是面试时要讲的部分：</p>
+  <div class="tbl"><table>
+    <tr><th>根因</th><th>具体表现</th><th>需要的框架能力</th></tr>
+    <tr><td>Actor 的注册挂在 Unity 的 Start 上，而 Start 一生只调用一次</td><td>第二次出池不会 BeginPlay；HasBegunPlay 永远为 true</td><td>Actor 增加“出池 / 入池”生命周期钩子（类似 UE 的 Actor 池化需要业务自己实现的 Reset 逻辑）</td></tr>
+    <tr><td>注销挂在 OnDestroy 上，而 SetActive(false) 不会触发 OnDestroy</td><td>入池对象仍在 World 名单里，只靠 IsTickEnabled 跳过</td><td>World 提供显式的 Unregister / Suspend</td></tr>
+    <tr><td>状态没有集中复位点</td><td>isDying、名字、材质颜色、碰撞体 enabled、寿命句柄都要逐个撤销；GetOrCreatePawn 里“碰撞体为空才 AddComponent”的判断永远不成立（碰撞体只是被 disable）</td><td>每个 Actor 一个 ResetForReuse，由池子统一调用</td></tr>
+    <tr><td>销毁路径写死了 Destroy</td><td>Die、OnUnPossess、SimpleAIController.OnUnPossess 都直接 Destroy</td><td>“结束生命”抽象成一个可替换的策略：销毁或归还</td></tr>
+    <tr><td>外部持有直接引用</td><td>Controller ⇄ Pawn 双向引用、UI 持有句柄、GameMode 的字典</td><td>入池前强制解绑（UnPossess）；对外只发句柄</td></tr>
+  </table></div>
+
+  <h2>11.7 Code Review：ObjectPool 问题表</h2>
+  <div class="tbl"><table>
+    <tr><th>级别</th><th>问题</th><th>说明</th></tr>
+    <tr><td>P1</td><td>借条无 generation</td><td>陈旧拷贝能回收别人的对象（E8）</td></tr>
+    <tr><td>P1</td><td>Recycle 不校验 elem 与槽位是否匹配</td><td>错配回收导致同一对象被两人持有（G9）</td></tr>
+    <tr><td>P2</td><td>default 借条 index = 0</td><td>回收时对 null 调 OnRecycle（E8）</td></tr>
+    <tr><td>P2</td><td>容量 0 永远借不到且不报错</td><td>G9</td></tr>
+    <tr><td>P2</td><td>只增不减、无 maxSize、扩容时预先 new 满</td><td>峰值后内存不还；扩容那一帧集中分配</td></tr>
+    <tr><td>P3</td><td>侵入式接口；注释“深拷贝”“只有值类型才连续”不准确；未启用的接入代码与实际参数已分叉（4.5 s / 8 s vs 5 s / 30 s）</td><td>—</td></tr>
+    <tr><td>测试</td><td>无</td><td>应覆盖：LIFO 顺序、扩容、重复归还、陈旧借条、默认借条、容量 0</td></tr>
+  </table></div>
+
+  <h2>11.8 面试追问树</h2>
+  <!--code:text:追问树 · ObjectPool-->
+Q11-1 你的项目用了对象池吗？                                      ← 先说准事实
+ └── Q11-2 为什么没启用？                                          ← 生命周期冲突
+      └── Q11-3 Start 只调用一次，那出池怎么重新初始化？
+Q11-4 讲一下池子的结构。为什么用栈不用队列？
+Q11-5 PoolObject 为什么没有 generation？会出什么问题？            ← 压力题
+ └── Q11-6 加了 generation 就安全了吗？                            ← 业务层的直接引用
+Q11-7 对象池到底省了什么？什么对象不值得池化？
+Q11-8 Unity 自带的 ObjectPool 和你的有什么区别？
+Q11-9 C++ 里对象池怎么做？和 malloc 有什么关系？                   ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q11-1 → Q11-3　用了对象池吗？为什么没启用？</div>
+    <p><b>L1 · 30 秒</b>　实现了一个泛型对象池，也给 SoulDecay 的肉体和 AI 灵魂写了接入代码，但没有启用，现在走的是创建加 Destroy。原因是接入时发现它和我的 Actor 生命周期冲突。</p>
+    <p><b>L2 · 正常回答</b>　我的 Actor 在 Unity 的 Start 里向 World 注册、在 OnDestroy 里注销。池化之后对象不会被销毁，只是 SetActive(false)，所以不会注销；再出池时 Start 不会再调用，也就不会重新 BeginPlay。我当时用 IsTickEnabled 临时挡住了入池对象的 Tick，但状态复位没做完：死亡标志、名字、颜色、碰撞体、寿命句柄，每一个都要撤销。</p>
+    <p><b>L3 · 深入</b>　根本上需要框架层的支持：Actor 增加出池和入池两个钩子，World 提供显式的挂起和恢复，所有“结束生命”的地方走同一个可替换的出口（销毁或归还），入池前强制解除 Possess。没有这些，池化只是把 bug 从“对象没了”变成“对象带着上一任的状态复活”。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11-5 / Q11-6　PoolObject 为什么没有 generation？（压力题）</div>
+    <p><b>L1</b>　当时没想到，这是一个问题。借条只有对象和下标，归还时只能检查槽位是否已空闲，判断不了借条是不是当前这一任的。</p>
+    <p><b>L2</b>　借条是 struct，存进字典会被拷贝；用一份归还后，另一份还能用。池子是栈，刚还的槽位下一次立刻借给别人，这时用旧拷贝归还会成功，把别人正在用的对象回收掉——我用移植版测过。另外 Recycle 不检查借条里的对象是否就是那个槽位的对象，错配时会出现同一个对象被两个人持有。修法和计时器一样：槽位带代数，借条带代数，归还时比对，代数从 1 开始。</p>
+    <p><b>L3 / L4 攻击</b>　“加了就安全了吗？” → 只对“通过借条访问”的路径安全。业务代码如果直接存了对象引用，池子管不到，对象被回收再借出后，旧引用就指向了新主人。所以池化对象对外最好只发句柄；或者对象内部也带代数，访问前比对。UE 的弱对象指针就是用“对象数组下标 + 序列号”判断对象是否还是原来那个。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11-7　对象池省了什么？什么不值得池化？</div>
+    <p><b>L2</b>　在 Unity 里主要省的是原生对象的创建销毁——GameObject、组件、碰撞体、材质的创建和 Destroy 比托管 new 贵得多；其次是 GC 次数和初始化成本。代价是常驻内存、复位负担、生命周期变复杂、悬垂引用变成静默的 ABA。值得池化的是创建频繁、寿命短、在帧敏感时刻创建的：子弹、伤害数字、特效、音效。SoulDecay 每 3 秒刷一只、活几十秒的 AI，收益小、复位复杂，不启用是合理的。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11-9　C++ 里对象池怎么做？和 malloc 有什么关系？（发散）</div>
+    <p><b>L2</b>　C++ 常见的是固定大小块的内存池（free list allocator）：预先申请一大块内存切成等大的块，空闲块用侵入式链表串起来，分配和释放都是 O(1)，用 placement new 构造、手动调用析构。和 malloc 比，省掉了通用分配器的元数据、锁和碎片；tcmalloc、jemalloc 内部也是按大小分级的线程本地缓存，本质上是同一个思想。游戏引擎里还常见帧分配器（每帧开头整体重置的线性分配器）和对象级的池。</p>
+    <p><b>L3</b>　C++ 池的风险更大：归还后继续使用就是 use-after-free，而且因为内存被复用，往往不会崩溃而是静默读到新对象——所以引擎会配合句柄 + 代数，或者在调试版本里给释放的块填充特殊值（如 0xDD）来尽早暴露问题。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“对象池能完全消除 GC。”</p>
+    <p><b>问题</b>：它减少的是分配次数；池里常驻的对象仍然每次被 GC 标记。扩容时会集中分配；借出时的 OnSpawn 里如果有字符串拼接、闭包，照样分配。</p>
+  </div>
+
+  <h2>11.9 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">内存碎片</div><p>外部碎片：总空闲够但没有连续的大块；内部碎片：分配的块比需要的大。不压缩的 GC（Boehm）和 C/C++ 的 malloc 都会有外部碎片，等大块的池天然没有外部碎片。</p></div>
+    <div class="card"><div class="t">分代与压缩 GC</div><p>.NET CLR 的 GC 分代 + 压缩，短命对象很便宜；Unity 的 Boehm 不分代、不移动，短命对象并不便宜——这是 Unity 项目比一般 .NET 项目更重视池化的原因。</p></div>
+    <div class="card"><div class="t">UE 的对象复用</div><p>UE 没有通用的 Actor 池（Spawn/Destroy 很重），项目通常自己写池；Niagara 特效、音频组件有引擎内置的池；UObject 的 GC 是标记—清除，靠 UPROPERTY 引用图追踪。</p></div>
+    <div class="card"><div class="t">ECS 的“池”</div><p>ECS 里实体本来就是数组下标 + 版本号，组件存在按类型的连续数组里，增删就是 swap-and-pop——第 9 章的 Slot Map 已经是“池 + 句柄”的完整形态。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><strong>实现了、接入代码写了、没启用</strong>；实际走 Create + Destroy。</li>
+    <li>结构：Elem[] + <strong>可用下标栈（LIFO）</strong> + 翻倍扩容（预先 new 满）；容量 0 永远借不到（G9）。</li>
+    <li>借条只有 index：<strong>陈旧拷贝回收别人（E8）、错配回收导致一物两主（G9）、default 借条 NRE</strong>；修法是 Index + Generation，但业务层的直接引用仍不受保护。</li>
+    <li>池化在 Unity 里主要省<strong>原生对象创建销毁</strong>，代价是常驻内存、复位负担、静默 ABA。</li>
+    <li>没启用的根因：<strong>注册挂在 Start、注销挂在 OnDestroy</strong>，池化绕开了这两个时机。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：容量 4 的池，借 a、b，归还 a，借 c，然后用 a 的旧拷贝再归还一次，会发生什么？</summary><p>栈是 LIFO：a 在槽 3、b 在槽 2；归还 a 后槽 3 入栈；借 c 拿到槽 3（同一个对象）。用 a 的旧拷贝归还：index=3 合法、槽 3 当前不空闲 → 成功，c 正在用的对象被 OnRecycle 并标记空闲，下一次借出会把它再给别人。</p></details>
+  <details class="quiz"><summary>自测 2：为什么说“池化让悬垂引用从显性变成静默”？</summary><p>不池化时，对象被 Destroy 后，Unity 的假 null 判断为 true、访问会抛 MissingReferenceException，问题立刻暴露；池化后对象没有被销毁而是被另一个使用者借走，旧引用访问不会报错，却在读写别人的数据。</p></details>
+</section>

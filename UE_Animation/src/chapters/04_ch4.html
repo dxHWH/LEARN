@@ -1,0 +1,119 @@
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>混合空间与同步组：让走跑自然过渡</h1>
+    <p class="lead">输入一个速度和方向，输出一个“介于走和跑之间、偏右前”的姿势。要做到不滑步，权重要算对，脚步还要对齐。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>知道 1D / 2D 混合空间如何把输入参数变成采样权重：三角剖分 + 重心坐标</li>
+    <li>区分“输入平滑（Smoothing Time）”和“采样权重速度（Weight Speed）”</li>
+    <li>理解为什么混合不同长度的循环动画必须同步，以及归一化时间同步与同步标记的区别</li>
+    <li>知道 Leader / Follower 的规则，以及混合空间内部是怎么同步采样的</li>
+  </ul></div>
+
+  <h2>4.1 混合空间是什么</h2>
+  <p>混合空间（Blend Space）是一种动画资产：定义 1 或 2 个输入轴（例如速度、方向），在轴上摆若干<strong>采样</strong>（每个采样是一条动画），运行时根据输入值算出每个采样的权重，把它们同步推进、求值、按权重混合。</p>
+  <div class="tbl"><table>
+    <tr><th>资产</th><th>轴</th><th>采样</th><th>典型用途</th></tr>
+    <tr><td>Blend Space 1D</td><td>1 个</td><td>普通序列</td><td>Idle → Walk → Jog → Run 按速度混合</td></tr>
+    <tr><td>Blend Space</td><td>2 个</td><td>普通序列</td><td>八方向移动（Vx / Vy 或 方向 / 速度）</td></tr>
+    <tr><td>Aim Offset (1D)</td><td>1~2 个</td><td><strong>网格空间加性</strong>序列</td><td>按 Yaw / Pitch 叠加瞄准偏移</td></tr>
+  </table></div>
+
+  <h2>4.2 权重怎么算</h2>
+  <h3>1D：只看左右两个邻居</h3>
+  <p>采样按轴值排序，输入落在哪两个采样之间，就按距离线性分配：速度 290 落在 Walk(160) 和 Jog(420) 之间，Jog 权重 = (290−160)/(420−160) = 0.5。</p>
+  <h3>2D：三角剖分 + 重心坐标</h3>
+  <div class="co tip"><span class="h">白话版：B4.5</span><p>“重心坐标”可以理解成：输入点把三角形切成三块，每个顶点的权重 = 它对面那块的面积占比。前置篇 B4.5 用同一组数字画了一张图。</p></div>
+  <p>UE5 默认把所有采样点做<strong>Delaunay 三角剖分</strong>（编辑器里可以点 Show Triangulation 看到），输入点落在哪个三角形里，三个顶点的<strong>重心坐标</strong>就是权重；其余采样权重为 0。重心坐标保证：权重非负、和为 1、而且按权重加权的采样坐标正好等于输入点——<strong>混合出来的“速度”就是你要的速度</strong>，这正是不滑步的前提。</p>
+  <!--bspace {"samples":[["Idle",0,0],["Walk_F",0,160],["Walk_B",0,-140],["Walk_L",-150,0],["Walk_R",150,0],["Jog_F",0,420],["Jog_B",0,-340],["Jog_L",-370,0],["Jog_R",380,0]],
+    "xr":[-420,560],"yr":[-380,560],"xlab":"Vx（cm/s，右为正）；纵轴 Vy（前为正）",
+    "query":[[0,290,"前进 290"],[180,180,"右前斜向"],[-100,-60,"左后慢走",-84,30],[500,500,"超出范围",-70,-6]],
+    "cap":"<b>图 4-1</b>　9 个采样的 Delaunay 三角剖分（12 个三角形，由构建脚本计算，与 E5 一致）。查询点所在三角形高亮，虚线连到参与混合的采样；落在三角网外的输入投影到最近的边界边"} -->
+  <div class="co ver"><span class="h">实测 E5：权重与重建</span>
+    <div class="tbl"><table>
+      <tr><th>输入 (Vx, Vy)</th><th>权重</th><th>Σw</th><th>加权重建的坐标</th></tr>
+      <tr><td>(0, 0) 原地</td><td>Idle 1.000</td><td>1</td><td>(0, 0)</td></tr>
+      <tr><td>(0, 290) 前进</td><td>Walk_F 0.500 · Jog_F 0.500</td><td>1</td><td>(0, 290)</td></tr>
+      <tr><td>(180, 180) 右前</td><td>Walk_F 0.158 · Jog_F 0.368 · Jog_R 0.474</td><td>1</td><td>(180, 180)</td></tr>
+      <tr><td>(−100, −60) 左后</td><td>Walk_B 0.267 · Walk_L 0.667 · Jog_B 0.067</td><td>1</td><td>(−100, −60)</td></tr>
+      <tr><td>(500, 500) 超出</td><td>Jog_F 0.512 · Jog_R 0.488</td><td>1</td><td>(185, 215) ← 被限制在边界上</td></tr>
+    </table></div>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>插值方式</th><th>做法</th><th>特点</th></tr>
+    <tr><td><strong>三角剖分</strong>（默认）</td><td>Delaunay + 重心坐标，最多 3 个采样参与</td><td>采样可以随意摆放；斜向过渡顺滑；当采样均匀摆在网格上时有“哪条对角线”的歧义，用 Preferred Triangulation Direction（Tangential / Radial）指定，保证左右对称</td></tr>
+    <tr><td>网格（Use Grid，旧版）</td><td>先把轴切成 Grid Divisions 个格子，格子四角双线性插值，最多 4 个采样参与</td><td>采样必须落在网格交点上；主要为兼容旧项目和 Wrap Input（方向轴首尾相接）这类场景</td></tr>
+  </table></div>
+  <div class="lab alab bslab" id="lab-bspace"></div><!--/lab-->
+
+  <h2>4.3 轴怎么选</h2>
+  <ul>
+    <li><strong>方向 + 速度</strong>（Direction −180~180，Speed 0~600）：直观，但方向轴首尾（±180° 都是后退）需要开 <strong>Wrap Input</strong>；速度为 0 时方向没有意义，Idle 要在 Speed=0 那一行摆满。</li>
+    <li><strong>Vx + Vy（局部速度）</strong>：如图 4-1，没有角度环绕问题，原点就是 Idle。</li>
+    <li><strong>只有 1D 方向 + 播放速率</strong>：UE5 的 Lyra / Game Animation Sample 走的是另一条路——方向用少量“基本方向”动画，速度不靠混合空间，而是用<strong>距离匹配</strong>和<strong>步幅调整（Stride Warping）</strong>去贴合真实速度（第 8 章）。</li>
+  </ul>
+  <div class="co warn"><span class="h">面试注意：采样的“速度”必须和动画里根骨骼的真实速度一致</span>
+    <p>采样摆在 Jog_F = 420 的位置，意思是“这条动画播放时脚每秒向后推 420 cm”。如果美术做的动画其实是 380 cm/s，角色以 420 移动时就会<strong>滑步</strong>。UE 的 Blend Space Analysis 可以按根骨骼位移自动把采样放到正确位置；也可以开启 <strong>Axis to Scale Animation</strong>，让引擎在输入超出混合结果时按比例调整播放速率。</p>
+  </div>
+
+  <h2>4.4 两种“平滑”：别混为一谈</h2>
+  <p>键盘输入从“左”瞬间切到“右”时，混合空间的输入会突变。UE 有两种完全不同的平滑：</p>
+  <div class="tbl"><table>
+    <tr><th>选项</th><th>平滑的是什么</th><th>E5：1D 方向混合空间，−90° 突变到 +90°（0.3 s）</th></tr>
+    <tr><td><strong>Smoothing Time / Type</strong>（输入平滑）</td><td>输入参数本身：输入从 −90 慢慢变到 +90，<strong>中间会经过 0°</strong></td><td>途经 Fwd：Fwd 最大权重 <strong>1.00</strong>，占主导 9 帧——角色先往前走一下再往右</td></tr>
+    <tr><td><strong>Weight Speed</strong>（采样权重速度）</td><td>每个采样的权重：直接从“Left=1”往“Right=1”淡过去</td><td>Fwd 最大权重 <strong>0.00</strong>——从左直接过渡到右，不经过中间状态</td></tr>
+  </table></div>
+  <p>Smoothing Type 可选 Averaged、Linear、Cubic、Ease In/Out、Exponential、Spring Damper（可设阻尼比、最大速度）。<strong>官方文档建议两者不要同时使用</strong>。Weight Speed 还可以按骨骼单独设置（Per Bone Overrides，例如让头比身体更快转向目标）。</p>
+
+  <h2>4.5 同步组：为什么要同步</h2>
+  <p>走路循环 1.2 s、跑步循环 0.7 s。如果各自按自己的时间播放再混合，两条动画的脚步相位会不断错开：一个在迈左脚，一个在迈右脚，混合出来两只脚都悬在半空或者交叉。</p>
+  <!--sync {"walk":[1.2,0.0],"run":[0.7,0.1],"T":3.0,"modes":["none","norm","marker"],
+    "cap":"<b>图 4-2</b>　Walk（L 标记在 0.00、R 在 0.50）与 Run（L 在 0.10、R 在 0.60）各占 50%。不同步时一半时间支撑脚相反；归一化时间同步后仍有 20% 不一致（两条动画的落脚时机本身差了 10% 周期）；按同步标记对齐后完全一致"} -->
+  <div class="co ver"><span class="h">实测 E6：20 秒 @60fps</span>
+    <div class="tbl"><table>
+      <tr><th>方式</th><th>支撑脚不一致的帧</th><th>说明</th></tr>
+      <tr><td>不同步（各播各的）</td><td class="no">50.4%</td><td>相位差在 0~0.5 之间来回漂</td></tr>
+      <tr><td>同步组：归一化时间</td><td class="mid">21.2%</td><td>归一化位置相同，但左脚落地事件差 95 ms</td></tr>
+      <tr><td>同步组：同步标记</td><td class="yes">0.0%</td><td>按 L / R 标记对齐，归一化位置反而差 0.10</td></tr>
+    </table></div>
+  </div>
+
+  <h3>同步组的规则</h3>
+  <ul>
+    <li>动画播放节点（序列播放器、混合空间）的 Sync 设置里填一个 <strong>Group Name</strong>，同名的节点组成一组。</li>
+    <li>每帧组内<strong>权重最高</strong>、且角色允许当 Leader 的那个成为 <strong>Leader</strong>：它按自己的时长和播放速率推进时间。其余成员是 <strong>Follower</strong>：不自己推进，而是直接对齐到 Leader 的归一化位置（或标记位置）。</li>
+    <li><strong>Group Role</strong>：Can Be Leader（默认）、Always Leader、Always Follower、Transition Leader / Transition Follower（只在状态机过渡期间参与同步）等。</li>
+    <li>没有放进同步组的混合空间，内部采样<strong>也是自动同步的</strong>：混合空间作为一个整体，周期取各采样时长的加权平均（E6 的 0.5×1.2 + 0.5×0.7 = 0.95 s），各采样按同一个归一化位置（或同步标记）推进。</li>
+  </ul>
+  <div class="co deep"><span class="h">深入：Leader 切换时会怎样</span>
+    <p>两个独立的序列播放器放进同一组，Walk 权重 0.6 时 Leader 是 Walk，节奏是 1.2 s；权重越过 0.5 后 Leader 变成 Run，节奏立刻变成 0.7 s。因为 Follower 一直对齐着 Leader 的相位，所以<strong>姿势不会跳</strong>，但<strong>步频会突然变</strong>。这就是为什么移动混合通常放在一个混合空间里（周期按权重连续变化），而不是用两个播放器 + Blend 节点。</p>
+  </div>
+
+  <h2>4.6 同步标记：按脚步对齐</h2>
+  <p>在动画的 Sync Marker 轨道上标出 L、R（左脚 / 右脚落地）。开启标记同步后，Follower 不再对齐归一化时间，而是对齐“<strong>距离上一个同名标记走了多远</strong>”：Leader 刚过 L 标记 30%，Follower 也放到自己的 L 与下一个 R 之间 30% 的位置。</p>
+  <ul>
+    <li>所有参与者必须有<strong>同一套</strong>标记名，否则退回归一化时间同步。</li>
+    <li>可以处理“两条动画落脚时机不一样”（E6），甚至“一个周期里步数不同”的情况。</li>
+    <li>起步、急停这类非循环动画也可以带标记，从循环过渡进来时从对应的脚开始。</li>
+  </ul>
+  <div class="lab alab synclab" id="lab-sync"></div><!--/lab-->
+
+  <div class="co net"><span class="h">游戏客户端实战：混合空间常见问题排查</span>
+    <ul>
+      <li><strong>斜向移动时手 / 武器抖</strong>：两个独立的混合空间（人物和武器各一个）三角剖分或网格设置不一致，同一输入算出的权重不同。让它们共用同一套采样布局，或让武器跟随角色骨骼。</li>
+      <li><strong>急转向时角色先“刹一下”</strong>：Vx/Vy 混合空间里输入从左穿过原点到右，经过了 Idle。换成 Weight Speed，或者用方向 + 速度轴并让速度保持。</li>
+      <li><strong>脚步声响两次</strong>：混合中的两条动画都有脚步 Notify。混合空间设 Notify Trigger Mode = Highest Weighted Animation。</li>
+    </ul>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>2D 混合空间：<strong>Delaunay 三角剖分 + 重心坐标</strong>，最多 3 个采样，权重之和为 1，加权坐标 = 输入（E5）；三角网外投影到边界。</li>
+    <li>采样位置要与动画真实速度一致，否则滑步；Blend Space Analysis / Axis to Scale Animation 辅助。</li>
+    <li><strong>输入平滑会经过中间状态，Weight Speed 不会</strong>（E5：Fwd 权重 1.00 对 0.00），两者别同时用。</li>
+    <li>不同长度循环不同步 → 50% 时间脚步相反；<strong>同步组</strong>：权重最高者当 Leader，其余对齐其归一化位置；<strong>同步标记</strong>按 L/R 对齐（E6：21.2% → 0%）。</li>
+    <li>混合空间内部采样自动同步，周期按权重加权；独立播放器的 Leader 切换会让步频突变。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么 Idle 不需要和走跑同步，但起步动画需要同步标记？</summary><p>Idle 没有脚步周期，和 Walk 混合时只是从站姿过渡到走路，对齐与否影响不大（通常也不放进同一同步组，或给它 Always Follower）。起步动画最后要接进走路循环，如果起步最后迈的是左脚，循环就应该从“右脚即将落地”的位置开始，否则会出现连续两步迈同一只脚。用同步标记，状态机过渡时 Follower 会从匹配的标记位置开始播放。</p></details>
+  <details class="quiz"><summary>自测：2D 混合空间里，为什么采样不能全部共线？</summary><p>共线的点没法组成有面积的三角形，三角剖分会退化，二维输入无法唯一确定权重。至少要有三个不共线的采样；实际项目里还要保证覆盖整个可能的输入范围，否则输入会被频繁投影到边界上。</p></details>
+</section>

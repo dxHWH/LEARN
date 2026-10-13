@@ -1,0 +1,58 @@
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>实测大比拼：五种地图 × 五种算法</h1>
+    <p class="lead">同一台机器、同一份代码框架、同一批查询。地图形状对结果的影响，比算法本身还大。</p>
+  </div>
+  <div class="co ver"><span class="h">测试环境</span>
+    <p>Windows 11 x64，MSVC 14.44（<code>cl /std:c++latest /EHsc /O2</code>）。512×512 格子图，8 方向，禁止切角，直走 1000、斜走 1414。每张图 40 次查询（U 型陷阱：起点在杯内、终点在杯外；其余：最大连通块内随机取点）。A* 用 Octile 启发、f 相同取 h 小；JPS 为禁止切角版本。“展开”指从 open 取出并处理的节点数，JPS 中指跳点数。源码 <code>demos/astar_demo.cpp</code>，原始输出 <code>demos/run_output.txt</code>。</p>
+  </div>
+
+  <h2>8.1 E1 总表</h2>
+  <div class="tbl"><table>
+    <tr><th>地图（平均最优路径长）</th><th>算法</th><th>平均展开</th><th>平均耗时 ms</th><th>代价 / 最优</th><th>非最优占比</th></tr>
+    <tr><td rowspan="5"><strong>开阔地</strong><br>（266.6 格）</td><td>BFS</td><td>128450</td><td>1.758</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>Dijkstra</td><td>127329</td><td>5.726</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>贪心</td><td>228</td><td>0.033</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>A*</td><td class="yes">228</td><td class="yes">0.018</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>JPS</td><td>3</td><td>0.444</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td rowspan="5"><strong>随机障碍 25%</strong><br>（282.9 格）</td><td>BFS</td><td>91515</td><td>3.260</td><td>1.0081</td><td class="no">72%</td></tr>
+    <tr><td>Dijkstra</td><td>90947</td><td>6.259</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>贪心</td><td>360</td><td>0.043</td><td class="no">1.1444</td><td class="no">100%</td></tr>
+    <tr><td>A*</td><td>11758</td><td>1.277</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>JPS</td><td>6285</td><td class="yes">0.858</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td rowspan="5"><strong>U 型陷阱</strong><br>（481.7 格）</td><td>BFS</td><td>205173</td><td>2.809</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>Dijkstra</td><td>207016</td><td>9.103</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>贪心</td><td>42496</td><td>3.054</td><td class="no">1.1055</td><td class="no">52%</td></tr>
+    <tr><td>A*</td><td>52359</td><td>3.934</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>JPS</td><td>7</td><td class="yes">0.524</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td rowspan="5"><strong>迷宫</strong><br>（19146.2 格）</td><td>BFS</td><td>80179</td><td>2.294</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>Dijkstra</td><td>80180</td><td>3.155</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>贪心</td><td>55842</td><td>1.527</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>A*</td><td>79476</td><td>2.910</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>JPS</td><td>23927</td><td class="yes">1.149</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td rowspan="5"><strong>房间</strong><br>（280.0 格）</td><td>BFS</td><td>114689</td><td>1.879</td><td>1.0083</td><td class="no">58%</td></tr>
+    <tr><td>Dijkstra</td><td>115138</td><td>5.872</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>贪心</td><td>382</td><td>0.055</td><td class="no">1.1448</td><td class="no">98%</td></tr>
+    <tr><td>A*</td><td>7822</td><td>0.920</td><td>1.0000</td><td>0%</td></tr>
+    <tr><td>JPS</td><td>564</td><td class="yes">0.192</td><td>1.0000</td><td>0%</td></tr>
+  </table></div>
+  <!--bars {"title":"E1 · A* 平均耗时（ms）随地图形状的变化","unit":"ms","items":[["开阔地",0.018,"g"],["房间",0.920,"b"],["随机障碍 25%",1.277,"a"],["迷宫",2.910,"o"],["U 型陷阱",3.934,"r"]],"cap":"<b>图 8-1</b>　同样 512×512、同样的 A*：耗时相差 200 多倍。决定 A* 快慢的，是启发函数被障碍误导的程度"} -->
+
+  <h2>8.2 从数据中得出的十条结论</h2>
+  <ol>
+    <li><strong>A* 的表现取决于地图</strong>：开阔地 0.018 ms，U 型陷阱 3.9 ms，相差 200 多倍。h 被凹形障碍误导时，A* 要先把陷阱填满。</li>
+    <li><strong>迷宫里 A* ≈ Dijkstra</strong>（79476 对 80180）：真实路径长 19146 格，启发函数估计的直线距离只有几百格，几乎不提供信息；A* 还多了算 h 的开销。</li>
+    <li><strong>BFS 在 8 方向上不保证最短</strong>：随机图、房间图上 58%～72% 的路径偏长；但它常数小，开阔地比 Dijkstra 快 3 倍。</li>
+    <li><strong>贪心是一把双刃剑</strong>：开阔地和 A* 一样快，有障碍时路径平均长 10%～14%，没有上界。</li>
+    <li><strong>JPS 擅长“开阔 + 障碍”</strong>：U 型陷阱快 7.5 倍、房间快 4.8 倍；在纯开阔地上反而比 A* 慢 25 倍（扫描线铺满全图）。</li>
+    <li><strong>Octile 是 8 方向的正确启发</strong>：比欧几里得少展开 27%～52%，曼哈顿会丢掉最优性（E2）。</li>
+    <li><strong>加权 A* 收益依地图而定</strong>：随机图 w = 1.2 展开数降到 1/10，路径只长 3%；U 型陷阱几乎没有收益（E3）。</li>
+    <li><strong>平局决胜在开阔地上至关重要</strong>：228 对 10772，差 47 倍（E4）。</li>
+    <li><strong>短查询的瓶颈是复位，不是搜索</strong>：每次清零整图慢 90 倍（E5）；open 很小时线性数组最快。</li>
+    <li><strong>不可达是最坏情况</strong>：20.5 ms 搜完 19.5 万格，而连通块编号的判断只要一次数组比较（E8）。</li>
+  </ol>
+  <div class="co warn"><span class="h">面试注意：用数据说话要带条件</span>
+    <p>说“JPS 比 A* 快 4.8 倍”时要加上“在房间类地图、512×512、8 方向禁止切角的条件下”。同样的 JPS 在开阔地上慢 25 倍。面试官更看重你知道“什么情况下快、什么情况下慢、为什么”，而不是一个孤立的倍数。</p>
+  </div>
+</section>

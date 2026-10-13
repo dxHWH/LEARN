@@ -1,0 +1,101 @@
+<section class="chapter" id="ch16">
+  <div class="ch-head">
+    <div class="no">CHAPTER 16</div>
+    <h1>56 道面试追问与速记卡</h1>
+    <p class="lead">按“基础 → 绑定 → 开火命中 → 弹药换弹 → 弱网 → 项目本身 → Gameplay 框架与蓝图实现 → 执行端与复制标注”排列。每题先给能直接说出口的答案，括号里是本书对应位置。</p>
+  </div>
+
+  <h2>一、网络基础（1~9）</h2>
+  <details class="quiz"><summary>1. UE 的网络模型是什么？Listen Server 和 Dedicated Server 区别？</summary>服务器权威的 C/S 模型：真实状态只在服务器，客户端通过属性复制得到近似状态，通过 Server RPC 发请求。Listen Server 的主机同时是服务器和一个玩家（有渲染、有本地输入）；Dedicated Server 无本地玩家、不渲染，适合正式联机但多一份部署成本。双人合作通常用 Listen Server。（第 2 章）</details>
+  <details class="quiz"><summary>2. GameMode、GameState、PlayerState、PlayerController 分别在哪几端存在？</summary>GameMode 只在服务器；GameState、PlayerState 在所有端（复制）；PlayerController 在服务器和它自己的客户端，别人的 PC 在你的客户端上不存在；HUD / UMG 只在本地。（第 2 章表）</details>
+  <details class="quiz"><summary>3. Role 有哪几种？主机玩家的角色在主机上是什么 Role？</summary>Authority、AutonomousProxy、SimulatedProxy、None。主机玩家的角色在主机上是 Authority，同时 IsLocallyControlled 为 true——所以“权限判断”和“本地控制判断”要分开写。（第 2 章）</details>
+  <details class="quiz"><summary>4. 能不能在一个 Actor 上调用 Server RPC，取决于什么？</summary>取决于调用端是不是这个 Actor 的拥有者连接：Owner 链最终要连到这个客户端的 PlayerController。和 Role 无关。关卡里摆放的 Actor、僵尸、关卡蓝图都不属于任何客户端，客户端调用会被丢弃（No owning connection）。（第 2、3 章）</details>
+  <details class="quiz"><summary>5. 客户端调用 Multicast 会怎样？服务器调用 Client RPC 但 Actor 没有拥有者会怎样？</summary>客户端调用 Multicast 只在本地执行；没有拥有者的 Actor 上服务器调用 Client RPC，会在服务器本地执行。（RPC 可达性表）</details>
+  <details class="quiz"><summary>6. Reliable 和 Unreliable 怎么选？Reliable 滥用会怎样？</summary>按“这条消息丢了怎么办”选：必须到达且低频的用 Reliable（开始开火、换弹、命中上报），表现类和高频的用 Unreliable 或复制计数器。Reliable 有序，丢包时后面的要排队（队头阻塞，E2）；发得太快会塞满可靠缓冲区，连接被断开。（第 6 章）</details>
+  <details class="quiz"><summary>7. 属性复制有哪些特点？为什么“事件”不适合用普通复制属性表达？</summary>只从服务器到客户端、只发最新值、按网络帧和 NetUpdateFrequency 发、可以按条件发。一个网络帧内多次变化只会被看到最后一次，布尔 true→false→true 可能根本看不到变化；事件要用只增不减的计数器（BurstCounter）或 RPC。（第 2、5 章）</details>
+  <details class="quiz"><summary>8. C++ 的 OnRep 和蓝图的 RepNotify 有什么区别？</summary>C++ 的 ReplicatedUsing 只在客户端收到新值时调用，服务器改值不触发，需要手动调用；蓝图 RepNotify 变量在服务器 Set 时服务器自己也会执行 OnRep。（第 2 章）</details>
+  <details class="quiz"><summary>9. 常用的复制条件有哪些？各举一个例子。</summary>COND_OwnerOnly（弹药、背包）、COND_SkipOwner（开火计数、换弹状态——拥有者已经本地预测过）、COND_InitialOnly（出生时的外观种子）、COND_SimulatedOnly（只给模拟代理的插值数据）、COND_AutonomousOnly。（第 5 章）</details>
+
+  <h2>二、角色、控制器、武器（10~15）</h2>
+  <details class="quiz"><summary>10. 讲一下 Possess 的过程。</summary>服务器：GameMode RestartPlayer → SpawnDefaultPawnFor → PC->Possess → Pawn->PossessedBy（SetOwner(PC)、设 AutonomousProxy、关联 PlayerState）→ ClientRestart（Client RPC）。客户端：AcknowledgePossession → PawnClientRestart → SetupPlayerInputComponent。（第 3 章表）</details>
+  <details class="quiz"><summary>11. 武器应该在哪生成？Owner 和 Instigator 分别设成什么、有什么用？</summary>在服务器生成（PossessedBy 或带 HasAuthority 的 BeginPlay），SpawnParams 里 Owner = Pawn（让武器进入 Owner 链：能发 Server RPC、OwnerOnly 属性发给持有者、相关性跟随持有者），Instigator = Pawn（伤害统计、友伤、仇恨）。不要先生成再 SetOwner：BeginPlay 在 SpawnActor 内部就执行了。（第 3 章）</details>
+  <details class="quiz"><summary>12. 武器挂到角色手上，挂接信息会自动复制吗？</summary>挂接信息（AttachmentReplication）只在 Actor 开启 bReplicateMovement 时复制。武器通常不复制移动，所以要复制 CurrentWeapon，并在 OnRep 里各端自己挂。（第 3 章）</details>
+  <details class="quiz"><summary>13. 第一人称射击联机后，为什么要两套模型？</summary>自己看到的是贴脸的手臂和枪（1P，OnlyOwnerSee），别人看到的是完整人物（3P，OwnerNoSee）；两者的动画、Socket、蒙太奇都不同。只有手臂的话，别人看到漂浮的手臂。（第 3 章）</details>
+  <details class="quiz"><summary>14. Enhanced Input 的映射应该在哪里添加？为什么不放在 BeginPlay？</summary>在本地控制者拿到控制权时：NotifyControllerChanged / PawnClientRestart，并判断 IsLocalController。BeginPlay 在每端每个副本都会执行，客户端 BeginPlay 时 Controller 可能还没复制下来。（第 3 章）</details>
+  <details class="quiz"><summary>15. 在服务器上调用 GetPlayerController(0) 拿到的是什么？</summary>服务器这台机器的第一个本地玩家（Listen Server 的主机玩家），不是“当前 Pawn 的控制器”。原 Demo 用它在服务器上禁用死亡玩家的输入：客户端玩家死时传入的是主机 PC，Pawn 的 DisableInput 只接受自己的 Controller，于是只打错误日志、不生效；而且服务器上关输入本就管不到客户端。服务器只改状态 + 校验，关输入放到拥有者客户端的 OnRep 里。（第 3、10 章）</details>
+
+  <h2>三、开火到命中（16~23）</h2>
+  <details class="quiz"><summary>16. 从按下开火到僵尸扣血，完整说一遍。</summary>本机：检查预测弹药 → 扣一发、Seq+1 → 立即播 1P 表现和后坐力 → 本地射线播命中特效 → ServerFireShot(Seq, 起点, 方向, 时间)。服务器：校验 → 扣弹、推进 AckSeq、BurstCounter+1 → 判定命中（PvE 容差校验 / PvP 回溯）→ ApplyPointDamage(Instigator, Causer)。僵尸 TakeDamage 只在服务器改 Health，死亡设 bIsDead。各端：OnRep 播开火、受击、死亡。（第 4 章）</details>
+  <details class="quiz"><summary>17. 为什么开火表现要本机先播？只用 Multicast 有什么问题？</summary>只用 Multicast 时开火者要等一个往返（E1：RTT 200 ms 时 {{v:E1[s=0,rtt=200].own:.0f}} ms）。本机先播，Multicast / BurstCounter 只给别人；开火者跳过（SkipOwner），避免播两次。（第 4 章）</details>
+  <details class="quiz"><summary>18. 服务器需要校验客户端开火的哪些内容？</summary>开火者存活、不在换弹、射速（令牌桶：允许短时突发、长期平均不超过射速；不能比较到达间隔，丢包重传后请求会扎堆到达）、弹药 &gt; 0、起点离服务器上的眼睛位置不太远、方向与服务器视角夹角不太大；若客户端上报了命中，再校验目标包围盒 + 容差、视线是否被墙挡。（第 4 章代码）</details>
+  <details class="quiz"><summary>19. 命中扫描和抛射物各适合什么？抛射物怎么做到本机不延迟？</summary>飞行时间很短的武器（步枪、手枪）用命中扫描；慢速武器（火箭、榴弹）用抛射物：服务器生成权威抛射物负责伤害，开火者本地先生成一个不复制的假抛射物，别人看到的是服务器复制下来的（可按 RTT/2 向前外推）。原 Demo 20000 cm/s 的子弹本质是命中扫描。（第 4 章表）</details>
+  <details class="quiz"><summary>20. 原 Demo 的伤害为什么会在客户端也算一次？</summary>子弹是复制 Actor，ProjectileMovement 在每个客户端副本上也模拟、也碰撞，ReceiveHit 在每端触发，里面直接 ApplyDamage 没有权限判断。客户端本地扣了僵尸血、本地触发了 Multicast_Death（客户端调用多播只在本地执行）。（第 1 章）</details>
+  <details class="quiz"><summary>21. 僵尸的死亡应该怎么同步？</summary>服务器 TakeDamage 判定死亡 → bIsDead = true（复制），OnRep 里关碰撞、开布娃娃；同时停 AI、清所有计时器、给击杀者 PlayerState 加分、通知 GameMode 补刷、SetLifeSpan 交给服务器销毁。也可以 TearOff 让各端接管尸体。不要只发一次 Multicast（晚加入的人看不到）。（第 4 章）</details>
+  <details class="quiz"><summary>22. Dedicated Server 上爆头判定可能出什么问题？</summary>服务器不渲染，默认不刷新不可见网格的骨骼，骨骼碰撞体停在旧姿势。需要把网格的 VisibilityBasedAnimTickOption 设为 AlwaysTickPoseAndRefreshBones，或用简化碰撞体判定。（第 4 章）</details>
+  <details class="quiz"><summary>23. Listen Server 主机看客户端开火，SkipOwner 的 BurstCounter 有什么坑？</summary>OnRep 只在客户端触发，服务器（主机）不会收到自己的复制，所以服务器在接受客户端那发时要自己播远端开火表现（NM_ListenServer 且开火者非本地控制时）。（第 4 章代码）</details>
+
+  <h2>四、弹药与换弹（24~29）</h2>
+  <details class="quiz"><summary>24. 弹药应该怎么复制？</summary>服务器权威，一个结构体 {InClip, Reserve, AckSeq}，COND_OwnerOnly。本机预测扣弹，显示 = InClip − (LocalSeq − AckSeq)。（第 5 章）</details>
+  <details class="quiz"><summary>25. 预测扣弹后 OnRep 直接覆盖本地值，会出现什么？怎么解决？</summary>服务器值反映的是“处理完某一发时”的弹数，本机此时已经多打了几发，覆盖会让 UI 往回跳（E5：每次连射回跳 {{v:E5.1.rb:.0f}} 次）。用序号对账：服务器回传已处理的最后序号，本机减去尚未确认的发数。（第 5 章）</details>
+  <details class="quiz"><summary>26. 换弹的流程？期间开火、切枪、死亡怎么处理？</summary>本机预测播动画 → ServerStartReload（Reliable）→ 服务器校验后 bPendingReload=true（SkipOwner）、启动计时器 → 到点 take = min(空位, 备弹) 一次性转移 → 复位。期间开火本地挡住、服务器 ProcessShot 也拒绝；切枪 / 死亡调用 CancelReload：ClearTimer、弹药不变。（第 5 章状态机）</details>
+  <details class="quiz"><summary>27. 原 Demo 的换弹 bug 是什么？怎么发现的？</summary>“剩余子弹计算”在备弹不够补满时走 false 分支，该分支没有连 Return 节点，函数返回默认值 0，弹匣被清零（3/7 → 0/0）。把蓝图逐节点移植成 C++ 跑表驱动测试（E4）发现；整局打空再换只能打出 {{v:E4.session.0.2}}/40 发。（第 5 章）</details>
+  <details class="quiz"><summary>28. 换弹加子弹应该挂在蒙太奇的 AnimNotify 上吗？</summary>不推荐在服务器依赖动画通知：Dedicated Server 动画可能不更新，蒙太奇被打断时通知不来。服务器用数据配置的时长计时，动画按同一时长播放，只负责表现。（第 5 章）</details>
+  <details class="quiz"><summary>29. 另一端怎么看到“他在开枪”？为什么不用复制的 bIsFiring？</summary>BurstCounter（只增不减，SkipOwner），OnRep 里按增量播。bIsFiring 在连射时一直为 true，只会触发一次 OnRep，一个网络帧内的多发也无法区分。（第 5 章）</details>
+
+  <h2>五、弱网与性能（30~37）</h2>
+  <details class="quiz"><summary>30. 弱网“卡”有哪几种？分别用什么工具定位？</summary>帧卡（stat unit / Insights CPU，不是网络）、操作反馈慢（RTT 相关）、移动拉回（p.NetShowCorrections）、远端顿挫（看更新频率与到达间隔）、打不中（移动目标 + 高延迟）、消息扎堆（Networking Insights 看 RPC 时间）、带宽饱和（stat net）。复现用 PIE 网络模拟或 NetEmulation.PktLag / PktLoss。（第 6 章表）</details>
+  <details class="quiz"><summary>31. 讲一下 CharacterMovement 的客户端预测和纠正。</summary>拥有者每帧本地移动并保存 SavedMove，ServerMove 发给服务器；服务器用同样输入重放，误差超过 MAXPOSITIONERRORSQUARED（默认 3）就发 ClientAdjustPosition；客户端回到服务器位置并重放未确认的 SavedMove。纠正发送有最小间隔（NetworkMinTimeBetweenClientAdjustments）。（第 6 章）</details>
+  <details class="quiz"><summary>32. 冲刺为什么会被拉回？正确做法？</summary>冲刺标志只在一端生效，两端用不同速度模拟（E6：每秒纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次，平均回拉 {{v:E6[c=0,rtt=100].avg:.0f}} cm）。“本地切换 + Server RPC”在丢包时仍会纠正。正确做法：标志放进 SavedMove（CompressedFlags / FCharacterNetworkMoveData），GetMaxSpeed 统一计算。（第 6 章）</details>
+  <details class="quiz"><summary>33. 什么是延迟补偿？有哪些做法？</summary>补偿“客户端看到的是过去”的误差，让服务器按开火者看到的时刻判定。服务器回溯：记录目标历史位置，按客户端时间插值回去射线，需限制最大回溯；客户端判定 + 服务器容差校验：简单、手感好，但信任客户端。PvE 多用后者。（第 6 章，E3）</details>
+  <details class="quiz"><summary>34. 延迟补偿的副作用是什么？</summary>被打的一方会遇到“已经躲到掩体后还被打中”（E3 的受害者位移，RTT 200 ms、480 cm/s 时平均 {{v:E3[v=480,rtt=200].victim:.0f}} cm）；高延迟玩家占便宜；服务器要存历史、做回溯，有 CPU 和内存开销。（第 6 章）</details>
+  <details class="quiz"><summary>35. 远端角色 / 僵尸移动一顿一顿的，怎么查？</summary>看 NetUpdateFrequency 和实际到达间隔、是否丢包；CMC 模拟代理的平滑模式（默认 Exponential）和参数；动画是否用复制的速度驱动；是否有人在客户端改它的位置。（第 6 章）</details>
+  <details class="quiz"><summary>36. 有哪些降低带宽的手段？</summary>不复制短命 Actor（子弹、特效）、复制条件、降低 NetUpdateFrequency、休眠（Dormancy）、相关性（NetCullDistance、OwnerRelevancy）、量化（FVector_NetQuantize）、Push Model、合并事件为计数器。（第 6 章表）</details>
+  <details class="quiz"><summary>37. 为什么即使 RTT 为 0，原 Demo 的开火反馈也有约 20 ms？</summary>属性和多播要等服务器下一个网络帧（默认 30 Hz，平均等半帧左右）才发出；RTT 0 时 E1 测得 {{v:E1[s=0,rtt=0].own:.0f}} ms。这也说明“本机表现等服务器”在局域网里同样有延迟。（第 2、4 章）</details>
+
+  <h2>六、关于这个项目本身（38~40）</h2>
+  <details class="quiz"><summary>38. 这个 Demo 最大的问题是什么？你会先改哪三处？</summary>根因是单机思维：代码在错误的一端执行。先改：① BP_Bullet 的伤害加权限判断（否则客户端也在算伤害、触发死亡与补刷）；② 换弹函数补上 Return，改成一次性 take 计算；③ 开火本机预测 + 服务器校验，冲刺进移动预测。（第 1 章）</details>
+  <details class="quiz"><summary>39. 你是怎么验证这些问题的？</summary>先静态审计：把 .uasset 解析成节点和连线（导出伪代码），逐张图确认每段逻辑在哪一端执行；再把关键逻辑（换弹、开火时序、移动纠正、命中判定）移植成离散事件模拟，在不同 RTT / 丢包下对比方案；最后在 PIE 用网络模拟、Dedicated Server 模式、晚加入复测。（附录 A）</details>
+  <details class="quiz"><summary>40. 如果做成正式项目，你会怎么组织网络代码？</summary>C++ 打底：Character + 自定义 MovementComponent（预测状态）、Weapon（预测开火 / 换弹）、GameMode / GameState / PlayerState 分工；或直接用 GAS（技能预测键、GameplayEffect 伤害、GameplayCue 表现），参考 Lyra。从第一天起就在 Bad 网络和 Dedicated Server 模式下测试。（第 8、14 章）</details>
+
+  <h2>七、Gameplay 框架与蓝图实现（41~50）</h2>
+  <details class="quiz"><summary>41. GameInstance、World、Level 是什么关系？切地图时谁会被销毁？</summary>GameInstance 进程级，一个进程一份，持有 LocalPlayer 和跨地图的本地数据；World 是当前地图的运行时容器，持有 PersistentLevel 和流送关卡，Actor 的 Outer 是 Level。Open Level / ServerTravel 时 World 及其中所有 Actor（包括 GameMode、GameState、PlayerController、PlayerState）都会重建，GameInstance、LocalPlayer 保留；无缝漫游下 PC 会被保留、PlayerState 通过 CopyProperties 拷贝。（第 7 章）</details>
+  <details class="quiz"><summary>42. Outer、Owner、AttachParent、Instigator 分别管什么？</summary>Outer 管内存归属（对象路径、GC、随谁卸载）；Owner 管网络归属（Server RPC 能否发出、OwnerOnly 发给谁、相关性）；AttachParent 管变换层级（跟着谁动）；Instigator 管责任（伤害是谁造成的）。武器：Outer 是 Level，Owner 和 Instigator 是角色，AttachParent 是角色手上的插槽。（第 7 章）</details>
+  <details class="quiz"><summary>43. 服务器上一个 PlayerController 的 IsLocalController 为 false 说明什么？</summary>它的 Player 是 UNetConnection 而不是 ULocalPlayer——它是远端客户端玩家在服务器上的代理。在它上面建 UI、加输入映射没有意义；在它上面调 Client RPC 会发到那个客户端。PC 的 BeginPlay 在这种 PC 上也会执行，所以建 UI 前要判断。（第 7、9 章）</details>
+  <details class="quiz"><summary>44. 一个玩家 Pawn 的生命周期里，哪些蓝图事件只在服务器、哪些在拥有者、哪些在所有端？</summary>Construction Script、BeginPlay、Tick、EndPlay、Destroyed 在所有端；Event Possessed / Unpossessed 只在服务器；Receive Controller Changed 在服务器和拥有者客户端；RepNotify 在客户端收到时执行（蓝图在服务器 Set 时也执行）；输入事件只在本地控制端。（第 7 章表）</details>
+  <details class="quiz"><summary>45. 覆写 GameMode 的 HandleStartingNewPlayer 要注意什么？</summary>它是 BlueprintNativeEvent，覆写后默认实现（RestartPlayer → 生成 Pawn → Possess）不再执行，需要显式调用 Parent 节点；本 Demo 在对局进行中加入时不调用父类，而是让新玩家观战。（第 9 章）</details>
+  <details class="quiz"><summary>46. UMG 能直接调用 Server RPC 吗？</summary>不能。Widget 不是 Actor，没有 Owner 链和网络连接；用 Get Owning Player 拿到本地 PlayerController，调用它上面的 Server RPC（PC 属于这个客户端的连接）。（第 13 章）</details>
+  <details class="quiz"><summary>47. 蓝图的 RepNotify 和 C++ 的 OnRep 在使用上有哪些差别？</summary>① 蓝图在服务器 Set 时也执行 OnRep，C++ 不执行；② 蓝图 OnRep 没有旧值参数，需要自己保存上次的值（如 LastSeenBurst），C++ 可以声明一个旧值参数；③ 蓝图结构体复制变量用 Make → Set 整体赋值更稳妥，Set Members in Struct 不一定触发服务器端 RepNotify。（第 10、11 章）</details>
+  <details class="quiz"><summary>48. 为什么换弹用 Set Timer by Event 而不是 Delay？</summary>Delay 是 Latent 节点，没有句柄，无法从外部取消，同一事件再次进入时会被忽略；换弹被死亡、切枪打断时必须能取消并保证弹药不变，所以用计时器句柄（Clear and Invalidate Timer）。（第 11 章）</details>
+  <details class="quiz"><summary>49. 僵尸的随机外观怎么在各端保持一致？</summary>服务器在 BeginPlay 生成一个整数种子 VariantSeed（复制条件 Initial Only，RepNotify），各端在 OnRep 里用它构造 Random Stream，按相同顺序抽取速度档位、移动 / 待机动画；攻击动作同理，用 AttackInfo {Counter, Index} 由服务器选、各端播。原 Demo 只在服务器随机、或在多播里各端各自随机，导致各端动作不一致。（第 12 章）</details>
+  <details class="quiz"><summary>50. 你认为一个“合格”的联机 Demo 的标准是什么？</summary>五个维度：权威清晰（伤害、死亡、弹药、阶段、刷怪只在服务器）、手感跟手（开火 / 换弹 / 冲刺本机零等待，弱网不回跳不拉回）、状态完整（持续状态是复制属性，晚加入正确，随机一致）、职责单一（框架类各司其职，无上帝对象，UI 只读）、可验证（Listen / Dedicated / 独立进程 / 弱网 / 晚加入都测过，有录屏和数据）。（第 8 章）</details>
+
+  <h2>八、执行端、复制与组播（51~56）</h2>
+  <details class="quiz"><summary>51. 一个事件在哪端执行，你怎么判断？</summary>先看它是不是 RPC：Run on Server 在服务器执行、Run on owning Client 在拥有者客户端执行、服务器调用的 Multicast 在服务器和所有相关客户端执行。不是 RPC 的普通事件<strong>没有自己的执行端</strong>，跟随调用者：由 Possessed、HandleDamage 这类服务器事件调用就在服务器，由输入事件调用就在本地控制端，由 OnRep 调用就在“服务器（蓝图 Set 时）+ 收到的客户端”。再看对象存在于哪端：GameMode、AIController 只在服务器，Widget 只在本机。（第 8 章表 8-6、第 9 章图 9-1a）</details>
+  <details class="quiz"><summary>52. Listen Server 的主机会“收到”复制吗？主机是怎么看到客户端玩家开火表现的？</summary>不会。主机进程就是服务器，持有的是权威值，复制只从服务器发往客户端。主机能看到客户端的 3P 开火，是因为蓝图 RepNotify 在服务器 <code>Set w/ Notify</code> 时会在服务器本地执行一次 OnRep_BurstCounter；C++ 的 OnRep 不会，C++ 里要在服务器手动调用。也因此 OnRep 对主机自己的武器也会执行，要用 <code>NOT Owner.IsLocallyControlled</code> 过滤掉已预测的那份。（第 8 章表 8-4、第 11 章图 11-4）</details>
+  <details class="quiz"><summary>53. Owner Only、Skip Owner、Initial Only 分别发给谁？本 Demo 哪些变量用了？</summary>Owner Only 只发拥有者连接：Ammo（只有持枪者需要对账）；Skip Owner 发给除拥有者外的所有人：BurstCounter、bPendingReload、bIsAiming（拥有者已本地预测）；Initial Only 只在 Actor 首次复制给某个连接时发：VariantSeed（生成后不变，晚加入者加入时也会收到）。引擎的 ReplicatedMovement 用的是 SimulatedOrPhysics，拥有者靠移动预测，不收。（第 8 章 4.1）</details>
+  <details class="quiz"><summary>54. 什么时候用组播，什么时候用 RepNotify？原 Demo 的 8 个组播你怎么处理的？</summary>持续状态（阶段、死亡、换弹中、外观）用 RepNotify：晚加入能看到、丢包会被下一次更新纠正。组播只用于同时满足四条的：由服务器调用、一瞬间、晚加入不需要、丢了无所谓——本 Demo 只剩僵尸惨叫和低吼两个 Unreliable 组播。原来的 8 个：开局 → GS.Phase；开火 → BurstCounter（Skip Owner）；换弹 → bPendingReload；受击 → LastHit；攻击 → AttackInfo；玩家 / 僵尸死亡 → bIsDead + GameMode 判定；关卡蓝图里那个直接删除。（第 8 章表 8-5、第 12 章 4.5）</details>
+  <details class="quiz"><summary>55. 在蓝图里让一个变量复制要勾哪几处？为什么有人勾了 RepNotify 却在客户端收不到？</summary>三层：Actor 的 Replicates；变量所在组件的 Component Replicates；变量自己的 Replication（Replicated / RepNotify）和 Condition。常见漏法：变量放在 ActorComponent 里却没勾 Component Replicates；Actor 是运行时在客户端本地 Spawn 的（不是服务器生成的复制 Actor）；在客户端 Set 了变量（只改本地，不会发出去，下次复制还会被覆盖）。（第 8 章 4、第 10 章 AC_Health）</details>
+  <details class="quiz"><summary>56. 客户端调用 Multicast 会怎样？客户端在不属于自己的 Actor 上调用 Server RPC 会怎样？</summary>客户端调用的 Multicast 只在这台客户端本地执行，不会发给服务器和别人——原 Demo 客户端本地扣血后触发 Multicast_Death，结果只有自己这边的僵尸倒地。在没有拥有者连接的 Actor（关卡蓝图、僵尸、别人的角色）上调 Server RPC 会被丢弃，日志里是 No owning connection——原 Demo 关卡蓝图的 Server_SetStart 就是这样失效的。请求一律从自己的 PC 或自己 Possess 的 Pawn / 武器发出。（第 1、2 章、第 8 章表 8-5）</details>
+
+  <h2>速记卡</h2>
+  <div class="cards">
+    <div class="card"><div class="t">四个问题</div><p>这个对象在哪几端？这段代码在哪端执行？谁能调这个 RPC？这个变量发给谁？</p></div>
+    <div class="card"><div class="t">一条总规则</div><p>状态用复制属性，瞬时事件用 RPC 或计数器，表现各端本地做，结果只认服务器。</p></div>
+    <div class="card"><div class="t">两个判断</div><p>改状态看 HasAuthority；播本地表现看 IsLocallyControlled。主机玩家两个都是 true。</p></div>
+    <div class="card"><div class="t">Owner 链</div><p>Weapon → Pawn → PC → Connection。决定 Server RPC 可达、OwnerOnly 发给谁。</p></div>
+    <div class="card"><div class="t">开火三段</div><p>本机预测表现 + 发请求；服务器校验、扣弹、判定、伤害；各端 OnRep / 计数器播表现。</p></div>
+    <div class="card"><div class="t">弹药</div><p>OwnerOnly 结构体带 AckSeq；显示 = InClip − 未确认发数；别人用 SkipOwner 的 BurstCounter。</p></div>
+    <div class="card"><div class="t">换弹</div><p>服务器计时器状态机；到点 take = min(空位, 备弹)；取消不动弹药；本机预测动画。</p></div>
+    <div class="card"><div class="t">移动</div><p>影响速度的状态进 SavedMove；两端用 GetMaxSpeed 同一规则算；不另发 RPC。</p></div>
+    <div class="card"><div class="t">命中</div><p>PvE：客户端判定 + 容差校验；PvP：服务器回溯，限最大回溯时间。</p></div>
+    <div class="card"><div class="t">Reliable</div><p>低频必达才用；表现类 Unreliable；Tick 里发 Reliable 必扣分。</p></div>
+    <div class="card"><div class="t">整局流程</div><p>规则 GameMode、全局 GameState、个人 PlayerState；倒计时复制结束时刻；重开 ServerTravel。</p></div>
+    <div class="card"><div class="t">框架职责</div><p>GameInstance 进程 · GameMode 规则 · GameState 全局 · PlayerState 人 · PC 灵魂与 UI · Pawn 身体 · Component 能力。</p></div>
+    <div class="card"><div class="t">五种关系</div><p>Outer 管内存、Owner 管网络、AttachParent 管变换、Instigator 管责任、Possess 管控制。</p></div>
+    <div class="card"><div class="t">蓝图三坑</div><p>OnRep 无旧值；结构体整体赋值；需要取消的等待用计时器不用 Delay。</p></div>
+    <div class="card"><div class="t">测试</div><p>Dedicated Server 模式、独立进程、Bad 网络、晚加入、谁先死、同时击杀。</p></div>
+    <div class="card"><div class="t">执行端</div><p>RPC 看类型；普通事件跟调用者；OnRep = 服务器（蓝图 Set 时）+ 收到的客户端；GameMode / AI 只在服务器，Widget 只在本机。</p></div>
+    <div class="card"><div class="t">复制三层 + 三条件</div><p>Actor Replicates → Component Replicates → 变量 Replicated / RepNotify。OwnerOnly 只给自己，SkipOwner 给别人，InitialOnly 只发一次。</p></div>
+    <div class="card"><div class="t">组播四条件</div><p>服务器调用、一瞬间、晚加入不需要、丢了无所谓 → Unreliable 组播；否则用 RepNotify。原 8 个：7 个换 RepNotify、1 个删。</p></div>
+  </div>
+</section>

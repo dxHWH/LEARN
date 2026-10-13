@@ -1,0 +1,169 @@
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>启发函数：A* 的灵魂</h1>
+    <p class="lead">同一个 A*，换一个 h，展开的节点数可以差 25 倍，结果也可能从最短变成不是最短。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>准确区分可采纳（admissible）与一致（consistent），知道两者分别保证了什么</li>
+    <li>能根据移动规则选出正确的距离公式，并说出其他公式错在哪</li>
+    <li>理解加权 A* 的取舍，以及它的次优上界</li>
+    <li>知道平局决胜为什么能让开阔地上的展开数降一个数量级</li>
+  </ul></div>
+
+  <h2>3.1 两个性质</h2>
+  <p>记 h*(n) 为从 n 到终点的<strong>真实</strong>最短代价。</p>
+  <div class="cards">
+    <div class="card"><div class="t">可采纳（admissible）</div><p>对所有节点 n：<strong>h(n) ≤ h*(n)</strong>。</p><p>也就是“只会低估，不会高估”。它保证 A* 找到的路径是<strong>最短的</strong>。</p></div>
+    <div class="card"><div class="t">一致（consistent / 单调）</div><p>对每条边 (n, n')：<strong>h(n) ≤ cost(n, n') + h(n')</strong>，且 h(G) = 0。</p><p>这是三角不等式。它保证节点<strong>第一次出队时 g 已最优</strong>，closed 节点永远不用重开。</p></div>
+  </div>
+  <ul>
+    <li><strong>一致 ⇒ 可采纳</strong>：沿着从 n 到 G 的最短路径反复使用三角不等式，把每条边加起来，就得到 h(n) ≤ h*(n)。</li>
+    <li><strong>可采纳 ⇏ 一致</strong>：可以构造出“h(A) = 10，走一步代价 1 到 B，h(B) = 2”的例子，h 都不高估，但相邻两点的 h 落差比边长还大。这种 h 下，一个节点可能先以较大的 g 进入 closed，后来又发现更短的路，需要<strong>重开</strong>（reopen），否则就会丢失最优性。</li>
+    <li>实际使用的几种距离公式（曼哈顿、Octile、欧几里得等），只要和移动规则匹配，<strong>都是一致的</strong>。所以工程实现里通常直接不重开 closed 节点。</li>
+  </ul>
+
+  <h2>3.2 四种距离公式</h2>
+  <p>设 dx = |x − x<sub>G</sub>|，dy = |y − y<sub>G</sub>|，直走代价 D，斜走代价 D₂ = √2·D：</p>
+  <div class="tbl"><table>
+    <tr><th>名称</th><th>公式</th><th>它是哪种移动的真实距离</th></tr>
+    <tr><td>曼哈顿</td><td><code>D·(dx + dy)</code></td><td>4 方向</td></tr>
+    <tr><td>Octile（对角距离）</td><td><code>D·max(dx,dy) + (D₂ − D)·min(dx,dy)</code></td><td>8 方向、斜走 √2（先斜走 min 步，再直走剩下的）</td></tr>
+    <tr><td>切比雪夫</td><td><code>D·max(dx, dy)</code></td><td>8 方向、斜走也算 D（国际象棋的王）</td></tr>
+    <tr><td>欧几里得</td><td><code>D·√(dx² + dy²)</code></td><td>任意角度移动（导航网格、连续空间）</td></tr>
+  </table></div>
+  <figure>
+  <svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg">
+    <rect x="30" y="20" width="320" height="300" fill="#FFFFFF" stroke="#E5E7EB"/>
+    <g stroke="#F1F2F5"><line x1="190" y1="20" x2="190" y2="320"/><line x1="30" y1="170" x2="350" y2="170"/></g>
+    <rect x="70" y="50" width="240" height="240" fill="none" stroke="#6D28D9" stroke-width="2"/>
+    <circle cx="190" cy="170" r="120" fill="none" stroke="#2F5BD3" stroke-width="2"/>
+    <polygon points="310,170 274.9,85.1 190,50 105.1,85.1 70,170 105.1,254.9 190,290 274.9,254.9" fill="#EAF7EF" fill-opacity=".55" stroke="#15803D" stroke-width="2.6"/>
+    <polygon points="310,170 190,50 70,170 190,290" fill="none" stroke="#B91C1C" stroke-width="2" stroke-dasharray="6 4"/>
+    <circle cx="190" cy="170" r="6" fill="#B91C1C"/><text x="198" y="186" class="sm b">G</text>
+    <text x="270" y="46" class="sm b" style="fill:#6D28D9">切比雪夫</text>
+    <text x="292" y="120" class="sm b" style="fill:#2F5BD3">欧几里得</text>
+    <text x="226" y="94" class="sm b" style="fill:#15803D">Octile</text>
+    <text x="126" y="136" class="sm b" style="fill:#B91C1C">曼哈顿</text>
+    <text x="400" y="44" class="b">图中每条线是“h = 12 格”的等值线</text>
+    <text x="400" y="70" class="sm">8 方向移动时，真实距离恰好是 12 格的点组成</text>
+    <text x="400" y="88" class="sm"><tspan class="b" style="fill:#15803D">绿色正八边形（Octile）</tspan>。</text>
+    <text x="400" y="118" class="sm">某个启发函数的等值线如果在绿线<tspan class="b">外面</tspan>，</text>
+    <text x="400" y="136" class="sm">说明绿线上的点 h 还不到 12 → <tspan class="b" style="fill:#15803D">低估，可采纳</tspan>：</text>
+    <text x="416" y="156" class="sm">欧几里得（圆）、切比雪夫（正方形）</text>
+    <text x="400" y="186" class="sm">等值线在绿线<tspan class="b">里面</tspan>，说明绿线上的点 h 超过 12</text>
+    <text x="400" y="204" class="sm">→ <tspan class="b" style="fill:#B91C1C">高估，不可采纳</tspan>：曼哈顿（菱形）</text>
+    <text x="400" y="236" class="sm">离绿线越远，低估得越多，A* 要展开的节点也越多。</text>
+    <text x="400" y="264" class="sm b">结论：启发函数要和移动规则匹配，贴着真实距离，</text>
+    <text x="400" y="282" class="sm b">又不越过它。8 方向就用 Octile。</text>
+  </svg>
+  <figcaption><b>图 3-1</b>　四种距离的“单位圆”：Octile 恰好内接于欧几里得圆、外接于曼哈顿菱形</figcaption>
+  </figure>
+
+  <h3>实测 E2：五种启发函数，同一批查询</h3>
+  <div class="tbl"><table>
+    <tr><th rowspan="2">启发函数</th><th colspan="4">随机障碍 25%</th><th colspan="3">房间</th></tr>
+    <tr><th>展开</th><th>耗时 ms</th><th>最短率</th><th>最多长出</th><th>展开</th><th>最短率</th><th>最多长出</th></tr>
+    <tr><td>h = 0（Dijkstra）</td><td>90947</td><td>6.26</td><td>100%</td><td>0</td><td>115138</td><td>100%</td><td>0</td></tr>
+    <tr><td>切比雪夫</td><td>22044</td><td>2.09</td><td>100%</td><td>0</td><td>27890</td><td>100%</td><td>0</td></tr>
+    <tr><td>欧几里得（取整）</td><td>16105</td><td>1.52</td><td>100%</td><td>0</td><td>16265</td><td>100%</td><td>0</td></tr>
+    <tr><td><strong>Octile</strong></td><td><strong>11758</strong></td><td><strong>1.39</strong></td><td>100%</td><td>0</td><td><strong>7822</strong></td><td>100%</td><td>0</td></tr>
+    <tr><td>曼哈顿（8 方向下高估）</td><td>3608</td><td>0.40</td><td class="no">0%</td><td class="no">9.77%</td><td>2577</td><td class="no">15%</td><td class="no">8.39%</td></tr>
+  </table></div>
+  <!--bars {"title":"E2 · 房间地图：平均展开节点数","unit":"","items":[["h = 0（Dijkstra）",115138,"s"],["切比雪夫",27890,"p"],["欧几里得",16265,"b"],["Octile",7822,"g"],["曼哈顿（不最优）",2577,"r"]],"labw":170,"cap":"<b>图 3-2</b>　可采纳的启发函数里，越接近真实距离展开越少：Octile 比欧几里得少一半，比 h = 0 少 93%；曼哈顿更少，但已经不保证最短"} -->
+  <div class="co deep"><span class="h">深入一层：整数化代价之后，欧几里得严格来说会高估</span>
+    <p>本书斜走代价取 1414，比 1000·√2 = 1414.21 略小。长对角线上，比如 100 格的纯对角路径：真实代价 141400，而欧几里得（取整）给出 141421，高估了 21。本次实测没有因此产生非最短路，但这个现象说明：<strong>改了代价模型（取整、改斜走代价、加地形权重），就要重新检查启发函数是否还可采纳</strong>。Recast/Detour 的做法是把启发函数乘上 0.999（源码里的 <code>H_SCALE</code>），留一点余量防止浮点误差导致高估。</p>
+  </div>
+  <div class="co warn"><span class="h">面试注意：地形代价会让距离公式“失真”</span>
+    <p>如果地图上有沼泽（代价 ×3）、道路（代价 ×0.5），那么启发函数必须乘以<strong>最便宜地形</strong>的单价，才能保证不高估。比如道路单价是 0.5，就得用 0.5·Octile。代价是：大部分区域不是道路，h 低估得很厉害，A* 的引导作用变弱。这是“地形越丰富，A* 越慢”的根本原因。</p>
+  </div>
+
+  <h2>3.3 h 的强弱光谱</h2>
+  <figure>
+  <svg viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg">
+    <defs><linearGradient id="spec" x1="0" x2="1"><stop offset="0" stop-color="#DBEAFE"/><stop offset=".62" stop-color="#DCFCE7"/><stop offset=".64" stop-color="#FEE2E2"/><stop offset="1" stop-color="#FCA5A5"/></linearGradient></defs>
+    <rect x="40" y="70" width="780" height="26" rx="13" fill="url(#spec)" stroke="#CBD5E1"/>
+    <line x1="530" y1="52" x2="530" y2="114" stroke="#111827" stroke-width="2" stroke-dasharray="4 3"/>
+    <text x="530" y="44" text-anchor="middle" class="b sm">h = h*（完美启发）</text>
+    <g class="sm" text-anchor="middle">
+      <circle cx="60" cy="83" r="6" fill="#2F5BD3"/><text x="60" y="132">h = 0</text><text x="60" y="150" class="xs">= Dijkstra</text>
+      <circle cx="250" cy="83" r="6" fill="#6D28D9"/><text x="250" y="132">切比雪夫</text>
+      <circle cx="370" cy="83" r="6" fill="#2F5BD3"/><text x="370" y="132">欧几里得</text>
+      <circle cx="500" cy="83" r="6" fill="#15803D"/><text x="490" y="132">Octile</text><text x="490" y="150" class="xs">（空地上 = h*）</text>
+      <circle cx="620" cy="83" r="6" fill="#B91C1C"/><text x="620" y="132">曼哈顿 / w·h</text><text x="620" y="150" class="xs">（8 方向下）</text>
+      <circle cx="800" cy="83" r="6" fill="#991B1B"/><text x="800" y="132">只看 h</text><text x="800" y="150" class="xs">= 贪心</text>
+    </g>
+    <text x="280" y="184" text-anchor="middle" class="sm b" style="fill:#15803D">可采纳：保证最短；越靠右展开越少</text>
+    <text x="690" y="184" text-anchor="middle" class="sm b" style="fill:#B91C1C">不可采纳：更快，但路径可能变长</text>
+  </svg>
+  <figcaption><b>图 3-3</b>　启发函数的光谱：h 越大，A* 越像贪心；h 越小，越像 Dijkstra。h 恰好等于真实距离时，A* 只展开最短路径上的节点</figcaption>
+  </figure>
+  <p>如果能拿到完美的启发函数 h = h*，A* 会径直沿着最短路径走，一个多余的节点都不展开。现实中拿不到 h*，但可以<strong>预计算</strong>出更接近它的下界，比如 ALT 算法预先算出到若干“地标”的距离，用三角不等式得到更紧的 h（第 6 章）。</p>
+
+  <h2>3.4 加权 A*：用有上界的次优换速度</h2>
+  <p>令 f = g + w·h（w &gt; 1），h 被放大，搜索更“急”着冲向终点。可以证明，若 h 可采纳，加权 A* 找到的路径代价<strong>不超过最优的 w 倍</strong>。实践中远小于这个上界：</p>
+  <div class="tbl"><table>
+    <tr><th rowspan="2">权重</th><th colspan="4">随机障碍 25%</th><th colspan="3">U 型陷阱</th></tr>
+    <tr><th>展开</th><th>耗时 ms</th><th>平均长出</th><th>最多长出</th><th>展开</th><th>平均长出</th><th>最多长出</th></tr>
+    <tr><td>w = 1.0（A*）</td><td>11758</td><td>1.341</td><td>0</td><td>0</td><td>52359</td><td>0</td><td>0</td></tr>
+    <tr><td>w = 1.2</td><td class="yes">1159</td><td class="yes">0.112</td><td>3.15%</td><td>7.26%</td><td>50077</td><td>0</td><td>0</td></tr>
+    <tr><td>w = 1.5</td><td>492</td><td>0.050</td><td>6.46%</td><td>12.52%</td><td>48430</td><td>0.17%</td><td>6.78%</td></tr>
+    <tr><td>w = 2.0</td><td>412</td><td>0.042</td><td>9.93%</td><td>16.10%</td><td>47323</td><td>0.76%</td><td>9.71%</td></tr>
+    <tr><td>w = 5.0</td><td>367</td><td>0.031</td><td>12.43%</td><td>21.95%</td><td>45720</td><td>5.52%</td><td>30.38%</td></tr>
+    <tr><td>贪心（w = ∞）</td><td>360</td><td>0.030</td><td>14.44%</td><td>27.56%</td><td>42496</td><td>10.55%</td><td class="no">58.05%</td></tr>
+  </table></div>
+  <ul>
+    <li><strong>随机障碍图</strong>：w 只从 1 提到 1.2，展开数就降到 1/10，路径平均只长 3%。游戏里这通常是划算的：玩家看不出 3% 的绕路，却能感受到卡顿。</li>
+    <li><strong>U 型陷阱</strong>：加权几乎没用，展开数只从 52359 降到 45720。启发函数本来就把搜索引向杯底，加大它的权重只会让搜索更深地陷进去；必须先把杯子填满才能绕出来。</li>
+    <li><strong>贪心没有上界</strong>：U 型陷阱上最坏长出 58%。有上界的加权 A* 是更安全的选择。</li>
+  </ul>
+  <div class="co tip"><span class="h">变体</span>
+    <p><strong>动态加权</strong>：离起点近时 w 大、离终点近时 w 趋于 1，开始冲得快，结尾走得准。<strong>ARA*（Anytime Repairing A*）</strong>：先用大 w 很快给出一条路，有余力再逐步减小 w 改进它，适合“先让单位动起来，路径后面再优化”的场景。</p>
+  </div>
+
+  <h2>3.5 平局决胜：开阔地上的大问题</h2>
+  <p>在没有障碍的开阔地上，从 S 到 G 有大量代价完全相同的最短路径，这些路径上的所有节点 f 都相等。如果 f 相同时随便选，A* 会把这一大片“平局区域”全部展开。规则很简单：<strong>f 相同时，优先展开 h 更小（g 更大）的节点</strong>，也就是离终点更近的那个，它会一路往前推，不再横向铺开。</p>
+  <!--grid {"map":[
+    "..................",
+    "..................",
+    "..................",
+    "..................",
+    "..S...............",
+    "..................",
+    "..................",
+    "..................",
+    "..............G..."],
+    "per":2,"cell":24,"nums":"","arrows":false,
+    "panels":[
+      {"tie":"small_h","title":"f 相同取 h 小：展开 {exp}"},
+      {"tie":"big_h","title":"f 相同取 h 大：展开 {exp}"}],
+    "cap":"<b>图 3-4</b>　同一张空地图，两种平局规则：路径一样长（代价 136），展开数差 3 倍多；在 512×512 的大图上差距更大"} -->
+  <div class="tbl"><table>
+    <tr><th>E4：平均展开（耗时）</th><th>只比 f（交给堆）</th><th>f 同取 h 小</th><th>f 同取 h 大</th></tr>
+    <tr><td>开阔地</td><td>3582（0.292 ms）</td><td class="yes">228（0.024 ms）</td><td class="no">10772（0.517 ms）</td></tr>
+    <tr><td>随机障碍 25%</td><td>11805</td><td>11758</td><td>11828</td></tr>
+    <tr><td>房间</td><td>8395</td><td>7822</td><td>8607</td></tr>
+  </table></div>
+  <p>开阔地上差了 47 倍；障碍多的地图上平局本来就少，差别只有百分之几。另外两种常见的决胜方法：</p>
+  <ul>
+    <li><strong>微调 h</strong>：h ×= (1 + 1/p)，p 取比最长路径还大的数。h 只放大一点点，几乎不影响最优性，但能打破平局。缺点是严格来说不再可采纳。</li>
+    <li><strong>叉积决胜</strong>：在 f 相同的节点里，优先选择更靠近“起点到终点连线”的节点，得到的路径看起来更直，不会先斜走到底再直走。</li>
+  </ul>
+  <div class="co warn"><span class="h">面试注意：平局决胜还关系到确定性</span>
+    <p>只比 f 时，平局由堆的内部实现决定。同一份代码换一个 STL、换一种堆实现，走出的路径就可能不同（E9：40 次查询里 40 次不同）。对单机游戏这只影响表现，对帧同步游戏则是不同步 bug。第 7 章会给出完整的确定性方案。</p>
+  </div>
+
+  <h2>3.6 交互实验：启发函数和权重</h2>
+  <p>六个面板分别是 Dijkstra、欧几里得、Octile、曼哈顿、加权 A*（w = 2）和贪心。注意标题里的“比最优多 x%”：只有前三个永远是最优的。</p>
+  <div class="lab cmplab" id="lab-heur" data-algos="dijkstra,astar:euclid,astar:octile,astar:manhattan,wastar:octile:2,greedy:octile" data-map="random" data-w="48" data-h="28" data-seed="9"></div><!--/lab-->
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><strong>可采纳</strong> h ≤ h* → 保证最短；<strong>一致</strong> h(n) ≤ c(n,n') + h(n') → 出队即最优、不用重开。一致 ⇒ 可采纳。</li>
+    <li>4 方向用曼哈顿，8 方向用 <strong>Octile</strong>，任意角度用欧几里得；8 方向下曼哈顿会高估（E2：最多长 9.8%）。</li>
+    <li>有地形代价时，h 要乘最便宜地形的单价；改了代价模型就要重新检查可采纳性。</li>
+    <li>加权 A*：代价 ≤ w × 最优；w = 1.2 就能少展开 90%（随机图），但对凹形陷阱无效。</li>
+    <li>平局决胜：f 相同取 h 小；开阔地上展开数差 47 倍（228 对 10772）。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：两个可采纳启发函数 h₁、h₂，max(h₁, h₂) 可采纳吗？更好吗？</summary><p>可采纳，因为两者都不超过 h*，较大的那个也不超过。而且它比两者都“强”（更接近 h*），A* 展开的节点不会更多。这是组合多个启发函数的标准方法，ALT 就是对多个地标取 max。</p></details>
+  <details class="quiz"><summary>自测：4 方向地图用欧几里得距离，结果最短吗？效率如何？</summary><p>最短。欧几里得 ≤ 曼哈顿 = 4 方向下的真实距离，所以它可采纳。但它低估得多，展开的节点比曼哈顿多。</p></details>
+</section>

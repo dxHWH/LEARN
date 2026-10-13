@@ -1,0 +1,236 @@
+<section class="chapter" id="ch2">
+  <div class="ch-head">
+    <div class="no">CHAPTER 02</div>
+    <h1>从 Unity 生命周期到 Gameplay 生命周期</h1>
+    <p class="lead">项目在 MonoBehaviour 外面又包了一层 BeginPlay / Tick。包这一层是为了什么，两套时间线是怎么对齐的，没对齐的地方又会出什么事——比如“先 Possess、后 BeginPlay”。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清 Unity 的 Awake / OnEnable / Start / Update / OnDestroy 各自什么时候调用，以及运行时生成的对象和场景预置对象有什么不同</li>
+    <li>画出一个 AActor 从创建到 BeginPlay、Tick、注销的完整时间线，能指出“BeginPlay 至少晚一帧”的原因</li>
+    <li>解释三个 Demo 的 Possess 与 BeginPlay 谁先谁后，以及“先 Possess”带来的四个后果</li>
+    <li>知道 Destroy 是延迟的、没有 EndPlay 意味着什么，以及切场景时各单例的销毁顺序为什么不能依赖</li>
+    <li>能和 UE 的 Spawn → PostInitializeComponents → BeginPlay → EndPlay 逐项对照</li>
+  </ul></div>
+
+  <h2>2.1 这一章解决什么问题</h2>
+  <p>面试官听到“我在 Unity 里仿照 UE 做了 BeginPlay 和 Tick”，第一反应几乎都是：<strong>Unity 已经有 Start 和 Update 了，你为什么还要再包一层？包完之后，两套回调谁先谁后？</strong>这两个问题如果答不清，后面讲 World、Possess、GameMode 都会显得“只是换了个名字”。</p>
+  <p>这一章先把 Unity 自己的规则讲准（哪些是官方保证的，哪些只是“通常如此”），再看项目怎么在上面搭出 Gameplay 生命周期，最后逐个检查两套时间线没有对齐的地方。</p>
+
+  <h2>2.2 Unity 生命周期：只讲项目用到的部分</h2>
+  <div class="tbl"><table>
+    <tr><th>回调</th><th>什么时候调用</th><th>项目里谁用了</th></tr>
+    <tr><td><code>Awake</code></td><td>对象被加载（场景加载）或被 <code>AddComponent / Instantiate</code> 创建时，<strong>在创建调用返回之前</strong>立即执行；对象未激活则推迟到激活时</td><td>三个单例的 override（都没调 base，第 6 章）；CombatPawn / DemoHeroPawn 在这里取 Renderer</td></tr>
+    <tr><td><code>OnEnable</code></td><td>紧跟在同一个对象的 Awake 之后；之后每次重新启用都会调用</td><td>SurvivalUIController 在这里注册事件监听（第 6 章会讲它的隐患）</td></tr>
+    <tr><td><code>Start</code></td><td>该脚本第一次 Update 之前调用一次，<strong>不会在创建调用内部执行</strong>；脚本未启用时推迟到启用时</td><td><strong>AActor.Start → World.RegisterAActor</strong>（整个 Gameplay 生命周期的入口）</td></tr>
+    <tr><td><code>Update</code></td><td>每帧一次；不同脚本之间的先后由 Script Execution Order 决定，没配置就<strong>不保证</strong></td><td>World、TimerSystem、EventSystem、各 UI 各有一个</td></tr>
+    <tr><td><code>OnCollisionEnter</code></td><td>物理阶段（FixedUpdate 之后的物理模拟里）</td><td>CombatPawn 的“大吃小”——不经过 World</td></tr>
+    <tr><td><code>OnDestroy</code></td><td>对象真正被销毁时；<code>Destroy()</code> 是延迟的，要到本帧 Update 循环之后；只对曾经激活过的对象调用</td><td>AActor 在这里注销；GameMode 在这里停计时器、退订事件</td></tr>
+    <tr><td><code>OnApplicationQuit</code></td><td>应用退出前，对所有存活对象调用</td><td>MonoSingleton 设置退出标志（第 6 章）</td></tr>
+  </table></div>
+
+  <p>本章和下一章的推演依赖下面四条规则。前三条来自 Unity 手册的“事件函数执行顺序”，第二条中“同一帧稍后执行”的细节来自社区实测（手册只保证“第一次 Update 之前”）。本机没有 Unity，书中凡是用到这四条的结论都标为【模型假设】，并在附录给出验证方法。</p>
+  <!--code:text:四条规则（demos/framework_verify.cpp 按它们建模）-->
+R1  AddComponent / Instantiate：Awake → OnEnable 在调用返回之前执行完（对象激活时）
+R2  Start 永远不在创建调用里执行。
+      场景加载的对象：所有对象的 Awake/OnEnable 都执行完，才开始调用任何 Start
+      Update 阶段里创建的对象：Start 在本帧 Update 阶段结束后执行，第一次 Update 在下一帧
+R3  Destroy(obj) 只做标记，本帧 Update 循环结束后才真正销毁、调用 OnDestroy；
+      DestroyImmediate(obj) 立即销毁
+R4  被销毁的 UnityEngine.Object，用 == null 判断为 true（"fake null"），
+      但 C# 对象本身还在：is / ?. / ?? / ReferenceEquals 都不经过 Unity 的 == 重载
+<!--/code-->
+  <div class="co warn"><span class="h">面试注意：“Awake 一定在 Start 之前”只对同一个对象成立</span>
+    <p>官方保证的是：同一个脚本实例 Awake 先于 Start；场景加载时所有对象的 Awake/OnEnable 先于任何一个 Start。<strong>不同对象之间的 Awake 顺序不保证</strong>，运行时生成的对象和场景里已有对象之间的 Start 顺序也不保证。“A 的 Awake 里访问 B 的字段”能不能工作，取决于 B 是否已经 Awake——这是第 6 章 EventSystem 隐患的根源。</p>
+  </div>
+
+  <h2>2.3 项目怎么在上面搭出 Gameplay 生命周期</h2>
+  <!--code:cs:AActor.cs:14-47（节选）-->
+protected virtual void Start()
+{
+    World.RegisterAActor(this);          // 不是直接 BeginPlay，而是去 World 排队
+}
+protected virtual void OnDestroy()
+{
+    if (World.HasInstance) World.UnregisterAActor(this);
+}
+public virtual void BeginPlay() { HasBegunPlay = true; }   // 由 World 调用
+public virtual void Tick(float deltaTime) { }              // 由 World 调用
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>Gameplay 概念</th><th>由谁触发</th><th>对应的 Unity 时机</th><th>代码位置</th></tr>
+    <tr><td>注册（进入 pending）</td><td>AActor 自己</td><td>Start</td><td>AActor.cs:17 → World.cs:92-102</td></tr>
+    <tr><td><b>BeginPlay</b></td><td>World</td><td>注册之后的<strong>下一次 World.Update</strong>，开头处理 pending 时</td><td>World.cs:54-68</td></tr>
+    <tr><td><b>Tick</b></td><td>World</td><td>每次 World.Update，倒序遍历，要求 HasBegunPlay 且 IsTickEnabled</td><td>World.cs:71-87</td></tr>
+    <tr><td>注销</td><td>AActor 自己</td><td>OnDestroy</td><td>AActor.cs:20-25 → World.cs:118-130</td></tr>
+    <tr><td>EndPlay</td><td>—</td><td><strong>不存在</strong>，清理逻辑都写在 OnDestroy</td><td>—</td></tr>
+  </table></div>
+  <p>包这一层得到了三样东西：</p>
+  <ul>
+    <li><b>统一的开始时刻</b>：BeginPlay 只由 World 发出，所有 Actor 都“从 World 开始运转的那一刻”进入游戏，而不是各自在不确定的 Start 里开始。</li>
+    <li><b>统一的驱动入口</b>：只有 World 一个 Update，Actor 的 Tick 由它遍历调用，可以统一做暂停、开关 Tick、排序（第 3 章）。</li>
+    <li><b>UE 风格的概念</b>：BeginPlay / Tick / Possess / GameMode 这套词汇能和 UE 一一对照，便于团队交流和面试表达。</li>
+  </ul>
+  <p>但它<strong>没有替换掉</strong> Unity 生命周期：Awake 仍然会先执行，物理回调仍然不经过 World，TimerSystem / EventSystem / UI 仍然有自己的 Update。所以项目里实际有两条时间线并行，下面逐个看它们对不齐的地方。</p>
+
+  <h2>2.4 一个 Actor 的完整时间线</h2>
+  <h3>2.4.1 场景里预置的 Actor（例：SurvivalGameMode）</h3>
+  <!--code:text:SoulDecayScene，帧 0（按 R1~R3 推演）-->
+帧 0 · 场景加载    所有对象 Awake / OnEnable（彼此顺序不保证）
+帧 0 · Start 阶段  SurvivalGameMode.Start → World.RegisterAActor
+                     └ World.Instance 为空 → 懒创建 World（Awake 立即执行，Start 排到本帧稍后）
+                     └ GameMode 进入 _pendingAActors
+                   World.Start：遍历 _actors —— 此时 _actors 一定是空的（所有人都先进 pending）
+帧 0 · Update 阶段 World.Update：pending → _actors → GameMode.BeginPlay → 本帧就 Tick
+<!--/code-->
+  <p>两个源码事实：</p>
+  <ul>
+    <li><b>World.Start 是死代码</b>。它遍历 <code>_actors</code> 调 BeginPlay，但任何 Actor 都只能经由 <code>RegisterAActor</code> 进入 <code>_pendingAActors</code>，<code>_actors</code> 只在 Update 里被填充。World.Start 执行时列表一定为空。</li>
+    <li><b>RegisterAActor 的注释“只有 World 存在时才注册”不成立</b>。<code>if (Instance == null) return;</code> 里的 <code>Instance</code> 是懒创建的 getter，只要不是在退出过程中，它永远不会返回 null——这一句实际是在<strong>创建</strong> World。</li>
+  </ul>
+
+  <h3>2.4.2 运行时生成的 Actor（例：GameMode 在 BeginPlay 里生成的玩家肉体）</h3>
+  <!--code:text:运行时生成：BeginPlay 至少晚一帧-->
+帧 k · Update 阶段  某处 AddComponent<CombatPawn>()     → Awake 立即执行（R1）
+                     ……调用方继续执行，可能立刻 Possess 它
+帧 k · Update 之后  CombatPawn.Start → RegisterAActor → 进入 pending（R2）
+帧 k+1 · Update     World.Update：pending → _actors → BeginPlay → 同一次 Update 里接着第一次 Tick
+<!--/code-->
+  <p>移植版实测（F2-C7，第 3 章详述）：第 2 帧的 Tick 里生成的 Actor N，<strong>第 3 帧才 BeginPlay、第 3 帧才第一次 Tick</strong>。只要创建发生在 World.Update 之内（GameMode 的 BeginPlay、计时器回调、事件回调都是），BeginPlay 至少晚一帧，这是结构决定的，与帧率无关。</p>
+  <div class="co deep"><span class="h">为什么 BeginPlay 不能在 Start 里直接调用</span>
+    <p>如果 AActor.Start 直接调用 BeginPlay，那它就退化成了“换个名字的 Start”，开始时刻仍然由 Unity 决定。走 pending 的好处是：BeginPlay 一定发生在 World.Update 的开头、在本帧所有 Tick 之前，而且同一帧注册的 Actor 按注册顺序依次 BeginPlay。代价就是这一帧的延迟。UE 里关卡里的 Actor 也是“等 World 开始游戏时统一 BeginPlay”，运行时 SpawnActor 的 Actor 则在 Spawn 调用内部就 BeginPlay——这一点和本项目正好相反（2.7 节）。</p>
+  </div>
+
+  <h2>2.5 先 Possess，后 BeginPlay</h2>
+  <p>这是本项目生命周期最典型的“对不齐”。三个 Demo 的顺序各不相同：</p>
+  <div class="tbl"><table>
+    <tr><th>Demo</th><th>Possess 发生在</th><th>Pawn / Controller 的 BeginPlay</th><th>结论</th></tr>
+    <tr><td>SoulDecay 开局（SurvivalGameMode.BeginPlay）</td><td>帧 0，AddComponent 之后立刻 Possess</td><td>帧 1</td><td class="no">先 Possess</td></tr>
+    <tr><td>SoulDecay 刷 AI（AISpawner 回调）</td><td>计时器回调里，生成后立刻 Possess</td><td>下一帧</td><td class="no">先 Possess</td></tr>
+    <tr><td>SoulDecay 夺舍（ExecuteSoulTransfer）</td><td>玩家点击时，目标早已在场</td><td>早已执行</td><td class="yes">先 BeginPlay</td></tr>
+    <tr><td>GamePlayTest2（DemoGameMode）</td><td>StartMatch 只生成，等 UI 按钮发事件后才 Possess</td><td>生成后的下一帧</td><td class="yes">先 BeginPlay（靠玩家点按钮的时间差）</td></tr>
+    <tr><td>GamePlayTest1（DemoStarter）</td><td><code>Invoke(StartPossess, 0.1f)</code></td><td>帧 0</td><td class="mid">先 BeginPlay（靠 0.1 秒延时）</td></tr>
+  </table></div>
+  <p>“先 Possess”带来四个后果，前两个在项目里真实出现过：</p>
+  <div class="cards">
+    <div class="card"><div class="t">① OnPossess 里拿不到 BeginPlay 初始化的东西</div><p>MyHeroPawn 在 BeginPlay 里取 Renderer，OnPossess 里改颜色。被提前 Possess 就是空引用。CombatPawn 和 DemoHeroPawn 都把 <code>GetComponent&lt;Renderer&gt;</code> 挪到了 Awake，DemoHeroPawn 的注释记录了这次修复；DemoStarter 则用 0.1 秒延时绕开。</p></div>
+    <div class="card"><div class="t">② 半绑定：异常发生在 Possess 中间</div><p>移植版实测 F3-P3：Pawn.OnPossess 抛异常时，<code>Pawn.Controller</code> 已经赋值，<code>Controller.ControlledPawn</code> 还没赋值——Pawn 认为自己有主人，Controller 认为自己空手。下一帧重试 Possess 可以恢复（第 4 章）。</p></div>
+    <div class="card"><div class="t">③ 输入在 BeginPlay 之前不可用</div><p>AUnityController 在 BeginPlay 里才 <code>new GameInput()</code>。TestPossess 在自己的 Update 里直接读 <code>_moveAction</code>，而它创建的 Controller 要下一帧才 BeginPlay——第一帧就是空引用（审计 P3-10）。</p></div>
+    <div class="card"><div class="t">④ 寿命从 BeginPlay 之前开始计时</div><p>CombatPawn.OnPossess 里创建 5 秒寿命计时器，而 Pawn 要下一帧才开始 Tick。差一帧对玩法无影响，但说明“计时器的时间线”和“Actor 的时间线”不是同一条。</p></div>
+  </div>
+  <div class="co tip"><span class="h">面试注意：把顺序说成“设计选择”，再说代价</span>
+    <p>好的说法是：“我的 World 用 pending 队列统一发 BeginPlay，所以运行时生成的 Actor 要下一帧才 BeginPlay；GameMode 生成玩家后立即 Possess，于是 Possess 早于 BeginPlay。我的应对是：Pawn 的自身引用在 Awake 里获取，OnPossess 只依赖 Awake 阶段的数据。更彻底的做法是让 Possess 也走队列，或者生成时同步 BeginPlay。”——先陈述事实，再说规则，再说取舍，比只说“UE 是先 BeginPlay”有说服力得多。</p>
+  </div>
+
+  <h2>2.6 结束：Destroy、OnDestroy 与切场景</h2>
+  <h3>2.6.1 Destroy 是延迟的</h3>
+  <p>R3 决定了：在 Tick 里 <code>Destroy(other)</code> 之后，other 本帧<strong>仍然会被 Tick</strong>（只要它排在后面）。移植版实测 F2-C5：A3 在 Tick 里 Destroy(A1)，A1 第 2 帧照样 Tick 了 1 次，第 3 帧才消失。放到游戏里就是“被打死的怪本帧还能出手一次”。项目里 CombatPawn 用 <code>isDying</code> 标志挡住重复死亡，但它只在 OnUnPossess 里用于决定是否延迟销毁，并没有挡住其它逻辑。</p>
+
+  <h3>2.6.2 没有 EndPlay</h3>
+  <p>UE 把“离开游戏”（EndPlay，带原因：被销毁、切关卡、退出、PIE 结束……）和“对象内存回收”（BeginDestroy / FinishDestroy）分开。本项目只有 OnDestroy，所以：</p>
+  <ul>
+    <li>无法区分“被打死”和“切场景”：DemoGameMode.OnDestroy 停计时器、退订事件，在两种情况下做的是同一件事；而真正需要区分的逻辑（例如“只有被打死才掉落、加分”）只能写到别处（CombatPawn.Die）。</li>
+    <li>对象池复用时没有“重新开始”的回调：池子只调 <code>SetActive</code>，Start 不会再执行，<code>HasBegunPlay</code> 一直为 true，BeginPlay 不会第二次调用（第 11 章）。</li>
+  </ul>
+
+  <h3>2.6.3 切场景时，谁先被销毁不确定</h3>
+  <p>World、TimerSystem、EventSystem 都是场景级对象，切场景时和普通 Actor 一起销毁，<strong>OnDestroy 的先后不保证</strong>。项目在这里做得对：AActor.OnDestroy 用 <code>World.HasInstance</code> 而不是 <code>World.Instance</code>，GameMode、GameState、UI 也都先判断 <code>HasInstance</code>。如果写成 <code>Instance</code>，World 先被销毁时，后销毁的 Actor 会在 OnDestroy 里<strong>重新创建一个 World</strong>，它会被留到下一个场景（编辑器里会提示“Some objects were not cleaned up when closing the scene”）。</p>
+  <div class="co warn"><span class="h">【问题】HasInstance 的两个盲区（第 6 章展开）</span>
+    <p>① 三个单例没调 <code>base.Awake()</code>，场景预置的 TimerSystem / EventSystem 在第一次有人访问 <code>Instance</code> 之前，<code>HasInstance</code> 为 false；② 退出标志是每个泛型类型一份，只置不复位，关闭 Domain Reload 后第二次 Play 会出问题。</p>
+  </div>
+
+  <h2>2.7 与 UE 的生命周期对照</h2>
+  <div class="tbl"><table>
+    <tr><th>阶段</th><th>UE（AActor）</th><th>本项目</th><th>差异</th></tr>
+    <tr><td>构造</td><td>构造函数 / CDO；SpawnActor → PostActorCreated → OnConstruction</td><td>AddComponent → Awake</td><td>Unity 没有 CDO，“默认值”来自 Inspector 序列化</td></tr>
+    <tr><td>组件初始化</td><td>PreInitializeComponents → 组件 InitializeComponent → PostInitializeComponents</td><td>无（AActor 本身就是组件）</td><td>本项目的 Actor 不是组件容器</td></tr>
+    <tr><td>开始游戏</td><td>关卡里的 Actor：World 开始游戏时统一 BeginPlay；运行时 Spawn：<strong>在 SpawnActor 调用内部</strong> BeginPlay</td><td>一律下一次 World.Update 统一 BeginPlay</td><td>UE 的 Spawn 返回时 Actor 已经 BeginPlay</td></tr>
+    <tr><td>附身</td><td>GameMode 的 RestartPlayer：先生成 Pawn（已 BeginPlay），再 Possess</td><td>先 Possess，下一帧 BeginPlay</td><td>正好相反（2.5 节）</td></tr>
+    <tr><td>每帧</td><td>TickFunction，按 TickGroup 和前置依赖排序；BeginPlay 时才注册 Tick</td><td>World 倒序遍历，HasBegunPlay 才 Tick</td><td>“BeginPlay 之后才 Tick”一致；本项目没有分组和依赖</td></tr>
+    <tr><td>离开游戏</td><td>EndPlay(EEndPlayReason)</td><td>无</td><td>清理逻辑和销毁混在一起</td></tr>
+    <tr><td>销毁</td><td>Destroy 标记 → GC 时 BeginDestroy / FinishDestroy</td><td>Destroy 延迟到帧末 → OnDestroy → 注销</td><td>都有“标记后才真正回收”的延迟</td></tr>
+  </table></div>
+
+  <h2>2.8 Code Review：生命周期相关问题</h2>
+  <div class="tbl"><table>
+    <tr><th>当前设计</th><th>问题</th><th>影响</th><th>改进方向（不写代码）</th></tr>
+    <tr><td>GameMode 生成 Actor 后立即 Possess</td><td>Possess 早于 BeginPlay</td><td>OnPossess 不能依赖 BeginPlay 的数据；可能半绑定</td><td>生成接口同步完成 BeginPlay；或 Possess 也进入队列，在双方 BeginPlay 之后执行</td></tr>
+    <tr><td>World.Start 遍历 _actors</td><td>列表永远为空，死代码</td><td>误导读者以为“场景 Actor 在 World.Start 里 BeginPlay”</td><td>删除，或改成处理 pending</td></tr>
+    <tr><td>RegisterAActor 里 <code>if (Instance == null)</code></td><td>注释与行为不符，实际是懒创建</td><td>任何 Actor 的 Start 都可能创建 World</td><td>明确“World 由谁创建”：由 GameInstance / 场景引导对象显式创建</td></tr>
+    <tr><td>只有 OnDestroy</td><td>没有 EndPlay 及原因</td><td>切场景和被杀走同一段清理；对象池没有重新开始的回调</td><td>加 EndPlay(reason)，池化对象出池时重新进入 BeginPlay 流程</td></tr>
+    <tr><td>Destroy 延迟</td><td>被销毁的 Actor 本帧仍会 Tick</td><td>“死后还能出手一次”</td><td>销毁时立即 <code>SetActorTickEnabled(false)</code> 或标记 PendingKill 并在遍历时跳过</td></tr>
+  </table></div>
+
+  <h2>2.9 面试追问树</h2>
+  <!--code:text:追问树 · 生命周期-->
+Q2-1 Unity 已经有 Start/Update，你为什么还要包 BeginPlay/Tick？
+ ├── Q2-2 BeginPlay 是在什么时候调用的？和 Start 谁先？
+ │    └── Q2-3 运行时 Spawn 的 Actor，什么时候 BeginPlay？           ← 至少晚一帧
+ ├── Q2-4 先 Possess 还是先 BeginPlay？有什么后果？                  ← 项目真实踩过的坑
+ │    └── Q2-5 UE 是什么顺序？为什么？
+ └── Q2-6 统一驱动之后，Awake 里还能写什么？
+Q2-7 在 Tick 里 Destroy 了另一个 Actor，它这一帧还会 Tick 吗？      ← R3
+Q2-8 切场景时 World 和 Actor 谁先 OnDestroy？你怎么保证不出错？
+ └── Q2-9 为什么用 HasInstance 而不是 Instance？
+Q2-10 你的框架有 EndPlay 吗？没有会怎样？                           ← 对象池、切关
+Q2-11 Unity 的 Script Execution Order / PlayerLoop 了解吗？          ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q2-1 → Q2-3　为什么包一层？BeginPlay 什么时候调用？</div>
+    <p><b>L1 · 30 秒</b>　为了让“开始游戏”的时刻由 World 统一决定，而不是由 Unity 在不确定的时机调用 Start。Actor 在 Start 里只向 World 登记，World 在下一次 Update 的开头统一 BeginPlay，然后统一 Tick。</p>
+    <p><b>L2 · 正常回答</b>　Start 只做注册，进入 pending 队列；World.Update 先把 pending 里的 Actor 移到正式列表并逐个 BeginPlay，再倒序遍历做 Tick。所以场景里的 Actor 在第一帧就 BeginPlay；运行时生成的 Actor，它的 Start 不会在 AddComponent 里执行，在 Update 里生成的话要到本帧稍后才 Start、下一帧才 BeginPlay——我用移植版测过，第 2 帧生成的 Actor 第 3 帧才 BeginPlay 和第一次 Tick。</p>
+    <p><b>L3 · 深入</b>　好处是三点：开始时刻统一、同帧注册的 Actor 按注册顺序 BeginPlay、Tick 可以统一暂停和开关。代价是一帧延迟和两条时间线并存：Awake 仍然最先执行，物理回调不经过 World，Timer/Event/UI 有自己的 Update。所以我的约定是：Awake 只取自身组件引用，不访问别的对象；跨对象的初始化放在 BeginPlay。</p>
+    <p><b>L4 · 面试官攻击</b>　“那你不就是把 Start 改了个名字？” → 不只是改名。Start 由 Unity 调用，不同对象之间的顺序不保证，而且在 Update 中生成的对象 Start 时机还和生成位置有关；BeginPlay 一定发生在 World.Update 的开头、本帧所有 Tick 之前，顺序等于注册顺序。另外 Tick 由 World 统一遍历，我能在一处实现暂停、开关 Tick 和排序，这是 Update 做不到的。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q2-4 → Q2-5　先 Possess 还是先 BeginPlay？</div>
+    <p><b>L1</b>　SoulDecay 里是先 Possess：GameMode 在 BeginPlay 里生成肉体和灵魂后立刻 Possess，而它们要下一帧才 BeginPlay。</p>
+    <p><b>L2</b>　后果是 OnPossess 里不能依赖 BeginPlay 初始化的字段。我最早的 MyHeroPawn 在 BeginPlay 里取 Renderer、OnPossess 里改颜色，被提前 Possess 就空引用；后来把取组件挪到 Awake。GamePlayTest1 当时用 Invoke 延时 0.1 秒绕过去，那是个时间上的补丁，不是结构上的保证。</p>
+    <p><b>L3</b>　更隐蔽的是异常发生在 Possess 中间：Pawn 那一侧已经记下了 Controller，Controller 这一侧还没记下 Pawn，形成半绑定。UE 的 RestartPlayer 是先生成 Pawn（SpawnActor 返回时已经 BeginPlay）、再 Possess，所以 OnPossess 里可以放心用 BeginPlay 准备好的东西。</p>
+    <p><b>L4 攻击</b>　“那你为什么不改成先 BeginPlay？” → 两种改法：一是生成接口同步完成注册和 BeginPlay，像 UE 的 SpawnActor 那样，代价是 BeginPlay 可能在别人的 Tick 中间发生，要重新考虑遍历安全；二是让 Possess 也进队列，等双方 BeginPlay 之后再执行，代价是多一帧延迟。我倾向第一种，因为“生成后立刻可用”对写玩法更直观。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q2-7　Tick 里 Destroy 了另一个 Actor，它本帧还会 Tick 吗？</div>
+    <p><b>L2</b>　会，只要它在遍历顺序里排在后面。Unity 的 Destroy 只做标记，要等本帧 Update 循环结束才真正销毁、调 OnDestroy，那时才从 World 注销；在此之前它不是 fake null，World 照常 Tick 它。移植版实测：A3 在 Tick 里 Destroy(A1)，A1 当帧还 Tick 了一次。要避免“死后出手”，销毁时应该同步关掉它的 Tick，或者在逻辑上标记死亡并在 Tick 开头检查。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q2-8 → Q2-9　切场景时谁先 OnDestroy？</div>
+    <p><b>L2</b>　不保证。所以所有 OnDestroy 里访问单例都用 HasInstance：如果 World 已经先销毁，HasInstance 为 false，直接跳过注销；如果写成 Instance，懒创建的 getter 会在场景卸载过程中重新造一个 World，成为泄漏到下一个场景的“幽灵单例”。</p>
+    <p><b>L3</b>　HasInstance 也有盲区：子类没调 base.Awake，场景预置的单例在第一次被访问 Instance 之前 HasInstance 是 false，这时候的 OnDestroy 清理会被跳过。这是第 6 章要讲的确定性 bug。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q2-10　没有 EndPlay 会怎样？</div>
+    <p><b>L2</b>　清理逻辑只能写在 OnDestroy，切场景、被打死、退出游戏走的是同一段代码，无法根据原因做不同处理；对象池复用时只 SetActive，Start 不会再跑，HasBegunPlay 一直是 true，BeginPlay 不会第二次调用，所以池化对象没有“重新开始”的入口。UE 的 EndPlay 带 EEndPlayReason，和内存回收（BeginDestroy）是分开的，这是我想补上的。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“BeginPlay 就是 Start，只是我们统一叫 BeginPlay。”</p>
+    <p><b>问题</b>：项目里 Start 只负责注册，BeginPlay 由 World 在下一次 Update 时调用，时机不同；说成“改名”会被追问“那你包这一层有什么意义”。</p>
+    <p><b>更好的回答</b>：“Start 里向 World 登记，World 在 Update 开头统一 BeginPlay，所以运行时生成的 Actor 会晚一帧开始，而且同帧注册的按注册顺序开始。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“Awake 一定先于 Start，所以我在 Awake 里初始化、在 Start 里访问别人就安全。”</p>
+    <p><b>问题</b>：只对“场景加载时的对象”成立。运行时生成的对象、以及 Awake 里访问别的对象，都没有这种保证；本项目 UI 在 OnEnable 里访问 EventSystem 就依赖了不保证的顺序（第 6 章）。</p>
+    <p><b>更好的回答</b>：“Awake 只初始化自己；跨对象的依赖放到 BeginPlay，由 World 统一保证时机。”</p>
+  </div>
+
+  <h2>2.10 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">Unity PlayerLoop</div><p>一帧被拆成 Initialization → EarlyUpdate → FixedUpdate → PreUpdate → Update → PreLateUpdate → PostLateUpdate 等阶段，可以用 <code>PlayerLoop.SetPlayerLoop</code> 插入自定义阶段。把 World.Tick 注册成一个明确的阶段，就不再依赖“World 的 Update 和别人谁先”。为什么会追过去：你说“统一驱动”，面试官会问“统一到谁之前、谁之后”。</p></div>
+    <div class="card"><div class="t">Script Execution Order</div><p>项目设置里或 <code>[DefaultExecutionOrder(n)]</code> 指定脚本的相对顺序，对 Awake / OnEnable / Update 都生效。本项目没有配置任何顺序，所以四个 Update 之间、Awake 之间的先后都不保证。</p></div>
+    <div class="card"><div class="t">Enter Play Mode Options</div><p>关闭 Domain Reload 能让进入 Play 快很多，但静态字段不会重置——单例的 <code>_instance</code>、退出标志都会残留到下一次 Play，需要用 <code>[RuntimeInitializeOnLoadMethod]</code> 手动清理。为什么会追过去：生命周期一问到“进入/退出”，就会问到静态状态。</p></div>
+    <div class="card"><div class="t">UE 的 EndPlay 与 GC</div><p>EndPlay 负责“离开游戏”的逻辑；对象真正释放要等 GC 把它标记为不可达后，经过 BeginDestroy / FinishDestroy。这也是为什么 UE 里对已 Destroy 的 Actor 要用 IsValid 判断——和 Unity 的 fake null 是同一类问题。</p></div>
+    <div class="card"><div class="t">C++ 的初始化顺序问题</div><p>不同编译单元的全局对象构造顺序不确定（static initialization order fiasco），常见解法是函数内静态变量（首次使用时构造）。这和“Awake 之间顺序不保证、所以用懒加载单例”是同一个问题的两个版本。</p></div>
+    <div class="card"><div class="t">ECS 的系统顺序</div><p>ECS 框架通常显式声明系统顺序（UpdateBefore / UpdateAfter、阶段分组），而不是依赖对象各自的回调。把“谁先谁后”写成数据，是解决生命周期歧义的另一种思路。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>Gameplay 生命周期：<strong>Start → 进 pending → 下一次 World.Update 开头 BeginPlay → 同一次 Update 开始 Tick → OnDestroy 注销</strong>；没有 EndPlay。</li>
+    <li>运行时生成的 Actor <strong>至少晚一帧 BeginPlay</strong>（F2-C7：第 2 帧生成，第 3 帧 BeginPlay 并第一次 Tick）；World.Start 是死代码。</li>
+    <li>SoulDecay 开局和刷 AI 都是<strong>先 Possess、后 BeginPlay</strong>；后果：OnPossess 不能依赖 BeginPlay 数据、可能半绑定（F3-P3）、输入未就绪、计时器先跑。</li>
+    <li>Destroy 延迟到帧末：<strong>被 Destroy 的 Actor 本帧仍会 Tick</strong>（F2-C5）。</li>
+    <li>切场景时 OnDestroy 顺序不保证，所以 OnDestroy 里一律用 <code>HasInstance</code>；UE 是先 Spawn（已 BeginPlay）再 Possess。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：TimerSystem 的回调里 AddComponent 了一个 AActor 子类，它的 Awake、Start、BeginPlay、第一次 Tick 分别在什么时候？</summary><p>Awake 在 AddComponent 返回之前；Start 在本帧 Update 阶段之后（不在回调里）；BeginPlay 和第一次 Tick 在下一帧的 World.Update 里，先 BeginPlay、紧接着同一次 Update 里 Tick。这些都依赖 R1、R2 两条规则。</p></details>
+  <details class="quiz"><summary>自测 2：为什么 World.Start 里的循环永远不会执行？</summary><p>Actor 只能通过 RegisterAActor 进入 _pendingAActors，_actors 只在 World.Update 里由 pending 填充。World 是在第一个 Actor 的 Start 里被懒创建的，它自己的 Start 执行时还没有任何一次 Update，所以 _actors 为空。</p></details>
+  <details class="quiz"><summary>自测 3：把 AActor.OnDestroy 里的 <code>World.HasInstance</code> 改成 <code>World.Instance != null</code>，切场景时可能出现什么？</summary><p>如果 World 先于某个 Actor 被销毁，这个 Actor 的 OnDestroy 访问 Instance 会触发懒创建，生成一个新的 World GameObject；它不在被卸载的对象里，会残留到下一个场景，编辑器里还会出现“Some objects were not cleaned up when closing the scene”的提示。</p></details>
+</section>

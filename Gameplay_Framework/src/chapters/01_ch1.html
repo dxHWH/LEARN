@@ -1,0 +1,233 @@
+<div class="part-head" data-toc="第一部分 · 项目全景">
+  <div class="no">PART ONE</div>
+  <h1>第一部分　项目全景</h1>
+  <p>先把“这个项目到底是什么”说准：做了什么、没做什么、哪些只是写了没用上，以及两个 Demo 分别在验证什么。</p>
+</div>
+
+<section class="chapter" id="ch1">
+  <div class="ch-head">
+    <div class="no">CHAPTER 01</div>
+    <h1>项目目标、事实基线与真实架构</h1>
+    <p class="lead">不照抄类继承图，而是从源码和场景文件里重建“谁持有谁、谁驱动谁、一帧里发生了什么”。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能用 30 秒 / 1 分钟 / 3 分钟三个版本介绍项目，而且不夸大</li>
+    <li>不看代码画出真实架构：静态持有关系 + 一帧里的四个独立 Update</li>
+    <li>说清两个 Demo（GamePlayTest2、SoulDecay）各自在验证框架的哪一部分</li>
+    <li>知道哪些模块“已实现并被使用”、哪些“实现了但没启用”、哪些“没有充分验证”</li>
+  </ul></div>
+
+  <h2>1.1 这一章解决什么问题</h2>
+  <p>面试的第一个问题几乎一定是“介绍一下你的项目”。这个问题的陷阱是：你说出的每一个名词（World、统一 Tick、Slot Map、Zero-GC、单元测试）都会变成下一个追问的入口。所以第一步不是“包装”，而是<strong>把事实说准</strong>——说准了，后面的追问都是你熟悉的地盘。</p>
+
+  <h2>1.2 项目在做什么：一句话与三层</h2>
+  <p>【设计意图】把 UE Gameplay Framework 的分层思想——<em>谁存在于世界（Actor/Pawn）、谁做决定（Controller）、谁定规则（GameMode）、谁对外公布状态（GameState）</em>——落到 Unity 的 MonoBehaviour 体系上，并配套计时器、事件、对象池、日志等基础设施，用两个可玩 Demo 验证。</p>
+  <div class="cards">
+    <div class="card"><div class="t">Gameplay 层（GamePlayCore/）</div><p>World、AActor、APawn、AController、AUnityController、AGameModeBase/AGameMode、AGameStateBase/AGameState、GameInstance</p></div>
+    <div class="card"><div class="t">基础设施层（Framework/ + DataStructure/）</div><p>TimerSystem、EventSystem（+ ThreadSafeEventSystem）、MonoSingleton/Singleton、ObjectPool、Log、RingBuffer、ThreadSafeRingBuffer</p></div>
+    <div class="card"><div class="t">验证层（Demo + UnitTest/）</div><p>GamePlayTest2（开局流程）、SoulDecay（夺舍生存战）；6 个挂在 MonoBehaviour 上的运行时测试脚本</p></div>
+  </div>
+
+  <h2>1.3 真实架构图</h2>
+  <figure>
+  <svg viewBox="0 0 860 520" xmlns="http://www.w3.org/2000/svg">
+    <rect x="20" y="10" width="820" height="56" rx="12" fill="#F3F4F6" stroke="#6B7280"/>
+    <text x="40" y="34" class="b">GameInstance · DontDestroyOnLoad</text>
+    <text x="40" y="54" class="sm">只挂在 MainMenuScene；不创建、不持有 World（CurrentWorld 没有调用方），实际职责只有“跨场景存活 + 初始化日志”</text>
+    <rect x="20" y="80" width="820" height="424" rx="18" fill="#FBFAF7" stroke="#6B7280"/>
+    <text x="40" y="104" class="b">每个场景各一套 · 切场景时全部随场景销毁</text>
+    <text x="820" y="104" text-anchor="end" class="sm" style="fill:#B45309">四个独立的 Update，相互之间没有设定执行顺序</text>
+    <g>
+      <rect x="40" y="122" width="180" height="60" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="130" y="146" text-anchor="middle" class="b">World</text><text x="130" y="166" text-anchor="middle" class="xs">第一个 Actor 注册时懒创建</text>
+      <rect x="240" y="122" width="180" height="60" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="330" y="146" text-anchor="middle" class="b">TimerSystem</text><text x="330" y="166" text-anchor="middle" class="xs">Slot Map · 自己的 Update</text>
+      <rect x="440" y="122" width="180" height="60" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+      <text x="530" y="146" text-anchor="middle" class="b">EventSystem</text><text x="530" y="166" text-anchor="middle" class="xs">双缓冲延迟派发 · 自己的 Update</text>
+      <rect x="640" y="122" width="180" height="60" rx="8" fill="#FFFFFF" stroke="#6B7280"/>
+      <text x="730" y="146" text-anchor="middle" class="b">UI（普通 MonoBehaviour）</text><text x="730" y="166" text-anchor="middle" class="xs">收事件 + 每帧拉取剩余时间</text>
+    </g>
+    <line x1="620" y1="152" x2="636" y2="152" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/>
+    <path d="M730,182 V200 H330 V186" fill="none" stroke="#6B7280" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#a)"/>
+    <text x="560" y="214" class="xs">UI 每帧 GetTimeRemaining(handle)</text>
+    <line x1="130" y1="182" x2="130" y2="244" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/>
+    <text x="140" y="226" class="xs" style="fill:#2F5BD3">pending → BeginPlay → 倒序 Tick</text>
+    <rect x="40" y="248" width="780" height="240" rx="12" fill="#FFFFFF" stroke="#6B7280"/>
+    <text x="60" y="272" class="b sm">AActor（每个都是挂在 GameObject 上的 MonoBehaviour 组件，Start 时向 World 注册）</text>
+    <rect x="70" y="290" width="200" height="60" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="170" y="314" text-anchor="middle" class="b">GameMode</text><text x="170" y="334" text-anchor="middle" class="xs">规则与流程 · BeginPlay 时向 World 报到</text>
+    <rect x="330" y="290" width="200" height="60" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="430" y="314" text-anchor="middle" class="b">GameState</text><text x="430" y="334" text-anchor="middle" class="xs">比赛阶段 · 分数 · 状态变化发事件</text>
+    <rect x="590" y="290" width="200" height="60" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="690" y="314" text-anchor="middle" class="b">Controller</text><text x="690" y="334" text-anchor="middle" class="xs">玩家 / AI 的“灵魂”：做决定</text>
+    <rect x="590" y="408" width="200" height="60" rx="8" fill="#EAF0FD" stroke="#2F5BD3"/>
+    <text x="690" y="432" text-anchor="middle" class="b">Pawn</text><text x="690" y="452" text-anchor="middle" class="xs">世界里的“肉体”：被控制</text>
+    <line x1="270" y1="320" x2="326" y2="320" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/>
+    <text x="298" y="312" text-anchor="middle" class="xs">生成+担保</text>
+    <path d="M480,290 V250" fill="none" stroke="#2F5BD3" stroke-width="1.5"/>
+    <path d="M480,248 V200 H530 V186" fill="none" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/>
+    <text x="488" y="240" class="xs" style="fill:#2F5BD3">Trigger 事件</text>
+    <line x1="670" y1="350" x2="670" y2="404" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/>
+    <line x1="710" y1="404" x2="710" y2="354" stroke="#2F5BD3" stroke-width="1.5" marker-end="url(#ab)"/>
+    <text x="718" y="384" class="xs" style="fill:#2F5BD3">双向引用</text>
+    <path d="M590,426 H430 V354" fill="none" stroke="#C2410C" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ao)"/>
+    <text x="500" y="418" text-anchor="middle" class="xs" style="fill:#C2410C">AddScore（直接写）</text>
+    <path d="M590,456 H170 V354" fill="none" stroke="#C2410C" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ao)"/>
+    <text x="300" y="448" text-anchor="middle" class="xs" style="fill:#C2410C">EndMatch（Pawn 直接调用裁判）</text>
+    <text x="70" y="478" class="xs" style="fill:#C2410C">橙色虚线 = 规则写入没有收口到 GameMode（第 5 章的核心讨论点）</text>
+  </svg>
+  <figcaption><b>图 1-1</b>　按源码重建的真实架构。与“GameInstance → World → GameMode/GameState”的理想图不同：GameInstance 不持有 World，World 是场景级懒单例，Timer / Event / UI 都不经过 World 驱动</figcaption>
+  </figure>
+  <p>继承树（源码事实）只是辅助理解：</p>
+  <!--code:text:继承关系（源码事实）-->
+MonoBehaviour
+ ├── MonoSingleton<T> ── World / TimerSystem / EventSystem / ThreadSafeEventSystem / GameInstance
+ └── AActor
+      ├── APawn ─────────── CombatPawn / DemoHeroPawn / MyHeroPawn
+      ├── AController
+      │    ├── AUnityController ── SoulPlayerController (+IFactionMember)
+      │    └── SimpleAIController (+IFactionMember)
+      ├── AGameModeBase ── AGameMode ── SurvivalGameMode / DemoGameMode
+      └── AGameStateBase ── AGameState ── SurvivalGameState
+<!--/code-->
+  <div class="co warn"><span class="h">面试注意：三个最容易说错的地方</span>
+    <ul>
+      <li><strong>“World 统一驱动一切”</strong>——错。World 只驱动 Actor；TimerSystem、EventSystem、UI 各有自己的 <code>Update</code>，而且项目没有用 <code>DefaultExecutionOrder</code> 规定先后。</li>
+      <li><strong>“GameInstance 管理 World”</strong>——错。<code>CurrentWorld =&gt; World.Instance</code> 没有任何调用方；World 是第一个 Actor 在 <code>Start</code> 里注册时懒创建的。</li>
+      <li><strong>“AActor 对应 UE 的 AActor”</strong>——只对一半。UE 的 AActor 是组件的容器，这里的 AActor 本身就是组件；一个 GameObject 上挂两个 AActor 子类，会各自注册、各自 Tick。</li>
+    </ul>
+  </div>
+
+  <h2>1.4 一帧里发生了什么</h2>
+  <!--code:text:Unity Update 阶段（四个脚本之间顺序未定义）-->
+World.Update        ① _pendingAActors → _actors，逐个 BeginPlay
+                    ② 倒序遍历 _actors：HasBegunPlay && IsTickEnabled → Tick(Time.deltaTime)
+                       └─ Controller.Tick 读输入 → 驱动 Pawn 移动 / 发起夺舍
+TimerSystem.Update  Tick(deltaTime, unscaledDeltaTime)：先执行所有 interval 回调，再执行所有完成回调
+EventSystem.Update  swap(front, back) → 按优先级 Logic → Appearance 清空 front
+UI.Update           向 TimerSystem 拉取剩余时间，刷新文本
+物理阶段            OnCollisionEnter（CombatPawn 的“大吃小”与加分）——不经过 World
+<!--/code-->
+  <p>这张时间线决定了很多“偶发 1 帧”的现象：同一帧 Trigger 的事件，如果 EventSystem 排在 World 后面，本帧就派发；排在前面，就要等下一帧。第 3、7 章会展开。</p>
+
+  <h2>1.5 两个 Demo 分别在验证什么</h2>
+  <p>框架写完之后，用两个场景（从 MainMenuScene 进入）验证。两者覆盖的模块几乎互补：</p>
+  <div class="tbl"><table>
+    <tr><th>框架能力</th><th>GamePlayTest2（开局流程）</th><th>SoulDecay（夺舍生存战）</th></tr>
+    <tr><td>World 懒创建 + Actor 注册/BeginPlay/Tick</td><td>DemoGameMode 预置在场景中；Pawn/Controller 由 Prefab 实例化</td><td>GameMode 预置；所有肉体和灵魂都是运行时 <code>AddComponent</code> 动态生成</td></tr>
+    <tr><td>GameMode → GameState 生成与注册</td><td>AGameState 的比赛阶段：WaitingToStart → InProgress</td><td>子类 SurvivalGameState：三阵营计分</td></tr>
+    <tr><td>Possess / UnPossess</td><td>点按钮后一次性附身（DefaultPawnClass + DefaultControllerClass）</td><td><strong>核心玩法</strong>：鼠标点敌人即夺舍，AI 灵魂被踢出后自毁，旧肉体枯萎</td></tr>
+    <tr><td>TimerSystem</td><td>命名计时器 <code>MatchWarmupTimer</code>，UI 按名字查剩余时间</td><td>每具玩家肉体一个寿命计时器（句柄经事件交给 UI）；循环刷怪计时器 <code>AISpawner</code></td></tr>
+    <tr><td>EventSystem</td><td>双向：GameState → UI（阶段变化）；UI → GameMode（请求控制）</td><td>GameState → UI（分数，Appearance 优先级）；Pawn → UI（寿命句柄，Logic）</td></tr>
+    <tr><td>输入（Input System）</td><td>AUnityController 默认移动</td><td>SoulPlayerController 重写移动 + 鼠标射线</td></tr>
+    <tr><td>ObjectPool</td><td>—</td><td>写了接入代码，但<strong>初始化被注释</strong>，实际走的是 new + Destroy</td></tr>
+    <tr><td>暂停（timeScale = 0）</td><td>InGameMenuController</td><td>同左；寿命计时器与刷怪计时器都是 scaled，暂停时冻结</td></tr>
+  </table></div>
+  <p>SoulDecay 是本书的主案例，第 15 章会完整拆开它：规则、开局时间线、夺舍调用链、碰撞结算、寿命计时器和 UI 的协作、游戏结束后发生了什么，以及它暴露出的框架问题。</p>
+
+  <h2>1.6 事实基线：实现了 / 没启用 / 没验证</h2>
+  <div class="tbl"><table>
+    <tr><th>状态</th><th>模块</th><th>依据</th></tr>
+    <tr><td class="yes">已实现并被 Demo 使用</td><td>World、AActor、APawn、AController、AUnityController、AGameMode(Base)、AGameState(Base)、TimerSystem、EventSystem、RingBuffer、MonoSingleton、Log</td><td>两个场景的脚本挂载 + 调用链</td></tr>
+    <tr><td class="mid">实现了但没启用</td><td>ObjectPool（SoulDecay 里池子没初始化）、ThreadSafeEventSystem（零调用方）、<code>Singleton&lt;T&gt;</code>（零使用）、<code>GameInstance.CurrentWorld</code></td><td>全仓库检索</td></tr>
+    <tr><td class="mid">只在测试脚本里用</td><td>ThreadSafeRingBuffer（RingBufferTests / StressTest）</td><td>同上</td></tr>
+    <tr><td class="no">没有充分验证</td><td>Timer 的非追赶分支、EventSystem 溢出/异常、多线程 FIFO 顺序、Log 落盘、所有 Demo 级流程</td><td>测试用例名不副实或缺失；测试脚本没有挂在任何场景</td></tr>
+  </table></div>
+
+  <h2>1.7 借鉴了 UE 什么，省略了什么</h2>
+  <div class="tbl"><table>
+    <tr><th>UE 概念</th><th>本项目</th><th>语义差异</th></tr>
+    <tr><td>UWorld</td><td>World（MonoSingleton）</td><td>UE 的 World 拥有 Level、Actor 列表、TickTaskManager、TimerManager、物理场景；这里只是 Actor 名单 + 两个注册口</td></tr>
+    <tr><td>AActor / 组件</td><td>AActor : MonoBehaviour</td><td>这里没有组件容器、没有 TickGroup、没有 Tick 依赖、没有复制</td></tr>
+    <tr><td>APawn / AController</td><td>APawn / AController / AUnityController</td><td>核心的双向绑定与“抢占”语义一致；没有 PlayerState、没有 Possess 时的网络角色切换</td></tr>
+    <tr><td>AGameModeBase / AGameMode</td><td>同名</td><td>UE 的 GameMode 只存在于服务器；这里是单机，Authority 只表示“规则的唯一裁决者”（而且写入没有收口）</td></tr>
+    <tr><td>AGameStateBase / AGameState</td><td>同名，<code>ServerWorldTimeSeconds</code> 只是本地累加</td><td>UE 的 GameState 会复制到所有客户端；这里靠 EventSystem 通知 UI</td></tr>
+    <tr><td>UGameInstance</td><td>GameInstance</td><td>UE 的 GameInstance 持有 Subsystem、跨关卡数据、TimerManager 等；这里几乎为空</td></tr>
+    <tr><td>FTimerManager</td><td>TimerSystem</td><td>UE 用按到期时间排序的堆 + 64 位句柄；这里用线性扫描的 Slot Map（第 9、10 章）</td></tr>
+  </table></div>
+
+  <h2>1.8 项目介绍：30 秒 / 1 分钟 / 3 分钟</h2>
+  <p>结构固定：<strong>为什么做 → 解决什么问题 → 核心设计 → 最有技术含量的模块 → Demo 怎么验证 → 现在看来有什么不足</strong>。不要罗列模块名。</p>
+  <div class="ans">
+    <div class="q">30 秒版</div>
+    <p>为了真正理解 UE Gameplay Framework 的分层思想，我在 Unity 里实现了一个小框架：用 World 统一驱动 Actor 的生命周期，把“做决定的 Controller”和“存在于世界的 Pawn”分开，GameMode 管规则、GameState 对外公布状态。基础设施里最有含量的是一个 Slot Map 计时器，用 generation 句柄防止旧句柄误操作。我用一个“夺舍”玩法的 Demo 去高频触发 Possess 来验证它。复盘时我也发现了几处边界问题，比如默认句柄会被当成合法句柄。</p>
+  </div>
+  <div class="ans">
+    <div class="q">1 分钟版（在 30 秒版基础上补三点）</div>
+    <p><strong>① 为什么包装生命周期</strong>：Unity 每个 MonoBehaviour 自己 Update，顺序和开关都不好控制；我让 Actor 在 Start 时进入 World 的待加入队列，下一帧统一 BeginPlay、统一 Tick，并且可以单独关掉某个 Actor 的 Tick。</p>
+    <p><strong>② 计时器怎么做</strong>：数据放在连续数组里每帧线性遍历；句柄是“槽位下标 + 代数”，通过稀疏映射找到数组位置；删除用 swap-and-pop，O(1)；槽位回收时代数加一，旧句柄自然失效。回调采用“先收集、后执行、执行前再校验”，所以回调里删除自己或别人都安全。</p>
+    <p><strong>③ 不足</strong>：Tick 稳态不分配，但委托和闭包还会分配，不能叫 Zero-GC；统一 Tick 只覆盖了 Actor；事件队列满了会静默丢弃。</p>
+  </div>
+  <div class="ans">
+    <div class="q">3 分钟版（按“问题—设计—验证—反思”展开）</div>
+    <p><strong>背景（20 秒）</strong>：学 UE 时我发现最难的不是 API，而是“为什么要把 Pawn 和 Controller 拆开、GameMode 和 GameState 拆开”。所以我选择在 Unity 里从零搭一遍，逼自己把每个边界想清楚。</p>
+    <p><strong>架构（40 秒）</strong>：三层。Gameplay 层有 World、Actor、Pawn、Controller、GameMode、GameState；基础设施层有计时器、事件系统、单例模板、对象池、日志；验证层是两个 Demo 和一组运行时测试脚本。World 是场景级的单例，Actor 注册后统一 BeginPlay/Tick；GameMode 在 BeginPlay 时向 World 报到，再按 <code>GameStateClass</code> 反射生成对应的 GameState 并替它向 World 担保注册；GameState 状态变化时通过事件系统通知 UI，UI 不直接读 GameMode。</p>
+    <p><strong>重点模块（60 秒）</strong>：计时器。需求是大量计时器的增删要 O(1)、每帧遍历要快、外部持有的句柄要安全。我用了 Slot Map：dense 数组放数据，handle→dense 与 dense→handle 两个映射，删除时把末尾元素搬到洞里并修两条映射；句柄带 generation，槽位复用时加一，旧句柄比对失败就被拒绝。Tick 分两阶段，先把到期的句柄收集起来，再统一回调，每次回调前重新校验，解决回调重入。另外支持 interval 回调和掉帧追赶，追赶最多 5 次防止雪崩。事件系统用了按优先级的双缓冲环形队列，事件回调里再发事件只会进入下一帧，不会递归。</p>
+    <p><strong>验证（30 秒）</strong>：SoulDecay 是一个夺舍生存战：玩家的灵魂每占据一具肉体就开始寿命倒计时，必须不停夺舍别人的身体活下去；体型大的撞碎体型小的得分。它高频触发 Possess/UnPossess、计时器的创建停止和回调里销毁自身，正好压测这几个模块。</p>
+    <p><strong>反思（30 秒）</strong>：复盘时我发现 generation 从 0 开始，导致默认句柄等于第一个计时器的句柄，Demo 里 AI 肉体的空句柄恰好会命中它，只是当前参数下不会触发；三个单例子类没有调用基类的 Awake；事件队列溢出静默丢弃；对象池写了但没启用；测试是运行时脚本而不是 Unity Test Framework。如果重做，我会让 World 显式按顺序驱动计时器和事件，把句柄改成从 1 开始，并把纯逻辑拆成可单测的 C# 类。</p>
+  </div>
+
+  <h2>1.9 面试追问树</h2>
+  <!--code:text:追问树 · 项目全景-->
+Q1 为什么要在 Unity 里仿 UE 的 Gameplay Framework？
+ ├── Q1.1 Unity 原生没有这些概念吗？你解决了什么 Unity 解决不了的问题？
+ │    └── Q1.1.1 那为什么不直接用 Unity 的 ECS / DOTS？
+ ├── Q1.2 AActor 为什么继承 MonoBehaviour，而不是纯 C# 类？
+ │    └── Q1.2.1 那 Tick 和 Unity 的 Update 是什么关系？性能更好吗？
+ └── Q1.3 你说“统一 Tick”，TimerSystem 和 EventSystem 也被统一了吗？
+      └── Q1.3.1 顺序不确定会造成什么现象？
+Q2 这个框架最大的问题是什么？如果重做你会怎么改？
+ └── Q2.1 为什么当时没发现？（测试为什么没覆盖）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q1.1　Unity 原生没有这些概念吗？你的框架解决了什么？</div>
+    <p><b>L1 · 30 秒</b>　Unity 给的是“GameObject + 组件 + 场景”这一层，没有规定玩法代码的分层。我补的是一套约定：谁控制谁（Controller/Pawn）、规则写在哪（GameMode）、状态从哪对外公布（GameState），以及统一的 Actor 生命周期。</p>
+    <p><b>L2 · 正常回答</b>　具体有三个收益：一是 Actor 的 BeginPlay/Tick 由 World 驱动，可以统一开关、统一顺序（倒序遍历）、统一传 dt；二是 Controller 和 Pawn 解耦后，“换身体”只是改两条引用，玩家输入与 AI 逻辑可以替换同一具身体；三是 UI 只订阅 GameState 的事件，不依赖规则对象。</p>
+    <p><b>L3 · 深入</b>　这些都不是“Unity 做不到”，而是“Unity 不替你约定”。项目的价值在于把约定固化成基类和注册流程，例如 GameMode 必须先 <code>RegisterGameMode</code> 再生成 GameState，World 只接受当前裁判担保的 GameState。</p>
+    <p><b>L4 · 面试官攻击</b>　“那你这不就是换个名字的 MonoBehaviour 吗？” → <b>修正回答</b>：承认底层仍是 MonoBehaviour，区别在“控制权和数据流的约束”：Actor 的逻辑入口从 Update 换成了由 World 调用的 Tick，生命周期多了一个可控的 BeginPlay 时机；但我也必须承认这层约束目前只覆盖 Actor，计时器和事件还是各自 Update，这是我想改的第一件事。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q1.1.1　为什么不直接用 Unity DOTS / ECS？</div>
+    <p><b>L2</b>　目标不同：这个项目要学的是“面向对象的 Gameplay 分层”，也就是 UE 那一套；ECS 解决的是大规模同构实体的数据布局与并行。两者也不矛盾——我的 TimerSystem 本身就借用了 ECS 常见的稀疏集思想（dense 数组 + 稀疏映射 + 带版本的 ID）。</p>
+    <p><b>L4 攻击</b>　“那你懂 ECS 的 Entity 为什么要带 Version 吗？” → 和我的 TimerHandle 一样：Entity 下标会被复用，Version 用来让旧 Entity 引用失效（第 9 章）。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q1.2　AActor 为什么继承 MonoBehaviour？</div>
+    <p><b>L2</b>　为了直接复用 Unity 的 Transform、物理回调（OnCollisionEnter）、Inspector 序列化和 Prefab；代价是生命周期仍然受 Unity 支配（Awake/Start/OnDestroy 的时机由引擎决定），而且 Unity 对象有“假 null”语义。</p>
+    <p><b>L3</b>　纯 C# 的 Actor 更容易单元测试、也能完全掌控创建与销毁，但需要自己同步 Transform 和物理，工作量大很多。折中方案是“表现层 MonoBehaviour + 逻辑层纯 C#”，逻辑层由 World 持有并驱动。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q1.2.1　Tick 比 Update 性能更好吗？</div>
+    <p><b>L2</b>　理论上，Unity 每个 MonoBehaviour 的 Update 都是一次从引擎原生层到托管层的调用，Unity 官方博客也讨论过“大量 Update 不如一个管理器循环调用”的问题；World 的统一 Tick 把 N 次跨层调用变成 1 次 + N 次普通虚调用。</p>
+    <p><b>L4 攻击</b>　“你测过吗？” → <b>修正回答</b>：没有在 Unity 里实测，所以我不会把它当成主要收益。我做统一 Tick 的主要目的是<strong>控制时机</strong>（BeginPlay 统一在下一帧、可按 Actor 关 Tick），性能是次要收益，而且 World 里的 <code>List.Contains</code> 注册是 O(n)，规模大了反而会成为瓶颈。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q1.3.1　执行顺序不确定会造成什么现象？</div>
+    <p><b>L2</b>　最典型的是“偶发晚一帧”：Controller 在 World.Update 里触发事件，如果 EventSystem.Update 先于 World 执行，事件要到下一帧才派发；计时器在 World.Update 里创建，如果 TimerSystem 排在后面，它创建的当帧就会被加上一整帧的 dt。SoulDecay 里夺舍后 UI 可能闪 1 帧 “DIE”（第 15 章分析）。</p>
+    <p><b>L3</b>　解决方法：让一个顶层 GameLoop（或 World）按固定顺序显式调用 <code>Timer.Tick → Actor.Tick → Event.Pump → UI</code>，基础设施不再自己 Update；或者至少用 <code>[DefaultExecutionOrder]</code> 固定顺序。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“我实现了一个类 UE 的完整 Gameplay 框架，支持 Zero-GC 计时器和完整的单元测试。”</p>
+    <p><b>问题在哪</b>：三个词全部可以被一句追问击穿——“完整”（没有 PlayerState、复制、TickGroup）、“Zero-GC”（TimerData 含委托，调用方会分配）、“单元测试”（是挂在 MonoBehaviour 上的运行时脚本，没有挂进任何场景）。</p>
+    <p><b>更好的回答</b>：“我实现了一个借鉴 UE 分层思想的学习型 Gameplay 框架，计时器的 Tick 稳态零分配，配了 22 个运行时测试用例；复盘后我知道它离 Unity Test Framework 的自动化测试还有差距。”</p>
+  </div>
+
+  <h2>1.10 发散：面试官会从“架构”这个词追到哪里</h2>
+  <div class="cards">
+    <div class="card"><div class="t">组合 vs 继承</div><p>你的 Pawn/Controller/GameMode 都是继承体系；UE 也是深继承 + 组件。追问：阵营为什么用接口 <code>IFactionMember</code> 而不是基类字段？——这是 Demo 里组合思想的体现，可以主动讲。</p></div>
+    <div class="card"><div class="t">引擎分层</div><p>平台层 → 核心（内存、容器、数学）→ 资源 → 渲染/物理/音频 → Gameplay 框架 → 玩法。你的项目位于“Gameplay 框架”这一层，下面依赖 Unity。</p></div>
+    <div class="card"><div class="t">数据驱动</div><p>SurvivalGameMode 里重/轻肉体的速度、寿命写死在代码里；追问“策划要改数值怎么办”→ ScriptableObject / 配置表，与 HOK 这类项目的配置表体系对应。</p></div>
+    <div class="card"><div class="t">可测试性</div><p>所有核心类都是 MonoBehaviour 单例，导致无法在 EditMode 下纯逻辑测试——这是“架构影响测试”的典型例子（第 20 章）。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>真实架构：<strong>GameInstance 不持有 World</strong>；World 是场景级懒单例，只驱动 Actor；Timer / Event / UI <strong>各自 Update，顺序未定义</strong>。</li>
+    <li>AActor 本身是 MonoBehaviour <strong>组件</strong>，不是组件容器。</li>
+    <li>GamePlayTest2 验证“GameMode → 计时器 → 事件 → UI → Possess”的开局闭环；SoulDecay 用夺舍<strong>高频压测 Possess、计时器与回调重入</strong>。</li>
+    <li>ObjectPool、ThreadSafeEventSystem、<code>Singleton&lt;T&gt;</code> <strong>写了没用</strong>；测试脚本<strong>没挂场景</strong>。</li>
+    <li>介绍项目：为什么做 → 解决什么 → 核心设计 → 最难模块 → Demo 验证 → 不足。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：一帧里有几个独立的 Update 参与 Gameplay？各自做什么？</summary><p>至少四个：World（Actor 的 BeginPlay 与倒序 Tick）、TimerSystem（两阶段回调）、EventSystem（交换缓冲并派发）、UI（拉取剩余时间）；另外物理回调 OnCollisionEnter 也不经过 World。它们之间没有设定执行顺序。</p></details>
+  <details class="quiz"><summary>自测 2：为什么说“ObjectPool 已经在 SoulDecay 中使用”是错的？</summary><p>SurvivalGameMode 声明了三个池子字段，但初始化语句被注释掉；GetOrCreatePawn / GetOrCreateAIController / RecycleObject 都没有调用方，SpawnRandomAI 实际走的是 CreatePawn + new GameObject，死亡时 Destroy。</p></details>
+</section>

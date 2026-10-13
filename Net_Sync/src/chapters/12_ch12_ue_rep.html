@@ -1,0 +1,170 @@
+<section class="chapter" id="ch12">
+<div class="ch-head"><div class="no">CHAPTER 12</div><h1>Unreal 属性复制与 RPC：状态与事件</h1><p class="lead">属性复制同步的是“现在是什么样”，RPC 传递的是“刚才发生了什么”。用错一个，就会出现“中途加入的人看不到门是开的”或者“满屏重复的受击特效”。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>写出属性复制的完整声明（UPROPERTY、GetLifetimeReplicatedProps、条件、RepNotify、Push Model），知道 OnRep 在哪端触发。</li>
+<li>用实测理解属性复制的三个语义：只保证最终一致、中间值会被合并、丢包后发最新值。</li>
+<li>掌握 RPC 的三种类型 × 可靠性 × “从哪端调用、Actor 归谁所有 → 在哪执行”表，以及可靠 RPC 的队头阻塞与缓冲溢出。</li>
+<li>能根据数据的性质选择：属性 / 不可靠多播 / 可靠 RPC / GameplayCue / 计数器 + OnRep。</li>
+</ul></div>
+
+<div class="ans30"><span class="h">30 秒面试版答案</span>
+<p>属性复制：在 UPROPERTY 上标 <code>Replicated</code> 或 <code>ReplicatedUsing=OnRep_X</code>，在 <code>GetLifetimeReplicatedProps</code> 里用 <code>DOREPLIFETIME(_CONDITION)</code> 注册，可加条件（OwnerOnly、SkipOwner、SimulatedOnly、InitialOnly 等）。服务器按连接保存影子状态，只发变化的属性；它只保证<strong>最终一致</strong>：短时间内的多次修改会被合并成一次，丢包后不重发旧包而是发最新值；中途加入的客户端也能拿到当前值。C++ 里 OnRep 只在客户端值变化时调用，服务器要自己手动调。RPC 分 Server（拥有者客户端 → 服务器）、Client（服务器 → 拥有者客户端）、NetMulticast（服务器 → 所有相关端），可靠 RPC 保证到达且在 Actor 通道内有序，但会队头阻塞、缓冲满了会断线；不可靠 RPC 可能丢。原则：持续状态用属性，一次性表现用不可靠多播或 GameplayCue，关键一次性事件才用可靠 RPC，而且尽量用“计数器属性 + OnRep”代替。</p></div>
+
+<h2>12.1 属性复制：声明与条件</h2>
+<!--code:cpp:UE C++：复制属性的完整写法（示例，未在本机编译）-->
+// MyCharacter.h
+UPROPERTY(ReplicatedUsing = OnRep_Health)
+float Health = 100.f;
+
+UPROPERTY(Replicated)
+int32 Ammo = 30;                       // 只有自己需要知道弹药数 → OwnerOnly
+
+UPROPERTY(ReplicatedUsing = OnRep_BurstCounter)
+uint8 BurstCounter = 0;                // 开火计数器：每开一枪 +1，用来驱动别人端的开火特效
+
+UFUNCTION() void OnRep_Health(float OldHealth);     // 可以带一个参数接收旧值
+UFUNCTION() void OnRep_BurstCounter();
+
+// MyCharacter.cpp
+void AMyCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+    FDoRepLifetimeParams Params;
+    Params.bIsPushBased = true;                                  // Push Model：只有标脏才检查
+    DOREPLIFETIME_WITH_PARAMS_FAST(AMyCharacter, Health, Params);
+
+    Params.Condition = COND_OwnerOnly;
+    DOREPLIFETIME_WITH_PARAMS_FAST(AMyCharacter, Ammo, Params);
+
+    Params.Condition = COND_SkipOwner;                           // 开枪者自己本地预测过了，不需要
+    DOREPLIFETIME_WITH_PARAMS_FAST(AMyCharacter, BurstCounter, Params);
+}
+
+void AMyCharacter::ApplyDamage_Server(float Damage)             // 只在服务器上调用
+{
+    const float Old = Health;
+    Health = FMath::Max(0.f, Health - Damage);
+    MARK_PROPERTY_DIRTY_FROM_NAME(AMyCharacter, Health, this);  // Push Model 下必须标脏
+    OnRep_Health(Old);                                           // C++ 中服务器不会自动调 OnRep
+}
+<!--/code-->
+<div class="tbl"><table>
+<tr><th>复制条件（<code>ELifetimeCondition</code>）</th><th>发给谁</th><th>典型用途</th></tr>
+<tr><td><code>COND_None</code></td><td>所有相关连接（默认）</td><td>血量、状态</td></tr>
+<tr><td><code>COND_InitialOnly</code></td><td>只在初始复制时发一次</td><td>出生时确定、之后不变的配置（队伍、皮肤）</td></tr>
+<tr><td><code>COND_OwnerOnly</code></td><td>只发给拥有者</td><td>弹药、背包、技能冷却等私有数据</td></tr>
+<tr><td><code>COND_SkipOwner</code></td><td>发给除拥有者外的所有人</td><td>拥有者本地预测过的东西（开火计数器、预测的动画状态）</td></tr>
+<tr><td><code>COND_SimulatedOnly</code> / <code>COND_AutonomousOnly</code></td><td>只发给模拟代理 / 只发给自主代理</td><td>只有旁观者需要的平滑数据 / 只有控制者需要的校正数据</td></tr>
+<tr><td><code>COND_SimulatedOrPhysics</code></td><td>模拟代理或物理模拟的对象</td><td>物理相关数据</td></tr>
+<tr><td><code>COND_InitialOrOwner</code></td><td>初始复制 + 之后只给拥有者</td><td>—</td></tr>
+<tr><td><code>COND_Custom</code></td><td>由 <code>DOREPLIFETIME_ACTIVE_OVERRIDE</code> 在 PreReplication 中动态开关</td><td>按游戏状态决定是否复制</td></tr>
+<tr><td><code>COND_ReplayOrOwner</code> / <code>COND_ReplayOnly</code> / <code>COND_SkipReplay</code> 等</td><td>与回放（DemoNetDriver）相关</td><td>只为回放录制的数据</td></tr>
+<tr><td><code>COND_Dynamic</code> / <code>COND_Never</code></td><td>运行时可改的条件 / 永不复制（UE5 新增）</td><td>—</td></tr>
+</table></div>
+<div class="tbl"><table>
+<tr><th>OnRep 语义</th><th>说明 <span class="tag ue">UE 文档 / 源码</span></th></tr>
+<tr><td>在哪端触发</td><td><strong>C++：只在客户端</strong>收到新值时触发，服务器修改不会自动调用；<strong>蓝图 RepNotify：服务器上通过蓝图设置变量时也会调用</strong>——两者不一致是常见坑</td></tr>
+<tr><td>何时触发</td><td>默认 <code>REPNOTIFY_OnChanged</code>：收到的值与本地不同才触发；<code>REPNOTIFY_Always</code>：每次收到都触发（客户端本地改过值、服务器再发同样的值时有用）</td></tr>
+<tr><td>多个属性</td><td>同一 Actor 一次更新里的多个属性会先全部写入、再依次调用各自的 OnRep，所以 OnRep 里读到的其他属性是“同一批”的新值</td></tr>
+<tr><td>对象引用</td><td>复制的是 NetGUID；客户端还没有那个对象时指针为空，等对象到达、映射完成后会再次触发 OnRep</td></tr>
+</table></div>
+<p>数组与结构体：<code>TArray</code> 按元素做增量；大数组（背包、Buff 列表）用 <code>FFastArraySerializer</code>，元素变化时 <code>MarkItemDirty</code>，客户端有 <code>PostReplicatedAdd / PostReplicatedChange / PreReplicatedRemove</code> 逐元素回调（GAS 的激活效果列表就是这么做的）。结构体默认按成员增量复制；实现了 <code>NetSerialize</code>（<code>WithNetSerializer</code> 特征）就作为整体原子复制，常用来做量化（如 <code>FVector_NetQuantize10</code>）。</p>
+
+<h2>12.2 属性复制的三个语义</h2>
+<!--seq {"p":["服务器","网络（下行）","客户端"],"pc":["b","a","t"],
+"s":[[0,0,"0 ms：Health 100 → 75","b"],[0,0,"10 ms：75 → 50","b"],[0,0,"20 ms：50 → 25","b"],[0,0,"30 ms：25 → 10","b"],
+[0,1,"约 50 ms：本 Actor 的网络更新到点，发送 Health = 10","net"],[1,2,"到达 → OnRep_Health(Old = 100)：中间的 75 / 50 / 25 从未出现在客户端","rep"],
+[0,0,"300 ms：10 → 0","b"],[0,1,"约 350 ms：发送 Health = 0（此包丢失）","net"],[0,0,"约 1 个 RTT 后发现丢包 → 把 Health 重新标脏","b"],[0,1,"约 450 ms：再次发送 —— 发的是“当前值”，不是旧包","net"],[1,2,"OnRep_Health(Old = 10)","rep"]],
+"cap":"<b>图 12-1</b> 属性复制只保证<strong>最终一致</strong>：两次网络更新之间的多次修改被合并；丢包后发送的是最新值。所以不能用“OnRep 的次数”去数事件次数（受击次数、开枪次数），要用计数器或事件通道。"} -->
+<h3>实测：同一组受击，属性 vs RPC <span class="tag ex">实测 E14</span></h3>
+<p>模型：0 / 10 / 20 / 30 ms 连续 4 次受击（100 → 75 → 50 → 25 → 10），300 ms 再受击一次（→ 0）。属性：NetUpdateFrequency = 10（每 100 ms 一次更新，相位随机），下行丢包 20%，单程 40 ms，丢包后约 90 ms 发现并在下次更新补发最新值。RPC：每次受击发一个多播；可靠 RPC 丢包后 100 ms 重传、按序交付。2 万次试验：</p>
+<div class="tbl"><table>
+<tr><th>通道</th><th>客户端收到什么</th><th>延迟</th><th>适合</th></tr>
+<tr><td>复制属性 Health</td><td>平均只触发 [[E14.onrep|.2f]] 次 OnRep（5 次变化中的中间值大多被合并），但<strong>最终值一定正确</strong></td><td>最终值平均在 [[E14.finalT|.0f]] ms 到达（第 5 次受击在 300 ms）</td><td>持续状态；中途加入也能拿到</td></tr>
+<tr><td>不可靠多播 RPC</td><td>平均收到 [[E14.unrel|.2f]] / 5 个事件</td><td>最低</td><td>可以丢的表现（受击特效、音效）</td></tr>
+<tr><td>可靠多播 RPC</td><td>5 个都收到、按序</td><td>平均 [[E14.relLat|.0f]] ms（前一个丢了，后面的即使先到也要等：队头阻塞）</td><td>必须到达、次数要准的关键事件，且频率低</td></tr>
+</table></div>
+<!--dtab {"rows":"E14.repDist","cols":[["这次试验里 OnRep 触发次数","0"],["占比 %","1",".1f"]],"cap":"<b>表 12-1</b> OnRep 次数分布：大多数试验只触发 2 次（4 次连击合并成 1 次 + 最后 1 次），只有更新时刻恰好落在连击中间时才会触发 3 次。"} -->
+
+<h2>12.3 RPC：类型、可靠性、在哪执行</h2>
+<!--code:cpp:UE C++：三种 RPC（示例，未在本机编译）-->
+UFUNCTION(Server, Reliable, WithValidation)          // 拥有者客户端 → 服务器
+void ServerFire(FVector_NetQuantize Origin, FVector_NetQuantizeNormal Dir, float ClientTime);
+
+UFUNCTION(Client, Reliable)                            // 服务器 → 拥有者客户端
+void ClientRejectFire(uint8 Reason);
+
+UFUNCTION(NetMulticast, Unreliable)                    // 服务器 → 服务器自己 + 所有相关客户端
+void MulticastHitFX(FVector_NetQuantize Where);
+
+bool AMyWeapon::ServerFire_Validate(FVector_NetQuantize Origin, FVector_NetQuantizeNormal Dir, float ClientTime)
+{
+    return Dir.IsNormalized();                          // 返回 false 会把这个客户端踢掉：只用于“明显作弊”的检查
+}
+void AMyWeapon::ServerFire_Implementation(FVector_NetQuantize Origin, FVector_NetQuantizeNormal Dir, float ClientTime)
+{
+    if (!FireRateBucket.TryConsume(GetWorld()->GetTimeSeconds())) { ClientRejectFire(1); return; }  // 射速校验用令牌桶
+    // ... 服务器权威的弹药扣减、延迟补偿命中判定（第 10 章）
+}
+<!--/code-->
+<div class="tbl"><table>
+<tr><th>在哪调用</th><th>RPC 类型</th><th>Actor 归调用方连接所有</th><th>Actor 归其他客户端 / 服务器 / 无主</th></tr>
+<tr><td rowspan="3">服务器</td><td>NetMulticast</td><td colspan="2">服务器 + 所有（相关的）客户端</td></tr>
+<tr><td>Server</td><td colspan="2">在服务器上执行（相当于本地调用）</td></tr>
+<tr><td>Client</td><td>归某个客户端所有 → 在那个客户端执行</td><td>无主 / 服务器所有 → 在服务器执行</td></tr>
+<tr><td rowspan="3">客户端</td><td>Server</td><td class="yes">在服务器执行</td><td class="no">被丢弃</td></tr>
+<tr><td>Client</td><td colspan="2">在调用方客户端本地执行</td></tr>
+<tr><td>NetMulticast</td><td colspan="2">只在调用方客户端本地执行（不会发到网络上）</td></tr>
+</table></div>
+<p class="tcap"><b>表 12-2</b> RPC 调用与执行端 <span class="tag ue">UE 文档</span>。最常见的 bug 是第五行：客户端对“不归自己所有”的 Actor 调 Server RPC，直接被丢弃。</p>
+<div class="tbl"><table>
+<tr><th>可靠性</th><th>保证</th><th>代价 / 风险</th></tr>
+<tr><td>Reliable</td><td>一定到达；同一 Actor 通道内按调用顺序执行</td><td>丢包时后面的可靠 RPC 要等它（E14 平均 [[E14.relLat|.0f]] ms）；可靠缓冲有上限，持续高频发送会溢出并<strong>断开连接</strong></td></tr>
+<tr><td>Unreliable</td><td>不保证到达、不保证顺序</td><td>带宽紧张或丢包时会丢；适合高频、可丢的数据（移动、表现）</td></tr>
+</table></div>
+<div class="co warn"><span class="h">多播与相关性</span><p>NetMulticast 只发给“当前与该 Actor 相关”的连接；之后才变得相关、或中途加入的客户端<strong>收不到之前的多播</strong>。所以“门打开了”“宝箱被开过”这种持续状态必须用属性（新来的人能拿到当前值），多播只用于“此刻播一下就行”的表现。传统复制系统下，同一 Actor 的属性与 RPC 到达顺序也没有固定保证（Iris 改为 RPC 在状态数据之后发送）<span class="tag ue">UE 文档</span>。</p></div>
+
+<h2>12.4 怎么选：状态、事件，还是计数器</h2>
+<!--flow {"w":900,"h":300,
+"boxes":[
+{"id":"q1","x":300,"y":8,"w":300,"h":46,"t":"中途加入的人需要知道它吗？","s":"它是“现在的样子”还是“刚才发生的事”","c":"a"},
+{"id":"p","x":20,"y":100,"w":250,"h":56,"t":"复制属性（+ OnRep）","s":"血量、门开关、比分、装备","c":"b","hl":true},
+{"id":"q2","x":330,"y":100,"w":240,"h":56,"t":"丢了 / 合并了有关系吗？","c":"a"},
+{"id":"u","x":620,"y":100,"w":260,"h":56,"t":"不可靠多播 / GameplayCue","s":"受击特效、音效、枪口火光","c":"g"},
+{"id":"q3","x":330,"y":196,"w":240,"h":56,"t":"频率高吗？","s":"每秒多次","c":"a"},
+{"id":"c","x":20,"y":196,"w":270,"h":90,"t":"计数器属性 + OnRep","s":"BurstCounter / HitCounter：每发生一次 +1","s2":"不可靠 + 自动合并 + 不会断线；次数靠差值","c":"p","hl":true},
+{"id":"r","x":620,"y":196,"w":260,"h":56,"t":"可靠 RPC（少用）","s":"结算、关键一次性指令","c":"r"}],
+"arrows":[{"from":"q1","to":"p","label":"需要","p":[[300,31],[145,31],[145,100]],"lx":200,"ly":24},{"from":"q1","to":"q2","label":"不需要","lx":456,"ly":82},
+{"from":"q2","to":"u","label":"没关系"},{"from":"q2","to":"q3","label":"有关系","lx":456,"ly":180},
+{"from":"q3","to":"c","label":"高","lx":296,"ly":216},{"from":"q3","to":"r","label":"低","lx":580,"ly":216}],
+"cap":"<b>图 12-2</b> 数据通道的选择。计数器模式（ShooterGame 的 <code>BurstCounter</code> 就是这样：服务器每次开火 +1，模拟代理在 OnRep 里播放开火表现）兼顾了“次数可推算”和“不阻塞、可合并”。"} -->
+
+<div class="co net"><span class="h">对照 HOK</span><p>帧同步里没有“属性复制 vs RPC”的选择题：网络上只有输入，状态与事件都是本地演算出来的（第 5 章的结果事件）。HOK 的上行技能命令需要“必须到达、按序”，它没有用可靠通道，而是用“不可靠 + 全量冗余 + 序号”（第 7 章）——和这里“计数器属性 + OnRep”是同一个思路：<strong>用幂等的、可合并的表示代替可靠有序的消息流</strong>。</p></div>
+
+<div class="co warn"><span class="h">面试注意</span><p>高频题：“属性复制和 RPC 的区别、各自适用场景”（状态 vs 事件、最终一致 vs 逐条、新加入者能否拿到）；“OnRep 在服务器会调用吗”（C++ 不会、蓝图会）；“Reliable 有什么风险”（队头阻塞、缓冲溢出断线，Tick 里发 Reliable 是大忌）；“为什么客户端调 Server RPC 没执行”（所有权）。能讲出 E14 的“5 次变化只触发 2 次 OnRep”，说明你理解了属性复制的合并语义。</p></div>
+
+<h2>12.5 坑位</h2>
+<div class="tbl"><table>
+<tr><th>坑</th><th>后果</th><th>修正</th></tr>
+<tr><td>用 OnRep 次数统计事件次数</td><td>次数偏少（被合并）</td><td>计数器差值，或事件通道</td></tr>
+<tr><td>持续状态用多播</td><td>中途加入 / 后来相关的人看不到</td><td>属性</td></tr>
+<tr><td>Tick 里发 Reliable RPC</td><td>弱网下可靠缓冲溢出，连接被关闭</td><td>高频数据用不可靠，或合并成属性</td></tr>
+<tr><td>C++ 服务器改了属性却期待 OnRep 执行</td><td>服务器端（Listen Server 主机）没表现</td><td>服务器手动调用 OnRep 或抽出公共函数</td></tr>
+<tr><td>Push Model 下忘记标脏</td><td>属性永远不复制</td><td>修改处统一 <code>MARK_PROPERTY_DIRTY</code>，或封装 Setter</td></tr>
+<tr><td>_Validate 里做业务校验（射速等）</td><td>网络抖动导致的正常玩家被踢</td><td>_Validate 只查明显非法；业务校验在 _Implementation 里拒绝并回滚</td></tr>
+<tr><td>大数组整体复制</td><td>每次改一个元素都可能触发大量比较 / 发送</td><td>FFastArraySerializer</td></tr>
+</table></div>
+
+<div class="recap"><div class="t">本章速记</div><ul>
+<li>属性：<code>Replicated / ReplicatedUsing</code> + <code>DOREPLIFETIME(_CONDITION / _WITH_PARAMS_FAST)</code>；条件 OwnerOnly / SkipOwner / InitialOnly …；Push Model 要标脏。</li>
+<li>语义：最终一致、中间值合并、丢包发最新值；E14：5 次变化平均 [[E14.onrep|.2f]] 次 OnRep。C++ OnRep 只在客户端触发。</li>
+<li>RPC：Server（只能由拥有者客户端发起）/ Client / NetMulticast（只发给相关连接）；Reliable 有序但队头阻塞（E14 [[E14.relLat|.0f]] ms）且可能溢出断线。</li>
+<li>选择：状态 → 属性；可丢表现 → 不可靠多播 / GameplayCue；高频且要计数 → 计数器 + OnRep；低频关键 → 可靠 RPC。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：子弹打中墙留下弹孔，用什么同步？</summary>弹孔本身是表现，丢了不影响逻辑，用不可靠多播或 GameplayCue（或者干脆由每端根据复制下来的开火计数器 + 命中结果本地生成）；如果弹孔要长期存在且中途加入的人也要看到，就需要服务器维护一个复制的“弹孔列表”（FFastArraySerializer，限制数量）。</details>
+<details class="quiz"><summary>自测 2：为什么开火计数器要用 COND_SkipOwner？</summary>开枪的人自己在本地已经预测播放了开火表现；如果计数器也复制给他，OnRep 里会再播一次，出现重复特效。SkipOwner 让只有其他人（模拟代理）通过 OnRep 播放。</details>
+<details class="quiz"><summary>自测 3：Listen Server 上，主机玩家受伤时 C++ 的 OnRep_Health 会执行吗？</summary>不会自动执行——主机是服务器，C++ OnRep 只在客户端收到复制时调用。所以服务器改血量后要手动调用 OnRep_Health（或共同的处理函数），否则主机玩家看不到受伤表现。蓝图 RepNotify 则会在服务器上自动调用。</details>
+</section>

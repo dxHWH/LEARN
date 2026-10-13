@@ -1,0 +1,300 @@
+<section class="chapter" id="ch5">
+<div class="ch-head"><div class="no">CHAPTER 05</div><h1>无模型预测：蒙特卡洛与时序差分</h1><p class="lead">不知道 $p(s',r\mid s,a)$ 时，只能靠玩游戏采样来估计价值。蒙特卡洛等回合结束、用真实回报，无偏但方差大；时序差分走一步就更新、用估计值替代剩余回报，有偏但方差小。把两者连起来的是 n 步回报、λ-回报和资格迹。本章最后推出的“TD 误差累加”恒等式，就是 PPO 里 GAE 的数学基础。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>写出 MC、TD(0)、n 步 TD、TD(λ) 的更新式，说清每个式子里的“目标”是什么。</li>
+<li>推出 TD 目标的偏差来源，并用随机游走实测“TD 有偏但方差小、通常学得更快”。</li>
+<li>证明 <strong>TD 误差累加 = MC 误差</strong>：$G_t-V(S_t)=\sum_{k\ge0}\gamma^k\delta_{t+k}$，以及 λ 版本 $G^\lambda_t-V(S_t)=\sum_k(\gamma\lambda)^k\delta_{t+k}$。</li>
+<li>理解批量更新下 MC 与 TD 收敛到不同的解（样本均值 vs 确定性等价），以及资格迹的前向 / 后向视角为什么等价。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>MC 和 TD 都是用采样估计 $V_\pi$，区别在<strong>更新目标</strong>：MC 用完整回报 $G_t$，要等回合结束，目标是 $V_\pi(s)$ 的无偏样本，但它累积了后面每一步的随机性，方差大；TD(0) 用 $R_{t+1}+\gamma V(S_{t+1})$，走一步就能更新（<strong>自举</strong>），方差只来自一步，但 $V$ 不准时目标有偏，偏差等于 $\gamma\,\E[V(S_{t+1})-V_\pi(S_{t+1})]$。TD 利用了马尔可夫性，在马尔可夫环境里通常学得更快；MC 不依赖马尔可夫性，对部分可观测更稳。两者之间可以用 n 步回报或 λ-回报连续过渡，λ 越大越接近 MC。关键恒等式是 MC 误差等于 TD 误差的折扣累加 $G_t-V(S_t)=\sum_k\gamma^k\delta_{t+k}$，把 γ 换成 γλ 就得到 λ-回报，也就是 PPO 里 GAE 的写法；资格迹是在线实现 λ-回报的方式。</p></div>
+
+<h2>5.1 从 DP 到采样：三种 backup</h2>
+<p>第 4 章的 DP 每次更新都要对所有动作、所有后继状态求期望（全宽 backup），前提是知道模型。游戏引擎是一个“能玩但给不出公式”的模拟器，只能<strong>采样</strong>：让 Bot 按策略 $\pi$ 打一局，得到一条轨迹 $S_0,A_0,R_1,S_1,A_1,R_2,\dots,S_T$。用样本估计期望有两种思路，区别在于“目标往前看多远”：</p>
+<!--graph {"w":860,"h":332,
+"nodes":[
+{"id":"d0","x":140,"y":36,"r":17,"t":"s","c":"b","hl":true},
+{"id":"da1","k":"act","x":80,"y":104,"c":"k"},{"id":"da2","k":"act","x":140,"y":104,"c":"k"},{"id":"da3","k":"act","x":200,"y":104,"c":"k"},
+{"id":"d1","x":62,"y":172,"r":13,"t":"s′","ts":10,"c":"b"},{"id":"d2","x":98,"y":172,"r":13,"t":"s′","ts":10,"c":"b"},
+{"id":"d3","x":122,"y":172,"r":13,"t":"s′","ts":10,"c":"b"},{"id":"d4","x":158,"y":172,"r":13,"t":"s′","ts":10,"c":"b"},
+{"id":"d5","x":182,"y":172,"r":13,"t":"s′","ts":10,"c":"b"},{"id":"d6","x":218,"y":172,"r":13,"t":"s′","ts":10,"c":"b"},
+{"id":"m0","x":430,"y":36,"r":17,"t":"s","c":"o","hl":true},
+{"id":"ma1","k":"act","x":430,"y":82,"c":"k"},
+{"id":"m1","x":430,"y":124,"r":13,"t":"","c":"o"},
+{"id":"ma2","k":"act","x":430,"y":166,"c":"k"},
+{"id":"m2","x":430,"y":208,"r":13,"t":"","c":"o"},
+{"id":"mT","x":430,"y":262,"r":15,"t":"T","ts":11,"c":"o","term":true},
+{"id":"t0","x":720,"y":36,"r":17,"t":"s","c":"g","hl":true},
+{"id":"ta1","k":"act","x":720,"y":96,"c":"k"},
+{"id":"t1","x":720,"y":156,"r":15,"t":"s′","ts":11,"c":"g","fill":"#BBF7D0","lab":"用 V(s′) 自举","lp":"r"}],
+"edges":[
+{"f":"d0","t":"da1","arrow":false,"c":"b"},{"f":"d0","t":"da2","arrow":false,"c":"b"},{"f":"d0","t":"da3","arrow":false,"c":"b"},
+{"f":"da1","t":"d1","c":"b"},{"f":"da1","t":"d2","c":"b"},{"f":"da2","t":"d3","c":"b"},{"f":"da2","t":"d4","c":"b"},{"f":"da3","t":"d5","c":"b"},{"f":"da3","t":"d6","c":"b"},
+{"f":"m0","t":"ma1","arrow":false,"c":"o","sw":2.2},{"f":"ma1","t":"m1","c":"o","sw":2.2},{"f":"m1","t":"ma2","arrow":false,"c":"o","sw":2.2},{"f":"ma2","t":"m2","c":"o","sw":2.2},{"f":"m2","t":"mT","c":"o","sw":2.2,"dash":true,"l":"⋯ 一直到终止","dx":52},
+{"f":"t0","t":"ta1","arrow":false,"c":"g","sw":2.2},{"f":"ta1","t":"t1","c":"g","sw":2.2,"l":"Rₜ₊₁","dx":24}],
+"texts":[
+{"x":140,"y":222,"a":"middle","cls":"sm b","t":"DP：全宽 · 一步 · 自举"},{"x":140,"y":242,"a":"middle","cls":"xs","t":"对所有 a、s′ 求期望，需要模型"},
+{"x":430,"y":300,"a":"middle","cls":"sm b","t":"MC：采样 · 整条 · 不自举"},{"x":430,"y":318,"a":"middle","cls":"xs","t":"目标 = 真实回报 Gₜ"},
+{"x":720,"y":214,"a":"middle","cls":"sm b","t":"TD(0)：采样 · 一步 · 自举"},{"x":720,"y":234,"a":"middle","cls":"xs","t":"目标 = Rₜ₊₁ + γV(Sₜ₊₁)"}],
+"cap":"<b>图 5-1</b>　三种 backup。空心圆是状态，实心点是动作，粗线是一次更新用到的路径。DP 全宽但只看一步；MC 只看一条样本路径，但一直看到终止；TD 只看一条路径的一步，剩下的用当前估计 $V(S_{t+1})$ 顶替。"} -->
+<p>三者都在逼近同一个量 $V_\pi(s)=\E_\pi[G_t\mid S_t=s]=\E_\pi[R_{t+1}+\gamma V_\pi(S_{t+1})\mid S_t=s]$。MC 用的是第一个等号（直接采样 $G_t$），DP 和 TD 用的是第二个等号（Bellman 期望方程）：DP 精确计算期望，TD 用一个样本代替期望，并用 $V$ 代替未知的 $V_\pi$。</p>
+
+<h2>5.2 蒙特卡洛预测</h2>
+<p>MC 的思路最直接：价值就是回报的期望，那就打很多局，把每次访问状态 $s$ 之后的实际回报取平均。同一局里状态 $s$ 可能出现多次：只用第一次出现之后的回报叫<strong>首次访问 MC</strong>（每局给出 $V_\pi(s)$ 的一个独立无偏样本），每次出现都用叫<strong>每次访问 MC</strong>（样本之间相关，有限样本下有偏，但仍然一致，且更容易推广到函数近似）。</p>
+<p>实现时不需要存下所有回报，用增量均值即可：</p>
+<!--deriv 增量均值，以及常数步长的含义
+V_N & = \frac1N\sum_{i=1}^{N}G_i=\frac1N\Big(G_N+(N-1)V_{N-1}\Big) || 第 $N$ 个样本到来时的样本均值
+* & = V_{N-1}+\frac1N\big(G_N-V_{N-1}\big) || 整理：新估计 = 旧估计 + 步长 ×（目标 − 旧估计）
+# 把 1/N 换成常数 α（非平稳问题常用），展开递推：
+V_N & = \alpha G_N+(1-\alpha)V_{N-1} || 同一个式子换一种写法
+& = \alpha G_N+(1-\alpha)\alpha G_{N-1}+(1-\alpha)^2V_{N-2} || 把 $V_{N-1}$ 再展开一次
+* & = (1-\alpha)^NV_0+\sum_{i=1}^{N}\alpha(1-\alpha)^{N-i}\,G_i || 反复展开：越旧的样本权重按 $(1-\alpha)$ 指数衰减，所有权重之和为 1
+-->
+<p>“新估计 = 旧估计 + α ×（目标 − 旧估计）”是全书最常见的更新形式，后面所有算法的区别几乎都在“目标”怎么定。步长有两种选法：</p>
+<ul>
+<li>$\alpha_N=1/N$：精确的样本均值，满足 Robbins-Monro 条件 $\sum\alpha_N=\infty,\ \sum\alpha_N^2<\infty$，在平稳问题中以概率 1 收敛到真值。</li>
+<li>常数 α：近似“只记住最近约 $1/\alpha$ 个样本”的指数加权平均，估计永远在真值附近抖动，但能跟上变化。自博弈训练里对手一直在变，Bot 面对的环境是<strong>非平稳</strong>的，所以深度 RL 的学习率都是常数或缓慢衰减，而不是 $1/N$。</li>
+</ul>
+<div class="co warn"><span class="h">面试注意：MC 的两个前提</span><p>① MC 只能用于<strong>回合制</strong>任务，必须等回合结束才能算回报。一局 MOBA 有上万帧，就算每 4 帧决策一次也有几千步，等一局打完才更新太慢了。② MC 不需要马尔可夫性：它只是对实际回报求平均，状态表示不完整也照样无偏。这一点在 5.5 节和 TD 对比时很重要。</p></div>
+
+<h2>5.3 时序差分 TD(0)</h2>
+<p>TD 不等回合结束：走一步，看到 $R_{t+1}$ 和 $S_{t+1}$，就用 Bellman 方程的右边做目标：</p>
+$$V(S_t)\leftarrow V(S_t)+\alpha\big[\underbrace{R_{t+1}+\gamma V(S_{t+1})}_{\text{TD 目标}}-V(S_t)\big],\qquad \delta_t\doteq R_{t+1}+\gamma V(S_{t+1})-V(S_t)\ \ \text{（TD 误差）}$$
+<p>“用估计去更新估计”叫<strong>自举</strong>（bootstrapping）。它为什么能收敛？取期望看一下就清楚了：</p>
+<!--deriv TD(0) 的期望更新就是一步 DP；TD 目标的偏差来自下一状态的估计误差
+\E\big[\delta_t\,\big|\,S_t=s\big] & = \E_\pi\big[R_{t+1}+\gamma V(S_{t+1})\,\big|\,S_t=s\big]-V(s) || 只有 $R_{t+1}$、$S_{t+1}$ 是随机的
+* & = (T^\pi V)(s)-V(s) || 第 3 章 Bellman 期望算子的定义：期望更新 = 向 $T^\pi V$ 走 α 步
+# 所以 TD(0) 是“用一个样本代替期望”的随机化策略评估。再看目标本身有没有偏：
+\E\big[R_{t+1}+\gamma V(S_{t+1})\,\big|\,S_t=s\big] & = \E\big[R_{t+1}+\gamma V_\pi(S_{t+1})\big]+\gamma\,\E\big[V(S_{t+1})-V_\pi(S_{t+1})\big] || 加一项减一项 $\gamma V_\pi(S_{t+1})$
+* & = V_\pi(s)+\gamma\,\E\big[V(S_{t+1})-V_\pi(S_{t+1})\,\big|\,S_t=s\big] || 第一项按 Bellman 期望方程等于 $V_\pi(s)$；第二项就是偏差
+-->
+<p>偏差是“下一状态估计误差的 γ 倍”：$V$ 越准，偏差越小；$V=V_\pi$ 时完全无偏。表格情形下，只要每个状态被无限次访问、步长满足 Robbins-Monro 条件，TD(0) 以概率 1 收敛到 $V_\pi$（证明用随机逼近理论，面试只需要说出条件）。<strong>函数近似 + 自举 + off-policy</strong> 三者同时出现时可能发散，这就是第 8 章 DQN 要用目标网络的原因（“致命三角”）。</p>
+<div class="co warn"><span class="h">面试注意：终止要置 0，截断要自举</span><p>代码里 TD 目标写成 <code>r + gamma * V[s2] * (1 - done)</code>。这里的 <code>done</code> 只能是<strong>真正的终止</strong>（打赢 / 打输 / 角色死亡导致回合结束），终止后没有未来回报，所以乘 0。因为时间上限被截断的回合（训练时每局最多 3000 步）在第 3000 步之后游戏其实还在继续，应该照常用 $\gamma V(S_{t+1})$ 自举，否则价值网络会以为“快到时间上限的状态价值低”，学到一个和状态无关的时间效应。Gymnasium 把 <code>terminated</code> 和 <code>truncated</code> 分开返回就是为了这件事（第 3 章 3.3 节）。</p></div>
+
+<h2>5.4 实测：随机游走上的 MC vs TD</h2>
+<p>Sutton 例 6.2 的 5 状态随机游走是比较 MC 和 TD 的标准环境：从中间的 C 出发，每步等概率向左或向右，走到左端得 0 分、右端得 +1 分，γ = 1。</p>
+<!--graph {"w":860,"h":150,
+"nodes":[
+{"id":"L","x":70,"y":56,"r":20,"t":"左端","ts":11,"c":"s","term":true},
+{"id":"A","x":200,"y":56,"r":22,"t":"A","c":"b"},{"id":"B","x":310,"y":56,"r":22,"t":"B","c":"b"},
+{"id":"C","x":420,"y":56,"r":22,"t":"C","c":"o","hl":true,"lab":"起点","lp":"t","lcls":"xs b","lfill":"#C2410C"},
+{"id":"D","x":530,"y":56,"r":22,"t":"D","c":"b"},{"id":"E","x":640,"y":56,"r":22,"t":"E","c":"b"},
+{"id":"R","x":770,"y":56,"r":20,"t":"右端","ts":11,"c":"g","term":true}],
+"edges":[
+{"f":"A","t":"L","l":"r = 0","dy":-12},{"f":"A","t":"B","bend":-10},{"f":"B","t":"A","bend":-10},{"f":"B","t":"C","bend":-10},{"f":"C","t":"B","bend":-10},
+{"f":"C","t":"D","bend":-10},{"f":"D","t":"C","bend":-10},{"f":"D","t":"E","bend":-10},{"f":"E","t":"D","bend":-10},{"f":"E","t":"R","l":"r = +1","dy":-12,"c":"g"}],
+"texts":[
+{"x":420,"y":112,"a":"middle","cls":"sm","t":"每步向左 / 向右各 0.5，其余转移奖励为 0，γ = 1"},
+{"x":420,"y":134,"a":"middle","cls":"sm","t":"真值 V(A…E) = 1/6, 2/6, 3/6, 4/6, 5/6 —— 就是“从该状态出发最终走到右端的概率”"}],
+"cap":"<b>图 5-2</b>　5 状态随机游走（Sutton 例 6.2）。价值等于“最后赢”的概率，所以这个环境也可以看成一个最简单的<strong>胜率预测</strong>问题。"} -->
+<p>所有状态初值设为 0.5，用 TD(0) 学习（α = 0.1），同一组随机回合下价值的变化：</p>
+<!--plot {"x":[1,5],"y":[0,1],"xt":[1,2,3,4,5],"h":280,"xlabel":"状态（1 = A … 5 = E）","ylabel":"估计价值","legend":"tl",
+"series":[{"path":"ch05d.snap.0","n":"初值（全 0.5）","c":"s","dash":true},{"path":"ch05d.snap.1","n":"1 个回合后","c":"a","dots":true},{"path":"ch05d.snap.2","n":"10 个回合后","c":"o","dots":true},{"path":"ch05d.snap.3","n":"100 个回合后","c":"b","dots":true},{"path":"ch05d.snap.4","n":"真值","c":"g","dash":true,"dots":true}],
+"cap":"<b>图 5-3</b>　TD(0) 在一次运行中学到的价值（<code>demos/ch05_random_walk.cpp</code> E1，run 0）。第 1 个回合只改变了一个状态：这一局从右端结束，只有最后一步 E → 右端的 TD 误差（+0.5）不为 0（中间各步两侧估计都是 0.5，误差为 0），所以只有 V(E) 从 0.5 变成 0.55。之后价值逐渐倾斜成真值那条直线，但常数步长下会一直在真值附近抖动。"} -->
+<p>换成 100 次独立运行、每次 100 个回合，比较不同步长下 MC 与 TD 的均方根误差（RMS，对 5 个状态平均）。两种算法在同一次运行中用的是<strong>同一组回合</strong>（公共随机数），差异只来自算法本身：</p>
+<!--plot {"x":[0,100],"y":[0,0.26],"h":320,"xlabel":"回合数","ylabel":"RMS 误差（100 次运行平均）","legend":"tr",
+"series":[{"path":"ch05.rw5.curves.0.pts","n":"TD α=0.05","c":"b"},{"path":"ch05.rw5.curves.1.pts","n":"TD α=0.1","c":"t"},{"path":"ch05.rw5.curves.2.pts","n":"TD α=0.15","c":"p"},
+{"path":"ch05.rw5.curves.3.pts","n":"MC α=0.01","c":"o","dash":true},{"path":"ch05.rw5.curves.4.pts","n":"MC α=0.02","c":"r","dash":true},{"path":"ch05.rw5.curves.5.pts","n":"MC α=0.03","c":"a","dash":true},{"path":"ch05.rw5.curves.6.pts","n":"MC α=0.04","c":"s","dash":true}],
+"cap":"<b>图 5-4</b>　随机游走上 TD(0) 与常数步长 MC 的学习曲线（C++ 实测，100 次运行平均；Python 用同一个随机数生成器重跑 run 0 逐位对拍）。实线 TD 整体在虚线 MC 下方。"} -->
+<div class="tbl"><table>
+<tr><th>方法</th><th>第 10 回合</th><th>第 25 回合</th><th>第 100 回合</th><th>100 回合内最低</th></tr>
+<tr><td>TD α=0.05</td><td>[[ch05.rw5.curves.0.rms10|.3f]]</td><td>[[ch05.rw5.curves.0.rms25|.3f]]</td><td>[[ch05.rw5.curves.0.rms100|.3f]]</td><td>[[ch05.rw5.curves.0.min|.3f]]</td></tr>
+<tr><td>TD α=0.1</td><td>[[ch05.rw5.curves.1.rms10|.3f]]</td><td>[[ch05.rw5.curves.1.rms25|.3f]]</td><td>[[ch05.rw5.curves.1.rms100|.3f]]</td><td>[[ch05.rw5.curves.1.min|.3f]]</td></tr>
+<tr><td>TD α=0.15</td><td>[[ch05.rw5.curves.2.rms10|.3f]]</td><td>[[ch05.rw5.curves.2.rms25|.3f]]</td><td>[[ch05.rw5.curves.2.rms100|.3f]]</td><td>[[ch05.rw5.curves.2.min|.3f]]</td></tr>
+<tr><td>MC α=0.01</td><td>[[ch05.rw5.curves.3.rms10|.3f]]</td><td>[[ch05.rw5.curves.3.rms25|.3f]]</td><td>[[ch05.rw5.curves.3.rms100|.3f]]</td><td>[[ch05.rw5.curves.3.min|.3f]]</td></tr>
+<tr><td>MC α=0.02</td><td>[[ch05.rw5.curves.4.rms10|.3f]]</td><td>[[ch05.rw5.curves.4.rms25|.3f]]</td><td>[[ch05.rw5.curves.4.rms100|.3f]]</td><td>[[ch05.rw5.curves.4.min|.3f]]</td></tr>
+<tr><td>MC α=0.03</td><td>[[ch05.rw5.curves.5.rms10|.3f]]</td><td>[[ch05.rw5.curves.5.rms25|.3f]]</td><td>[[ch05.rw5.curves.5.rms100|.3f]]</td><td>[[ch05.rw5.curves.5.min|.3f]]</td></tr>
+<tr><td>MC α=0.04</td><td>[[ch05.rw5.curves.6.rms10|.3f]]</td><td>[[ch05.rw5.curves.6.rms25|.3f]]</td><td>[[ch05.rw5.curves.6.rms100|.3f]]</td><td>[[ch05.rw5.curves.6.min|.3f]]</td></tr>
+</table></div>
+<p class="tcap"><b>表 5-1</b>　图 5-4 的数值（<code>demos/ch05_output.txt</code> E1）。</p>
+<p>可以读出三件事：</p>
+<ol>
+<li><strong>同样的回合数，TD 误差更低</strong>。第 25 回合时 TD 三个步长都低于 MC 的四个步长。</li>
+<li><strong>步长越大学得越快，但最后停在更高的误差</strong>。TD α=0.15 在第 10 回合最好，但第 100 回合的误差（[[ch05.rw5.curves.2.rms100|.3f]]）高于它曾经达到的最低点（[[ch05.rw5.curves.2.min|.3f]]）：常数步长下估计会在真值附近抖动，步长越大抖得越厉害——这就是深度 RL 里学习率衰减的动机。</li>
+<li><strong>MC 能用的步长更小</strong>。MC 目标的方差大，步长稍大估计就抖得厉害，只能用小步长，于是学得慢。</li>
+</ol>
+<p>为什么 TD 的方差小？把真值代入，直接算两种目标在每个状态的方差：</p>
+<!--dtab {"rows":"ch05d.var","cols":[["状态","=('A','B','C','D','E')[s-1]"],["真值 V","v",".3f"],["MC 目标 G_t 的方差","mc",".4f"],["TD 目标 R+V(S′) 的方差","td",".4f"],["MC / TD","ratio",".1f"]],
+"cap":"<b>表 5-2</b>　随机游走中两种目标的方差（V 取真值，构建时计算）。MC 的回报只有 0 和 1 两种结果，方差是 $p(1-p)$；TD 目标只取决于下一步往哪走，两种结果只差 2/6，方差小一个数量级。"} -->
+<p>MC 回报里叠加了后面<strong>每一步</strong>的随机性；TD 目标只包含<strong>一步</strong>的随机性，剩下的随机性被 $V(S_{t+1})$ 这个“平均过的数”吸收了。代价是：$V(S_{t+1})$ 不准时会带来偏差（5.3 节）。这就是 MC 与 TD 之间的<strong>偏差-方差权衡</strong>。</p>
+
+<h2>5.5 批量更新：MC 和 TD 收敛到不同的答案</h2>
+<p>如果数据只有固定的一批回合，反复在上面训练直到收敛（<strong>批量更新</strong>，离线 RL 和经验回放都是这种情形），MC 和 TD 会收敛到同一个值吗？先看 Sutton 例 6.4 的一个小例子：观察到 8 个回合，其中 1 个是 “A → B → 终止”，奖励都是 0；另外 7 个从 B 开始，6 个得 1 分、1 个得 0 分。</p>
+<div class="tbl"><table>
+<tr><th></th><th>V(B)</th><th>V(A)</th><th>理由</th></tr>
+<tr><td>批量 MC</td><td>[[ab.mcB|.3f]]</td><td>[[ab.mcA|.3f]]</td><td>A 只出现过 1 次，那次的回报是 0，样本均值就是 0</td></tr>
+<tr><td>批量 TD</td><td>[[ab.tdB|.3f]]</td><td>[[ab.tdA|.3f]]</td><td>A 每次都转到 B、奖励 0，所以 V(A) = 0 + V(B)</td></tr>
+</table></div>
+<p class="tcap"><b>表 5-3</b>　A/B 例子的两种批量解（构建时计算）。</p>
+<p>MC 的答案在<strong>训练数据</strong>上误差最小，但 TD 的答案更合理：如果环境是马尔可夫的，A 的价值就应该由 B 的价值决定，那唯一一次 0 分只是运气。TD 的解有一个准确的名字：</p>
+<!--deriv 批量 TD 收敛到“确定性等价”估计；批量 MC 收敛到回报的样本均值
+\sum_{t:\,S_t=s}\big[R_{t+1}+\gamma V(S_{t+1})-V(s)\big] & = 0\qquad\forall s || 批量 TD 收敛 ⇔ 对整批数据，每个状态的 TD 误差之和为 0（增量为 0）
+\frac{1}{N(s)}\sum_{t:\,S_t=s}R_{t+1}+\gamma\sum_{s'}\frac{N(s,s')}{N(s)}V(s') & = V(s) || 除以访问次数 $N(s)$；$N(s,s')$ 是数据里 $s\to s'$ 出现的次数
+* V(s) & = \hat r(s)+\gamma\sum_{s'}\hat p(s'\mid s)\,V(s') || 正是“用经验频率建模”后的 Bellman 方程：先拟合极大似然模型，再精确求值
+# 批量 MC 最小化 $\sum_{t:S_t=s}(G_t-V(s))^2$，令导数为 0：
+* V(s) & = \frac{1}{N(s)}\sum_{t:\,S_t=s}G_t || 回报的样本均值，没有用到“状态之间怎么转移”的信息
+-->
+<p>在随机游走上实测：每多观察一个回合，就在全部已有数据上分别求批量 TD 解（解线性方程）和批量 MC 解（求均值）：</p>
+<!--plot {"x":[1,100],"y":[0,0.42],"h":280,"xlabel":"已观察的回合数","ylabel":"RMS 误差（100 次运行平均）","legend":"tr",
+"series":[{"path":"ch05.batch.td","n":"批量 TD（确定性等价）","c":"b"},{"path":"ch05.batch.mc","n":"批量 MC（样本均值）","c":"o","dash":true}],
+"cap":"<b>图 5-5</b>　批量更新下 TD 与 MC 的误差（C++ 实测，100 次运行平均）。20 个回合时 TD 为 [[ch05.batch.td20|.3f]]、MC 为 [[ch05.batch.mc20|.3f]]；100 个回合时为 [[ch05.batch.td100|.3f]] 和 [[ch05.batch.mc100|.3f]]。另外用“α = 0.01、整批累加增量后统一更新”的迭代批量 TD 在 20 个回合上跑了 [[ch05.batch.iter_sweeps]] 次整批扫描，结果与确定性等价闭式解的最大差为 [[ch05.batch.iter_diff|.1e]]，验证了上面的推导。"} -->
+<div class="co tip"><span class="h">面试注意：“TD 利用了马尔可夫性”到底是什么意思</span><p>就是上面这个推导：TD 的解等价于先从数据里估计一个转移模型、再在这个模型里求价值，它默认“未来只取决于当前状态”。环境确实是马尔可夫的时候，这等于把所有经过 B 的数据都用来估计 A，数据利用率更高；状态表示不完整（部分可观测、观测里漏了对手冷却时间之类的关键信息）时，这个假设就错了，TD 的偏差会更大，MC 反而更稳。深度 RL 用 n 步回报或 GAE 在两者之间折中，原因之一就在这里。</p></div>
+
+<h2>5.6 n 步 TD：在 MC 和 TD 之间连续过渡</h2>
+<p>TD(0) 只看 1 步真实奖励，MC 看到终止。中间的选择是看 n 步，然后自举：</p>
+$$G^{(n)}_t\doteq R_{t+1}+\gamma R_{t+2}+\cdots+\gamma^{n-1}R_{t+n}+\gamma^nV(S_{t+n}),\qquad V(S_t)\leftarrow V(S_t)+\alpha\big[G^{(n)}_t-V(S_t)\big]$$
+<p>$n=1$ 是 TD(0)，$n\ge T-t$（回合在 n 步内结束）是 MC。n 步回报有一个很有用的性质：它的期望误差比 $V$ 本身的误差缩小了 $\gamma^n$ 倍。</p>
+<!--deriv n 步回报的误差缩减性质：max_s |E[G⁽ⁿ⁾ | s] − V_π(s)| ≤ γⁿ · max_s |V(s) − V_π(s)|
+V_\pi(s) & = \E_\pi\Big[\textstyle\sum_{k=0}^{n-1}\gamma^kR_{t+k+1}+\gamma^nV_\pi(S_{t+n})\,\Big|\,S_t=s\Big] || 把 Bellman 期望方程展开 n 次（回合提前结束时，终止后的项都按 0 计）
+\E_\pi\big[G^{(n)}_t\,\big|\,S_t=s\big]-V_\pi(s) & = \gamma^n\,\E_\pi\big[V(S_{t+n})-V_\pi(S_{t+n})\,\big|\,S_t=s\big] || 两式相减：前 n 步的真实奖励完全抵消，只剩自举那一项
+* \max_s\big|\E_\pi[G^{(n)}_t\mid S_t=s]-V_\pi(s)\big| & \le \gamma^n\max_{s'}\big|V(s')-V_\pi(s')\big| || 期望的绝对值不超过绝对值的最大值
+-->
+<p>n 越大，偏差缩减得越多（$\gamma^n$），但目标里包含的随机奖励也越多，方差越大。所以存在一个最好的中间值。下面在 19 状态随机游走上实测（左端 −1、右端 +1，γ = 1，初值 0；指标是前 10 个回合每个回合结束时 RMS 的平均，100 次运行平均）：</p>
+<!--plot {"x":[0,1],"y":[0.24,0.56],"h":330,"xlabel":"步长 α","ylabel":"前 10 回合平均 RMS","legend":"tr",
+"series":[{"path":"ch05.rw19.nstep.0.pts","n":"n = 1（TD(0)）","c":"b","dots":true},{"path":"ch05.rw19.nstep.1.pts","n":"n = 2","c":"t","dots":true},{"path":"ch05.rw19.nstep.2.pts","n":"n = 4","c":"g","dots":true,"sw":3},
+{"path":"ch05.rw19.nstep.3.pts","n":"n = 8","c":"a","dots":true},{"path":"ch05.rw19.nstep.4.pts","n":"n = 16","c":"o","dots":true},{"path":"ch05.rw19.nstep.5.pts","n":"n = 32","c":"r","dots":true}],
+"cap":"<b>图 5-6</b>　19 状态随机游走上 n 步 TD 的误差（C++ 实测）。每条曲线都是 U 形：α 太小学得慢，α 太大抖得厉害；n 越大，最优 α 越小（目标方差越大，只能走小步）。整体最好的是 n = [[ch05d.n_argmin.n]]（α = [[ch05d.n_argmin.best_a|.2f]]，RMS = [[ch05d.n_argmin.best|.3f]]），两端的 n = 1 和 n = 32 都更差。"} -->
+<!--dtab {"rows":"ch05d.n_tab","cols":[["n","n"],["最优 α","best_a",".2f"],["最小 RMS","best",".4f"]],
+"cap":"<b>表 5-4</b>　各 n 的最优步长与最小误差（<code>demos/ch05_output.txt</code> E3）。"} -->
+
+<h2>5.7 λ-回报与 TD 误差累加恒等式</h2>
+<p>n 只能取整数，而且要事先选好。更自然的做法是把所有 n 步回报按几何权重平均起来，这就是 <strong>λ-回报</strong>：</p>
+$$G^\lambda_t\doteq(1-\lambda)\sum_{n=1}^{\infty}\lambda^{n-1}G^{(n)}_t,\qquad\lambda\in[0,1]$$
+<p>权重 $(1-\lambda)\lambda^{n-1}$ 之和为 1。回合制任务里，$n\ge T-t$ 的 n 步回报都等于 MC 回报 $G_t$，它们的权重合起来是 $\lambda^{T-t-1}$，所以 $G^\lambda_t=(1-\lambda)\sum_{n=1}^{T-t-1}\lambda^{n-1}G^{(n)}_t+\lambda^{T-t-1}G_t$。λ = 0 时只剩 $G^{(1)}_t$（TD(0) 目标），λ = 1 时就是 $G_t$（MC）。</p>
+<!--plot {"x":[0.5,15.5],"y":[0,0.52],"xt":[1,3,5,7,9,11,13,15],"h":250,"xlabel":"n（n 步回报）","ylabel":"权重 (1−λ)λⁿ⁻¹","legend":"tr",
+"series":[{"f":"(1-0.5)*0.5**(x-1)","int":true,"n":"λ = 0.5","c":"o","dots":true},{"f":"(1-0.8)*0.8**(x-1)","int":true,"n":"λ = 0.8","c":"b","dots":true},{"f":"(1-0.95)*0.95**(x-1)","int":true,"n":"λ = 0.95（PPO 常用）","c":"g","dots":true}],
+"cap":"<b>图 5-7</b>　λ-回报中各 n 步回报的权重（构建时按公式计算）。λ 越大，权重衰减越慢、越接近 MC；“平均看多少步”约为 $1/(1-\\lambda)$。"} -->
+<p>λ-回报按定义要算无穷多个 n 步回报，实际计算靠下面的递推。这一组推导是本章最重要的内容，PPO 里的 GAE 直接用到它：</p>
+<!--deriv ① TD 误差累加 = MC 误差：G_t − V(S_t) = Σ_k γᵏ δ_{t+k}
+G_t-V(S_t) & = R_{t+1}+\gamma G_{t+1}-V(S_t) || 回报的递推 $G_t=R_{t+1}+\gamma G_{t+1}$
+& = \underbrace{R_{t+1}+\gamma V(S_{t+1})-V(S_t)}_{\delta_t}+\gamma\big(G_{t+1}-V(S_{t+1})\big) || 加一项减一项 $\gamma V(S_{t+1})$
+& = \delta_t+\gamma\delta_{t+1}+\gamma^2\big(G_{t+2}-V(S_{t+2})\big) || 对 $G_{t+1}-V(S_{t+1})$ 用同样的拆法
+* & = \sum_{k=0}^{T-t-1}\gamma^k\delta_{t+k} || 一直展开到终止：$G_T=0$、$V(S_T)=0$。注意<strong>对任意 V 都成立</strong>，不需要 $V=V_\pi$
+-->
+<!--deriv ② λ-回报的递推，以及 G^λ_t − V(S_t) = Σ_k (γλ)ᵏ δ_{t+k}
+G^\lambda_t & = (1-\lambda)G^{(1)}_t+(1-\lambda)\sum_{n\ge2}\lambda^{n-1}\big[R_{t+1}+\gamma G^{(n-1)}_{t+1}\big] || 拆出 $n=1$；$n\ge2$ 时 $G^{(n)}_t=R_{t+1}+\gamma G^{(n-1)}_{t+1}$
+& = (1-\lambda)\big[R_{t+1}+\gamma V(S_{t+1})\big]+\lambda R_{t+1}+\gamma\lambda\,(1-\lambda)\sum_{m\ge1}\lambda^{m-1}G^{(m)}_{t+1} || $(1-\lambda)\sum_{n\ge2}\lambda^{n-1}=\lambda$；令 $m=n-1$
+* G^\lambda_t & = R_{t+1}+\gamma\big[(1-\lambda)V(S_{t+1})+\lambda\,G^\lambda_{t+1}\big] || 最后一项正是 $\gamma\lambda G^\lambda_{t+1}$。倒序一遍就能算出整条轨迹的 λ-回报
+G^\lambda_t-V(S_t) & = \delta_t+\gamma\lambda\big(G^\lambda_{t+1}-V(S_{t+1})\big) || 两边减 $V(S_t)$，并把 $\gamma V(S_{t+1})$ 拆成 $\gamma(1-\lambda)V+\gamma\lambda V$
+* & = \sum_{k=0}^{T-t-1}(\gamma\lambda)^k\,\delta_{t+k} || 反复展开。λ = 1 退化为 ①，λ = 0 只剩 $\delta_t$
+-->
+<p>把 $V$ 换成 critic 的价值估计、把“λ-回报减 V”叫作优势估计，②就是 GAE：$\hat A_t^{\mathrm{GAE}(\gamma,\lambda)}=\sum_k(\gamma\lambda)^k\delta_{t+k}$。PPO 常用 γ = 0.99、λ = 0.95，此时 TD 误差的衰减因子 $\gamma\lambda=0.9405$，有效视界约 $1/(1-\gamma\lambda)\approx16.8$ 步：优势估计主要看接下来十几个决策步的 TD 误差，更远的部分交给 critic 自举。第 10 章会从“优势估计的偏差-方差”角度再推一次。</p>
+<p>这两个恒等式只用到代数，demo 用随机生成的 $V$（故意不准）、带噪声的中间奖励，在 [[ch05.ident.episodes]] 个回合、共 [[ch05.ident.steps]] 步上逐步验证（γ = [[ch05.ident.gamma]]、λ = [[ch05.ident.lam]]）：① 的最大误差为 [[ch05.ident.td_sum|.1e]]，② 为 [[ch05.ident.lam_ret|.1e]]，都是浮点舍入误差的量级。</p>
+<div class="co warn"><span class="h">面试注意：GAE 的倒序代码怎么写</span><p>手撕 GAE 时按②倒序递推：<code>adv = delta[t] + gamma * lam * (1 - done[t]) * adv</code>，其中 <code>delta[t] = r[t] + gamma * (1 - done[t]) * V[t+1] - V[t]</code>。两个易错点：① <code>done</code> 要同时切断 δ 里的自举和 adv 的递推，否则下一局的优势会“漏”到上一局的最后几步；② rollout 被截断时（采样长度到了但回合没结束），最后一步要用 $V(S_T)$ 自举，而不是当作终止。critic 的训练目标取 <code>adv + V</code>，也就是 λ-回报。</p></div>
+
+<h2>5.8 TD(λ)：资格迹与前向 / 后向视角</h2>
+<p>λ-回报（前向视角）要等回合结束才能算出来，和 MC 一样不能在线更新。<strong>资格迹</strong>（eligibility trace）给出了一个等价的后向实现：每个状态维护一个“最近被访问过多少”的分数 $z(s)$，每一步的 TD 误差按这个分数分给所有状态：</p>
+$$z_t(s)=\gamma\lambda\,z_{t-1}(s)+\mathbb 1[S_t=s],\qquad V(s)\leftarrow V(s)+\alpha\,\delta_t\,z_t(s)\quad\forall s$$
+<!--plot {"x":[0,22],"y":[0,3.4],"h":270,"xlabel":"时间步 t","ylabel":"状态 s 的资格迹 z(s)","legend":"tr",
+"vlines":[[2,"访问","s",1.25],[5,"","s"],[6,"","s"],[7,"t = 5、6、7 连续访问","s",3.05],[15,"再次访问","s",1.75]],
+"series":[{"path":"tr.acc","n":"累积迹：z ← γλz + 1","c":"b","sw":2.2},{"path":"tr.rep","n":"替换迹：z ← 1","c":"o","dash":true}],
+"cap":"<b>图 5-8</b>　一个状态的资格迹随时间变化（γλ = [[tr.gl]]，构建时计算）。每次访问迹加 1（或重置为 1），之后每步乘 γλ 衰减。某一步的 TD 误差 $\\delta_t$ 会按迹的大小“归功”给最近访问过的状态：越近、越频繁，分到的越多。连续访问时累积迹最高到 [[tr.acc_max|.2f]]，替换迹封顶为 1。"} -->
+<p>为什么后向视角和前向视角等价？在<strong>离线</strong>情形（回合内 $V$ 不变，增量攒到回合结束再一起加）可以严格证明：</p>
+<!--deriv ③ 离线等价：一个回合内，后向视角（资格迹）的总增量 = 前向视角（λ-回报）的总增量
+\sum_{t=0}^{T-1}\alpha\,\delta_t\,z_t(s) & = \alpha\sum_{t=0}^{T-1}\delta_t\sum_{k=0}^{t}(\gamma\lambda)^{t-k}\,\mathbb 1[S_k=s] || 把迹的递推展开：$z_t(s)=\sum_{k\le t}(\gamma\lambda)^{t-k}\mathbb 1[S_k=s]$
+& = \alpha\sum_{k=0}^{T-1}\mathbb 1[S_k=s]\sum_{t=k}^{T-1}(\gamma\lambda)^{t-k}\,\delta_t || 交换求和顺序（$0\le k\le t\le T-1$ 的三角区域）
+* & = \alpha\sum_{k=0}^{T-1}\mathbb 1[S_k=s]\,\big(G^\lambda_k-V(S_k)\big) || 内层求和就是恒等式 ②
+-->
+<p>demo 中同样逐回合验证了③，前向、后向总增量的最大差为 [[ch05.ident.fwd_bwd|.1e]]。在线更新（每步立刻改 $V$）时两者只是近似相等；Sutton 书第 12 章的 True Online TD(λ) 用“荷兰迹”做到了在线也精确等价，面试知道名字即可。</p>
+<p>回到 19 状态随机游走，对比离线 TD(λ)（= 离线 λ-回报算法）和在线 TD(λ)：</p>
+<!--plot {"x":[0,1],"y":[0.24,0.72],"h":330,"xlabel":"步长 α","ylabel":"前 10 回合平均 RMS","legend":"tr",
+"series":[{"path":"ch05.rw19.lam_on.0.pts","n":"λ = 0","c":"b","dots":true},{"path":"ch05.rw19.lam_on.1.pts","n":"λ = 0.4","c":"t","dots":true},{"path":"ch05.rw19.lam_on.2.pts","n":"λ = 0.8","c":"g","dots":true,"sw":3},
+{"path":"ch05.rw19.lam_on.3.pts","n":"λ = 0.9","c":"a","dots":true},{"path":"ch05.rw19.lam_on.4.pts","n":"λ = 0.95","c":"o","dots":true},{"path":"ch05.rw19.lam_on.5.pts","n":"λ = 0.975","c":"r","dots":true},{"path":"ch05.rw19.lam_on.6.pts","n":"λ = 1（≈ MC）","c":"p","dots":true}],
+"cap":"<b>图 5-9</b>　19 状态随机游走上在线 TD(λ)（累积迹）的误差（C++ 实测）。和图 5-6 的 n 步 TD 形状几乎一样：λ 扮演了 n 的角色，λ 大时只能用小步长，大步长下误差迅速增大甚至发散（超出图框）。最好的是 λ = [[ch05d.on_argmin.lam]]（RMS = [[ch05d.on_argmin.best|.3f]]）。"} -->
+<!--dtab {"rows":"ch05d.lam_tab","cols":[["λ","lam"],["离线 TD(λ) 最小 RMS","off",".4f"],["离线最优 α","off_a",".2f"],["在线 TD(λ) 最小 RMS","on",".4f"],["在线最优 α","on_a",".2f"]],
+"cap":"<b>表 5-5</b>　λ 对误差的影响（<code>demos/ch05_output.txt</code> E3）。"} -->
+<p>表 5-5 说明三点：</p>
+<ol>
+<li><strong>中间的 λ 最好</strong>：在线 λ = [[ch05d.on_argmin.lam]]、离线 λ = [[ch05d.off_argmin.lam]] 最好，λ = 1（MC）两种都最差。与 n 步 TD 的 U 形结论一致。</li>
+<li><strong>在线 λ = 0 就是 TD(0)</strong>：最小误差 [[ch05.rw19.lam_on.0.best|.4f]] 与表 5-4 中 n = 1 的 [[ch05.rw19.nstep.0.best|.4f]] 完全相同，可以作为实现正确性的检查。</li>
+<li><strong>这里在线比离线好</strong>：回合平均长 [[ch05.rw19.avg_len|.0f]] 步，离线版本要等整局结束才更新，局内的信息用不上；只看 10 个回合时这个差距很明显。这也是“能在线就在线”的直观理由。</li>
+</ol>
+<div class="co tip"><span class="h">游戏 AI 实战：资格迹在深度 RL 里去哪了</span><p>深度 RL 里很少直接维护资格迹：神经网络的参数是共享的，“每个状态一个迹”变成了“每个参数一个迹”（$\mathbf z\leftarrow\gamma\lambda\mathbf z+\nabla_\theta V$），与小批量 SGD、经验回放都不好配合。PPO 这类算法采样一段固定长度的 rollout，然后用②的倒序递推直接算出 λ-回报（GAE），本质上就是前向视角的截断版。所以面试时可以这样说：<strong>TD(λ) 的思想在深度 RL 里以 GAE 的形式存在，资格迹是它在表格 / 线性情形下的在线实现</strong>。</p></div>
+
+<h2>5.9 统一视角与游戏里的价值估计</h2>
+<!--flow {"w":900,"h":330,
+"boxes":[
+{"id":"dp","x":120,"y":40,"w":250,"h":70,"t":"动态规划（第 4 章）","s":"全宽 · 一步自举","s2":"需要模型","c":"b"},
+{"id":"ex","x":560,"y":40,"w":250,"h":70,"t":"穷举搜索","s":"全宽 · 一直到终止","s2":"代价随深度指数增长","c":"s"},
+{"id":"td","x":120,"y":200,"w":250,"h":70,"t":"TD(0)","s":"采样 · 一步自举","s2":"偏差↑ 方差↓","c":"g"},
+{"id":"mc","x":560,"y":200,"w":250,"h":70,"t":"蒙特卡洛","s":"采样 · 一直到终止","s2":"无偏 · 方差↑","c":"o"}],
+"arrows":[
+{"p":[[370,235],[560,235]],"c":"p","sw":2.2,"label":"n 步 TD / TD(λ) / GAE：n ↑ 或 λ ↑","lx":384,"ly":226},
+{"p":[[245,200],[245,110]],"c":"s","dash":true,"label":"期望 ↔ 样本","lx":254,"ly":160}],
+"texts":[
+{"x":465,"y":300,"a":"middle","cls":"sm","t":"横轴：backup 的深度（自举 → 看到终止）　纵轴：backup 的宽度（采样一条 ↔ 全部求期望）"},
+{"x":465,"y":322,"a":"middle","cls":"sm","t":"MCTS（第 17 章）在两者之间：选择性展开一部分分支，叶子处用价值网络自举或 rollout"}],
+"cap":"<b>图 5-10</b>　按“宽度 × 深度”给价值估计方法分类。本章的 MC、TD、n 步、λ 都在下面一行；左上的 DP 在第 4 章；右上的穷举搜索与第 17 章 MCTS 有关。"} -->
+<div class="tbl"><table>
+<tr><th>对比项</th><th>蒙特卡洛</th><th>TD(0)</th><th>n 步 / TD(λ)</th></tr>
+<tr><td>更新目标</td><td>$G_t$</td><td>$R_{t+1}+\gamma V(S_{t+1})$</td><td>$G^{(n)}_t$ / $G^\lambda_t$</td></tr>
+<tr><td>何时能更新</td><td>回合结束</td><td>每一步</td><td>n 步后 / 资格迹每一步</td></tr>
+<tr><td>偏差</td><td>无偏（首次访问）</td><td>$V$ 不准时有偏</td><td>随 n / λ 增大而减小</td></tr>
+<tr><td>方差</td><td>大（累积所有步的随机性）</td><td>小（只有一步）</td><td>随 n / λ 增大而增大</td></tr>
+<tr><td>依赖马尔可夫性</td><td>不依赖</td><td>依赖（批量解 = 确定性等价）</td><td>介于两者之间</td></tr>
+<tr><td>持续性任务</td><td>不能用</td><td>能用</td><td>能用</td></tr>
+<tr><td>对初值</td><td>不敏感</td><td>敏感（自举会传播初值）</td><td>介于两者之间</td></tr>
+<tr><td>深度 RL 中的对应</td><td>REINFORCE 的回报</td><td>DQN 的一步目标</td><td>n 步 DQN（Rainbow）、GAE（PPO）</td></tr>
+</table></div>
+<p class="tcap"><b>表 5-6</b>　三类方法的对比，面试回答“MC 和 TD 有什么区别”时按这几行说。</p>
+<h3>游戏里的价值估计</h3>
+<div class="tbl"><table>
+<tr><th>场景</th><th>与本章的关系</th><th>说明</th></tr>
+<tr><td>实时胜率预测 / 局势评估</td><td>图 5-2 的放大版：终局奖励 ±1，$V$ = 胜率</td><td>MOBA Bot 的价值头可以直接画成实时胜率曲线，用于复盘、解说、动态难度调整。一局几千个决策步只有一个终局奖励，MC 方差极大，实际用 TD(λ) / GAE 或加入中间奖励训练</td></tr>
+<tr><td>Bot 强度评估</td><td>MC 估计</td><td>“让 Bot 打 N 局算胜率”就是对终局回报做 MC 估计；置信区间按二项分布算，第 15 章 Elo 评估会用到</td></tr>
+<tr><td>PPO 的 critic 与优势</td><td>λ-回报 = critic 目标，GAE = 优势</td><td>λ 是调 Bot 训练稳定性的重要超参：奖励稀疏、局很长时偏大（0.95~0.98），奖励稠密时可以小一些</td></tr>
+<tr><td>离线数据训练价值网络</td><td>批量更新（5.5 节）</td><td>用玩家对局录像训练价值网络时，MC 目标（直接用最终胜负）简单稳健，TD 目标数据利用率高但可能放大分布外状态的误差（第 14 章离线 RL）</td></tr>
+</table></div>
+
+<h3>手撕代码</h3>
+<p>面试最可能让你写的是 TD(0) 更新和 GAE / λ-回报的倒序计算。下面的代码与 <code>demos/ch05_interview.py</code> 逐字相同，脚本会与参考实现、以及按定义暴力计算的 λ-回报对拍：</p>
+<!--code:py:MC / TD(0) / TD(λ) / λ-回报（Python，面试手撕版）-->
+{{demo:ch05_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch05_interview.py 的输出-->
+{{demo:ch05_interview_output.txt}}
+<!--/code-->
+
+<h2>5.10 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“TD 有偏，所以比 MC 差”</td><td>只看偏差，忽略方差</td><td>TD 用偏差换方差，在马尔可夫环境里通常学得更快（图 5-4、图 5-5）；偏差随 $V$ 变准而消失</td></tr>
+<tr><td>“TD 的偏差来自奖励估计不准”</td><td>偏差的来源说错了</td><td>来自自举项：偏差 $=\gamma\,\E[V(S_{t+1})-V_\pi(S_{t+1})]$</td></tr>
+<tr><td>“MC 和 TD 在数据足够多时结果一样，所以批量训练选哪个都行”</td><td>批量解不同</td><td>批量 MC 收敛到样本均值，批量 TD 收敛到确定性等价解（表 5-3）；非马尔可夫时 TD 的假设不成立</td></tr>
+<tr><td>“$G_t-V(S_t)=\sum\gamma^k\delta_{t+k}$ 需要 $V=V_\pi$”</td><td>把恒等式当成近似</td><td>对任意 $V$ 都严格成立，是纯代数恒等式；GAE 的偏差来自“截断 + λ < 1 + $V$ 不准”</td></tr>
+<tr><td>“λ 越大越好，因为越接近无偏的 MC”</td><td>忽略方差和最优步长变小</td><td>中间的 λ 最好（表 5-5）；PPO 常用 0.95</td></tr>
+<tr><td>“时间到了也是 done，TD 目标里乘 0”</td><td>混淆终止与截断</td><td>截断要自举 $\gamma V(S_{t+1})$，只有真正终止才乘 0</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:MC / TD 常见追问链-->
+MC 和 TD 的区别？
+├─ TD 为什么有偏？偏差多大？ → 自举：偏差 = γ·E[V(S′) − V_π(S′)]，V 准了就无偏
+│   └─ 那为什么还用 TD？ → 方差只来自一步（表 5-2），能在线 / 持续任务，通常更快（图 5-4）
+├─ 什么叫“TD 利用了马尔可夫性”？ → 批量 TD = 确定性等价解（先估模型再求值），A/B 例子
+│   └─ 环境不是马尔可夫的呢？ → TD 偏差变大，MC 更稳；用 n 步 / λ 折中
+├─ n 步 TD 和 λ 是什么关系？ → λ-回报 = n 步回报的几何加权平均，λ 大 ≈ n 大
+│   ├─ 推一下 TD 误差累加 = MC 误差 → G_t − V = δ_t + γ(G_{t+1} − V′)，递推展开（恒等式 ①）
+│   └─ 和 GAE 什么关系？ → γ 换成 γλ 就是 GAE（恒等式 ②），倒序递推，done 要切断
+└─ 资格迹是什么？ → 后向视角：z ← γλz + 1[S=s]，δ 按 z 分给最近访问的状态
+    ├─ 为什么和 λ-回报等价？ → 离线时交换求和顺序即证（③）；在线只近似，True Online 精确
+    └─ 深度 RL 里还用吗？ → 很少直接用，PPO 用 rollout + GAE 倒序递推代替
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 5 章</div><ul>
+<li>通用更新：$V\leftarrow V+\alpha(\text{目标}-V)$；$\alpha=1/N$ 是样本均值，常数 α 是指数加权（适合非平稳的自博弈）。</li>
+<li>MC 目标 $G_t$：无偏、方差大、要等回合结束、不依赖马尔可夫性。</li>
+<li>TD 目标 $R+\gamma V(S')$：期望更新 = 一步 DP；偏差 $=\gamma\E[V-V_\pi](S')$；方差小、能在线。</li>
+<li>批量：MC → 样本均值；TD → 确定性等价（经验模型上的 Bellman 解）。</li>
+<li>n 步回报误差缩减 $\gamma^n$；n、λ 都是偏差-方差旋钮，实测都是中间最好。</li>
+<li>恒等式：$G_t-V(S_t)=\sum\gamma^k\delta_{t+k}$；$G^\lambda_t-V(S_t)=\sum(\gamma\lambda)^k\delta_{t+k}$ ⇒ GAE。</li>
+<li>λ-回报递推 $G^\lambda_t=R_{t+1}+\gamma[(1-\lambda)V(S_{t+1})+\lambda G^\lambda_{t+1}]$；资格迹 $z\leftarrow\gamma\lambda z+\mathbb 1$，离线与前向等价。</li>
+<li>终止乘 0，截断要自举。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：图 5-3 中，第一个回合结束后为什么只有一个状态的价值变了？</summary><p>初值全是 0.5，中间任意一步 $s\to s'$ 的 TD 误差是 $0+0.5-0.5=0$，不会产生更新。只有走到端点的那一步才有非零误差：走到左端时 $\delta=0+0-0.5=-0.5$（终止价值为 0），走到右端时 $\delta=1+0-0.5=+0.5$。所以第一个回合只改变了与端点相邻的那个状态。MC 则会更新这一局访问过的所有状态（它们的回报都等于终局结果）。</p></details>
+<details class="quiz"><summary>自测 2：如果每一步都有随机的中间奖励，恒等式 $G_t-V(S_t)=\sum\gamma^k\delta_{t+k}$ 还成立吗？</summary><p>成立。推导只用到 $G_t=R_{t+1}+\gamma G_{t+1}$ 和“加一项减一项”，与奖励的分布、$V$ 准不准都无关。demo E4 就是在随机 $V$、带噪声的中间奖励下验证的，误差在 $10^{-15}$ 量级。</p></details>
+<details class="quiz"><summary>自测 3：PPO 里把 λ 从 0.95 调到 1.0，优势估计会怎样变化？</summary><p>λ = 1 时优势等于 $G_t-V(S_t)$（截断处自举），即 MC 回报减基线：偏差最小（只剩截断处的自举误差），但方差最大，训练更不稳定，通常需要更大的 batch 才能稳住。λ 调小则更依赖 critic，critic 不准时偏差变大。</p></details>
+<details class="quiz"><summary>自测 4：GAE 代码里 done 为 True 的那一步，<code>delta</code> 和 <code>adv</code> 应该怎么算？</summary><p><code>delta = r - V[t]</code>（终止后没有未来价值），<code>adv = delta</code>（不把下一局的优势加进来）。如果这一步只是 rollout 截断而不是终止，<code>delta = r + gamma * V_last - V[t]</code>，其中 <code>V_last</code> 是 critic 对截断处下一状态的估计。</p></details>
+</section>

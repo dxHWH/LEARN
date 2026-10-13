@@ -1,0 +1,230 @@
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>一个合格的联机 Demo 应该是什么样子</h1>
+    <p class="lead">“合格”不是“两个人能一起打僵尸”，而是：在 Bad 网络、Dedicated Server、晚加入、谁先死这些条件下，规则依然只有一份、结果依然只认服务器、操作依然跟手。本章把它写成可验收的标准，并给出类清单、复制总表、RPC 总表和工程结构。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能用 5 个维度、20 条可勾选的标准定义“合格”，并说出每条怎么验证。</li>
+    <li>给出重做后的类清单：父类、职责、在哪端、关键事件、关键变量。</li>
+    <li>给出全部复制变量和 RPC 的总表——面试时被问“你同步了哪些东西”能逐条答出。</li>
+    <li>说清每个复制变量在双人局里<strong>发给了谁</strong>、每个事件<strong>在哪端执行</strong>、原 Demo 的 8 个组播<strong>各自换成了什么</strong>。</li>
+    <li>说清纯蓝图和“蓝图 + 少量 C++”两条路线各自能做到哪一步。</li>
+  </ul></div>
+
+  <div class="ans">
+    <div class="q">30 秒版：我心目中合格的联机 Demo</div>
+    <p>① <strong>权威清晰</strong>：伤害、死亡、弹药、比赛阶段、刷怪只在服务器决定，客户端只发请求、只播表现；② <strong>手感跟手</strong>：开火、换弹、冲刺本机零等待，200 ms / 10% 丢包下 UI 不回跳、角色不被拉回；③ <strong>状态完整</strong>：所有持续状态都是复制属性，晚加入的人看到正确的阶段、尸体和弹药；④ <strong>职责单一</strong>：GameMode / GameState / PlayerState / PC / Character / Weapon / 组件各司其职，没有关卡蓝图里的上帝逻辑，没有 <code>GetPlayerController(0)</code>；⑤ <strong>可验证</strong>：有测试清单、有弱网录屏、有 <code>stat net</code> 数据，并且在 Dedicated Server 模式下也能跑。</p>
+  </div>
+
+  <h2>1. 验收标准（Definition of Done）</h2>
+  <div class="tbl"><table>
+    <tr><th>维度</th><th>#</th><th>标准</th><th>怎么验证</th><th>原 Demo</th></tr>
+    <tr><td rowspan="5"><strong>权威</strong></td><td>1</td><td>伤害、死亡、弹药变化只在服务器发生</td><td>在客户端打印僵尸血量变化来源；全工程搜 ApplyDamage 都在权限分支后</td><td class="no">✗ 子弹每端 ApplyDamage</td></tr>
+    <tr><td>2</td><td>比赛阶段、剩余时间、胜负只有一份（GameState）</td><td>网络模拟下两端同时结算；客户端 GetGameMode 为空也不影响 UI</td><td class="no">✗ UI 各算各的</td></tr>
+    <tr><td>3</td><td>刷怪、AI 决策只在服务器</td><td>客户端世界大纲里僵尸数 = 服务器僵尸数</td><td class="no">✗ 补刷在每端执行</td></tr>
+    <tr><td>4</td><td>没有 GetPlayerController(0) / GetPlayerCharacter(0) 出现在可能于服务器执行的逻辑里</td><td>全局搜索；只允许出现在 UI / 本地相机代码</td><td class="no">✗ 死亡逻辑里使用</td></tr>
+    <tr><td>5</td><td>所有 Server RPC 都在服务器端校验参数和状态</td><td>Code Review：每个 Server 事件第一个节点是校验分支</td><td class="no">✗ 无校验</td></tr>
+    <tr><td rowspan="4"><strong>手感</strong></td><td>6</td><td>开火 / 换弹表现本机零等待</td><td>Bad 网络下按下即有枪口火焰和换弹动画（E1）</td><td class="no">✗ 等一个 RTT</td></tr>
+    <tr><td>7</td><td>弹药 UI 单调变化，不回跳</td><td>Bad 网络连射录屏逐帧看数字（E5）</td><td class="mid">不回跳但整体晚 RTT</td></tr>
+    <tr><td>8</td><td>冲刺 / 瞄准不触发移动纠正</td><td><code>p.NetShowCorrections 1</code> 下冲刺无红绿胶囊（E6）</td><td class="no">✗ 每秒 9 次纠正</td></tr>
+    <tr><td>9</td><td>移动目标在 RTT 200 ms 下命中率不明显下降</td><td>对横移僵尸连射统计命中（E3）</td><td class="no">✗ 无补偿</td></tr>
+    <tr><td rowspan="4"><strong>状态完整</strong></td><td>10</td><td>持续状态（死亡、换弹、阶段）都是复制属性 + OnRep</td><td>Allow Late Joining 下中途加入，看到尸体、阶段、对方在换弹</td><td class="no">✗ 靠多播</td></tr>
+    <tr><td>11</td><td>随机结果由服务器决定一次并复制（僵尸外观、攻击动作）</td><td>两端并排看同一只僵尸的动作</td><td class="no">✗ 各端各自随机</td></tr>
+    <tr><td>12</td><td>换弹守恒；换弹中开火被拒；被打断时弹药不变</td><td>表驱动测试（E4）+ PIE 手测</td><td class="no">✗ 吞子弹</td></tr>
+    <tr><td>13</td><td>玩家死亡后另一人可继续，死者观战；全灭才失败</td><td>两种死亡顺序各测一遍</td><td class="no">✗ 一人死全员失败</td></tr>
+    <tr><td rowspan="4"><strong>职责</strong></td><td>14</td><td>每个类一句话说清职责；关卡蓝图只做场景演出</td><td>类清单（本章第 2 节）</td><td class="no">✗ 关卡蓝图管开局</td></tr>
+    <tr><td>15</td><td>UI 只读数据、通过委托刷新，不每帧 Cast</td><td>UMG 里没有属性绑定函数</td><td class="no">✗ 每帧 Cast</td></tr>
+    <tr><td>16</td><td>武器 / 僵尸参数数据驱动（DataAsset）</td><td>加一把枪不改蓝图逻辑</td><td class="no">✗ 写死</td></tr>
+    <tr><td>17</td><td>血量是组件，玩家和僵尸共用一套伤害管线</td><td>AC_Health 被两个类引用</td><td class="no">✗ 两套</td></tr>
+    <tr><td rowspan="3"><strong>可验证</strong></td><td>18</td><td>Listen Server、Dedicated Server、独立进程三种模式都能完整打一局</td><td>测试清单（第 15 章）</td><td class="no">✗ 只测过 PIE</td></tr>
+    <tr><td>19</td><td>有 Bad 网络下的演示录屏和 stat net 截图</td><td>README 里附视频</td><td class="no">✗</td></tr>
+    <tr><td>20</td><td>日志里没有 No owning connection / Accessed None / 大量纠正</td><td>LogNet、LogNetPlayerMovement、LogScript 过滤</td><td class="no">✗</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：说“合格”要说可验证的东西</span>
+    <p>“我的 Demo 同步做得很好”没有信息量。要说“我在 200 ms、10% 丢包下测过：开火零延迟、弹药不回跳、冲刺不被拉回、两个人死亡顺序都测过、Dedicated Server 模式也能跑”——每一条后面都能接一个具体做法。面试官往下追问时，你就有路可走。</p>
+  </div>
+
+  <h2>2. 重做后的类清单</h2>
+  <div class="tbl"><table>
+    <tr><th>类</th><th>父类</th><th>存在于</th><th>职责（一句话）</th><th>关键事件</th><th>关键变量</th></tr>
+    <tr><td>BP_CoopGameInstance</td><td>GameInstance</td><td>各进程</td><td>主持 / 加入 / 离开会话，处理网络错误</td><td>Init、NetworkError、TravelError</td><td>LastError（本地）</td></tr>
+    <tr><td>GM_Coop</td><td>GameModeBase</td><td>仅服务器</td><td>登录、出生、开局、刷怪、胜负、重开</td><td>OnPostLogin、OnLogout、StartMatch、EndMatch</td><td>MatchDuration、MaxAlive、SpawnPoints</td></tr>
+    <tr><td>GS_Coop</td><td>GameStateBase</td><td>所有端</td><td>把比赛状态广播给所有人</td><td>OnRep_Phase → OnPhaseChanged</td><td>Phase、MatchEndServerTime、AliveZombies</td></tr>
+    <tr><td>PS_Coop</td><td>PlayerState</td><td>所有端</td><td>“这个人”的状态：准备、击杀、存活</td><td>OnRep_Ready、OnRep_Kills</td><td>bReady、Kills、bIsAlive</td></tr>
+    <tr><td>PC_Coop</td><td>PlayerController</td><td>服务器 + 自己</td><td>本地 UI、暂停菜单；准备 / 重开请求；观战</td><td>BeginPlay、OnPossessedPawnChanged</td><td>HUD、Lobby、Result（本地引用）</td></tr>
+    <tr><td>BP_CoopCharacter</td><td>Character</td><td>所有端</td><td>玩家身体：输入、武器、死亡表现</td><td>Possessed、ReceiveControllerChanged、OnRep_CurrentWeapon</td><td>CurrentWeapon</td></tr>
+    <tr><td>BP_WeaponBase</td><td>Actor</td><td>所有端</td><td>开火、换弹、弹药、开火表现</td><td>StartFire、Server_FireShot、Server_StartReload、OnRep_*</td><td>Ammo、BurstCounter、bPendingReload</td></tr>
+    <tr><td>AC_Health</td><td>ActorComponent</td><td>随 Actor</td><td>血量、受伤、死亡，广播事件</td><td>HandleDamage、RecordHit、OnRep_Health / LastHit / bIsDead</td><td>Health、bIsDead、LastHit</td></tr>
+    <tr><td>BP_Zombie</td><td>Character</td><td>所有端</td><td>僵尸身体：外观变体、攻击表现、死亡</td><td>BeginPlay、OnRep_VariantSeed、StartAttack、HandleDeath</td><td>VariantSeed、AttackInfo、bAttacking（仅服务器）</td></tr>
+    <tr><td>AIC_Zombie</td><td>AIController</td><td>仅服务器</td><td>运行行为树</td><td>OnPossess</td><td>黑板：TargetActor、bInRange</td></tr>
+    <tr><td>BT_Zombie / BB_Zombie</td><td>BehaviorTree</td><td>仅服务器</td><td>选目标、追击、攻击</td><td>Service / Task</td><td>—</td></tr>
+    <tr><td>BP_SpawnPoint</td><td>Actor（不复制）</td><td>关卡摆放</td><td>刷怪点标记</td><td>—</td><td>Weight</td></tr>
+    <tr><td>DA_Weapon / DA_Zombie</td><td>PrimaryDataAsset</td><td>资产</td><td>参数：伤害、射速、弹匣、换弹时长、速度、攻击力</td><td>—</td><td>—</td></tr>
+    <tr><td>WBP_HUD / Lobby / Result / Pause</td><td>UserWidget</td><td>仅本机</td><td>只读显示 + 通过 PC 发请求</td><td>Construct、委托回调</td><td>—</td></tr>
+  </table></div>
+  <p class="tcap">表 8-1　14 个类。和原 Demo 比：新增 GameInstance / PlayerState / PlayerController / AC_Health / AIController / 行为树 / 数据资产；关卡蓝图里的开局逻辑全部移走</p>
+
+  <h2>3. 工程结构</h2>
+<!--tree {"cols":["Content/Coop/","内容","备注"],"x":[12,190,660],"root":{"n":"Coop","col":"s","d":"本 Demo 的全部逻辑资产","w":"与美术资源分开，方便只拉逻辑","c":[
+ {"n":"Core","col":"b","d":"BP_CoopGameInstance · GM_Coop · GS_Coop · PS_Coop · PC_Coop","w":"框架类","c":[]},
+ {"n":"Characters","col":"g","d":"BP_CoopCharacter · ABP_Coop1P · ABP_Coop3P","w":"玩家","c":[]},
+ {"n":"Weapons","col":"o","d":"BP_WeaponBase · BP_Rifle · DA_Rifle · S_AmmoState","w":"武器与数据","c":[]},
+ {"n":"Components","col":"p","d":"AC_Health · S_HitInfo","w":"可复用组件","c":[]},
+ {"n":"AI","col":"r","d":"BP_Zombie · AIC_Zombie · BT_Zombie · BB_Zombie · BTT_Attack · BTS_FindTarget","w":"僵尸","c":[]},
+ {"n":"Level","col":"a","d":"BP_SpawnPoint · L_Menu · L_CoffeeShop","w":"关卡只摆东西、做演出","c":[]},
+ {"n":"UI","col":"t","d":"WBP_MainMenu · WBP_Lobby · WBP_HUD · WBP_Result · WBP_Pause","w":"只读 + 发请求","c":[]},
+ {"n":"Input","col":"s","d":"IMC_Default · IA_Move / Look / Fire / Aim / Reload / Sprint / Pause","w":"Enhanced Input","c":[]},
+ {"n":"Source（可选）","col":"s","d":"UCoopMovementComponent（冲刺 / 瞄准进 SavedMove）","w":"唯一必须 C++ 的部分","c":[]}
+]},"cap":"<b>图 8-1</b>　工程结构。逻辑资产集中在 Content/Coop，美术包保持原位；面试时打开工程，目录本身就在讲架构"} -->
+
+  <h2>4. 复制总表：同步了哪些东西</h2>
+  <div class="tbl"><table>
+    <tr><th>所在类</th><th>变量</th><th>类型</th><th>复制条件</th><th>RepNotify</th><th>谁写</th><th>谁读 / OnRep 做什么</th></tr>
+    <tr><td>GS_Coop</td><td>Phase</td><td>E_MatchPhase</td><td>无</td><td>✓</td><td>GM</td><td>各端 UI 切换大厅 / HUD / 结算</td></tr>
+    <tr><td>GS_Coop</td><td>MatchEndServerTime</td><td>Float</td><td>无</td><td>—</td><td>GM</td><td>HUD 倒计时 = 它 − GetServerWorldTimeSeconds</td></tr>
+    <tr><td>GS_Coop</td><td>AliveZombies</td><td>Integer</td><td>无</td><td>—</td><td>GM</td><td>HUD 显示</td></tr>
+    <tr><td>PS_Coop</td><td>bReady</td><td>Bool</td><td>无</td><td>✓</td><td>服务器（经 PC 请求）</td><td>大厅列表打勾</td></tr>
+    <tr><td>PS_Coop</td><td>Kills</td><td>Integer</td><td>无</td><td>✓</td><td>GM</td><td>结算 / 记分</td></tr>
+    <tr><td>PS_Coop</td><td>bIsAlive</td><td>Bool</td><td>无</td><td>—</td><td>GM</td><td>僵尸选目标、HUD 队友状态</td></tr>
+    <tr><td>BP_CoopCharacter</td><td>CurrentWeapon</td><td>BP_WeaponBase 引用</td><td>无</td><td>✓</td><td>服务器（Possessed）</td><td>各端挂接 1P / 3P</td></tr>
+    <tr><td>BP_CoopCharacter</td><td>bIsAiming</td><td>Bool</td><td><strong>Skip Owner</strong></td><td>—</td><td>服务器（移动组件解出瞄准标志后写）</td><td>别人的 3P 开镜姿势；拥有者用本地值</td></tr>
+    <tr><td>BP_WeaponBase</td><td>Ammo</td><td>S_AmmoState {InClip, Reserve, AckSeq, ReloadCount}</td><td><strong>Owner Only</strong></td><td>✓</td><td>服务器</td><td>拥有者对账、刷新 HUD</td></tr>
+    <tr><td>BP_WeaponBase</td><td>BurstCounter</td><td>Integer</td><td><strong>Skip Owner</strong></td><td>✓</td><td>服务器（接受一发 +1）</td><td>别人播 3P 开火表现</td></tr>
+    <tr><td>BP_WeaponBase</td><td>bPendingReload</td><td>Bool</td><td><strong>Skip Owner</strong></td><td>✓</td><td>服务器</td><td>别人播 / 停 3P 换弹动画</td></tr>
+    <tr><td>AC_Health</td><td>Health</td><td>Float</td><td>无</td><td>✓</td><td>服务器</td><td>血条；广播 OnHealthChanged</td></tr>
+    <tr><td>AC_Health</td><td>LastHit</td><td>S_HitInfo {Counter, Point, bHead}</td><td>无</td><td>✓</td><td>服务器</td><td>受击动作、血迹、命中音</td></tr>
+    <tr><td>AC_Health</td><td>bIsDead</td><td>Bool</td><td>无</td><td>✓</td><td>服务器</td><td>布娃娃、关碰撞、广播 OnDeath</td></tr>
+    <tr><td>BP_Zombie</td><td>VariantSeed</td><td>Integer</td><td><strong>Initial Only</strong></td><td>✓</td><td>服务器（生成时）</td><td>各端用同一个种子选外观 / 速度 / 待机动画</td></tr>
+    <tr><td>BP_Zombie</td><td>AttackInfo</td><td>S_AttackInfo {Counter, Index}</td><td>无</td><td>✓</td><td>服务器（每次攻击 Counter + 1，随机选 Index）</td><td>各端播同一个攻击蒙太奇</td></tr>
+  </table></div>
+  <p class="tcap">表 8-2　16 个复制变量（原 Demo 11 个，其中 10 个的 OnRep 是空的）。另有引擎自带复制：Character 的移动（ReplicatedMovement + CMC）、Controller、PlayerState 引用、RemoteViewPitch</p>
+  <div class="co tip"><span class="h">在蓝图里“打开复制”要勾哪几处</span>
+    <p>① <strong>Actor 本身</strong>：Class Defaults → Replication → <code>Replicates</code> ✓（GameState / PlayerState / PlayerController / Character 父类默认已开；BP_WeaponBase、BP_Zombie 是自己建的，要手动勾）；② <strong>组件</strong>：组件 Details → <code>Component Replicates</code> ✓（AC_Health 要勾，否则它的变量不会复制）；③ <strong>变量</strong>：变量 Details → Replication 选 <code>Replicated</code> 或 <code>RepNotify</code>，再按需要选 Replication Condition。三层缺一层，变量就不会到客户端——第 9~12 章每个类开头的“网络规格”面板就是按这三层列的。</p>
+  </div>
+
+  <h3>4.1 这些变量在双人局里到底发给了谁</h3>
+  <p>Replication Condition 决定“发给哪些客户端”。Listen Server 双人局只有两个进程：<strong>主机进程</strong>（它就是服务器，同时有一个本地玩家）和<strong>客户端进程</strong>。属于某个玩家的变量（武器、角色上的）两个玩家各有一份，要分开看；GameState、僵尸这类不属于任何玩家的只有一份。</p>
+<!--repmx {"rows":[
+ ["Phase","RepNotify","None",false,"大厅 / HUD / 结算切换"],
+ ["MatchEndServerTime","Replicated","None",false,"倒计时"],
+ ["AliveZombies","Replicated","None",false,"HUD 僵尸数"],
+ ["bReady · Kills（PS）","RepNotify","None",false,"大厅勾选、记分"],
+ ["bIsAlive（PS）","Replicated","None",false,"队友状态、僵尸选目标"],
+ ["CurrentWeapon","RepNotify","None",false,"挂接 1P / 3P"],
+ ["bIsAiming","Replicated","Skip Owner",true,"别人的 3P 开镜姿势"],
+ ["Ammo","RepNotify","Owner Only",true,"拥有者对账、刷新 HUD"],
+ ["BurstCounter","RepNotify","Skip Owner",true,"别人播 3P 开火"],
+ ["bPendingReload","RepNotify","Skip Owner",true,"别人播 / 停 3P 换弹"],
+ ["Health · LastHit · bIsDead","RepNotify","None",false,"血条、受击、倒地"],
+ ["VariantSeed","RepNotify","Initial Only",false,"僵尸外观、速度"],
+ ["AttackInfo","RepNotify","None",false,"僵尸攻击蒙太奇"]
+],"cap":"表 8-4　复制接收矩阵（Listen Server · 双人）。“这一份属于”= 该 Actor 的拥有者是谁；绿 / ✓ = 收到，红 / ✗ = 不发送，黄 / ◐ = 只发一次。主机进程一栏永远是“权威值”——不存在“复制给主机”这回事"} -->
+  <div class="co deep"><span class="h">怎么读表 8-4：四条规律</span>
+    <ul>
+      <li><strong>主机进程只有权威值，没有“收到”</strong>。主机上的 OnRep 不是“收到复制”触发的，而是蓝图 RepNotify 的特性：服务器 <code>Set w/ Notify</code> 时<strong>立即在服务器执行一次</strong>（C++ 不会）。所以 Listen Server 的主机能“看到”客户端的开火 / 换弹表现，靠的就是这次服务器端 OnRep。</li>
+      <li><strong>Owner Only</strong>：只有拥有者客户端收到。客户端看不到主机玩家的弹药（不需要），主机也不需要收（它就是服务器）。弹药少发一份，还防止外挂读到别人的弹药。</li>
+      <li><strong>Skip Owner</strong>：拥有者已经本地预测过，只发给“别人”。客户端玩家的 BurstCounter 不会发回给它自己；主机玩家的 BurstCounter 会发给客户端（客户端是“别人”）。坑在服务器端：Set 时 OnRep 在主机执行，对“主机玩家自己的武器”也会执行——所以 OnRep 里要用 <code>NOT Owner.IsLocallyControlled</code> 过滤（图 11-4）。</li>
+      <li><strong>Initial Only</strong>：只在 Actor 第一次复制给某个客户端时带上，之后改了也不发。VariantSeed 生成后不变，正合适；晚加入的人也能收到——他的“第一次”就是加入时。</li>
+    </ul>
+  </div>
+
+  <h2>5. RPC 与组播总表：每一条都要能说出“为什么是它”</h2>
+  <div class="tbl"><table>
+    <tr><th style="width:27%">名称（所在类）</th><th style="width:17%">Replicates · Reliable</th><th style="width:30%">在哪调用 → 在哪执行</th><th>服务器校验 / 为什么</th></tr>
+    <tr><td><b>Server_SetReady</b><br><span style="color:#6B7280;font-size:12px">PC_Coop</span></td><td><span class="tag"  style="background:#E8EEFC;color:#1D4ED8">Run on Server</span><br><span style="color:#15803D;font-size:12px;font-weight:700">Reliable</span></td><td>拥有者客户端（大厅按钮 → Get Owning Player）<br>→ 服务器上这个玩家的 PC</td><td>Phase == Waiting；低频必达</td></tr>
+    <tr><td><b>Server_RequestRestart</b><br><span style="color:#6B7280;font-size:12px">PC_Coop</span></td><td><span class="tag"  style="background:#E8EEFC;color:#1D4ED8">Run on Server</span><br><span style="color:#15803D;font-size:12px;font-weight:700">Reliable</span></td><td>拥有者客户端（结算按钮）<br>→ 服务器</td><td>Phase 为 Won / Lost；只允许主机（服务器上 IsLocalController 的那个 PC）</td></tr>
+    <tr><td><b>Client_StartSpectating(Target)</b><br><span style="color:#6B7280;font-size:12px">PC_Coop</span></td><td><span class="tag"  style="background:#FEF6E4;color:#B45309">Run on owning Client</span><br><span style="color:#15803D;font-size:12px;font-weight:700">Reliable</span></td><td>服务器（GM.OnPlayerDied）<br>→ 死者的客户端（死者是主机时就在主机本地）</td><td>切换观战视角，必须送达</td></tr>
+    <tr><td><b>Client_ShowHitMarker</b><br><span style="color:#6B7280;font-size:12px">PC_Coop</span></td><td><span class="tag"  style="background:#FEF6E4;color:#B45309">Run on owning Client</span><br><span style="color:#6B7280;font-size:12px;font-weight:700">Unreliable</span></td><td>服务器（Server_FireShot 命中后）<br>→ 开火者的客户端</td><td>纯表现，丢了无所谓</td></tr>
+    <tr><td><b>Client_ShowDamageFeedback</b><br><span style="color:#6B7280;font-size:12px">PC_Coop</span></td><td><span class="tag"  style="background:#FEF6E4;color:#B45309">Run on owning Client</span><br><span style="color:#6B7280;font-size:12px;font-weight:700">Unreliable</span></td><td>服务器（玩家受伤后）<br>→ 受伤者的客户端</td><td>镜头抖动、方向指示（原 Demo 的 Client_PlayHitFX ✓）</td></tr>
+    <tr><td><b>Server_FireShot(Seq, Start, Dir, Time, HitActor, HitBone)</b><br><span style="color:#6B7280;font-size:12px">BP_WeaponBase</span></td><td><span class="tag"  style="background:#E8EEFC;color:#1D4ED8">Run on Server</span><br><span style="color:#15803D;font-size:12px;font-weight:700">Reliable</span></td><td>拥有者本机，每发一次<br>→ 服务器</td><td>存活 / 未换弹 / 射速令牌 / 弹药 / 起点 / 方向 / 命中容差；会造成伤害，不能丢</td></tr>
+    <tr><td><b>Server_StartReload</b><br><span style="color:#6B7280;font-size:12px">BP_WeaponBase</span></td><td><span class="tag"  style="background:#E8EEFC;color:#1D4ED8">Run on Server</span><br><span style="color:#15803D;font-size:12px;font-weight:700">Reliable</span></td><td>拥有者本机<br>→ 服务器</td><td>备弹 &gt; 0、未满、未在换弹、存活</td></tr>
+    <tr><td><b>Client_CancelReload</b><br><span style="color:#6B7280;font-size:12px">BP_WeaponBase</span></td><td><span class="tag"  style="background:#FEF6E4;color:#B45309">Run on owning Client</span><br><span style="color:#15803D;font-size:12px;font-weight:700">Reliable</span></td><td>服务器（拒绝 / 打断）<br>→ 持枪者的客户端</td><td>停掉本机预测的换弹动画</td></tr>
+    <tr><td><b>Multicast_DeathCry</b><br><span style="color:#6B7280;font-size:12px">BP_Zombie</span></td><td><span class="tag"  style="background:#FFF1E6;color:#C2410C">Multicast</span><br><span style="color:#6B7280;font-size:12px;font-weight:700">Unreliable</span></td><td><strong>服务器</strong>（HandleDeath）<br>→ 服务器 + 所有与这只僵尸相关的客户端</td><td>一次性惨叫；晚加入不该再响</td></tr>
+    <tr><td><b>Multicast_Growl</b><br><span style="color:#6B7280;font-size:12px">BP_Zombie</span></td><td><span class="tag"  style="background:#FFF1E6;color:#C2410C">Multicast</span><br><span style="color:#6B7280;font-size:12px;font-weight:700">Unreliable</span></td><td><strong>服务器</strong>（BTS_FindTarget 换目标）<br>→ 服务器 + 所有相关客户端</td><td>一次性低吼；丢了无所谓</td></tr>
+  </table></div>
+  <p class="tcap">表 8-3　10 个网络事件 = 8 个 RPC（4 个 Run on Server、4 个 Run on owning Client）+ 2 个组播。原 Demo 19 个，其中 8 个是组播。删掉的包括：“播动画 / 改状态的组播”（改成复制属性 + OnRep）、冲刺的两个 Server RPC（改进移动预测）、关卡蓝图与 GameMode 上没有意义的 RPC</p>
+  <div class="co deep"><span class="h">为什么 RPC 反而变少了</span>
+    <p>原 Demo 每想同步一件事就加一个组播：开火、换弹、受击、死亡、攻击、开局。这些大多是<strong>状态</strong>（在换弹、死了、开局了），用复制属性表达更对：晚加入能看到、丢包后会被下一次更新纠正、不会被打断。网络事件只剩三类：客户端的<strong>请求</strong>（Run on Server）、只给某个人的<strong>即时反馈</strong>（Run on owning Client）、服务器发起的<strong>一次性世界表现</strong>（Unreliable 组播）。</p>
+  </div>
+
+  <h3 id="ch8-mc">5.1 组播去哪了：原 Demo 的 8 个 Multicast 逐个替换</h3>
+  <div class="tbl"><table>
+    <tr><th style="width:19%">原组播（所在类）</th><th style="width:18%">原来做什么</th><th style="width:22%">出了什么问题</th><th style="width:26%">重做后用什么</th><th>为什么</th></tr>
+    <tr><td><b>Multicast_StartGame</b><br><span style="color:#6B7280;font-size:12px">BP_Player</span></td><td>人数到齐后 GM 对<strong>每个 Pawn</strong> 调一次 → 触发关卡蓝图 Start_Logic</td><td>2 个 Pawn = 每端开局逻辑跑 2 遍；晚加入收不到</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">GS_Coop.Phase · RepNotify</span> → OnRep_Phase → OnPhaseChanged</td><td>“比赛开始了”是状态</td></tr>
+    <tr><td><b>Multi_SetStrat</b><br><span style="color:#6B7280;font-size:12px">关卡蓝图</span></td><td>Server_SetStart → 组播在每端写 GameState 的“游戏是否开始”</td><td>客户端不拥有关卡蓝图，它调用的 Server_SetStart 被丢弃；“游戏是否开始”本身不复制，晚加入者永远是 false（附录 A #15）</td><td>删除；改由 GM 在服务器写 Phase</td><td>状态要放进复制变量，由服务器写一次</td></tr>
+    <tr><td><b>Multi_Death</b><br><span style="color:#6B7280;font-size:12px">BP_Player</span></td><td>任一玩家死亡 → 每端弹“失败”并暂停</td><td>活着的人也被判负</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">AC_Health.bIsDead · RepNotify</span>（尸体）+ GM 判全灭 → Phase = Lost；死者收 Client_StartSpectating</td><td>死亡是状态，胜负是规则</td></tr>
+    <tr><td><b>Multicast_Fire</b><br><span style="color:#6B7280;font-size:12px">BP_Weapon</span></td><td>服务器收到开火请求后，先组播开火动画</td><td>开火者等一个 RTT；排在弹药检查前，打空也播</td><td>本机预测 + <span class="tag" style="background:#F1ECFE;color:#6D28D9">BurstCounter · RepNotify · Skip Owner</span></td><td>高频；拥有者已预测，不该再收</td></tr>
+    <tr><td><b>Multicast_Change</b><br><span style="color:#6B7280;font-size:12px">BP_Weapon</span></td><td>换弹动画</td><td>开火者等 RTT；晚加入看不到；打断后无法撤销</td><td>本机预测 + <span class="tag" style="background:#F1ECFE;color:#6D28D9">bPendingReload · RepNotify · Skip Owner</span> + Client_CancelReload</td><td>“正在换弹”是持续状态</td></tr>
+    <tr><td><b>Multicast_PlayAttackAnim</b><br><span style="color:#6B7280;font-size:12px">BP_Zombie</span></td><td>各端随机选攻击蒙太奇；On Completed 里写“正在攻击”</td><td>各端动作不同；客户端写复制变量</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">AttackInfo{Counter, Index} · RepNotify</span>；bAttacking 只在服务器</td><td>随机结果由服务器决定一次</td></tr>
+    <tr><td><b>Multicast_HitReact</b><br><span style="color:#6B7280;font-size:12px">BP_Zombie</span></td><td>受击动画（各端随机）</td><td>同上</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">AC_Health.LastHit{Counter, Point, bHead} · RepNotify</span></td><td>Counter 保证连续两次相同命中也触发 OnRep</td></tr>
+    <tr><td><b>Multicast_Death</b><br><span style="color:#6B7280;font-size:12px">BP_Zombie</span></td><td>倒地 + 补刷一只</td><td>客户端本地扣血后调用 → 只在本地执行；补刷在每端执行</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">bIsDead · RepNotify</span>（布娃娃）+ GM 在服务器补刷 + <span class="tag" style="background:#FFF1E6;color:#C2410C">Multicast_DeathCry</span>（惨叫）</td><td>尸体是状态，惨叫是事件</td></tr>
+  </table></div>
+  <p class="tcap">表 8-5　8 个组播的去向：7 个换成 RepNotify，1 个直接删除；新加的 2 个组播只负责一次性音效</p>
+  <div class="co warn"><span class="h">面试注意：组播四条件，全满足才用</span>
+    <p>① <strong>由服务器调用</strong>（客户端调用的组播只在本地执行）；② <strong>一瞬间的</strong>，不是持续状态；③ <strong>晚加入的人不需要</strong>；④ <strong>丢了无所谓</strong>，所以用 Unreliable。再加一条实操：组播没有 Skip Owner，拥有者已经预测过的表现（开火、换弹）不要用组播。被问“为什么不用 Multicast 同步开火”时，就按这四条逐一说。</p>
+  </div>
+
+  <h3>5.2 每个事件在哪端执行：速查</h3>
+  <p>第 9~13 章每张事件图表的入口节点右上角都有一个执行端标签，图下方有“本图网络摘要”。把全书的事件按执行端归类，就是下面这张表——面试时被问“这段逻辑在哪跑”，先想它属于哪一行。</p>
+  <div class="tbl"><table>
+    <tr><th>执行端</th><th>本 Demo 里有哪些</th><th>靠什么保证只在这里执行</th></tr>
+    <tr><td><span class="tag" style="background:#E8EEFC;color:#1D4ED8">仅服务器</span></td><td>GM_Coop 的全部事件；AIC_Zombie 与行为树；角色 Event Possessed；AC_Health.HandleDamage / RecordHit；角色 / 僵尸 HandleDeath；武器 FinishReload / CancelReload / ServerStopAll；僵尸 StartAttack / DoAttackTrace / EndAttack；PS.AddKill；所有 Server_* 的函数体</td><td>对象只在服务器存在（GameMode、AIController）；伤害事件只在 Authority 分支里绑定；由服务器事件调用；Run on Server</td></tr>
+    <tr><td><span class="tag" style="background:#FEF6E4;color:#B45309">仅拥有者客户端</span></td><td>Client_StartSpectating、Client_ShowHitMarker、Client_ShowDamageFeedback、Client_CancelReload</td><td>Run on owning Client；拥有者是主机时在主机本地执行</td></tr>
+    <tr><td><span class="tag" style="background:#FFF1E6;color:#C2410C">服务器 + 所有客户端</span></td><td>Multicast_DeathCry、Multicast_Growl</td><td>Multicast，且必须由服务器调用</td></tr>
+    <tr><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">服务器（Set 时）+ 收到的客户端</span></td><td>全部 OnRep_*：Phase、bReady、Kills、CurrentWeapon、Ammo、BurstCounter、bPendingReload、Health、LastHit、bIsDead、VariantSeed、AttackInfo，以及在 OnRep 里广播的分发器（OnHealthChanged、OnDeadVisual…）</td><td>蓝图 RepNotify 的特性；需要排除某一端时用 IsLocallyControlled、bBegunPlay 过滤</td></tr>
+    <tr><td><span class="tag" style="background:#E8F7EE;color:#15803D">本地控制端</span></td><td>输入事件 IA_*；武器 StartFire / StopFire / FireShot / StartReload；PC 的 IA_Pause</td><td>Enhanced Input 只在本地 PC 上触发</td></tr>
+    <tr><td><span class="tag" style="background:#F3F4F6;color:#374151">所有端（每个副本）</span></td><td>BeginPlay、Tick、EndPlay；AnimBP 更新；Receive Controller Changed（服务器 + 拥有者）</td><td>需要分端的逻辑在里面用 Switch Has Authority / Is Local Controller 分流</td></tr>
+    <tr><td><span class="tag" style="background:#E6F6F5;color:#0F766E">本机，不联网</span></td><td>全部 Widget 事件；GI 的 HostGame / FindGames / JoinGame / LeaveGame</td><td>Widget 与 GameInstance 都不复制</td></tr>
+  </table></div>
+  <p class="tcap">表 8-6　执行端速查。蓝图里没有“这个事件只在服务器执行”的开关（除了 Run on Server），执行端由<strong>对象存在于哪端</strong>和<strong>谁调用</strong>共同决定——这就是第 9 章图 9-1a 那棵判断树</p>
+
+  <h2>6. 数据资产与碰撞设置</h2>
+  <div class="tbl"><table>
+    <tr><th>DA_Weapon 字段</th><th>Rifle</th><th>用途</th></tr>
+    <tr><td>BaseDamage / HeadshotMultiplier</td><td>40 / 2.5</td><td>原 Demo：身体 40、爆头 100</td></tr>
+    <tr><td>FireInterval</td><td>0.12 s</td><td>本机计时器与服务器射速校验共用</td></tr>
+    <tr><td>ClipSize / MaxReserve</td><td>10 / 30</td><td>弹药初值</td></tr>
+    <tr><td>ReloadDuration</td><td>按蒙太奇时长（约 2 s）</td><td>服务器计时；动画按此缩放播放速率</td></tr>
+    <tr><td>Spread（腰射 / 开镜）</td><td>2.5° / 0°</td><td>Seq 作随机种子，服务器可复现</td></tr>
+    <tr><td>Range / TraceChannel</td><td>10000 cm / Weapon</td><td>命中扫描</td></tr>
+    <tr><td>FireMontage1P / 3P、ReloadMontage1P / 3P、MuzzleFX、ImpactFX、Sounds</td><td>—</td><td>表现资源全部软引用</td></tr>
+  </table></div>
+  <div class="tbl"><table>
+    <tr><th>通道</th><th>类型</th><th>默认</th><th>谁 Block</th><th>原 Demo</th></tr>
+    <tr><td>Weapon</td><td>Trace</td><td>Block</td><td>僵尸网格（Physics Asset 判头）、墙；玩家胶囊 Ignore（合作无友伤）</td><td>Bullet 是 Object 通道，给复制子弹用</td></tr>
+    <tr><td>ZombieAttack</td><td>Trace</td><td>Ignore</td><td>玩家胶囊</td><td>丧尸攻击 ✓（保留）</td></tr>
+  </table></div>
+
+  <h2>7. 两条路线：纯蓝图能走多远</h2>
+  <div class="tbl"><table>
+    <tr><th>需求</th><th>纯蓝图</th><th>蓝图 + 少量 C++</th></tr>
+    <tr><td>服务器权威、复制、RPC、OnRep、复制条件</td><td class="yes">全部可以</td><td class="yes">同左</td></tr>
+    <tr><td>开火预测 + 序号对账、BurstCounter</td><td class="yes">可以（OnRep 没有旧值参数，需要本地保存上次值）</td><td class="yes">C++ 的 OnRep 可带 OldValue</td></tr>
+    <tr><td>换弹状态机、可取消</td><td class="yes">可以（用 Set Timer by Event，不用 Delay）</td><td class="yes">同左</td></tr>
+    <tr><td>冲刺 / 瞄准进移动预测</td><td class="no">做不到（SavedMove 只能 C++）</td><td class="yes">UCoopMovementComponent 约 60 行</td></tr>
+    <tr><td>服务器回溯（PvP）</td><td class="mid">能做但慢且难维护</td><td class="yes">推荐 C++</td></tr>
+    <tr><td>会话（主持 / 加入）</td><td class="yes">Create / Find / Join Session 节点</td><td class="yes">同左</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">纯蓝图下冲刺的“次优解”</span>
+    <p>不写 C++ 时，至少做到：输入时<strong>本机和服务器同时</strong>切换（本地 Set + Server RPC），两端用同一个函数从同一组变量算速度，并把冲刺状态做成复制变量给模拟代理看。这能消除原 Demo“只有一端生效”的持续纠正（E6 第一行），但丢包时仍有偶发纠正（E6 “半修复”行：每秒 {{v:E6[c=2,rtt=200,loss=0.1].cps:.2f}} 次）。面试时要主动说出这个局限，并说明 C++ 版本怎么彻底解决——这比假装纯蓝图能做完美更可信。</p>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>C++</th><th>蓝图里的对应</th></tr>
+    <tr><td><code>UFUNCTION(Server, Reliable)</code></td><td>自定义事件 → Replicates：Run on Server，勾 Reliable</td></tr>
+    <tr><td><code>UFUNCTION(Client, Reliable)</code></td><td>Run on owning Client</td></tr>
+    <tr><td><code>DOREPLIFETIME_CONDITION(…, COND_OwnerOnly)</code></td><td>变量 → Replication：RepNotify，Replication Condition：Owner Only</td></tr>
+    <tr><td><code>HasAuthority()</code> / <code>IsLocallyControlled()</code></td><td>Switch Has Authority / Is Locally Controlled</td></tr>
+    <tr><td><code>FActorSpawnParameters.Owner / Instigator</code></td><td>Spawn Actor 节点的 Owner / Instigator 引脚</td></tr>
+    <tr><td><code>GetWorld()->ServerTravel(...)</code></td><td>Execute Console Command “servertravel 地图名”（服务器上）</td></tr>
+    <tr><td><code>SetIsReplicated(true)</code>（组件）</td><td>组件细节面板：Component Replicates</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>合格 = <strong>权威清晰、手感跟手、状态完整、职责单一、可验证</strong>，20 条标准每条都能说出验证方法。</li>
+    <li>14 个类；16 个复制变量（Ammo OwnerOnly、BurstCounter / bPendingReload / bIsAiming SkipOwner、VariantSeed InitialOnly）；8 个 RPC（4 个请求、4 个单人反馈）+ 2 个 Unreliable 组播（一次性音效）。</li>
+    <li>打开复制三层：Actor Replicates → 组件 Component Replicates → 变量 Replicated / RepNotify + Condition。主机进程只有权威值，主机上的 OnRep 来自服务器 Set。</li>
+    <li>原 Demo 8 个组播：7 个换成 RepNotify、1 个删除。组播四条件：服务器调用、一瞬间、晚加入不需要、丢了无所谓。</li>
+    <li>纯蓝图能做完除“移动预测扩展”外的全部内容；冲刺要彻底不被拉回需要约 60 行 C++。</li>
+  </ul></div>
+</section>

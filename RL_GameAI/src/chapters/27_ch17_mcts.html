@@ -1,0 +1,133 @@
+<section class="chapter" id="ch17">
+<div class="ch-head"><div class="no">CHAPTER 17</div><h1>规划与搜索：MCTS 到 AlphaZero / MuZero</h1><p class="lead">前面的方法都是“训练好策略，部署时直接查表 / 前向一次”。如果有环境模型（规则已知的棋牌、或者能快速模拟的游戏），还可以在每次决策时临时搜索：往前推演若干步，用搜索结果弥补网络的不足。MCTS 把搜索变成“按 UCB 分配模拟次数”，AlphaZero 再用策略网络缩小搜索宽度、用价值网络代替随机 rollout，并用搜索结果反过来训练网络。卡牌、棋类、回合制游戏的 AI 大多是这个框架。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>说清 minimax / α-β 的代价，以及 MCTS 四个步骤与 UCT 公式的来历。</li>
+<li>理解 PUCT 中先验与价值估计的作用，用实测看“好的网络能让搜索少花多少模拟”。</li>
+<li>写出 AlphaZero 的训练目标，说清 AlphaGo / AlphaZero / MuZero 的区别。</li>
+<li>知道搜索在游戏里落地的约束：帧时间预算、不完全信息。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>MCTS 每次决策时从当前局面出发反复做四步：<strong>选择</strong>（从根往下，每层按 UCT $\bar X_j+c\sqrt{\ln N/n_j}$ 选子节点，兼顾平均胜率和访问不足带来的不确定性）、<strong>扩展</strong>（到达未完全展开的节点时新建一个子节点）、<strong>模拟</strong>（从新节点随机走到终局）、<strong>回传</strong>（把结果沿路径加回去，每层翻转一次视角）。模拟次数越多越接近 minimax，最后选访问次数最多的着法。UCT 来自多臂老虎机的 UCB，c 控制探索。AlphaZero 把它改成 PUCT：$Q+c\,P\frac{\sqrt N}{1+n}$，P 是策略网络的先验，用来缩小搜索宽度；叶子用价值网络估值代替随机 rollout，缩短搜索深度。训练靠自对弈：MCTS 的访问分布 π 作为策略网络的目标，终局胜负 z 作为价值网络的目标，损失 $(z-v)^2-\pi^\top\log p+c\lVert\theta\rVert^2$。AlphaGo 还需要人类棋谱和 rollout，AlphaZero 完全从零自对弈，MuZero 连规则都不需要，在学到的隐空间模型里搜索。</p></div>
+
+<h2>17.1 博弈树搜索：minimax 与 α-β</h2>
+<p>两人零和、完全信息、轮流行动的游戏（棋类）可以用 <strong>minimax</strong> 求解：自己走时取子节点价值的 max，对手走时取 min（用“轮到谁走、谁的视角”的写法就是 $V(s)=\max_a[-V(s_a)]$，即 negamax）。问题是节点数随深度指数增长。<strong>α-β 剪枝</strong>在搜索中维护一个窗口 [α, β]：如果某个分支已经证明“对手不会让我走到这里”，就不必再看剩下的子节点。着法排序越好，剪得越多，理想情况下把 $b^d$ 降到约 $b^{d/2}$。</p>
+<p>井字棋的完整博弈树（<code>demos/ch17_mcts.cpp</code> E1）：空棋盘的 minimax 值为 [[ch17.v]]（双方完美时平局）；不剪枝要访问 [[ch17.nodes_mm|.0f]] 个节点，α-β 只访问 [[ch17.nodes_ab|.0f]] 个；如果再按局面记忆（置换表），不同局面只有 [[ch17.states|.0f]] 个。围棋的分支因子约 250、深度约 150，这条路完全走不通，于是有了 MCTS。</p>
+
+<h2>17.2 MCTS 与 UCT</h2>
+<!--flow {"w":900,"h":200,
+"boxes":[
+{"id":"a","x":10,"y":30,"w":200,"h":76,"t":"① 选择","s":"从根往下，每层选 UCT 最大的子节点","s2":"直到未完全展开的节点","c":"b"},
+{"id":"b","x":240,"y":30,"w":190,"h":76,"t":"② 扩展","s":"新建一个子节点","s2":"（AlphaZero：一次展开全部 + 先验）","c":"t"},
+{"id":"c","x":460,"y":30,"w":200,"h":76,"t":"③ 模拟 / 估值","s":"随机走到终局得到胜负","s2":"（AlphaZero：价值网络 v(s)）","c":"o"},
+{"id":"d","x":690,"y":30,"w":200,"h":76,"t":"④ 回传","s":"沿路径 N += 1、W += 结果","s2":"每上一层视角翻转一次","c":"p"}],
+"arrows":[{"p":[[210,68],[240,68]],"c":"s"},{"p":[[430,68],[460,68]],"c":"s"},{"p":[[660,68],[690,68]],"c":"s"},
+{"p":[[790,106],[790,150],[110,150],[110,106]],"c":"s","dash":true,"label":"重复 N 次（模拟预算），最后选根节点下访问次数最多的着法","lx":230,"ly":142}],
+"cap":"<b>图 17-1</b>　MCTS 的四个步骤。"} -->
+<p>选择阶段的核心问题：在一个节点上，是继续深挖目前胜率最高的子节点，还是看看访问得少、可能被低估的子节点？这正是多臂老虎机的探索与利用问题。UCT（Kocsis &amp; Szepesvári, 2006）直接把 UCB1 用在每个节点上：</p>
+<!--deriv UCB1：用 Hoeffding 不等式构造置信上界
+\Pr\big(\mu_j\ge\bar X_j+\epsilon\big) & \le e^{-2n_j\epsilon^2} || Hoeffding：$n_j$ 个取值在 [0, 1] 的独立样本，均值被低估超过 ε 的概率指数小
+e^{-2n_j\epsilon^2} & = N^{-4}\ \Rightarrow\ \epsilon=\sqrt{\frac{2\ln N}{n_j}} || 让“真值超出上界”的概率随总次数 N 快速变小（取 $N^{-4}$）
+* \text{UCB1}_j & = \bar X_j+\sqrt{\frac{2\ln N}{n_j}} || 乐观地按上界选：访问少的分支上界宽，会被试探；访问多了上界收窄，只有真的好才继续被选
+\text{UCT}_j & = \bar X_j+c\sqrt{\frac{\ln N}{n_j}} || 用在树的每个节点上；理论 $c=\sqrt2$，实践中调参。可以证明模拟次数趋于无穷时收敛到 minimax 着法
+-->
+<p>让 UCT（随机 rollout，c = 1.4）和完美对手下井字棋，一半执先、一半执后，统计不败率（完美对局的最好结果就是平局；E2，每个点 [[ch17.G]] 局）：</p>
+<!--plot {"x":[8,4000],"logx":true,"y":[0,1.05],"h":270,"xlabel":"每步模拟次数（对数刻度）","ylabel":"对完美对手的不败率","legend":"br",
+"series":[{"path":"ch17.uct","n":"UCT + 随机 rollout","c":"b","dots":true,"sw":2.4},{"path":"ch17.puct","n":"PUCT + 策略先验 + 带噪声的价值估计","c":"o","dots":true,"sw":2.4}],
+"cap":"<b>图 17-2</b>　模拟次数与棋力（C++ 实测）。纯 UCT 每步 10 次模拟时不败率只有 [[ch17.uct_v.0|.2f]]，到 3000 次才全部不败；有了先验和价值估计的 PUCT，10 次模拟就有 [[ch17.puct_v.0|.2f]]。注意这里的“网络”是用真值加噪声模拟的（价值噪声标准差 0.5、先验一半是均匀分布），比真实训练出来的网络理想，只用来说明机制。"} -->
+<!--plot {"x":[0,6],"y":[0.5,0.85],"h":230,"xlabel":"探索常数 c","ylabel":"不败率（每步 100 次模拟，400 局）","legend":"tr",
+"series":[{"path":"ch17.c_sweep","n":"UCT","c":"b","dots":true,"sw":2.4}],
+"cap":"<b>图 17-3</b>　探索常数的影响（C++ 实测）。c = 0 时只按平均胜率贪心，容易被早期的随机结果锁死在差的分支上；c 太大则模拟次数被平均分摊，搜索不够深。中间值最好，曲线顶部比较平，说明 c 不算很敏感。"} -->
+<!--gbars {"groups":{"path":"ch17.labels"},"series":[{"n":"根节点下各着法的访问次数（2000 次模拟）","v":{"path":"ch17.visits"},"c":"b"}],"h":230,"fmt":".0f","ymax":520,
+"cap":"<b>图 17-4</b>　空棋盘上 2000 次 UCT 模拟后的访问分布（C++ 实测）。角和中心（理论上都不会输的着法）被访问得最多，边被访问得少——模拟次数会自动集中到好的分支上，这个访问分布就是 AlphaZero 用来训练策略网络的目标 π。"} -->
+
+<h2>17.3 AlphaGo → AlphaZero：先验、价值网络与自对弈</h2>
+<p>纯 MCTS 在围棋上有两个瓶颈：分支太多（宽度），随机 rollout 太弱（深度）。AlphaGo 系列的改进：</p>
+<ul>
+<li><strong>宽度</strong>：策略网络给出每个着法的先验 $P(s,a)$，选择时用 PUCT $\;Q(s,a)+c\,P(s,a)\frac{\sqrt{N(s)}}{1+N(s,a)}$：先验高的着法先被探索，先验极低的几乎不会被浪费模拟次数。</li>
+<li><strong>深度</strong>：叶子节点用价值网络 $v(s)$ 估计胜率，代替（或混合）随机 rollout，搜索不必走到终局。</li>
+<li><strong>自我提升</strong>：MCTS 的结果比网络的直接输出更强（相当于一次“策略改进”），于是用搜索结果训练网络，网络变强又让搜索更强——这就是第 4 章的广义策略迭代：MCTS 做策略改进，网络训练做策略评估。</li>
+</ul>
+<!--flow {"w":900,"h":200,
+"boxes":[
+{"id":"a","x":20,"y":40,"w":250,"h":76,"t":"自对弈","s":"每步跑 MCTS（PUCT + f_θ）","s2":"按访问分布 π 采样着法，加 Dirichlet 噪声","c":"b"},
+{"id":"b","x":330,"y":40,"w":240,"h":76,"t":"存样本 (s, π, z)","s":"π：根节点访问分布","s2":"z：这局最终胜负（±1 / 0）","c":"a"},
+{"id":"c","x":630,"y":40,"w":250,"h":76,"t":"训练 f_θ(s) = (p, v)","s":"L = (z − v)² − πᵀ log p + c‖θ‖²","c":"o"}],
+"arrows":[{"p":[[270,78],[330,78]],"c":"s"},{"p":[[570,78],[630,78]],"c":"s"},
+{"p":[[755,116],[755,160],[145,160],[145,116]],"c":"p","dash":true,"label":"更新后的网络用于下一轮自对弈","lx":330,"ly":152}],
+"cap":"<b>图 17-5</b>　AlphaZero 的训练循环。"} -->
+<p><strong>AlphaZero 的损失</strong> $L=(z-v)^2-\pi^\top\log p+c\lVert\theta\rVert^2$：价值头回归到对局结果（蒙特卡洛目标，第 5 章），策略头用交叉熵拟合 MCTS 的访问分布（相当于把搜索“蒸馏”进网络），加 L2 正则。根节点加 Dirichlet 噪声保证自对弈的探索；前若干步按访问分布采样、之后选访问最多的着法。</p>
+<div class="tbl"><table>
+<tr><th></th><th>AlphaGo（2016）</th><th>AlphaGo Zero / AlphaZero（2017）</th><th>MuZero（2020）</th></tr>
+<tr><td>人类数据</td><td>人类棋谱监督预训练</td><td>不需要，从零自对弈</td><td>不需要</td></tr>
+<tr><td>规则 / 模型</td><td>需要</td><td>需要（搜索时模拟走子）</td><td>不需要：在学到的隐空间模型里搜索</td></tr>
+<tr><td>网络</td><td>策略网络 + 价值网络 + rollout 策略</td><td>一个双头网络 (p, v)</td><td>表示 h、动力学 g、预测 f 三个网络</td></tr>
+<tr><td>叶子估值</td><td>价值网络与 rollout 混合</td><td>只用价值网络</td><td>只用价值网络（隐状态上）</td></tr>
+<tr><td>领域</td><td>围棋</td><td>围棋、国际象棋、将棋</td><td>棋类 + Atari</td></tr>
+</table></div>
+<p class="tcap"><b>表 17-1</b>　AlphaGo 系列的演进。</p>
+<p><strong>MuZero</strong>：$s^0=h(\text{观测})$ 把观测编码成隐状态，$(r^k,s^k)=g(s^{k-1},a^k)$ 在隐空间里“想象”走一步，$(p^k,v^k)=f(s^k)$ 给出先验和价值。训练时把真实轨迹展开 K 步，让每一步预测的奖励、价值、策略分别拟合真实奖励、n 步回报和 MCTS 访问分布。隐状态不需要能重建观测，只需要对规划有用。</p>
+
+<h2>17.4 model-based RL 的其他形式</h2>
+<ul>
+<li><strong>Dyna-Q</strong>（Sutton 1990）：每走一步真实环境，就用学到的表格模型额外“想象”k 步来更新 Q，用模型换样本效率。</li>
+<li><strong>World Models / Dreamer</strong>：学一个隐空间的世界模型，策略完全在模型的“梦境”里训练（Dreamer 用想象轨迹上的价值梯度），样本效率比无模型方法高一到两个数量级。</li>
+<li><strong>优缺点</strong>：样本效率高、能做规划和“想象”；但模型误差会被策略利用（和第 12 章 actor 利用 critic 误差是同一类问题），长程想象误差累积，训练系统更复杂。游戏里模拟往往很便宜，所以无模型 + 大规模采样更常见；模型主要用于搜索（有规则时）和需要“预测对手 / 预测未来”的模块。</li>
+</ul>
+
+<h2>17.5 游戏落地</h2>
+<div class="tbl"><table>
+<tr><th>问题</th><th>做法</th></tr>
+<tr><td>帧时间预算</td><td>搜索是“随时可停”的（anytime）：给定毫秒预算跑尽量多的模拟；回合制游戏可以用玩家思考时间，实时游戏只在关键决策点（出牌、技能释放时机）搜索；复用上一步的子树</td></tr>
+<tr><td>不完全信息（卡牌、迷雾）</td><td>确定化（determinization）：按信念采样对手手牌，在多个“确定的世界”里分别搜索再投票；信息集 MCTS（IS-MCTS）在信息集上建树；扑克类用 CFR 系列求近似纳什</td></tr>
+<tr><td>随机性（抽牌、暴击）</td><td>树中加入机会节点，按概率加权回传</td></tr>
+<tr><td>难度控制</td><td>限制模拟次数、在根节点按访问分布加温度采样、故意剪掉部分好着法</td></tr>
+<tr><td>和学习结合</td><td>用 RL / 模仿学习训练策略和价值网络做 PUCT 的先验与估值；也可以把搜索当作“老师”蒸馏出一个不搜索的快速策略（第 14 章的蒸馏）</td></tr>
+</table></div>
+<p class="tcap"><b>表 17-2</b>　游戏中使用搜索的常见问题与做法。</p>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch17_interview.py</code> 逐字相同；脚本用它在 Nim 上搜索，9 个局面 × 5 次全部找到必胜着法：</p>
+<!--code:py:MCTS 四步 / PUCT / AlphaZero 损失（Python，面试手撕版）-->
+{{demo:ch17_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch17_interview.py 的输出-->
+{{demo:ch17_interview_output.txt}}
+<!--/code-->
+
+<h2>17.6 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“MCTS 最后选 Q 最高的着法”</td><td>不稳</td><td>通常选访问次数最多的：访问多说明在 UCT 下反复胜出，Q 高但访问少的可能是噪声</td></tr>
+<tr><td>“回传时所有节点都加同一个结果”</td><td>漏了视角</td><td>两人零和要每层翻转符号（或按节点所属玩家记录）</td></tr>
+<tr><td>“UCT 的 c 越大越好，探索更充分”</td><td>忽略预算</td><td>预算有限时 c 太大搜索太浅（图 17-3）</td></tr>
+<tr><td>“AlphaZero 的策略网络直接学最优着法”</td><td>目标说错</td><td>学的是 MCTS 的访问分布 π（比网络自身更强的改进策略）</td></tr>
+<tr><td>“MuZero 学到了游戏规则”</td><td>不准确</td><td>学的是对规划有用的隐空间模型，不需要能重建观测或复现规则</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:MCTS / AlphaZero 常见追问链-->
+MCTS 的四个步骤？
+├─ UCT 公式从哪来？c 的作用？ → UCB1：Hoeffding 置信上界；c 平衡探索 / 利用（图 17-3）
+├─ 为什么最后选访问最多的？ → 访问次数比 Q 更稳；Q 高但访问少可能是运气
+├─ AlphaZero 和 AlphaGo 的区别？ → 不用人类棋谱、单个双头网络、只用价值网络不用 rollout
+│   ├─ PUCT 和 UCT 的区别？ → 加策略先验 P，探索项 ∝ P√N/(1+n)
+│   └─ 训练目标？ → (z − v)² − πᵀlog p + c‖θ‖²；π 是 MCTS 访问分布
+├─ MuZero？ → h / g / f 三个网络，在隐空间搜索，不需要规则
+└─ model-based 的优缺点？游戏里怎么用？ → 样本效率高 vs 模型误差被利用；卡牌棋类搜索、不完全信息用确定化 / IS-MCTS
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 17 章</div><ul>
+<li>minimax / negamax；α-β 理想情况 $b^d\to b^{d/2}$（井字棋 [[ch17.nodes_mm|.0f]] → [[ch17.nodes_ab|.0f]] 个节点）。</li>
+<li>MCTS：选择（UCT）→ 扩展 → 模拟 → 回传（翻转视角）；最终选访问最多的着法。</li>
+<li>UCB1 $=\bar X+\sqrt{2\ln N/n}$（Hoeffding）；UCT $=\bar X+c\sqrt{\ln N/n}$。</li>
+<li>PUCT $=Q+cP\sqrt N/(1+n)$；先验减宽度，价值网络减深度。</li>
+<li>AlphaZero：自对弈 (s, π, z)，$L=(z-v)^2-\pi^\top\log p+c\lVert\theta\rVert^2$；= GPI。</li>
+<li>MuZero：h / g / f，隐空间搜索；Dyna、Dreamer：用模型换样本效率。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：PUCT 中，一个先验很低的着法如果其实是妙手，还有机会被发现吗？</summary><p>有，但需要更多模拟：探索项是 $cP\sqrt N/(1+n)$，随父节点访问次数 N 增长，P 再小，N 足够大时也会被试到；一旦试到并发现 Q 很高，就会被持续选择。训练时根节点加 Dirichlet 噪声，就是为了让低先验着法在自对弈中有被尝试的机会，进而修正先验。</p></details>
+<details class="quiz"><summary>自测 2：为什么 AlphaZero 的价值目标用对局结果 z，而不是搜索得到的根节点 Q？</summary><p>z 是真实结果的蒙特卡洛样本，无偏；根节点 Q 依赖当前网络，用它做目标是自举，可能把网络的偏差固化。后续工作（如 MuZero 的 n 步回报、一些变体混合 z 与 Q）在偏差和方差之间做了不同的取舍，和第 5 章 MC vs TD 的讨论完全一致。</p></details>
+<details class="quiz"><summary>自测 3：卡牌游戏里对手手牌未知，直接对“真实手牌”做 MCTS 会有什么问题？</summary><p>那是作弊：搜索利用了不该知道的信息，评估出的着法在真实对局里不成立。确定化方法按信念采样多组可能的手牌分别搜索，但会出现“策略融合”问题（在不同世界里做出不同决定，而实际只能做一个）；IS-MCTS 在信息集上建树缓解这个问题。</p></details>
+<details class="quiz"><summary>自测 4：实时动作游戏的 Bot 适合用 MCTS 吗？</summary><p>一般不适合做每帧决策：动作空间连续或很大、状态推演需要完整的物理和战斗模拟、帧时间只有几毫秒。可以在离散的关键决策点（技能连招选择、战术层面的“打 / 撤”）做小规模搜索，或者离线用搜索生成高质量数据，再蒸馏成一个快速的策略网络。</p></details>
+</section>

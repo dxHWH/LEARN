@@ -1,0 +1,77 @@
+<div class="part-head" data-toc="附录 · 面试题库">
+  <div class="no">APPENDIX</div>
+  <h1>附录　面试题库与速记卡</h1>
+  <p>40 道追问，按“基础 → 启发函数 → 正确性与复杂度 → 工程实现 → 加速算法 → 游戏场景”排列。先自己口头回答，再展开看参考答案。</p>
+</div>
+
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>40 道面试追问</h1>
+    <p class="lead">每道题的参考答案都压缩到 30～60 秒能讲完的长度。</p>
+  </div>
+
+  <h2>9.1 基础（1～8）</h2>
+  <details class="quiz"><summary>1. A* 的 f、g、h 分别是什么？</summary><p>g 是起点到当前节点的真实已走代价；h 是当前节点到终点的估计代价；f = g + h 是经过该节点的完整路径的估计长度。每次展开 open 中 f 最小的节点。</p></details>
+  <details class="quiz"><summary>2. A* 和 Dijkstra、BFS、贪心是什么关系？</summary><p>都是“取一个节点展开”的图搜索，区别是取哪个：BFS 取最早入队的（只在等权图最短），Dijkstra 取 g 最小，贪心取 h 最小（快但不最短），A* 取 g + h 最小。h ≡ 0 时 A* 就是 Dijkstra。</p></details>
+  <details class="quiz"><summary>3. open list 和 closed list 是什么？</summary><p>open 是已发现、未展开的节点，用优先队列按 f 排序；closed 是已展开、g 已确定最优的节点。一致的 h 下 closed 节点不会再被更新。</p></details>
+  <details class="quiz"><summary>4. 为什么要在出队时判断终点，而不是入队时？</summary><p>入队时终点的 g 可能来自较长的路径，之后还可能被更新。只有当它成为 open 中 f 最小的节点时，才能保证没有更短的路径（最优性证明依赖这一点）。</p></details>
+  <details class="quiz"><summary>5. 8 方向寻路的代价怎么设？什么是切角？</summary><p>直走 1、斜走 √2，工程上用整数 10/14 或 1000/1414。切角指斜走时擦过墙角；通常要求斜走两侧的直邻格都可走，否则角色会卡进墙角。寻路规则要和碰撞体积一致。</p></details>
+  <details class="quiz"><summary>6. 游戏里寻路图有哪几种表示？各自优缺点？</summary><p>格子图：简单、动态障碍好改，但节点多、路径锯齿。路点图：节点少最快，但只能沿边走、覆盖不全。导航网格：节点少又覆盖整片可走区域，路径自然，但生成复杂、动态修改代价高，是 3D 游戏主流。</p></details>
+  <details class="quiz"><summary>7. 什么时候用 BFS / Dijkstra 而不是 A*？</summary><p>等权图（如 4 方向战棋）用 BFS；没有单一终点的问题用 Dijkstra：求移动范围、求到多个目标中最近的一个、生成距离场或流场。</p></details>
+  <details class="quiz"><summary>8. 如何从 A* 的结果得到路径？</summary><p>每次更新 g 时同时记录 parent，取出终点后沿 parent 从终点回溯到起点，再反转。</p></details>
+
+  <h2>9.2 启发函数（9～16）</h2>
+  <details class="quiz"><summary>9. 什么是可采纳？什么是一致？</summary><p>可采纳：h(n) ≤ h*(n)，从不高估，保证最短。一致：h(n) ≤ c(n, n') + h(n')（三角不等式），保证出队即最优、closed 不用重开。一致 ⇒ 可采纳，反之不成立。</p></details>
+  <details class="quiz"><summary>10. 4 方向、8 方向、任意角度分别用什么启发？</summary><p>曼哈顿、Octile（D·max + (D₂−D)·min）、欧几里得。8 方向用曼哈顿会高估（E2：路径最多长 9.8%），用欧几里得会低估、搜得多（16105 对 11758）。</p></details>
+  <details class="quiz"><summary>11. h 高估会怎样？h = 0 会怎样？</summary><p>高估：搜得更少、更快，但不保证最短。h = 0：退化为 Dijkstra，最短但向四周均匀扩散。</p></details>
+  <details class="quiz"><summary>12. 有地形代价时启发函数怎么设计？</summary><p>乘以最便宜地形的单价，保证不高估。代价是大部分区域 h 低估得厉害，引导变弱，搜索变慢。</p></details>
+  <details class="quiz"><summary>13. 加权 A* 是什么？有什么保证？</summary><p>f = g + w·h（w &gt; 1），h 可采纳时路径代价 ≤ w × 最优。E3：随机图 w = 1.2 展开数降到 1/10，路径平均只长 3%；但对凹形陷阱几乎无效。</p></details>
+  <details class="quiz"><summary>14. 什么是平局决胜？为什么重要？</summary><p>f 相同时先展开谁。优先 h 小（g 大）的节点，搜索会一路向前推而不是横向铺开。开阔地上展开数 228 对 10772（E4）。帧同步游戏里还要做成全序 (f, h, id) 保证确定性。</p></details>
+  <details class="quiz"><summary>15. 两个可采纳的 h 怎么组合？</summary><p>取 max，仍然可采纳且更强。ALT 就是对多个地标的下界取 max。</p></details>
+  <details class="quiz"><summary>16. 改成整数代价后要注意什么？</summary><p>重新检查启发函数是否还可采纳。例如斜走取 1414（小于 1000·√2），长对角线上欧几里得（取整）会略微高估。Detour 用 0.999 的系数留余量。</p></details>
+
+  <h2>9.3 正确性与复杂度（17～22）</h2>
+  <details class="quiz"><summary>17. 证明 A* 的最优性。</summary><p>反证：若取出终点时 g(G) &gt; C*，最短路径上必有一个节点 n 在 open 中且 g(n) 最优，由可采纳 f(n) ≤ C* &lt; f(G)，n 应先出队，矛盾。</p></details>
+  <details class="quiz"><summary>18. 一致性为什么能保证“出队即最优”？</summary><p>一致 ⇒ 沿任何边 f 不减 ⇒ 节点按 f 非降序出队；一个节点出队时，所有可能给它更短路径的节点 f 都更小、已经出队并松弛过它了。</p></details>
+  <details class="quiz"><summary>19. A* 的时间、空间复杂度？</summary><p>图上 O(E log V)（二叉堆），格子图 O(V log V)；空间 O(V)。树搜索视角最坏 O(b^d)，完美 h 时 O(d)。实际瓶颈常是内存。</p></details>
+  <details class="quiz"><summary>20. 什么叫 A* 最优效率？</summary><p>使用同一可采纳 h 并保证最短的算法，都必须展开所有 f &lt; C* 的节点；A* 只展开这些（加部分 f = C* 的）。要更快只能换更准的 h 或改变图。</p></details>
+  <details class="quiz"><summary>21. A* 的最坏情况是什么？怎么应对？</summary><p>终点不可达，要把整个连通块搜完（E8：20.5 ms）；以及凹形障碍误导启发。应对：连通块编号 O(1) 预判、展开上限、失败时返回 h 最小的已探索点、终点吸附到最近可走点。</p></details>
+  <details class="quiz"><summary>22. h 只可采纳不一致，会出什么问题？</summary><p>节点可能先以偏大的 g 出队，之后发现更短的路。要么允许重开 closed（最坏指数次展开），要么接受次优。几何距离都是一致的，问题多出在自己组合的启发函数上。</p></details>
+
+  <h2>9.4 工程实现（23～29）</h2>
+  <details class="quiz"><summary>23. open list 用什么数据结构？decrease-key 怎么做？</summary><p>二叉堆。std::priority_queue 不支持改 key，通常允许重复入队，出队时发现已 closed 就丢弃（惰性删除）。E5：惰性删除 1.30 ms，索引堆 1.39 ms，std::set 2.21 ms。</p></details>
+  <details class="quiz"><summary>24. 每次寻路都要清空整张图的状态吗？</summary><p>不要。用整图数组 + generation 计数：节点的 gen 等于当前查询号才算有效，新查询把号加 1 即可。每次清零 512×512 的数组会让短查询慢 90 倍（504 对 5.6 us）。gen 回绕时整体清零一次。</p></details>
+  <details class="quiz"><summary>25. A* 还有哪些常数优化？</summary><p>邻居偏移预计算、地图外加一圈边框省越界判断、int32 代价、位图存可走性、SoA 布局、容器 clear 复用容量、平局决胜；整数小代价可用桶队列。</p></details>
+  <details class="quiz"><summary>26. 一帧内有很多寻路请求怎么办？</summary><p>全局请求队列 + 每帧展开预算 + 优先级 + 请求合并 / 作废；单个长查询分帧执行（E7：单帧峰值 4.3 ms → 0.045 ms）；或放到工作线程异步计算。</p></details>
+  <details class="quiz"><summary>27. 寻路怎么做多线程？</summary><p>地图只读共享，搜索状态（g、parent、gen、堆）每线程一份；地图修改用锁或双缓冲。Detour 的 navmesh 共享、dtNavMeshQuery 每线程一个。帧同步下异步结果必须在确定的逻辑帧生效。</p></details>
+  <details class="quiz"><summary>28. A* 写出来路径是锯齿状的怎么办？</summary><p>拉绳：从锚点往后找最远的视线可达路点（E10：路点少 40%、长度短 4%，耗时不到寻路的 1%）；或用 Theta* 在搜索中做视线检测；navmesh 上用漏斗算法。</p></details>
+  <details class="quiz"><summary>29. 手写 A* 常见 bug？</summary><p>入队时判终点；惰性删除不检查 closed；更新 g 后不重新入堆；h 与移动规则不匹配；斜走代价错；允许切角；float 代价用 == 比较；不处理不可达。</p></details>
+
+  <h2>9.5 加速算法（30～34）</h2>
+  <details class="quiz"><summary>30. JPS 的原理？</summary><p>均匀代价格子图上存在大量对称的等价路径。JPS 按来向剪枝邻居，沿直线 / 对角线一直跳，只在终点、强制邻居（障碍造成的必经拐点）处停下入堆。保证最短。</p></details>
+  <details class="quiz"><summary>31. JPS 一定比 A* 快吗？限制是什么？</summary><p>不一定。开阔地上 A* 已近乎完美，JPS 的扫描线铺满全图，反而慢 25 倍；房间 / 陷阱类地图快 4.8～7.5 倍（E6、E1）。只适用于均匀代价格子图，不能用于导航网格、带地形权重的图。JPS+ 预计算跳跃距离，适合静态地图。</p></details>
+  <details class="quiz"><summary>32. HPA* 的原理和代价？</summary><p>切簇、在簇边界选入口、预计算簇内入口间距离形成抽象图；查询时插入起终点、抽象图上 A*、再分段细化。快一到两个数量级，结果近似最短，地图修改要重算受影响的簇。</p></details>
+  <details class="quiz"><summary>33. 双向 A* 的坑？</summary><p>两侧第一次相遇的路径不一定最短；要用正确的终止条件（已知最优 μ ≤ 两侧 open 最小 f 的较大者）。实现复杂，游戏里少用，但能更快发现终点被困在小区域里。</p></details>
+  <details class="quiz"><summary>34. ALT 是什么？</summary><p>预选 k 个地标，Dijkstra 算出地标到所有节点的距离；h(n) = max |d(L, G) − d(L, n)|，由三角不等式可采纳且一致，比几何距离准。内存 k × V，适合静态、绕路多的地图。</p></details>
+
+  <h2>9.6 游戏场景（35～40）</h2>
+  <details class="quiz"><summary>35. 导航网格上的寻路流程？</summary><p>Recast 离线烘焙：体素化 → 坡度 / 净高 / 台阶过滤 → 按角色半径收缩 → 区域划分 → 凸多边形 → 细节网格。Detour 查询：findNearestPoly 吸附 → findPath 多边形 A* → findStraightPath 漏斗拉直 → 跟随与避让。</p></details>
+  <details class="quiz"><summary>36. 漏斗算法的原理？</summary><p>A* 给出多边形走廊，相邻多边形的公共边是入口。从起点维护漏斗顶点和左右两条边，逐个入口收紧；某一边越过另一边时，那一边的端点成为拐点、成为新顶点。结果只在入口端点处拐弯，近似 O(n)。</p></details>
+  <details class="quiz"><summary>37. 动态障碍怎么处理？</summary><p>静态变化（门、建筑）：格子改格子并更新连通块；navmesh 按 tile 局部重建（TileCache 临时障碍）。路径只检查前方几个路点，被挡再重新寻路。移动单位不进寻路图，交给局部避障。增量算法 LPA* / D* Lite 游戏里少用。</p></details>
+  <details class="quiz"><summary>38. 200 个单位去同一个地方怎么寻路？</summary><p>流场：从目标跑一次 Dijkstra 得积分场，每格指向代价最小的邻居得方向场，单位每帧 O(1) 查表；再配合分离 / 避障。塔防、RTS 常用。</p></details>
+  <details class="quiz"><summary>39. 两个单位在窄路上互相卡住怎么办？</summary><p>这是局部避障问题：全局寻路不考虑移动单位；局部用 RVO / ORCA 让行；死锁时超时、一方等待或后退、临时把对方当障碍重新寻路。</p></details>
+  <details class="quiz"><summary>40. 帧同步游戏里寻路要注意什么？</summary><p>整数 / 定点代价与启发（不用 float、sqrt）；全序比较 (f, h, id)；邻居顺序固定；不依赖 unordered_map 遍历；导航数据各端一致；动态障碍、异步结果都在确定的逻辑帧生效；平滑也用整数检测。E9：只比 f 时两份堆实现 40 次里 40 次路径不同，全序后完全一致。</p></details>
+
+  <h2>9.7 速记卡</h2>
+  <div class="recap"><div class="t">一页纸背完 A*</div><ul>
+    <li><strong>核心</strong>：f = g + h，展开 open 中 f 最小者；出队时判终点；ng &lt; g 才更新；open 空即不可达。</li>
+    <li><strong>家族</strong>：BFS（等权）、Dijkstra（h = 0）、贪心（只看 h）、加权 A*（≤ w 倍最优）。</li>
+    <li><strong>启发</strong>：可采纳 → 最短；一致 → 出队即最优、不重开。4 向曼哈顿、8 向 Octile、任意角度欧几里得；有地形乘最小单价。</li>
+    <li><strong>证明</strong>：最短路径上总有 f ≤ C* 的节点在 open 里；A* 展开 f &lt; C* 的全部节点，最优效率。</li>
+    <li><strong>复杂度</strong>：O(E log V) 时间、O(V) 空间；最坏是不可达 → 连通块编号预判。</li>
+    <li><strong>工程</strong>：priority_queue + 惰性删除；generation 复位；f 同取 h 小；整数代价；分帧 + 请求队列；多线程状态各自一份。</li>
+    <li><strong>加速</strong>：JPS（均匀格子、开阔 + 障碍）、JPS+、HPA*（分层）、ALT（地标）、双向（注意终止条件）；拉绳 / Theta* / 漏斗做平滑。</li>
+    <li><strong>游戏</strong>：Recast/Detour = 烘焙 + 多边形 A* + 漏斗；流场管大量单位；全局寻路与局部避障分层；帧同步要整数 + 全序 + 确定帧生效。</li>
+  </ul></div>
+</section>

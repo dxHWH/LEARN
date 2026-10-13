@@ -1,0 +1,292 @@
+# /Game/Blueprints/Character/BP_Player  (Blueprint)
+ParentClass: /Script/Engine.Character
+
+## Variables
+- IsRunning : bool
+- MouseX : real
+- MouseY : real  [Replicated OnRep=OnRep_MouseY]
+- Anime BP Player : Object<AnimeBP_Player_C>
+- WeaponRef : Object<BP_Weapon_C>  [Replicated OnRep=OnRep_WeaponRef]
+- HP : real  [Replicated OnRep=OnRep_HP]
+- In Game UMG : Object<UWB_InGame_C>
+- Pause UMG : Object<UWB_Pause_C>
+- As BP My Game State : Object<BP_MyGameState_C>
+- OnGameStart_Dispatch : mcdelegate
+
+## BP_Player_C Default__BP_Player_C
+   HP = 100.0
+   OnGameStart_Dispatch = ('?', 'MulticastInlineDelegateProperty')
+   Mesh = CharacterMesh0
+   CharacterMovement = CharMoveComp
+   CapsuleComponent = CollisionCylinder
+   ArrowComponent = Arrow
+   bUseControllerRotationPitch = True
+   RootComponent = CollisionCylinder
+
+## CameraComponent BP_Player_C.Camera_GEN_VARIABLE
+   bCameraMeshHiddenInGame = False
+
+## PostProcessComponent BP_Player_C.PostProcess_GEN_VARIABLE
+   BlendWeight = 0.0
+
+## RectLightComponent BP_Player_C.RectLight_GEN_VARIABLE
+   SourceWidth = 32.0
+   IntensityUnits = ELightUnits::Candelas
+   LightingChannels = ('struct', 'LightingChannels', {'bChannel0': False, 'bChannel1': True})
+   Intensity = 0.30000001192092896
+
+## SceneComponent BP_Player_C.DefaultSceneRoot_GEN_VARIABLE
+   bVisualizeComponent = True
+
+## SCS_Node BP_Player_C.SimpleConstructionScript_0.SCS_Node_0
+   ComponentClass = SceneComponent
+   ComponentTemplate = DefaultSceneRoot_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = DefaultSceneRoot
+
+## SCS_Node BP_Player_C.SimpleConstructionScript_0.SCS_Node_1
+   ComponentClass = SpringArmComponent
+   ComponentTemplate = SpringArm_GEN_VARIABLE
+   CategoryName = Default
+   ParentComponentOrVariableName = CharacterMesh0
+   bIsParentComponentNative = True
+   InternalVariableName = SpringArm
+
+## SCS_Node BP_Player_C.SimpleConstructionScript_0.SCS_Node_2
+   ComponentClass = CameraComponent
+   ComponentTemplate = Camera_GEN_VARIABLE
+   CategoryName = Default
+   InternalVariableName = Camera
+
+## SCS_Node BP_Player_C.SimpleConstructionScript_0.SCS_Node_3
+   ComponentClass = PostProcessComponent
+   ComponentTemplate = PostProcess_GEN_VARIABLE
+   CategoryName = Default
+   ParentComponentOrVariableName = CollisionCylinder
+   bIsParentComponentNative = True
+   InternalVariableName = PostProcess
+
+## SCS_Node BP_Player_C.SimpleConstructionScript_0.SCS_Node_4
+   ComponentClass = RectLightComponent
+   ComponentTemplate = RectLight_GEN_VARIABLE
+   CategoryName = Default
+   ParentComponentOrVariableName = CollisionCylinder
+   bIsParentComponentNative = True
+   InternalVariableName = RectLight
+
+## SpringArmComponent BP_Player_C.SpringArm_GEN_VARIABLE
+   TargetArmLength = 0.0
+   bUsePawnControlRotation = True
+   CameraLagMaxDistance = 3.0
+
+## Custom events / RPC
+- CustomEvent 开始游戏   (graph BP_Player.EventGraph)
+- CustomEvent Multicast_StartGame  [RPC Net|Multicast]   (graph BP_Player.EventGraph)
+- CustomEvent Server_StopSprint  [RPC Net|Reliable|Server]   (graph BP_Player.冲刺)
+- CustomEvent Server_StartSprint  [RPC Net|Reliable|Server]   (graph BP_Player.冲刺)
+- CustomEvent Server_ReportReady  [RPC Net|Reliable|Server]   (graph BP_Player.准备报告)
+- CustomEvent Client_PlayHitFX  [RPC Net|Client]   (graph BP_Player.死亡系统)
+- CustomEvent Server_Death  [RPC Net|Reliable|Server]   (graph BP_Player.死亡系统)
+- CustomEvent Multi_Death  [RPC Net|Multicast]   (graph BP_Player.死亡系统)
+
+## Graph BP_Player.AttachWeaponVisuals
+
+FunctionEntry(TargetWeapon):  #164
+  K2_AttachToComponent(self=FunctionEntry#164.TargetWeapon, Parent=Mesh, SocketName="R_GunSocket", LocationRule=SnapToTarget, RotationRule=SnapToTarget, ScaleRule=SnapToTarget, bWeldSimulatedBodies=TRUE)  #77
+
+## Graph BP_Player.EventGraph
+
+CustomEvent 开始游戏():  #142
+  EnableInput(PlayerController=GetPlayerController(PlayerIndex=0))  #91
+  CreateWidget(Class=UWB_InGame_C, OwningPlayer=∅)  -> ReturnValue  #139
+  In Game UMG(In Game UMG=CreateWidget#139.ReturnValue)  -> Output_Get  #221
+  AddToViewport(self=In Game UMG#221.Output_Get, ZOrder=0)  #79
+  CreateWidget(Class=UWB_Pause_C, OwningPlayer=∅)  -> ReturnValue  #140
+  Pause UMG(Pause UMG=CreateWidget#140.ReturnValue)  #220
+
+CustomEvent Multicast_StartGame  [RPC Net|Multicast]():  #143
+  CallDelegate OnGameStart_Dispatch()  #76
+
+Event ReceiveBeginPlay():  #160
+  As BP My Game State(As BP My Game State=CastTo BP_MyGameState_C(Object=GetGameState()).AsBP My Game State)  #224
+  AddMappingContext(self=GetSubsystem<EnhancedInputLocalPlayerSubsystem>(PlayerController=GetPlayerController(PlayerIndex=0)), MappingContext=NewInputMappingContext, Priority=0, Options=(bIgnoreAllPressedKeysUntilRelease=True,bForceImmediately=False,bNotifyUserSettings=False))  #78
+  CastTo AnimeBP_Player_C(Object=GetAnimInstance(self=Mesh))  -> AsAnime BP Player  #150
+    [then]:
+      Anime BP Player(Anime BP Player=CastTo AnimeBP_Player_C#150.AsAnime BP Player)  #222
+      Macro Switch Has Authority()  #179
+        [Authority]:
+          SpawnActor(Class=BP_Weapon_C, SpawnTransform=GetTransform(), CollisionHandlingOverride=AlwaysSpawn, TransformScaleMethod=MultiplyWithRoot, Owner=∅, Instigator=None)  -> ReturnValue  #191
+          Macro IsValid(InputObject=SpawnActor#191.ReturnValue)  #180
+            [Is Valid]:
+              WeaponRef(WeaponRef=SpawnActor#191.ReturnValue)  -> Output_Get  #223
+              SetOwner(self=WeaponRef#223.Output_Get, NewOwner=self)  #80
+              AttachWeaponVisuals(TargetWeapon=SpawnActor#191.ReturnValue)  #81
+              for_server(self=WeaponRef#223.Output_Get)  #83
+            [Is Not Valid]:
+              PrintString(InString="生成失败", bPrintToScreen=true, bPrintToLog=true, TextColor=(R=0.000000,G=0.660000,B=1.000000,A=1.000000), Duration=2.000000, Key="None")  #88
+
+Event ReceiveActorBeginOverlap(OtherActor):  #161
+
+Event ReceiveTick(DeltaSeconds):  #162
+  速度计算()  #84
+  // exec nodes with no incoming exec (dead / disconnected): DisableInput#89
+  // node #88 PrintString EnabledState=ENodeEnabledState::DevelopmentOnly
+  // node #161 Event ReceiveActorBeginOverlap EnabledState=ENodeEnabledState::Disabled
+
+## Graph BP_Player.OnGameStart_Dispatch
+
+FunctionEntry():  #165
+
+## Graph BP_Player.OnRep_HP
+
+FunctionEntry():  #166
+
+## Graph BP_Player.OnRep_In Game UMG
+
+FunctionEntry():  #167
+
+## Graph BP_Player.OnRep_MouseY
+
+FunctionEntry():  #168
+
+## Graph BP_Player.OnRep_Pause UMG
+
+FunctionEntry():  #169
+
+## Graph BP_Player.OnRep_WeaponRef
+
+FunctionEntry():  #170
+  AttachWeaponVisuals(TargetWeapon=WeaponRef)  #92
+
+## Graph BP_Player.UserConstructionScript
+
+FunctionEntry():  #171
+
+## Graph BP_Player.冲刺
+
+CustomEvent Server_StopSprint  [RPC Net|Reliable|Server]():  #144
+  IsRunning(IsRunning=false)  #226
+
+CustomEvent Server_StartSprint  [RPC Net|Reliable|Server]():  #145
+  IsRunning(IsRunning=true)  #225
+
+InputAction IA_Run(ActionValue, ElapsedSeconds, TriggeredSeconds, InputAction):  #154
+  [Started]:
+    Server_StartSprint()  #93
+  [Completed]:
+    Server_StopSprint()  #94
+
+## Graph BP_Player.准备报告
+
+CustomEvent Server_ReportReady  [RPC Net|Reliable|Server]():  #146
+  CastTo GM_MyGame_C(Object=GetGameMode())  -> AsGM My Game  #152
+    [then]:
+      AddReadyPlayer(self=CastTo GM_MyGame_C#152.AsGM My Game, RequestingPC=CastTo PlayerController(Object=GetController()).As玩家控制器)  #96
+
+## Graph BP_Player.射击
+
+InputAction IA_Fire(ActionValue, ElapsedSeconds, TriggeredSeconds, InputAction):  #155
+  [Started]:
+    Macro IsValid(InputObject=WeaponRef)  #182
+      [Is Valid]:
+        Branch(Condition=As BP My Game State.游戏是否开始)  #175
+          [true]:
+            开始射击(self=WeaponRef)  #98
+  [Completed]:
+    Macro IsValid(InputObject=WeaponRef)  #181
+      [Is Valid]:
+        停止射击(self=WeaponRef)  #99
+
+## Graph BP_Player.换弹
+
+InputAction IA_Reload(ActionValue, ElapsedSeconds, TriggeredSeconds, InputAction):  #156
+  [Started]:
+    Macro IsValid(InputObject=WeaponRef)  #183
+      [Is Valid]:
+        开始换弹(self=WeaponRef)  #100
+
+## Graph BP_Player.暂停游戏
+
+InputKey CapsLock(Key):  #177
+  [Pressed]:
+    Macro IsValid(InputObject=Pause UMG)  #184
+      [Is Valid]:
+        AddToViewport(self=Pause UMG, ZOrder=0)  #101
+        SetGamePaused(bPaused=true)  #102
+
+InputKey Escape(Key):  #178
+  [Pressed]:
+    goto Macro IsValid #184
+
+## Graph BP_Player.查看
+
+InputAction IA_Look(ActionValue, ElapsedSeconds, TriggeredSeconds, InputAction):  #157
+  [Triggered]:
+    AddControllerYawInput(Val=BreakVector2D(InVec=InputAction IA_Look#157.ActionValue).X)  #103
+    AddControllerPitchInput(Val=Multiply_DoubleDouble(A=BreakVector2D(InVec=InputAction IA_Look#157.ActionValue).Y, B=-1.000000))  #104
+
+## Graph BP_Player.死亡系统
+
+CustomEvent Client_PlayHitFX  [RPC Net|Client]():  #147
+  ClientStartCameraShake(self=GetPlayerController(PlayerIndex=0), Shake=Hit_CameraShake1_C, Scale=5.000000, PlaySpace=CameraLocal, UserPlaySpaceRot=0, 0, 0)  #116
+  PlaySound2D(Sound=voice_male_d_hurt_pain_11_Cue, VolumeMultiplier=1.000000, PitchMultiplier=1.000000, StartTime=0.000000, ConcurrencySettings=None, OwningActor=None, bIsUISound=true)  #117
+  Timeline 时间轴_0(NewTime=0.0) <PlayFromStart>  -> 新建轨道_0  #192
+    [Update]:
+      BlendWeight(BlendWeight=Timeline 时间轴_0#192.新建轨道_0, self=PostProcess)  #228
+
+CustomEvent Server_Death  [RPC Net|Reliable|Server]():  #148
+  Multi_Death()  #113
+
+CustomEvent Multi_Death  [RPC Net|Multicast]():  #149
+  K2_AttachToComponent(self=Camera, Parent=Mesh, SocketName="CameraSocket", LocationRule=SnapToTarget, RotationRule=SnapToTarget, ScaleRule=KeepWorld, bWeldSimulatedBodies=TRUE)  #122
+  PlayMontage(InSkeletalMeshComponent=Mesh, MontageToPlay=Deaths_Walk_Forward_Decked_Montage, PlayRate=0.700000, StartingPosition=0.000000, StartingSection="None", bShouldStopAllMontages=true)  #186
+    [then]:
+      游戏结束(self=In Game UMG)  #106
+      CreateWidget(Class=UWB_WinOrFail_C, OwningPlayer=∅)  -> ReturnValue  #141
+      AddToViewport(self=CreateWidget#141.ReturnValue, ZOrder=0)  #107
+      游戏结果(self=CreateWidget#141.ReturnValue, 游戏是否成功=false)  #108
+      Timeline 时间轴_1(NewTime=0.0) <Play>  -> 新建轨道_0  #193
+        [Update]:
+          BlendWeight(BlendWeight=Timeline 时间轴_1#193.新建轨道_0, self=PostProcess)  #229
+          Delay(Duration=3.000000)  #110
+          SetGamePaused(bPaused=true)  #111
+
+Event ReceiveAnyDamage(Damage, DamageType, InstigatedBy, DamageCauser):  #163
+  HP(HP=Subtract_DoubleDouble(A=HP, B=Event ReceiveAnyDamage#163.Damage))  -> Output_Get  #227
+  Branch(Condition=LessEqual_DoubleDouble(A=HP#227.Output_Get, B=0.0))  #176
+    [true]:
+      Macro DoOnce(Start Closed=false)  #185
+      DisableInput(PlayerController=GetPlayerController(PlayerIndex=0))  #118
+      停止射击(self=WeaponRef)  #119
+      SetCollisionEnabled(self=CapsuleComponent, NewType=NoCollision)  #120
+      PlaySound2D(Sound=voice_male_grunt_pain_death_10_Cue, VolumeMultiplier=1.000000, PitchMultiplier=1.000000, StartTime=0.000000, ConcurrencySettings=None, OwningActor=None, bIsUISound=true)  #121
+      Server_Death()  #114
+    [false]:
+      Client_PlayHitFX()  #112
+
+## Graph BP_Player.瞄准
+
+InputAction IA_Aim(ActionValue, ElapsedSeconds, TriggeredSeconds, InputAction):  #158
+  [Started]:
+    是否瞄准(是否瞄准=true, self=Anime BP Player)  #231
+    Timeline 时间轴(NewTime=0.0) <Play>  -> 新建轨道_0  #194
+      [Update]:
+        SetFieldOfView(self=Camera, InFieldOfView=Lerp(A=90.000000, B=70.000000, Alpha=Timeline 时间轴#194.新建轨道_0))  #124
+  [Completed]:
+    是否瞄准(是否瞄准=false, self=Anime BP Player)  #230
+    goto Timeline 时间轴 #194 <Reverse>
+
+## Graph BP_Player.移动
+
+InputAction IA_Move(ActionValue, ElapsedSeconds, TriggeredSeconds, InputAction):  #159
+  [Triggered]:
+    AddMovementInput(WorldDirection=GetForwardVector(InRot=MakeRotator(Roll=0.0, Pitch=0.0, Yaw=BreakRotator(InRot=GetControlRotation()).Yaw)), ScaleValue=BreakVector2D(InVec=InputAction IA_Move#159.ActionValue).X, bForce=false)  #129
+    AddMovementInput(WorldDirection=GetRightVector(InRot=MakeRotator(Roll=0.0, Pitch=0.0, Yaw=BreakRotator(InRot=GetControlRotation()).Yaw)), ScaleValue=BreakVector2D(InVec=InputAction IA_Move#159.ActionValue).Y, bForce=false)  #126
+  // comment: 角色摄像机的画面，辅助角色移动，这个画面只包含了左右方向
+
+## Graph BP_Player.速度计算
+
+FunctionEntry():  #172
+  MouseX(MouseX=GetInputActionValue IA_Look().ReturnValue_X)  #232
+  MouseY(MouseY=GetInputActionValue IA_Look().ReturnValue_Y)  #234
+  MaxWalkSpeed(MaxWalkSpeed=FInterpTo(Current=VSize(A=GetVelocity()), Target=SelectFloat(A=120.000000, B=SelectFloat(A=500.000000, B=150.000000, bPickA=IsRunning), bPickA=Anime BP Player.是否瞄准), DeltaTime=GetWorldDeltaSeconds(), InterpSpeed=5.000000), self=CharacterMovement)  #233

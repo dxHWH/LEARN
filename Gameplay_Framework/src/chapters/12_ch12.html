@@ -1,0 +1,186 @@
+<section class="chapter" id="ch12">
+  <div class="ch-head">
+    <div class="no">CHAPTER 12</div>
+    <h1>ThreadSafeRingBuffer：lock、生产者—消费者与无锁的距离</h1>
+    <p class="lead">名字里有 ThreadSafe，面试官一定会确认“安全到什么程度”。它是一个 lock-based 的有界队列，不是 lock-free；压力测试只验证了计数，没有验证顺序。这一章从 lock 讲到 SPSC 无锁，再讲到 false sharing。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>准确定性：lock-based thread-safe bounded queue，不是 lock-free</li>
+    <li>说清 C# <code>lock</code> 是什么、临界区里做了什么、成本在哪</li>
+    <li>理解 contention：为什么 4 个生产者比 1 个慢</li>
+    <li>说清 SPSC 为什么可以无锁、MPSC / MPMC 难在哪</li>
+    <li>理解 false sharing，并用实测数据说明它的影响</li>
+    <li>指出现有压力测试的三个缺陷，以及 Unity 里使用工作线程的边界</li>
+  </ul></div>
+
+  <h2>12.1 当前实现与使用状态</h2>
+  <!--code:cs:ThreadSafeRingBuffer.cs（节选）-->
+public class ThreadSafeRingBuffer<T> {
+    private readonly object _lockObject = new object();
+    public bool TryEnqueue(T e) {
+        lock (_lockObject) {
+            if (_size >= _capacity) return false;
+            _buffer[_tail++] = e; _tail %= _capacity; _size++;
+        }
+        return true;
+    }
+    public bool TryDequeue(out T e) { lock (_lockObject) { ...与 RingBuffer 相同... } }
+    public bool TryPeek(out T e)    { lock (_lockObject) { ... } }
+    public int Count                { get { lock (_lockObject) { return _size; } } }
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>使用方</th><th>状态</th></tr>
+    <tr><td>ThreadSafeEventSystem（第 7 章 7.9）</td><td>零调用方</td></tr>
+    <tr><td>RingBufferTests.cs</td><td>5 个单线程用例（T = int）</td></tr>
+    <tr><td>RingBufferStressTest.cs</td><td>1 个生产者线程 + 1 个消费者线程，各 10 万个</td></tr>
+    <tr><td>任何 Demo</td><td>没有用到</td></tr>
+  </table></div>
+  <p>所以这一章讨论的是“这个类本身是否正确、能撑多大并发”，而不是“项目里的多线程是否正确”——项目里没有多线程业务。</p>
+
+  <h2>12.2 定性：它是 lock-based，不是 lock-free</h2>
+  <div class="tbl"><table>
+    <tr><th>术语</th><th>含义</th><th>本类</th></tr>
+    <tr><td>thread-safe</td><td>多个线程同时调用，结果仍然符合单线程语义（不丢、不重、不乱、不崩）</td><td class="yes">是（每个操作整体互斥）</td></tr>
+    <tr><td>lock-based / blocking</td><td>靠互斥锁保证；拿不到锁的线程等待</td><td class="yes">是</td></tr>
+    <tr><td>lock-free</td><td>不使用锁；任意时刻<strong>至少一个</strong>线程能在有限步内完成操作（一个线程被挂起不会让其他线程都停下）</td><td class="no">否</td></tr>
+    <tr><td>wait-free</td><td><strong>每个</strong>线程都能在有限步内完成</td><td class="no">否</td></tr>
+    <tr><td>bounded</td><td>有容量上限，满了拒绝</td><td class="yes">是（Try 语义，不阻塞等待）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：Try 语义 ≠ 无锁</span>
+    <p>TryEnqueue 满了立即返回 false、不等待，这叫“非阻塞的接口”；但它内部仍然用 lock，拿锁时会等。不要因为方法名是 Try 就说它是无锁队列。</p>
+  </div>
+
+  <h2>12.3 lock 做了什么，成本在哪</h2>
+  <ul>
+    <li><b>语义</b>：C# 的 <code>lock(obj)</code> 是 <code>Monitor.Enter / Monitor.Exit</code> 包在 try/finally 里，保证临界区互斥，同时提供内存屏障——临界区内的写入对下一个拿到锁的线程可见。</li>
+    <li><b>无竞争时</b>：一次原子操作（CAS）就能拿到锁，几十纳秒级别。</li>
+    <li><b>有竞争时</b>：先自旋一小段，仍拿不到就进入内核等待、被唤醒——涉及上下文切换，微秒级。多个线程抢同一把锁时，大部分时间花在“等”和“交接锁”上，这就是 <strong>contention（锁竞争）</strong>。</li>
+    <li><b>临界区很短</b>：本类每次只做几次读写，临界区本身几乎不花时间，开销几乎全在“拿锁 / 放锁 / 缓存行在核之间来回搬”。</li>
+  </ul>
+  <!--bars {"title":"G7 · 传递 400 万个 int（容量 1024），吞吐（百万个/秒）","items":[["lock 版 · 1 生产者 1 消费者",23.8,"o","23.8 M/s（167.8 ms）"],["lock 版 · 4 生产者 1 消费者",5.5,"r","5.5 M/s（722.2 ms）"],["无锁 SPSC · 1 生产者 1 消费者",226.6,"g","226.6 M/s（17.7 ms）"]],"labw":230,"cap":"<b>图 12-1</b>　实测 G7（demos/infra_output.txt，C++ std::mutex 对应 C# lock 的语义，32 逻辑核 Windows 机器）。生产者从 1 个增加到 4 个，总吞吐反而降到约 1/4——这就是锁竞争；同样是一进一出，无锁 SPSC 约快 9.5 倍。三组都逐个校验了“每个生产者内部 FIFO”和校验和，全部通过"} -->
+  <p>要强调的是：每秒 2380 万次对游戏的绝大多数跨线程通信来说已经绰绰有余（每帧几十到几百条消息）。lock 版本最大的问题不是吞吐，而是<strong>延迟的不确定性</strong>：主线程拿锁时如果正好赶上工作线程持锁被系统调度走，主线程就要等一个时间片。</p>
+
+  <h2>12.4 为什么 SPSC 可以无锁</h2>
+  <!--code:text:单生产者单消费者无锁环形队列（G7 中实现的版本，思路）-->
+共享：  buf[capacity]（capacity 是 2 的幂）
+        head：只有消费者写        tail：只有生产者写         ← 不再有两端共写的 size
+生产者：t = tail（relaxed 读自己的）
+        若 t − head(acquire 读对方的) == capacity → 满
+        buf[t & mask] = x
+        tail = t + 1（release 写）    ← 保证“写数据”先于“发布新 tail”被对方看到
+消费者：h = head（relaxed）
+        若 h == tail(acquire) → 空
+        x = buf[h & mask]
+        head = h + 1（release）       ← 保证“读完数据”先于“归还槽位”
+head、tail 分别对齐到 64 字节，各占一条 cache line
+<!--/code-->
+  <ul>
+    <li><b>每个变量只有一个写者</b>：这是能去掉锁的根本原因。第 8 章说过，size 是两端共写的，所以 RingBuffer 那套“用 size 区分满空”的设计无法直接改成无锁。</li>
+    <li><b>内存序</b>：仅仅“不加锁”是不够的。CPU 和编译器都可能重排读写，如果“写 buf”被重排到“写 tail”之后才对另一个核可见，消费者就会读到旧数据。release / acquire 配对建立“先行发生”关系。C# 里对应 <code>Volatile.Write / Volatile.Read</code>。</li>
+    <li><b>对齐</b>：head 和 tail 如果在同一条 cache line，两端每次写都会让对方的缓存失效——这就是 12.6 的 false sharing。</li>
+  </ul>
+
+  <h2>12.5 MPSC / MPMC 难在哪</h2>
+  <div class="tbl"><table>
+    <tr><th>模型</th><th>难点</th><th>常见做法</th></tr>
+    <tr><td>SPSC</td><td>只需正确的内存序</td><td>12.4 的写法；音频、日志线程</td></tr>
+    <tr><td>MPSC（多生产者单消费者）</td><td>多个生产者抢同一个 tail：要用 CAS 或 fetch_add 抢槽位，抢到槽位后还要“写完再标记可读”，消费者不能读到一个被抢到但没写完的槽</td><td>每个槽带序列号（Vyukov 有界 MPMC 队列的思路）；或每个生产者一个 SPSC，消费者轮询——游戏里常见（每个工作线程一个队列，主线程汇总）</td></tr>
+    <tr><td>MPMC</td><td>两端都有竞争；ABA（无锁栈 / 链表的经典问题，第 9 章）；内存回收（链表节点何时可以释放）；在高竞争下 CAS 失败重试也会“活锁”式地浪费</td><td>带序列号的环形数组；hazard pointer / epoch 回收；或者干脆用成熟库（.NET 的 <code>ConcurrentQueue&lt;T&gt;</code>、C++ 的 moodycamel::ConcurrentQueue）</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">面试注意：为什么不自己写无锁</span>
+    <p>“ThreadSafeRingBuffer 为什么不用 lock-free？”的好答案是：这个场景（工作线程偶尔给主线程发几条消息）lock 的吞吐完全够用，而无锁代码难写、难测、难证明正确；真需要时优先用 <code>ConcurrentQueue&lt;T&gt;</code> 或针对固定拓扑（每线程一个 SPSC）的简单结构。能说出 SPSC 的写法和内存序要点，证明你懂；选择不写，证明你有工程判断。</p>
+  </div>
+
+  <h2>12.6 false sharing</h2>
+  <!--bars {"title":"G8 · 两个线程各自累加自己的计数器 5000 万次（ms，越短越好）","items":[["两个计数器相邻（同一 cache line）",540,"r","540 ms"],["各自对齐到 64 字节",182,"g","182 ms"]],"labw":240,"cap":"<b>图 12-2</b>　实测 G8。两个线程写的是<b>不同的变量</b>，逻辑上没有共享；但两个变量落在同一条 64 字节缓存行里，每次写都要让对方核的缓存行失效、再把整行搬过来，结果慢了约 3 倍"} -->
+  <ul>
+    <li><b>原理</b>：缓存一致性协议（如 MESI）以 cache line 为单位。一个核写了某行，其他核持有的这一行副本就失效。两个线程各写各的变量，只要在同一行，就会互相“踢”对方的缓存。</li>
+    <li><b>和本类的关系</b>：lock 版本里，锁对象、head、tail、size 都挤在一起，生产者和消费者每次都在同一组缓存行上竞争——即使临界区很短，缓存行也在两个核之间来回搬，这是 G7 里 lock 版慢的原因之一。</li>
+    <li><b>解决</b>：按写者分组并填充对齐（C++ <code>alignas(64)</code>，C# <code>[StructLayout(LayoutKind.Explicit)]</code> + <code>FieldOffset</code>）；每线程统计数据各自累加，最后汇总。</li>
+  </ul>
+
+  <h2>12.7 现有测试验证了什么</h2>
+  <!--code:cs:RingBufferStressTest.cs（节选）-->
+var buffer = new ThreadSafeRingBuffer<int>(100);
+Task producer = Task.Run(() => { for (...) { while (!buffer.TryEnqueue(1)) Thread.Sleep(0); Interlocked.Increment(ref producedCount); } });
+Task consumer = Task.Run(() => { while (consumed < N) { if (buffer.TryDequeue(out val)) { ...; Interlocked.Increment(ref consumedCount); } else Thread.Sleep(0); } });
+Task.WaitAll(producer, consumer);                       // 在 Start() 里同步等待
+if (producedCount == N && consumedCount == N) Debug.Log("测试通过！数据完美守恒…");
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>缺陷</th><th>为什么</th></tr>
+    <tr><td><b>验证不了顺序和内容</b></td><td>入队的值恒为 1，乱序、重复、丢失后又多读一个，计数都可能对得上。G7 的做法是给每个值编号，逐个检查同一生产者内严格递增，并核对校验和</td></tr>
+    <tr><td><b>验证不了“丢失”</b></td><td>消费者“消费到 N 个才停”，如果真丢了数据，测试不是失败而是<strong>永远卡住</strong>，而它又在主线程 <code>Task.WaitAll</code>——编辑器会直接冻结</td></tr>
+    <tr><td><b>只有 SPSC</b></td><td>一个生产者一个消费者，碰不到多生产者抢 tail 的情况；而 lock 版本真正被设计来应对的就是多生产者</td></tr>
+    <tr><td>其他</td><td><code>Thread.Sleep(0)</code> 只让给同优先级线程，忙等会占满一个核；没有挂在任何场景里；“未发生死锁或丢包”的结论超出了测试能证明的范围</td></tr>
+  </table></div>
+  <p>同理，LogTest 的多线程测试（10 线程 × 500 条）只检查“没崩溃、文件变大了”，最后提示“请人工检查日志是否乱码”——它是一个手动观察工具，不是自动化测试。</p>
+
+  <h2>12.8 Unity 里用工作线程的边界</h2>
+  <ul>
+    <li><b>Unity API 只能在主线程调用</b>：GameObject、Transform、组件、<code>FindObjectOfType</code>、大部分 <code>Application.*</code>。工作线程第一次访问 <code>XxxSystem.Instance</code> 时如果实例还没缓存，会触发 FindObjectOfType / new GameObject 而报错；应在主线程取好引用再交给工作线程。</li>
+    <li><b>Debug.Log 可以在工作线程调用</b>（Log.cs 的注释也这么说），但它会捕获堆栈，较慢。</li>
+    <li><b>正确的拓扑</b>：工作线程只做纯计算，结果通过线程安全队列交回主线程，主线程在固定时机消费——ThreadSafeEventSystem 的“派发在主线程 Update”就是这个思路。</li>
+    <li><b>更 Unity 的做法</b>：C# Job System + Burst 处理数据并行（NativeArray 只能放 unmanaged 类型，所以第 10 章说的“TimerData 不是 blittable”在这里会成为直接障碍）；IO 和网络用 async/await 回到主线程的同步上下文。</li>
+  </ul>
+
+  <h2>12.9 面试追问树</h2>
+  <!--code:text:追问树 · 线程安全队列-->
+Q12-1 ThreadSafeRingBuffer 是怎么保证线程安全的？
+ ├── Q12-2 它是 lock-free 吗？lock-free 的定义是什么？
+ ├── Q12-3 lock 的成本是什么？什么是 contention？
+ │    └── Q12-4 你测过多生产者吗？                                 ← G7：4 生产者吞吐降到约 1/4
+ └── Q12-5 为什么不用 lock-free？
+      ├── Q12-6 SPSC 怎么写成无锁？需要注意什么？                  ← 内存序
+      └── Q12-7 MPMC 难在哪？
+Q12-8 false sharing 是什么？和你的队列有关系吗？
+Q12-9 你的压力测试能证明什么？                                     ← 质疑
+Q12-10 Unity 工作线程能调用你的单例吗？                            ← 边界
+Q12-11 C++ 里 std::mutex、自旋锁、atomic 怎么选？                  ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q12-1 → Q12-5　怎么保证线程安全？为什么不用 lock-free？</div>
+    <p><b>L1 · 30 秒</b>　每个操作整体放在同一把 lock 里，入队、出队、Peek、Count 互斥，所以是 lock-based 的线程安全有界队列，不是无锁。</p>
+    <p><b>L2 · 正常回答</b>　lock 在无竞争时只是一次原子操作，很便宜；竞争激烈时线程要自旋、甚至进内核等待，开销主要在交接锁和缓存行在核之间搬运。我用 C++ 按同样的结构测过：一进一出每秒约 2400 万次；四个生产者时总吞吐反而降到约四分之一。对游戏里工作线程偶尔回传结果的场景，这完全够用。</p>
+    <p><b>L3 · 深入</b>　要无锁，先得改掉 size：它被两端同时修改。改成 head 只归消费者写、tail 只归生产者写，单生产者单消费者就能用 acquire/release 内存序代替锁，同样的测试快了约 9.5 倍。多生产者就要用 CAS 抢槽位，还要处理“抢到但没写完”的槽，复杂度上一个台阶；这时我会直接用 ConcurrentQueue，或者给每个工作线程一个 SPSC 队列。</p>
+    <p><b>L4 · 面试官攻击</b>　“lock 版本在主线程用有什么风险？” → 吞吐不是问题，延迟的不确定性才是：如果工作线程持锁时被操作系统调度走，主线程拿锁就要等一个时间片，表现为偶发卡顿。所以主线程侧最好一次性把队列“换”出来（双缓冲交换，持锁时间极短），再在锁外慢慢处理——ThreadSafeEventSystem 的 swap 就是这个思路。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q12-6　SPSC 写成无锁要注意什么？</div>
+    <p><b>L2</b>　三点：每个变量只有一个写者；写数据之后用 release 发布 tail，读 tail 用 acquire，保证消费者看到新 tail 时也能看到数据，反过来 head 同理；head 和 tail 分开对齐到缓存行，避免 false sharing。容量取 2 的幂，用单调递增计数加位与取下标，满是 tail − head == capacity，空是 head == tail。</p>
+    <p><b>L4 攻击</b>　“C# 里能写吗？” → 能，用 Volatile.Read / Volatile.Write 或 Interlocked；但要注意 IL2CPP 在 ARM 上的内存模型比 x86 弱，x86 上“碰巧正确”的代码在手机上可能出错，所以内存序必须显式写出来，不能依赖平台。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q12-9　你的压力测试能证明什么？（质疑）</div>
+    <p><b>L2</b>　只能证明“一个生产者、一个消费者时，生产和消费的数量相等、没有崩溃”。它入队的值恒为 1，证明不了顺序和内容；如果真丢了数据，它不会失败而是在主线程上永远卡住；也没有覆盖多生产者。我后来在 C++ 移植版里给每个值编号，逐个检查顺序和校验和，并测了四个生产者，这才算真正验证。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q12-11　std::mutex、自旋锁、atomic 怎么选？（发散）</div>
+    <p><b>L2</b>　单个整数的计数、标志用 atomic；临界区极短且竞争不激烈、并且确定持锁线程不会被换出（比如固定核心的引擎线程）时可以用自旋锁；其他情况用 mutex——它在竞争时会让出 CPU，不会白白烧核。还要知道“锁的粒度”：一把大锁简单但竞争大，分段锁、读写锁、无锁结构是逐步降低竞争的手段，复杂度也逐步上升。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“我的队列加了锁，所以是线程安全的，压力测试十万次没丢包。”</p>
+    <p><b>问题</b>：压力测试只计数、值恒为 1，证明不了“没丢包”（丢了只会卡住）；只测了单生产者。</p>
+    <p><b>更好的回答</b>：“每个操作都在同一把锁里，所以线程安全；原来的压力测试只验证了 SPSC 下的计数，我后来补了带编号的顺序校验和多生产者测试。”</p>
+  </div>
+
+  <h2>12.10 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">死锁四条件</div><p>互斥、持有并等待、不可剥夺、循环等待。ThreadSafeEventSystem 有两把锁（字典锁、交换锁），但两者从不嵌套持有，所以不会死锁——这是可以主动说明的点。</p></div>
+    <div class="card"><div class="t">内存模型</div><p>x86 是强内存序（TSO），只有“写后读”可能重排；ARM 是弱内存序，几乎都可能重排。手游跑在 ARM 上，无锁代码必须显式使用 acquire/release。</p></div>
+    <div class="card"><div class="t">条件变量与阻塞队列</div><p>如果消费者没数据时应该睡眠而不是轮询，要用 condition_variable（C++）/ Monitor.Wait（C#）/ BlockingCollection；Try 接口 + Sleep(0) 的轮询会占满一个核。</p></div>
+    <div class="card"><div class="t">游戏引擎的任务系统</div><p>UE 的 TaskGraph、Unity 的 Job System 都是“工作窃取”的线程池：每个线程一个本地双端队列，空了去别人队尾偷——本质上是把 MPMC 拆成多个“几乎 SPSC”的队列来降低竞争。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><strong>lock-based 线程安全有界队列，不是 lock-free</strong>；Try 接口不等于无锁。项目里<strong>没有任何业务在用</strong>。</li>
+    <li>G7：lock 版 1P1C <strong>23.8 M/s</strong>，4P1C <strong>5.5 M/s</strong>（竞争），无锁 SPSC <strong>226.6 M/s</strong>。</li>
+    <li>SPSC 无锁三要点：<strong>每个变量单写者、release/acquire、head/tail 分行对齐</strong>；size 两端共写，所以原设计改不成无锁。</li>
+    <li>G8：false sharing 让互不相关的两个计数器<strong>慢约 3 倍</strong>。</li>
+    <li>压力测试：值恒为 1、丢包会卡死主线程、只有 SPSC——<strong>只证明了计数守恒</strong>。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么在 SPSC 无锁队列里，生产者写 tail 必须用 release，而不能用普通写？</summary><p>普通写可能被编译器或 CPU 重排到“写 buf”之前对其他核可见；消费者看到新的 tail 后去读 buf，可能读到旧数据。release 保证 tail 之前的所有写入先于 tail 对其他核可见，消费者用 acquire 读 tail 与之配对。</p></details>
+  <details class="quiz"><summary>自测 2：G7 中 4 个生产者时总吞吐为什么比 1 个还低？</summary><p>所有生产者和消费者争同一把锁、同一组缓存行；临界区极短，时间几乎都花在拿锁失败后的自旋 / 等待、锁的交接和缓存行在核间来回失效上，线程越多竞争越激烈。</p></details>
+</section>

@@ -1,0 +1,319 @@
+<section class="chapter" id="ch10">
+  <div class="ch-head">
+    <div class="no">CHAPTER 10</div>
+    <h1>TimerSystem（下）：Tick、重入、掉帧语义与 GC 审计</h1>
+    <p class="lead">数据结构对了，行为也要对：回调里删自己、删别人、建新的会怎样；卡了一帧该补几次；scaled 与 unscaled 怎么选；以及最常被质疑的那句——“它真的是 Zero-GC 吗？”</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>讲清 Tick 为什么分“收集”和“执行”两个阶段，以及二次校验防住了什么</li>
+    <li>能逐一回答回调重入的 7 种情况，并举出 SoulDecay 里真实存在的重入路径</li>
+    <li>说清 interval（追赶 / 不追赶）与 loop 三种掉帧语义的差异，并结合 Unity 的 maximumDeltaTime</li>
+    <li>按“初始化 / 扩容 / 创建 / 稳态 Tick / 业务回调”五类做一次严格的 GC 审计</li>
+    <li>给出完整的 Code Review 表：当前设计 → 问题 → 为什么 → 最小修复 → production 方案</li>
+  </ul></div>
+
+  <h2>10.1 Tick 的两阶段结构</h2>
+  <!--code:cs:TimerSystem.cs:374-505（节选）-->
+_expiredTimersCache.Clear(); _intervalTimersCache.Clear();
+for (int i = 0; i < _timerCount; i++) {                    // ── 阶段一：只改数据、只收集句柄
+    ref TimerData timer = ref _timers[i];
+    if (timer.isPaused) continue;
+    float dt = timer.isUnScaled ? unscaledDeltaTime : scaledDeltaTime;
+    timer.timeElapsed += dt;
+    if (timer.interval > 0f) { /* 累加 intervalElapsed，按追赶规则 Add 若干次句柄（10.3 节） */ }
+    if (timer.timeElapsed >= timer.duration) {
+        int handleIndex = _indexToHandle[i];
+        _expiredTimersCache.Add(new TimerHandle(handleIndex, _generations[handleIndex]));
+        if (timer.isLoop) timer.timeElapsed -= timer.duration;     // 循环：只减一个周期
+    }
+}
+for (...) {                                                // ── 阶段二 A：所有 interval 回调
+    if (!IsHandleValid(handle)) continue;                  //    二次校验
+    try { data.onTrigger?.Invoke(); } catch (Exception e) { Debug.LogException(e); }
+}
+for (...) {                                                // ── 阶段二 B：所有完成回调
+    if (!IsHandleValid(handle)) continue;
+    var data = _timers[realIndex];                         //    拷贝一份（回调可能改数组）
+    try { data.onComplete?.Invoke(); } catch (Exception e) { Debug.LogException(e); }
+    if (!data.isLoop && IsHandleValid(handle)) StopTimer(handle);  // 回调里可能已经停过了
+}
+<!--/code-->
+  <h3>如果在第一个循环里直接回调，会出什么事</h3>
+  <p>假设 dense = [A, B, C]，遍历到 i=0 时调用 A 的回调，回调里 <code>StopTimer(A)</code>：swap-and-pop 把 C 搬到 dense[0]，count 变成 2。循环继续 i=1，处理 B——<strong>C 这一帧被漏掉了</strong>。反过来，回调里 CreateTimer 会把新元素追加到末尾、count 变大，新计时器在创建它的同一帧就被累加了时间。这就是遍历中的<strong>结构性修改（structural modification）</strong>：C# 的 <code>foreach</code> 遇到它会直接抛 InvalidOperationException，裸数组 + 下标循环则会“静默地错”。</p>
+  <p>两阶段结构把“改结构”推迟到遍历结束之后：阶段一只读写数据、只记录句柄（值类型，不受搬家影响）；阶段二再逐个执行，执行前用 <code>IsHandleValid</code> 确认句柄仍然有效。</p>
+  <!--code:text:同一帧内的时间线-->
+阶段一  i=0..count-1   累加时间 → 记录 interval 句柄 ×k、到期句柄
+                         （此时没有任何用户代码运行，数组结构不变）
+阶段二A interval 回调  for each 句柄：IsHandleValid? → onTrigger()
+                         ↑ 回调里可能 Stop / Create / 抛异常
+阶段二B 完成回调       for each 句柄：IsHandleValid? → onComplete() → 非循环且仍有效 → StopTimer
+注意：所有计时器的 interval 回调都先于任何一个完成回调
+<!--/code-->
+
+  <h2>10.2 回调重入：7 种情况逐一检查</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>回调里做了什么</th><th>当前行为【源码事实 / 实测】</th><th>结论</th></tr>
+    <tr><td>1</td><td>停止自己</td><td>代数 +1；回调返回后 <code>IsHandleValid</code> 为 false，不会重复 Stop；同一帧剩余的追赶次数也被跳过</td><td class="yes">安全</td></tr>
+    <tr><td>2</td><td>停止同帧已进入缓存的另一个计时器 B</td><td>B 的句柄在缓存里，但执行到它时校验失败被跳过（实测 E4：B 的完成回调没有出现）</td><td class="yes">安全</td></tr>
+    <tr><td>3</td><td>停止后立刻新建，复用了刚释放的槽位</td><td>新计时器拿到同槽位、代数 +1；缓存里的旧句柄代数对不上，不会误触发新计时器（实测 E4：C=(0,1)）</td><td class="yes">安全（这正是 generation 在重入场景的价值）</td></tr>
+    <tr><td>4</td><td>新建计时器</td><td>追加到 dense 末尾；不在本帧缓存里，下一帧开始计时</td><td class="yes">安全</td></tr>
+    <tr><td>5</td><td>新建导致 <code>Array.Resize</code></td><td>阶段二A 持有 <code>ref TimerData data</code>，扩容后它指向<strong>旧数组</strong>；回调返回后不再使用它，所以没出错。阶段二B 用的是拷贝，不受影响</td><td class="mid">安全但脆弱：以后如果在 Invoke 之后再写 data，就会写进旧数组</td></tr>
+    <tr><td>6</td><td>抛异常</td><td>try/catch 吞掉并 <code>Debug.LogException</code>；非循环计时器之后照样被 Stop，不会每帧重复抛</td><td class="yes">安全（比 EventSystem 好：后者没有 try/catch）</td></tr>
+    <tr><td>7</td><td>用同名 CreateTimer “重启自己”</td><td>CreateTimer 发现同名旧句柄仍有效 → 先 Stop 旧的 → 建新的；回调返回后旧句柄已失效，不会把新计时器误删</td><td class="yes">安全</td></tr>
+  </table></div>
+  <div class="co net"><span class="h">Demo 里真实存在的重入路径（SoulDecay，第 15 章）</span>
+    <p>玩家肉体寿命到期 → TimerSystem 阶段二B 调用 <code>OnBodyExploded</code> → <code>Die(true)</code> → ① <code>AuthorityGameMode.EndMatch()</code> → <code>StopTimer("AISpawner")</code>（停掉另一个计时器）→ ② <code>Controller.UnPossess()</code> → <code>CombatPawn.OnUnPossess</code> → <code>StopTimer(_decayTimer)</code>（<strong>停掉正在执行的自己</strong>）→ ③ <code>Destroy(gameObject)</code>。回调返回后 TimerSystem 再校验，句柄已失效，跳过 StopTimer。三种重入在一个调用栈里同时出现，而系统行为正确——这是面试里最好的“我的设计经受住了验证”的例子。</p>
+  </div>
+  <div class="co warn"><span class="h">【问题】“到期了却不回调”的语义</span>
+    <p>因为所有 interval 回调先于所有完成回调，如果 Y 的 interval 回调停掉了同帧到期的 X，X 的 onComplete 就永远不会执行。对“停止 = 取消”的语义这是合理的，但需要在 API 文档里写明：<strong>StopTimer 不会触发 onComplete</strong>，到期与取消是两种结局。</p>
+  </div>
+
+  <h2>10.3 interval 与掉帧：一帧卡了 0.6 秒，该触发几次</h2>
+  <!--code:cs:TimerSystem.cs:394-437（节选）-->
+if (timer.interval > 0f) {
+    timer.intervalElapsed += dt;
+    if (timer.isChase) {                                   // 追赶模式（默认 true）
+        int chaseCount = 0;
+        while (timer.intervalElapsed >= timer.interval && chaseCount < MAX_CHASE_COUNT) {  // 最多 5 次
+            _intervalTimersCache.Add(handle);  timer.intervalElapsed -= timer.interval;  chaseCount++;
+        }
+    } else if (timer.intervalElapsed >= timer.interval) {  // 普通模式：最多 1 次
+        _intervalTimersCache.Add(handle);  timer.intervalElapsed -= timer.interval;
+    }
+    if (timer.intervalElapsed >= timer.interval) timer.intervalElapsed = 0f;   // “防爆”：多余的时间直接丢弃
+}
+<!--/code-->
+  <p>“interval = 0.1 s，一帧 dt = 0.6 s”理论上欠了 6 次。三种可能的设计语义：</p>
+  <div class="tbl"><table>
+    <tr><th>语义</th><th>触发次数</th><th>适合的业务</th><th>风险</th></tr>
+    <tr><td>只触发 1 次（丢弃欠账）</td><td>1</td><td>UI 刷新、心跳、AI 重新决策——只关心“最新状态”</td><td>依赖次数的逻辑会少算（DOT 少跳伤害）</td></tr>
+    <tr><td>全部补上（精确）</td><td>6</td><td>持续伤害、资源产出、回放/帧同步——次数本身有意义</td><td>卡得越久补得越多，补的过程又让帧更卡 → <strong>死亡螺旋（spiral of death）</strong></td></tr>
+    <tr><td>最多补 N 次（封顶）</td><td>min(6, N)</td><td>折中</td><td>封顶后怎么处理余量：丢弃（丢相位）还是保留（下帧接着补）</td></tr>
+  </table></div>
+  <p>本项目的实际行为（【实测 E3 / E12】，C++ 逐行移植）：</p>
+  <div class="tbl"><table>
+    <tr><th>场景</th><th>本帧触发</th><th>余量 intervalElapsed</th><th>解读</th></tr>
+    <tr><td>isChase=true，dt=0.6</td><td>5</td><td>0</td><td>封顶 5 次；剩下 0.1 仍 ≥ interval → 被“防爆”清零，<strong>丢 1 次</strong></td></tr>
+    <tr><td>isChase=false，dt=0.6</td><td>1</td><td>0</td><td>只触发 1 次，剩余 0.5 被清零，<strong>丢 5 次</strong></td></tr>
+    <tr><td>isChase=true，dt=0.35</td><td>3</td><td>0.0500000045</td><td>没触顶，余量保留，节拍相位正确</td></tr>
+    <tr><td>isChase=true，dt=0.5</td><td>5</td><td>1.49e-08</td><td>理想余量 0，float 运算残留一个极小正数</td></tr>
+    <tr><td>Loop(duration=0.1)，dt=0.35 后接 16 ms 帧</td><td>每帧 1 1 1 0 1 0</td><td>—</td><td>循环计时器每帧<strong>至多 1 次但不丢账</strong>，欠账分摊到后续帧</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">【问题】同一个系统里有三种掉帧语义</span>
+    <p>interval 追赶：封顶 5 次 + 清零（丢相位）；interval 不追赶：1 次 + 清零（丢次数）；loop：1 次 + 不清零（拖延）。调用方很难预期。更合理的设计是把它做成显式参数，例如“掉帧策略 = 只触发一次 / 补齐（封顶 N，余量保留）/ 补齐不封顶”，loop 与 interval 共用同一套策略。</p>
+  </div>
+
+  <h3>10.3.1 Unity 里根本不会出现 dt = 0.6 —— 对 scaled 计时器而言</h3>
+  <p>【扩展知识】Unity 的 <code>Time.deltaTime</code> 会被 <code>Time.maximumDeltaTime</code>（Project Settings → Time → Maximum Allowed Timestep，默认 1/3 秒）截断；<code>Time.unscaledDeltaTime</code> 不截断。所以真实卡顿 0.6 秒时，scaled 计时器看到的 dt 只有 0.333。【实测 E12】：</p>
+  <div class="tbl"><table>
+    <tr><th>真实卡顿</th><th>scaled 计时器（dt 被截断为 0.3333333）</th><th>unscaled 计时器（dt 不截断）</th></tr>
+    <tr><td>0.6 s</td><td>触发 3 次，余量 0.0333</td><td>触发 5 次（封顶），余量清零</td></tr>
+    <tr><td>2.0 s</td><td>触发 3 次，余量 0.0333</td><td>触发 5 次（封顶），余量清零，丢 15 次</td></tr>
+  </table></div>
+  <p>结论：对 scaled 计时器，<code>MAX_CHASE_COUNT = 5</code> 只有在 interval &lt; 0.067 s 时才可能起作用；真正需要“防爆”的是 unscaled 计时器。【实测 E12】unscaled 的 Loop(0.1) 在 2 秒卡顿后，连续 22 帧每帧补 1 次，然后才恢复正常节拍——总次数是对的（2.48 s 内理想 24 次、实际 24 次），但“补”的那 22 帧里回调频率是设计值的 6 倍。</p>
+  <div class="co deep"><span class="h">发散：手机切后台再回来</span>
+    <p>如果切后台或长时间断点调试之后 <code>unscaledDeltaTime</code> 一帧变得很大（具体数值取决于平台和 Unity 版本，需要实测），unscaled 的 loop 计时器会在之后的每一帧都补一次，持续很久：一个 0.1 s 周期的计时器欠 60 秒，就会在接下来 600 帧里每帧触发——这就是为什么联网游戏的心跳、超时检测通常直接读真实时钟（<code>Time.realtimeSinceStartupAsDouble</code> / Stopwatch）并按“当前时间 − 上次时间”计算，而不是累加帧间隔。</p>
+  </div>
+  <div class="lab chaselab glab" id="lab-chase"></div><!--/lab-->
+
+  <h2>10.4 scaled / unscaled：每个计时器选哪一种</h2>
+  <div class="tbl"><table>
+    <tr><th>场景</th><th>选择</th><th>原因</th></tr>
+    <tr><td>技能冷却、Buff 持续、刷怪、肉体寿命</td><td>scaled</td><td>暂停、子弹时间时应该一起变慢 / 停止（SoulDecay 的寿命计时器和 AISpawner 都是 scaled，按 ESC 暂停时冻结）</td></tr>
+    <tr><td>暂停菜单里的动画、Toast 自动消失、按钮冷却</td><td>unscaled</td><td><code>timeScale = 0</code> 时 UI 仍要动</td></tr>
+    <tr><td>网络心跳、请求超时、断线重连</td><td>真实时钟</td><td>和游戏内时间无关；切后台 / 卡顿时要按真实流逝判断</td></tr>
+    <tr><td>防沉迷、活动倒计时</td><td>服务器时间</td><td>本地时间可被修改，且可能跨越数天（见 10.6 的 float 精度问题）</td></tr>
+    <tr><td>帧同步（lockstep）战斗逻辑</td><td>逻辑帧计数</td><td>必须确定性：所有客户端在第 N 帧触发，不能依赖 float dt</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">【实测 E11】timeScale = 0 时的边界</span>
+    <p>暂停 10 帧（scaled dt = 0）：普通 5 秒计时器剩余仍是 5.00 s，interval 计时器触发 0 次——符合预期；但 <strong>duration = 0 的循环计时器触发了 10 次</strong>，因为判断条件是 <code>timeElapsed &gt;= duration</code>，0 ≥ 0 恒成立。CreateTimer 没有任何参数校验，duration ≤ 0 的循环计时器会变成“每帧回调”，暂停也挡不住（E3 也测到了 5 帧触发 5 次）。</p>
+  </div>
+
+  <h2>10.5 float 累加：为什么 UE 存“到期时刻”而不是“已走时间”</h2>
+  <p>本项目每个计时器每帧做 <code>timeElapsed += dt</code>（float）。float 只有 24 位有效数字，数值越大，能表示的最小增量越粗。【实测 E14】从某个已走时间开始再走 600 帧（每帧 0.016 s，理想 +9.6 s）：</p>
+  <div class="tbl"><table>
+    <tr><th>已走时间</th><th>实际增加</th><th>说明</th></tr>
+    <tr><td>3600 s（1 小时）</td><td>9.668 s</td><td>误差 0.7%</td></tr>
+    <tr><td>86400 s（1 天）</td><td>9.375 s</td><td>每帧的 0.016 被舍入成 0.015625</td></tr>
+    <tr><td>262144 s（约 3 天）</td><td>18.75 s</td><td>每帧被舍入成 0.03125，<strong>时间走快一倍</strong></td></tr>
+    <tr><td>524288 s（约 6 天）</td><td>0 s</td><td>0.016 小于半个最小增量，加了等于没加，<strong>计时器永远不会到期</strong></td></tr>
+  </table></div>
+  <p>普通 Gameplay 计时器只有几秒到几分钟，循环计时器每周期还会减回去，所以这不是 Demo 的问题；但如果有人用它做“7 天后活动结束”的倒计时就会出事。UE 的 FTimerManager 维护一个 double 的 <code>InternalTime</code>，每个计时器只存绝对到期时间 <code>ExpireTime</code>，比较时不累加误差。</p>
+
+  <h2>10.6 GC 审计：它到底是不是 Zero-GC</h2>
+  <p>先给结论：<strong>不是。准确的说法是：在调用方缓存委托、计时器数量不超过预分配容量的前提下，Tick 的稳态是零分配的；CreateTimer 本身不分配，但几乎所有真实调用点都会产生委托或闭包分配。</strong></p>
+  <div class="tbl"><table>
+    <tr><th>类别</th><th>来源（源码位置）</th><th>什么时候</th><th>是否在稳态每帧发生</th></tr>
+    <tr><td rowspan="2">① 初始化</td><td><code>new TimerData[128]</code>、三个 <code>List&lt;int&gt;(128)</code>、<code>Queue&lt;int&gt;(128)</code>、<code>Dictionary(64)</code>、两个缓存 <code>List(64)</code>（字段初始化器，81-105 行）</td><td>TimerSystem 组件创建时一次</td><td>否</td></tr>
+    <tr><td><code>AllocateCapacity(128)</code>（Awake）：容量已是 128，不再分配</td><td>—</td><td>否</td></tr>
+    <tr><td rowspan="4">② 扩容</td><td><code>Array.Resize(ref _timers, 2×)</code>（113 行）</td><td>同时存在的计时器第一次超过 128、256…</td><td>否（但会产生一个旧数组的垃圾，并拷贝全部数据）</td></tr>
+    <tr><td>三个 List 的 <code>Add</code>（195-197 行）</td><td>槽位数第一次超过 128…</td><td>否</td></tr>
+    <tr><td><code>Queue.Enqueue</code>、<code>Dictionary</code> 插入</td><td>空闲槽 / 命名计时器数超过容量</td><td>否</td></tr>
+    <tr><td>两个缓存 List 的 <code>Add</code></td><td>单帧 interval 回调或到期数第一次超过 64（追赶模式一帧可加 5 次）</td><td>否（Clear 不释放容量）</td></tr>
+    <tr><td rowspan="4">③ 创建计时器（调用方）</td><td>无捕获的 lambda <code>() =&gt; {}</code></td><td>编译器缓存为静态委托，首次之后不分配</td><td>—</td></tr>
+    <tr><td>捕获变量的 lambda（SphereSpawner、TimerSystemTest 里大量使用）</td><td>每次：一个闭包对象 + 一个委托</td><td>每次创建都分配</td></tr>
+    <tr><td>实例方法组 <code>CreateTimer(MaxLifespan, OnBodyExploded)</code>（CombatPawn.cs:44）</td><td>每次 new 一个委托（C# 9 不缓存实例方法组）</td><td>每次夺舍分配一次</td></tr>
+    <tr><td>缓存在字段里的委托（DemoGameMode 的 <code>_startMatchAction</code>、SurvivalGameMode 的 <code>_spawnAIAction</code>）</td><td>只在缓存时分配一次</td><td>否 ✔（正确做法）</td></tr>
+    <tr><td>④ 稳态 Tick</td><td><code>ref</code> 遍历、值类型句柄、<code>List.Clear</code>、<code>IsHandleValid</code>；<code>HashCode.Combine</code> 不装箱</td><td>—</td><td><strong>不分配</strong>（除非抛异常时 <code>Debug.LogException</code>）</td></tr>
+    <tr><td>⑤ 业务回调</td><td>回调里做什么就分配什么：<code>Log.N($"...")</code> 的字符串插值、<code>new XxxEventArgs</code>、事件闭包（第 7 章）、Destroy</td><td>回调执行时</td><td>取决于业务——不应算在计时器头上，但也不能说“整个计时链路零 GC”</td></tr>
+  </table></div>
+
+  <h3>10.6.1 “Blittable、避免 GC 扫描”这句注释为什么不成立</h3>
+  <ul>
+    <li><b>Blittable</b> 指托管与非托管内存里表示完全相同、可以直接 memcpy 给原生代码的类型。含引用字段的结构体<strong>不是</strong> blittable，也不满足 C# 的 <code>unmanaged</code> 约束——所以 TimerData 不能放进 <code>NativeArray</code>，也不能进 Burst Job。</li>
+    <li>TimerData 有<strong>两个</strong>委托字段（注释写“唯一的引用类型字段”也错了），整个 <code>_timers</code> 数组都需要被 GC 标记阶段扫描。</li>
+    <li>“存 int hash 而不是 string”确实少了一个引用，但这个收益远小于两个委托的存在。</li>
+  </ul>
+
+  <h3>10.6.2 【实测 E13】停止后的“托管层泄漏”</h3>
+  <p>StopTimer 只做 <code>_timerCount--</code>，不清空被移出范围的那一格。【实测 E13】回调捕获了一个对象，计时器停止后该对象<strong>仍然存活</strong>（引用残留在 <code>_timers[1]</code>），直到这一格被新计时器覆盖才释放。对比：RingBuffer 在出队时会 <code>_buffer[_head] = default</code>，作者在那里是知道这个问题的。</p>
+  <p>对 Unity 的影响：回调通常捕获 <code>this</code>（某个 MonoBehaviour）。GameObject 被 Destroy 后，原生对象没了，但 C# 包装对象被残留引用钉住，GC 回收不了；如果它又引用了贴图、Mesh 之类的资源，<code>Resources.UnloadUnusedAssets</code> 也会认为它们仍在使用。修复只要一行思路：swap-and-pop 之后把 <code>_timers[last]</code> 置为 default。</p>
+
+  <h3>10.6.3 怎么证明“稳态零分配”</h3>
+  <ol>
+    <li><b>Profiler</b>：CPU Usage 模块的 Hierarchy 视图看 <code>TimerSystem.Update</code> 一行的 GC Alloc 列，连续多帧为 0 B；打开 Deep Profile 或加 <code>ProfilerMarker</code> 精确到 Tick。</li>
+    <li><b>ProfilerRecorder</b>：在测试里记录 “GC Allocated In Frame” 计数器。</li>
+    <li><b>Unity Test Framework</b>：<code>Assert.That(() =&gt; ts.Tick(dt, dt), Is.Not.AllocatingGCMemory())</code>（需要先把 Tick 从 MonoBehaviour 中拆出来，第 20 章）。</li>
+  </ol>
+  <div class="co tip"><span class="h">面试注意：说“低分配”时附上边界条件</span>
+    <p>“Tick 稳态零分配，前提是计时器数量不超过预分配容量、单帧回调数不超过 64；创建计时器时调用方如果传闭包或实例方法组，每次会分配一个委托；这些我用 Profiler 看过 / 计划用 Profiler 验证。”——比“Zero-GC”多三句话，但不会被任何追问击穿。</p>
+  </div>
+  <h3>10.6.4 如果真的要做到更低 GC，设计空间有哪些</h3>
+  <ul>
+    <li><b>热冷分离</b>：Tick 用的数值字段放一个纯值数组（可以变成 unmanaged，甚至进 Job）；回调放另一个数组，只在触发时访问。</li>
+    <li><b>状态参数代替闭包</b>：提供 <code>CreateTimer&lt;TState&gt;(…, Action&lt;TState&gt; cb, TState state)</code>，让调用方传静态方法 + 状态对象，避免每次生成闭包（状态若是值类型，存储时要避免装箱，需要泛型化存储或按类型分池）。</li>
+    <li><b>回调 id 表</b>：回调预先注册成整数 id，计时器只存 id。代价是失去 lambda 的便利。</li>
+    <li><b>接口回调</b>：<code>ITimerListener.OnTimer(handle)</code>，由长期存在的对象实现，计时器只存接口引用（仍是引用，但不会每次新分配）。</li>
+  </ul>
+
+  <h2>10.7 Code Review：完整问题表</h2>
+  <div class="tbl"><table>
+    <tr><th>主题</th><th>当前设计</th><th>问题 / 为什么</th><th>最小修复</th><th>Production 方案</th></tr>
+    <tr><td>默认句柄</td><td>代数从 0 开始</td><td>(0,0) 与 default 相同 → 命中首个计时器（E1，P0）</td><td>代数从 1 开始；字段初始化为 Invalid</td><td>0 永远代表无效（UE 同款）</td></tr>
+    <tr><td>槽位在用检查</td><td>只比代数</td><td>伪造/残留句柄可删他人、产生僵尸与重复空闲槽（E2）</td><td>Stop 时 h2i 置 −1；校验加 0 ≤ h2i &lt; count</td><td>槽位带 active 位，并断言不变式</td></tr>
+    <tr><td>跨实例</td><td>句柄无系统标识</td><td>切场景后旧句柄命中新系统（E10）</td><td>每个实例代数起点不同（如全局计数）</td><td>句柄内含系统实例 id</td></tr>
+    <tr><td>代数溢出</td><td>int++ unchecked</td><td>2³² 次复用回绕（E6：每帧复用约 829 天）</td><td>说明风险窗口即可</td><td>64 位句柄 / 槽位退役</td></tr>
+    <tr><td>名字</td><td><code>string.GetHashCode()</code> 当键</td><td>碰撞互相覆盖；不保证跨进程稳定；hash 为 0 时无法按名查找</td><td><code>Dictionary&lt;string, Handle&gt;</code></td><td>预注册 id / 常量</td></tr>
+    <tr><td>同名覆盖</td><td>静默停止旧计时器</td><td>调用方无感知</td><td>文档写明 / 返回旧句柄</td><td>覆盖策略作为参数（替换 / 忽略 / 报错）</td></tr>
+    <tr><td>duration ≤ 0</td><td>无校验</td><td>循环计时器每帧触发，暂停也挡不住（E3、E11）</td><td>loop 时要求 duration &gt; 0</td><td>参数校验 + 断言</td></tr>
+    <tr><td>interval ≤ 0</td><td>静默当作“无 interval”</td><td>传 0 的意图可能是“每帧”</td><td>文档写明</td><td>每帧回调用单独 API</td></tr>
+    <tr><td>掉帧语义</td><td>三套规则</td><td>丢相位 / 丢次数 / 拖延（E3、E12）</td><td>统一并写入文档</td><td>掉帧策略枚举，loop 与 interval 共用</td></tr>
+    <tr><td>回调异常</td><td>try/catch + LogException</td><td>✔ 正确</td><td>—</td><td>附带计时器名/创建栈便于定位</td></tr>
+    <tr><td>回调重入</td><td>两阶段 + 二次校验</td><td>✔ 正确；ref 跨扩容脆弱</td><td>Invoke 前先取出委托到局部变量</td><td>Tick 期间的增删进入命令缓冲</td></tr>
+    <tr><td>回调顺序</td><td>dense 顺序</td><td>swap-and-pop 打乱，≠ 创建顺序（E4）</td><td>文档写明</td><td>按 (到期时间, 序号) 排序回调</td></tr>
+    <tr><td>尾部残留</td><td>Stop 不清空</td><td>捕获对象无法回收（E13）</td><td>Stop 后 <code>_timers[last] = default</code></td><td>热冷分离，回调数组单独清理</td></tr>
+    <tr><td>owner 生命周期</td><td>不感知</td><td>MonoBehaviour 已 Destroy，回调仍会执行 → MissingReferenceException</td><td>调用方在 OnDestroy 里 Stop</td><td>创建时登记 owner，销毁时批量取消（UE ClearAllTimersForObject）</td></tr>
+    <tr><td>时间精度</td><td>float 累加</td><td>数天后精度崩溃（E14）</td><td>长计时器用别的方案</td><td>double 全局时间 + 绝对到期时刻</td></tr>
+    <tr><td>调度复杂度</td><td>每帧扫描全部（含暂停的）</td><td>O(N)，暂停的也遍历</td><td>暂停的移出 dense</td><td>按流速分组 + 堆 / 时间轮</td></tr>
+    <tr><td>执行时机</td><td>自己 Update</td><td>与 World / Event 顺序不定</td><td><code>[DefaultExecutionOrder]</code></td><td>由 GameLoop 显式调用</td></tr>
+    <tr><td>线程</td><td>无同步</td><td>只能主线程调用（Unity API 本来也要求）</td><td>文档写明 / 断言主线程</td><td>跨线程请求走队列投递回主线程</td></tr>
+  </table></div>
+
+  <h2>10.8 测试：22 个用例到底验证了什么</h2>
+  <div class="tbl"><table>
+    <tr><th>行为</th><th>是否覆盖</th><th>说明</th></tr>
+    <tr><td>句柄有效性、停止后失效、Invalid 永远无效</td><td class="yes">✔</td><td>Test_HandleValidity</td></tr>
+    <tr><td>Swap-and-Pop</td><td class="mid">部分</td><td>只检查三个句柄的有效性，没检查被搬动的计时器数据是否正确（剩余时间、回调是否还对得上）</td></tr>
+    <tr><td>代数自增 / 槽位复用</td><td class="mid">依赖顺序</td><td>FIFO 下预留 2 个空闲槽两例都失败（E5）</td></tr>
+    <tr><td>暂停 / 循环 / 命名覆盖 / 回调中停止</td><td class="yes">✔</td><td>协程按真实时间等待，断言区间宽松</td></tr>
+    <tr><td>追赶 vs 非追赶</td><td class="no">✘</td><td>两个用例都用默认 isChase=true（注释反而说默认是 false）；稳定帧率下根本触发不了追赶</td></tr>
+    <tr><td>scaled vs unscaled</td><td class="no">✘</td><td>没有修改 timeScale，只验证了“都会触发”</td></tr>
+    <tr><td>默认句柄、伪造句柄、跨实例、溢出、hash 碰撞、duration≤0、扩容 &gt;128、回调异常、回调里新建</td><td class="no">✘</td><td>批量用例只有 30 个，碰不到 128 的扩容</td></tr>
+  </table></div>
+  <p>形式上的问题：这是挂在 MonoBehaviour 上的协程脚本，<strong>没有挂进任何场景</strong>；<code>WaitUntil</code> 没有超时，失败表现为卡住而不是报错；<code>Fail()</code> 只打日志，<code>RunTestCoroutine</code> 结束后照样打印“通过”。它是一个运行时测试 harness，不是 NUnit / Unity Test Framework 意义上的单元测试（第 20 章给出迁移方案）。</p>
+
+  <h2>10.9 与 UE 的行为对比</h2>
+  <div class="tbl"><table>
+    <tr><th>行为</th><th>本项目</th><th>UE FTimerManager【扩展知识】</th></tr>
+    <tr><td>循环计时器一帧欠多次</td><td>每帧最多 1 次，欠账拖到后续帧</td><td>默认在同一帧里连续补调多次；UE 5.4 起可用 <code>bMaxOncePerFrame</code> 限制为一次</td></tr>
+    <tr><td>回调里清除自己</td><td>两阶段 + 二次校验</td><td>记录 <code>CurrentlyExecutingTimer</code>，执行中被清除会被识别，不再重新入堆</td></tr>
+    <tr><td>回调目标对象已销毁</td><td>照样调用</td><td>绑定 UObject 的委托失效后不再执行，计时器被移除</td></tr>
+    <tr><td>Tick 中新加的计时器</td><td>追加到 dense，下一帧开始累加</td><td>先放进 <code>PendingTimerSet</code>，本次 Tick 结束后再入堆</td></tr>
+    <tr><td>时间基准</td><td>每个计时器 float 累加</td><td>管理器 double 时钟 + 绝对到期时刻</td></tr>
+  </table></div>
+
+  <h2>10.10 面试追问树</h2>
+  <!--code:text:追问树 · TimerSystem 行为与 GC-->
+Q10-1 回调里 StopTimer(自己) 会怎样？
+ ├── Q10-2 回调 A 里 StopTimer(B) 呢？B 也在本帧到期
+ │    └── Q10-3 那你为什么不在遍历时直接回调？                ← 考结构性修改
+ └── Q10-4 回调抛异常呢？会不会每帧都抛？
+Q10-5 interval=0.1，一帧卡了 0.6 秒，触发几次？              ← 边界
+ ├── Q10-6 为什么封顶 5 次？封顶之后多余的时间去哪了？
+ ├── Q10-7 Unity 里真的会出现 dt=0.6 吗？                    ← 考 maximumDeltaTime
+ └── Q10-8 循环计时器呢？和 interval 一致吗？
+Q10-9 你说 TimerSystem 是 Zero-GC，证据是什么？              ← 质疑
+ ├── Q10-10 TimerData 里有 Action，它还能叫 blittable 吗？
+ ├── Q10-11 CreateTimer(MaxLifespan, OnBodyExploded) 分配了什么？
+ └── Q10-12 停止的计时器会不会导致内存泄漏？                  ← E13
+Q10-13 计时器的主人被 Destroy 了，回调还会执行吗？
+Q10-14 如果做成帧同步（lockstep），这个计时器能直接用吗？      ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q10-1 → Q10-3　回调里删自己 / 删别人，为什么安全？为什么不边遍历边回调？</div>
+    <p><b>L1 · 30 秒</b>　Tick 分两阶段：先遍历累加时间、只收集到期句柄；遍历结束后再逐个回调，每次回调前用句柄重新校验。回调里删了自己或者删了别人，代数已经变了，后面轮到它时校验失败直接跳过。</p>
+    <p><b>L2 · 正常回答</b>　如果边遍历边回调，回调里的 StopTimer 会做 swap-and-pop，把末尾元素搬到当前位置，循环继续往后走就漏掉了被搬过来的那个；回调里 Create 会改变循环上界。所以要把“可能修改结构的用户代码”和“遍历”分开。缓存里存的是句柄而不是下标，搬家不影响它；二次校验处理“已经被删”的情况；generation 处理“被删后槽位又被新计时器复用”的情况。</p>
+    <p><b>L3 · 深入</b>　还有两个细节：完成回调前先把 TimerData 拷贝出来，因为回调可能触发扩容或 swap-and-pop；非循环计时器回调后要再校验一次才 Stop，因为回调里可能已经 Stop 过。SoulDecay 里“寿命到期 → Die → StopTimer(自己) + StopTimer(AISpawner) + Destroy”就是三种重入同时发生，行为正确。</p>
+    <p><b>L4 · 面试官攻击</b>　“二次校验只能说明句柄失效，如果 B 被删了又在同一帧被同名重建，缓存里 B 的旧句柄会不会触发新的 B？” → 不会。重建拿到的槽位要么不同，要么相同但代数 +1，旧句柄的代数对不上。这正是 generation 在重入场景下的价值，我用移植版测过“回调里停 A、停 B、再建 C 复用 A 的槽位”，B 的回调没有执行，C 拿到 (0,1)。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q10-5 → Q10-8　卡了 0.6 秒触发几次？</div>
+    <p><b>L1</b>　默认追赶模式触发 5 次——最多补 5 次，补完剩下的时间直接清零；非追赶模式触发 1 次并清零。</p>
+    <p><b>L2</b>　这是在“补齐次数”和“防止死亡螺旋”之间的折中：卡顿后一帧里补太多回调，会让这一帧更慢，下一帧 dt 更大，越补越卡。但清零会丢相位：理论上应该在 0.6、0.7…触发的节拍，变成从清零那一刻重新计。</p>
+    <p><b>L3</b>　而且在 Unity 里，scaled 计时器根本看不到 0.6：deltaTime 被 maximumDeltaTime 截断到 1/3 秒，所以只触发 3 次、余量保留；只有 unscaled 计时器才会真的封顶。循环计时器又是另一套：每帧最多 1 次但不清零，欠账拖到后面每帧补一次。三种语义并存是我想改的地方：应该做成一个显式的掉帧策略参数。</p>
+    <p><b>L4 攻击</b>　“如果是 DOT 伤害呢？丢 1 跳可以接受吗？” → 不可以。伤害、资源产出这类次数有意义的逻辑，不应该依赖“回调次数”，而应该按时间结算：一次回调里根据流逝时间算出应跳几次（或者直接算总伤害），这样卡顿只影响表现的平滑度，不影响数值。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q10-9 → Q10-11　Zero-GC 的证据？TimerData 还能叫 blittable 吗？</div>
+    <p><b>L1</b>　严格说不是 Zero-GC。Tick 的稳态不分配，但创建计时器时调用方传的委托和闭包会分配，扩容也会分配。</p>
+    <p><b>L2</b>　按五类拆：初始化分配一次；超过 128 个计时器或单帧回调超过 64 次会扩容；创建时，捕获变量的 lambda 每次一个闭包对象加一个委托，实例方法组在 C# 9 下每次 new 一个委托——比如 CombatPawn 每次被玩家附身都会分配一次；稳态 Tick 只有 ref 遍历和值类型操作，不分配；回调里业务做什么就分配什么。TimerData 含两个委托引用，不是 blittable，整个数组还要被 GC 扫描，那句注释是错的。</p>
+    <p><b>L3</b>　证据要靠 Profiler 的 GC Alloc 列，或者用 Unity Test Framework 的 <code>Is.Not.AllocatingGCMemory()</code> 约束，前提是把 Tick 拆成可直接调用的纯 C# 方法。</p>
+    <p><b>L4 攻击</b>　“那你项目里有没有地方做对了？” → 有：DemoGameMode 和 SurvivalGameMode 都把委托缓存成字段（<code>_startMatchAction = StartMatch</code>），之后每次传给 CreateTimer 都不再分配；CombatPawn 没有这样做，是一个可以直接改的点。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q10-12　停止的计时器会不会导致内存泄漏？</div>
+    <p><b>L2</b>　会有一种“托管层的滞留”：StopTimer 只把 count 减一，被移出范围的那一格还保存着委托引用，委托又引用着它捕获的对象。我用移植版验证过，停止后被捕获对象仍然存活，直到这一格被新计时器覆盖。在 Unity 里，被 Destroy 的 MonoBehaviour 的 C# 包装对象就会被它钉住。修复是 swap-and-pop 后把末尾那一格清成 default——RingBuffer 出队时就是这么做的。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q10-13　主人被 Destroy 了，回调还会执行吗？</div>
+    <p><b>L2</b>　会。TimerSystem 只存委托，不知道它属于谁；Destroy 之后委托照样被调用，回调里访问 <code>transform</code> 就会抛 MissingReferenceException（被 try/catch 接住并打日志）。项目里靠调用方自觉：CombatPawn.Die 和 OnUnPossess 里会 StopTimer，SphereSpawner 的回调里先判断 <code>if (sphere)</code>。</p>
+    <p><b>L3</b>　系统性的做法是创建时登记 owner，owner 销毁时批量取消；或者执行前检查 owner 是否存活（Unity 对象可以用重载的 <code>==</code> 判断假 null）。UE 的委托绑定 UObject 时会自动失效，还提供 <code>ClearAllTimersForObject</code>。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q10-14　做成帧同步（lockstep），这个计时器能直接用吗？（发散）</div>
+    <p><b>L2</b>　不能直接用。帧同步要求所有客户端在同一逻辑帧得到完全相同的结果：① 时间不能用 float 的 deltaTime 累加，要用整数逻辑帧（或定点数）；② 不能有 scaled/unscaled 这种依赖本地渲染帧率的分支，逻辑计时器只跟逻辑帧走；③ 同帧多个计时器的回调顺序必须确定且所有端一致——swap-and-pop 的顺序虽然在相同操作序列下是确定的，但不直观，通常显式按 (到期帧, 创建序号) 排序；④ 追赶策略也必须确定，掉帧时逻辑帧照样一帧一帧推进，渲染帧可以跳。</p>
+    <p><b>L3</b>　表现层的计时器（UI 动画、特效消失）仍然可以用现在这套，因为它不参与逻辑结果。所以帧同步项目里通常有两套计时：逻辑帧计时器和表现层计时器。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“我的 TimerSystem 是 Zero-GC 的，因为 TimerData 是 struct。”</p>
+    <p><b>问题</b>：struct 只说明 TimerData 本身不单独分配；它里面的两个 Action 是引用，调用方创建它们时会分配；数组也会扩容。</p>
+    <p><b>更好的回答</b>：“TimerData 用 struct 存在连续数组里，Tick 稳态不分配；分配集中在创建时的委托和闭包，可以通过缓存委托、状态参数或回调 id 表进一步降低。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“掉帧时我会补齐所有次数，保证逻辑正确。”</p>
+    <p><b>问题</b>：当前代码封顶 5 次并清零，并没有补齐；而且无限补齐会导致死亡螺旋。</p>
+    <p><b>更好的回答</b>：“interval 追赶最多 5 次，超出部分丢弃，这是为了防止卡顿后回调爆发；对次数敏感的逻辑应该在回调里按流逝时间结算，而不是依赖回调次数。”</p>
+  </div>
+
+  <h2>10.11 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">Fix Your Timestep</div><p>固定步长 + 累加器：<code>acc += frameDt; while (acc ≥ step) { Simulate(step); acc -= step; }</code>，渲染用 <code>acc/step</code> 插值；为防死亡螺旋，限制每帧最多模拟 N 步。Unity 的 FixedUpdate 就是这套，maximumDeltaTime 就是那个 N。</p></div>
+    <div class="card"><div class="t">协程 vs 计时器</div><p><code>yield return new WaitForSeconds(1)</code> 每次分配一个对象（可缓存复用）；协程随 GameObject 失活而停止、无法统一暂停或查询剩余时间；UniTask 等库基于 PlayerLoop 实现零分配的 await 延迟。</p></div>
+    <div class="card"><div class="t">时间轮</div><p>环形数组，每格一个链表；指针每 tick 前进一格，处理该格的计时器；超过一圈的放到上层轮（分层时间轮）。插入 O(1)，适合服务器上数十万连接的超时管理。</p></div>
+    <div class="card"><div class="t">float 精度与大世界</div><p>和 E14 同理：大世界坐标离原点越远精度越差，于是有 Floating Origin、UE5 的 Large World Coordinates（double）。“数值越大，float 越粗”是同一个知识点。</p></div>
+    <div class="card"><div class="t">GC 机制</div><p>Unity（Mono / IL2CPP）使用 Boehm GC：非分代、不压缩，可开启增量模式把标记分摊到多帧。所以“减少分配次数”和“减少存活的引用”同样重要——前者减少 GC 触发，后者减少每次标记的工作量。</p></div>
+    <div class="card"><div class="t">操作系统的定时器</div><p>Linux 内核用分层时间轮管理 timer，epoll 的超时、timerfd、高精度定时器 hrtimer（红黑树）；游戏服务器的“定时器线程 + 回调投递到逻辑线程”结构，正好对应第 12 章的线程安全队列。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>Tick = <strong>阶段一累加+收集句柄 → 阶段二A 全部 interval 回调 → 阶段二B 全部完成回调</strong>；回调前二次校验；完成回调前先拷贝数据。</li>
+    <li>重入 7 种情况都安全，Array.Resize 下的 <code>ref</code> 属于“安全但脆弱”；SoulDecay 寿命到期路径同时包含停自己、停别人、Destroy。</li>
+    <li>掉帧（E3/E12）：追赶 <strong>封顶 5 次 + 清零</strong>；不追赶 <strong>1 次 + 清零</strong>；loop <strong>每帧 1 次不丢账</strong>。Unity 的 scaled dt 被截断到 <strong>1/3 s</strong>，unscaled 不截断。</li>
+    <li>timeScale=0 时 duration=0 的循环计时器<strong>每帧触发</strong>（E11）；float 累加在约 6 天处<strong>停止前进</strong>（E14）。</li>
+    <li>GC：<strong>Tick 稳态零分配 ≠ Zero-GC</strong>；分配来自初始化、扩容、调用方委托/闭包、业务回调；TimerData 不是 blittable；Stop 后尾部残留引用（E13）。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：dt=0.35、interval=0.1、isChase=true，本帧触发几次？intervalElapsed 剩多少？如果 isChase=false 呢？</summary><p>追赶：触发 3 次，余量 ≈ 0.05（实测 0.0500000045），小于 interval，不清零。不追赶：触发 1 次，余量 0.25 ≥ 0.1 → 被清零为 0。</p></details>
+  <details class="quiz"><summary>自测 2：为什么阶段二B 用 <code>var data = _timers[realIndex]</code> 拷贝，而不是 ref？</summary><p>回调里可能 StopTimer（swap-and-pop 改写这一格）或 CreateTimer（扩容换数组），回调之后还要读 data.isLoop。拷贝保证读到的是回调前的值，不受数组变化影响。</p></details>
+  <details class="quiz"><summary>自测 3：列出 CombatPawn 一次被玩家夺舍时，与计时器相关的所有托管分配。</summary><p>① <code>OnBodyExploded</code> 方法组转委托：一个委托对象；② <code>new PlayerLifespanTimerEventArgs</code>：一个事件对象；③ EventSystem.Trigger 里 <code>() =&gt; callback(e)</code>：一个闭包对象 + 一个委托（第 7 章）；④ <code>Log.N</code> 的字符串插值（ENABLE_CONSOLELOG 已定义，调用不会被剥离）。CreateTimer 和 Tick 本身不分配。</p></details>
+</section>

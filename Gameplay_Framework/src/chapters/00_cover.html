@@ -1,0 +1,92 @@
+<div class="cover">
+  <div class="kicker">GAMEPLAY FRAMEWORK · 源码解析 + CODE REVIEW + 面试追问</div>
+  <h1>从 Unity Gameplay Framework<br><em>到游戏客户端面试</em></h1>
+  <p class="sub">以 MyGamePlayArchitecture（Unity 2022.3）的真实源码为唯一依据：World / Actor / Pawn / Controller / GameMode / GameState 怎么组织，TimerSystem 的 Slot Map 为什么这样设计、哪里有漏洞，SoulDecay 夺舍 Demo 如何把这些模块串起来；再从每一处设计往下追到数据结构、GC、操作系统与引擎知识，练到能扛住 30～60 分钟的连续追问。</p>
+  <div class="meta">
+    <span class="pill b">已写：第 0～13、11B、15 章（新增 11B 对象池落地设计）</span>
+    <span class="pill o">2 个交互实验（Slot Map / 掉帧追赶）</span>
+    <span class="pill g">C++ 移植实测 E1~E14 · F1~F5 · G1~G10 · H1~H5 + 基准 2 组</span>
+    <span class="pill p">每章：四层答案 · 追问树 · 错误回答 · 发散题</span>
+  </div>
+</div>
+
+<section class="chapter" id="ch0">
+  <div class="ch-head">
+    <div class="no">CHAPTER 00</div>
+    <h1>读前须知与面试地图</h1>
+    <p class="lead">这本书怎么读、书里的话哪些是事实哪些是推测，以及——面试官会从这个项目的哪一行代码，一路追问到哪里。</p>
+  </div>
+
+  <h2>0.1 事实等级：每一句话都要分清楚</h2>
+  <div class="tbl"><table>
+    <tr><th>标记</th><th>含义</th><th>例子</th></tr>
+    <tr><td><b>【源码事实】</b></td><td>当前 commit（427d7c1）真实的行为，逐行读过</td><td>generation 初始值是 0（TimerSystem.cs:197）</td></tr>
+    <tr><td><b>【设计意图】</b></td><td>从命名、注释、提交信息推测的目标，不等于已经实现</td><td>注释说 TimerData 是 “Blittable”</td></tr>
+    <tr><td><b>【问题】</b></td><td>缺陷、边界漏洞、注释与实现不一致</td><td>default(TimerHandle) 会命中第一个计时器</td></tr>
+    <tr><td><b>【改进方案】</b></td><td>建议的修改方向（本书只讲思路，不给修复代码）</td><td>generation 从 1 开始</td></tr>
+    <tr><td><b>【扩展知识】</b></td><td>项目没实现，但面试会从这里追下去的知识</td><td>UE 的 FTimerHandle 是 24 位下标 + 40 位序列号</td></tr>
+    <tr><td><b>【实测 Ex / Bx】</b></td><td>把 C# 逻辑逐行移植成 C++ 后跑出的结果</td><td><code>demos/run_output.txt</code>、<code>demos/bench_output.txt</code></td></tr>
+  </table></div>
+  <div class="co ver"><span class="h">关于“实测”的边界</span>
+    <p>本机没有 Unity，C# 编译器在当前环境被禁用，所以纯逻辑（句柄、队列、遍历、触发次数）用逐行移植的 C++ 验证；凡是依赖 C# 运行时的结论——闭包到底分配多少字节、<code>string.GetHashCode</code> 的具体值、Unity 生命周期的先后——都只标【源码事实】或【扩展知识】，<strong>不冒充实测</strong>。这些请在 Unity Profiler（GC Alloc 列）里自己补测，面试时说“我推断会分配，并用 Profiler 验证过”比报一个没测过的数字安全得多。</p>
+  </div>
+
+  <h2>0.2 回答公式：面试官要的不是“是什么”</h2>
+  <!--code:text:每道项目题都按这五步组织-->
+① 结论      一句话：它是什么、解决什么问题
+② 机制      数据结构 / 调用流程（能画出来）
+③ 代价      复杂度、内存、GC、顺序、线程
+④ 项目事实  我的代码里具体怎么做的，哪里做对了，哪里有坑（主动说）
+⑤ 改进      如果规模扩大十倍 / 做成联网 / 做成多线程，我会怎么改
+<!--/code-->
+  <p>面试官攻击项目通常只有五种姿势，本书每章的“压力题”都按它们来出：</p>
+  <div class="cards">
+    <div class="card"><div class="t">质疑</div><p>“你说 Zero-GC，证据是什么？”——考你有没有夸大。</p></div>
+    <div class="card"><div class="t">反例</div><p>“default 句柄会不会被当成合法句柄？”——考你有没有想过边界。</p></div>
+    <div class="card"><div class="t">边界</div><p>“回调里把自己删了呢？2001 个事件呢？”——考你的代码在极端输入下的行为。</p></div>
+    <div class="card"><div class="t">性能</div><p>“一万个计时器呢？数组一定比链表快吗？”——考你能不能用数据说话。</p></div>
+    <div class="card"><div class="t">替代设计</div><p>“为什么不用小顶堆 / 时间轮 / 协程？”——考你知不知道还有别的解法，以及为什么没选。</p></div>
+  </div>
+
+  <h2>0.3 面试地图：每一章会被问什么、会被追到哪里</h2>
+  <p>下表覆盖全书 27 章（已写的章节加粗）。第三列是“为什么面试官会从这个项目追到那个知识点”——<strong>能说出这条因果链，发散题就不再是背题</strong>。</p>
+  <div class="tbl"><table>
+    <tr><th>章</th><th>面试官最可能问</th><th>会被追到哪里（发散）</th><th>为什么会追过去</th></tr>
+    <tr><td><b>Ch1 项目全景</b></td><td>介绍一下项目；为什么在 Unity 里仿 UE；解决了什么 Unity 原生解决不了的问题</td><td>游戏引擎架构分层、组合 vs 继承、ECS</td><td>你自称“Gameplay 架构”，面试官会验证你懂不懂“架构”这个词背后的取舍</td></tr>
+    <tr><td><b>Ch2 生命周期</b></td><td>Awake/Start/BeginPlay 谁先；先 Possess 还是先 BeginPlay</td><td>Unity PlayerLoop、脚本执行顺序、UE 的 Spawn → PostInitializeComponents → BeginPlay</td><td>你重新包装了生命周期，就必须说清楚两套时间线如何对齐</td></tr>
+    <tr><td><b>Ch3 World Tick</b></td><td>统一 Tick 的好处；遍历中删除为什么安全；新 Actor 何时开始 Tick</td><td>TickGroup、Tick 依赖、fixed timestep、迭代器失效</td><td>你的倒序遍历只防一种情况，面试官会找另一种（本书实测：会重复 Tick）</td></tr>
+    <tr><td><b>Ch4 Possess</b></td><td>为什么 Controller 和 Pawn 分开；双向引用怎么保证一致；Pawn 死了 Controller 怎么办</td><td>不变式、事务、所有权、UE 的 PlayerController/PlayerState 生命周期</td><td>夺舍 Demo 就是 Possess 的压力测试，追问天然落在这里</td></tr>
+    <tr><td><b>Ch5 GameMode/State</b></td><td>为什么 UI 不读 GameMode；单机里的 Authority 是什么</td><td>Server/Client、网络复制、PlayerState、帧同步与状态同步</td><td>GameMode/GameState 的分离本来就是为联网设计的</td></tr>
+    <tr><td><b>Ch6 Singleton</b></td><td>子类 override Awake 为什么不调 base；Singleton 的缺点</td><td>初始化顺序、Service Locator、DI、UE Subsystem</td><td>三个核心单例都没调 base.Awake，这是确定性 bug</td></tr>
+    <tr><td><b>Ch7 EventSystem</b></td><td>事件里发事件为什么不会栈溢出；队列满了怎么办；闭包分配了什么</td><td>Observer/PubSub、背压、消息队列、委托与多播实现</td><td>双缓冲是亮点，溢出/快照/异常是漏洞，两面都会被问</td></tr>
+    <tr><td><b>Ch8 RingBuffer</b></td><td>head/tail/size 怎么维护；满和空怎么区分</td><td>取模 vs 位与、cache line、无锁 SPSC</td><td>基础数据结构题，常作为热身</td></tr>
+    <tr><td><b>Ch9 Timer 结构</b></td><td>为什么不用 List；Swap-and-Pop 后句柄怎么找；generation 解决什么；溢出怎么办</td><td>ABA、悬垂引用、ECS Entity、UE FTimerHandle、GPU 资源句柄、PID/fd 复用</td><td>全项目技术密度最高，追问可以连续 8～10 层</td></tr>
+    <tr><td><b>Ch10 Timer 行为/GC</b></td><td>回调里删自己；掉帧触发几次；是不是 Zero-GC</td><td>Fix Your Timestep、spiral of death、Boehm GC、闭包、时间轮、帧同步里的定时器</td><td>“Zero-GC”是最容易被质疑的说法</td></tr>
+    <tr><td><b>Ch11 ObjectPool</b></td><td>池真的用了吗；PoolObject 为什么没有 generation</td><td>内存碎片、GC 压力、UnityEngine.Pool、对象复位</td><td>池化会把 Timer 章的 ABA 问题重新带回来</td></tr>
+    <tr><td><b>Ch11B 对象池落地</b></td><td>如果要把对象池真正接进框架你会怎么设计；出池后怎么重新 BeginPlay；Tick 里回收会怎样；延迟回收被复用怎么办</td><td>UE SpawnActor/DestroyActor/EndPlay、FWeakObjectPtr、遍历中修改、帧末统一销毁</td><td>“写了没启用”的下一句追问一定是“那你会怎么接”</td></tr>
+    <tr><td><b>Ch12 线程安全队列</b></td><td>lock 还是 lock-free；contention 是什么</td><td>mutex/自旋、内存序、false sharing、SPSC/MPSC</td><td>名字叫 ThreadSafe，面试官会确认你懂“安全到什么程度”</td></tr>
+    <tr><td><b>Ch13 Log</b></td><td>[Conditional] 做了什么；落盘为什么要缓冲</td><td>编译期剥离、IO 线程、崩溃时丢日志</td><td>日志是线上排查的基础设施</td></tr>
+    <tr><td>Ch14 GamePlayTest2</td><td>开局流程怎么串；UI 怎么知道倒计时</td><td>Push vs Pull、MVC/MVVM</td><td>这是 GameMode → Timer → Event → UI 的最小闭环</td></tr>
+    <tr><td><b>Ch15 SoulDecay</b></td><td>介绍你的 Demo；夺舍时发生了什么；碰撞双方都触发怎么只结算一次；游戏结束后发生了什么</td><td>联网夺舍的权威校验、对象池接入、物理与 Transform 冲突、材质实例</td><td>Demo 是面试官检验“框架是否真的好用”的入口</td></tr>
+    <tr><td>Ch16 数据流</td><td>从输入到 UI 走了哪些模块</td><td>输入缓冲、命令模式、回放</td><td>考你能不能把模块串成一条线</td></tr>
+    <tr><td>Ch17～21 Code Review</td><td>你现在会怎么改；性能瓶颈在哪；测试覆盖了什么</td><td>Profiler、Unity Test Framework、CI</td><td>“复盘能力”是校招最看重的软素质之一</td></tr>
+    <tr><td>Ch22～27 面试</td><td>1/3 分钟介绍、压力面、UE 对比、C++/OS 延伸</td><td>UWorld/UGameInstance/Subsystem、虚函数、内存模型</td><td>收束全书</td></tr>
+  </table></div>
+
+  <h2>0.4 这个项目最该先背的 8 句话</h2>
+  <ol>
+    <li>这是一个<strong>学习型原型</strong>：把 UE 的 World / Actor / Pawn / Controller / GameMode / GameState 分层思想落到 Unity 的 MonoBehaviour 上，不是 UE 的复刻，也不是生产框架。</li>
+    <li><code>AActor</code> 本身就是一个 MonoBehaviour 组件；World 是<strong>每个场景懒创建</strong>的单例，统一驱动 Actor 的 BeginPlay 与 Tick。</li>
+    <li>TimerSystem 是 Slot Map：dense 数组连续遍历、稀疏映射做 O(1) 定位、swap-and-pop 做 O(1) 删除、generation 拦截旧句柄、FIFO free list 复用槽位。</li>
+    <li>它的 Tick 稳态不分配，但<strong>不是 Zero-GC</strong>：TimerData 含两个委托引用，调用方的委托和闭包会分配。</li>
+    <li>generation 从 0 开始，所以 <code>default(TimerHandle)</code> = (0,0) 会被当成合法句柄——SoulDecay 里 AI 肉体的寿命句柄恰好是默认值。</li>
+    <li>回调重入处理得对：先收集句柄、再统一执行、执行前二次校验，Demo 里“寿命到期 → Die → StopTimer(自己)”这条真实路径就是靠它保证安全。</li>
+    <li>EventSystem 用双缓冲做延迟派发，事件里发事件不会递归；代价是 0～1 帧延迟，以及溢出静默丢弃、异常中断派发这两个漏洞。</li>
+    <li>SoulDecay 用“夺舍”把 Possess / UnPossess 当作核心玩法反复触发，是对 Controller ⇄ Pawn 分离最直接的验证。</li>
+  </ol>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>先分清<strong>源码事实 / 设计意图 / 问题 / 改进 / 扩展知识</strong>，面试里说错等级比说错细节更致命。</li>
+    <li>回答五步：<strong>结论 → 机制 → 代价 → 项目事实 → 改进</strong>。</li>
+    <li>五种攻击：<strong>质疑、反例、边界、性能、替代设计</strong>；发散题要能讲出“为什么会追过去”。</li>
+  </ul></div>
+</section>

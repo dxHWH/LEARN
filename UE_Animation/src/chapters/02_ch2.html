@@ -1,0 +1,118 @@
+<section class="chapter" id="ch2">
+  <div class="ch-head">
+    <div class="no">CHAPTER 02</div>
+    <h1>蒙皮、动画序列与压缩</h1>
+    <p class="lead">骨骼动了，网格怎么跟着变形；一条动画在硬盘和内存里长什么样；为什么压缩误差要在组件空间衡量。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>写出线性混合蒙皮（LBS）的公式，知道 UE 在 GPU 上做蒙皮</li>
+    <li>理解 LBS 的“糖纸扭曲”和“关节塌陷”，以及 UE 用扭转骨和修正形变来解决</li>
+    <li>说清 AnimSequence 里有什么：轨道、曲线、Notify、同步标记、Root Motion</li>
+    <li>掌握动画压缩的三板斧，以及误差为什么会沿骨骼层级累积</li>
+  </ul></div>
+
+  <h2>2.1 线性混合蒙皮（LBS）</h2>
+  <p>每个顶点记录最多 N 根影响骨骼及权重（权重和为 1）。变形后的位置是各骨骼蒙皮矩阵作用后的<strong>加权平均</strong>：</p>
+<!--code:text:Linear Blend Skinning-->
+v' = Σ_k  w_k · (SkinMatrix[b_k] · v)        // = (Σ_k w_k · SkinMatrix[b_k]) · v
+     先把几个 3×4 矩阵按权重加起来，再乘一次顶点 —— GPU 上就是这么做的
+<!--/code-->
+  <ul>
+    <li><strong>在哪算</strong>：UE 默认 GPU 蒙皮。CPU 每帧只上传骨骼矩阵（每根 3×4），顶点着色器里按顶点的骨骼下标和权重取矩阵、加权、变换。需要在 CPU 拿顶点位置（比如精确命中检测）时才用 CPU 蒙皮，开销大得多。</li>
+    <li><strong>影响骨骼数</strong>：每个顶点的最大影响骨骼数可以按 LOD 设置（常用 4，可以更多），越多越准也越贵。</li>
+    <li><strong>Section 骨骼数</strong>：一个渲染 Section 能用的骨骼矩阵数受常量缓冲大小限制（移动端的经典上限是 75），超出时导入会把 Section 拆开，多一次 Draw Call。</li>
+  </ul>
+
+  <h2>2.2 LBS 的两个经典问题</h2>
+  <p>矩阵线性平均的结果不再是刚体变换。两根骨骼夹角越大，平均出来的矩阵“缩”得越厉害：</p>
+  <figure>
+  <svg viewBox="0 0 860 210" xmlns="http://www.w3.org/2000/svg">
+    <text x="215" y="22" text-anchor="middle" class="b">LBS：前臂扭转 180°</text>
+    <text x="645" y="22" text-anchor="middle" class="b">DQS / 扭转骨：截面保持</text>
+    <path d="M40,60 H175 C200,60 205,105 215,105 C225,105 230,60 255,60 H390 V150 H255 C230,150 225,105 215,105 C205,105 200,150 175,150 H40 Z" fill="#FDEEEE" stroke="#B91C1C" stroke-width="1.6"/>
+    <g stroke="#B91C1C" stroke-width="1" fill="none" opacity=".6">
+      <path d="M80,60 Q95,105 80,150"/><path d="M130,60 Q150,105 130,150"/><path d="M300,60 Q280,105 300,150"/><path d="M350,60 Q335,105 350,150"/>
+    </g>
+    <circle cx="215" cy="105" r="4" fill="#B91C1C"/>
+    <text x="215" y="178" text-anchor="middle" class="sm">关节处顶点权重 0.5/0.5 → 半径 ×cos(θ/2)，180° 时塌成一条线</text>
+    <rect x="470" y="60" width="350" height="90" fill="#EAF7EF" stroke="#15803D" stroke-width="1.6"/>
+    <g stroke="#15803D" stroke-width="1" fill="none" opacity=".6">
+      <path d="M520,60 Q540,105 520,150"/><path d="M600,60 Q630,105 600,150"/><path d="M690,60 Q660,105 690,150"/><path d="M770,60 Q750,105 770,150"/>
+    </g>
+    <circle cx="560" cy="105" r="4" fill="#15803D"/><circle cx="645" cy="105" r="4" fill="#15803D"/><circle cx="730" cy="105" r="4" fill="#15803D"/>
+    <text x="645" y="178" text-anchor="middle" class="sm">把 180° 分摊到 lowerarm → twist_01 → hand，每段只扭 60°</text>
+    <text x="645" y="198" text-anchor="middle" class="xs">UE Mannequin 的 upperarm_twist / lowerarm_twist 就是干这个的</text>
+  </svg>
+  <figcaption><b>图 2-1</b>　“糖纸扭曲”（candy-wrapper）：LBS 在扭转时体积丢失。UE 的标准做法是加扭转骨把大角度拆小，再配合修正形变</figcaption>
+  </figure>
+  <!--bars {"title":"关节处截面平均半径（原半径 1.0，权重 0.5/0.5）——实测 E3","labw":190,"max":1.0,"items":[
+    ["扭转 45°  LBS",0.924,"o"],["扭转 90°  LBS",0.707,"o"],["扭转 135° LBS",0.383,"r"],["扭转 170° LBS",0.087,"r"],["扭转 180° LBS",0.0,"r","0.000（塌成一条线）"],
+    ["弯曲 90°  LBS（平均）",0.860,"a","0.860"],["弯曲 135° LBS（平均）",0.726,"a"],["任意角度 DQS",1.0,"g","1.000"]],
+    "cap":"<b>图 2-2</b>　实测 E3：LBS 扭转时半径严格等于 cos(θ/2)；弯曲时关节内侧被“压扁”（弯曲 90° 最小半径 0.707）；双四元数蒙皮（DQS）始终保持 1.0"} -->
+  <div class="tbl"><table>
+    <tr><th>方案</th><th>原理</th><th>代价（E3：3 万顶点 × 4 影响，CPU）</th><th>UE 里的地位</th></tr>
+    <tr><td><strong>LBS</strong></td><td>矩阵加权平均</td><td>0.196 ms</td><td>默认，GPU 蒙皮</td></tr>
+    <tr><td>DQS</td><td>对偶四元数加权平均再归一化，结果仍是刚体变换</td><td>0.848 ms（4.33x）</td><td>引擎没有内置；有“鼓包”问题，不支持缩放</td></tr>
+    <tr><td><strong>扭转骨</strong></td><td>大扭转分摊到多根骨骼</td><td>多几根骨骼</td><td>Mannequin 标配，由动画或 Twist Corrective 节点驱动</td></tr>
+    <tr><td><strong>修正形变</strong></td><td>按关节角度驱动 Morph Target 或辅助骨骼</td><td>Morph 的 GPU 开销</td><td>Pose Driver（RBF）/ 曲线驱动 Morph</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：别只说“DQS 解决了糖纸问题”</span>
+    <p>DQS 确实保体积，但它在弯曲时会让关节外侧<strong>鼓起来</strong>，也处理不了缩放，而且比 LBS 贵（E3：4.33x）。工业界主流仍是 LBS + 扭转骨 + 修正形变（Morph Target / 辅助骨骼）。能说出“为什么 Mannequin 有 twist 骨”，比背 DQS 公式更像做过项目。</p>
+  </div>
+
+  <h2>2.3 动画序列里有什么</h2>
+  <div class="tbl"><table>
+    <tr><th>内容</th><th>说明</th></tr>
+    <tr><td>骨骼轨道</td><td>每根有动画的骨骼一条：旋转、平移、缩放各一组 key。没动的轨道在压缩时只留一个值或直接省略（与参考姿势相同）</td></tr>
+    <tr><td>曲线（Curves）</td><td>随时间变化的浮点值：驱动 Morph Target、材质参数，或给逻辑用（例如“脚离地距离”供距离匹配）。曲线名登记在 Skeleton 上</td></tr>
+    <tr><td>Notify / Notify State</td><td>时间轴上的事件：脚步声、特效、开关武器碰撞。State 有 Begin / Tick / End</td></tr>
+    <tr><td>同步标记（Sync Markers）</td><td>例如 L / R 表示左右脚落地，供同步组对齐（第 4 章）</td></tr>
+    <tr><td>Root Motion</td><td>是否把 root 骨骼的位移提取出来交给角色移动（第 7 章）</td></tr>
+    <tr><td>加性设置</td><td>Additive 类型（局部 / 网格空间）和基准姿势（第 3 章）</td></tr>
+    <tr><td>压缩设置</td><td>骨骼压缩编解码器和曲线压缩设置</td></tr>
+  </table></div>
+  <p>运行时“采样一条序列”就是：根据当前时间找到前后两个 key，旋转 nlerp、平移 / 缩放 lerp；没有轨道的骨骼直接用参考姿势。<code>UAnimSequence::GetAnimationPose</code> 最终调用解压代码完成这件事。</p>
+  <div class="co tip"><span class="h">Notify 是怎么触发的</span>
+    <p>普通 Notify 是<strong>排队触发</strong>的：求值时只是把本帧扫过的 Notify 收集起来，等回到游戏线程（第 6 章的 Complete 阶段）再统一派发，所以可能比动画画面晚一帧左右。混合中的多条动画都会产生 Notify，可以设 <strong>Trigger Weight Threshold</strong> 过滤掉权重很低的，或在混合空间里设 Notify Trigger Mode 为“只触发最高权重的动画”。蒙太奇里的 Notify 可以设为 <strong>Branching Point</strong>，在推进时间时同步、精确地触发，适合连招衔接等对时机敏感的逻辑，但更贵。</p>
+  </div>
+
+  <h2>2.4 动画压缩：为什么要压、怎么压</h2>
+  <p>不压缩的话，一条 4 秒、30 fps、68 根骨骼的动画，每帧每骨存 16 B 旋转 + 12 B 平移 + 12 B 缩放，就是 329,120 B。一个角色几百条动画，几十个角色，内存很快就爆了。压缩的三板斧：</p>
+  <ol>
+    <li><strong>去掉常量轨道</strong>：大量骨骼的平移就是骨长，缩放全是 1，手指在跑步动画里也不动，这些只存一个值。</li>
+    <li><strong>量化</strong>：单位四元数满足 x²+y²+z²+w²=1，保证 w ≥ 0 后可以只存 xyz，每个分量 16 位甚至更少；平移按每条轨道的取值范围归一化后量化。</li>
+    <li><strong>关键帧精简</strong>：能被前后两个 key 插值出来、误差在阈值内的中间帧删掉，代价是要存“这个 key 是哪一帧”。ACL 的做法不同：保持均匀采样，按误差给每条轨道选择不同的位宽（可变位率）。</li>
+  </ol>
+  <!--bars {"title":"实测 E9：同一条动画在各阶段的大小（字节）","labw":230,"unit":"B","items":[
+    ["0 原始",329120,"s","329,120 B"],["1 去常量轨道",97760,"b","97,760 B（3.37x）"],["2 量化（旋转 48 位）",38276,"g","38,276 B（8.60x）"],
+    ["3 精简 阈值 0.05°",41431,"a","41,431 B（7.94x，反而变大）"],["3 精简 阈值 0.20°",35719,"o","35,719 B（9.21x）"],["3 精简 阈值 0.50°",26892,"r","26,892 B（12.24x）"]],
+    "cap":"<b>图 2-3</b>　E9：68 骨骼 × 121 帧，48 根骨骼有旋转动画。阈值太小时几乎删不掉帧，多存的“帧号”反而让体积变大"} -->
+  <h3>误差会沿骨骼层级累积</h3>
+  <p>压缩器如果只在<strong>局部空间</strong>控制误差（“每根骨骼旋转误差 ≤ 0.2°”），到了组件空间误差会叠加：手指的组件空间朝向 = 骨盆、三节脊柱、锁骨、上臂、前臂、手、三节手指的局部旋转一路乘下来，每一节的误差都会传下去。</p>
+  <div class="tbl"><table>
+    <tr><th>精简阈值（局部）</th><th>局部旋转最大误差</th><th>组件空间旋转最大误差</th><th>组件空间位置最大误差</th></tr>
+    <tr><td>0.05°</td><td>0.079°</td><td>0.148°</td><td>0.032 cm</td></tr>
+    <tr><td>0.20°</td><td>0.202°</td><td><strong>0.444°（2.2 倍）</strong></td><td>0.264 cm</td></tr>
+    <tr><td>0.50°</td><td>0.499°</td><td><strong>1.638°（3.3 倍）</strong></td><td>0.699 cm</td></tr>
+  </table></div>
+  <p class="xs">（0.05° 阈值时局部误差 0.079° 超过阈值，是因为精简在量化之后进行，两步的误差叠加了。）</p>
+  <div class="co deep"><span class="h">深入：ACL 怎么衡量误差——虚拟顶点</span>
+    <p>ACL（Animation Compression Library，UE 5.3 起是默认的骨骼压缩编解码器）不看局部角度，而是在每根骨骼周围放一圈<strong>虚拟顶点</strong>（距离骨骼若干厘米的点，模拟蒙皮网格），把它们按完整层级变换到<strong>组件空间</strong>，比较压缩前后的位移。这样误差直接对应“屏幕上网格会偏多少厘米”，并且自动考虑了层级累积：越靠近根的骨骼影响的子孙越多，就会被分配更高的精度。挂长武器的骨骼可以用更大的虚拟顶点距离，防止枪口抖动。</p>
+  </div>
+  <div class="co warn"><span class="h">面试注意：压缩相关的高频追问</span>
+    <ul>
+      <li><strong>“为什么手指 / 武器在压缩后抖？”</strong> 误差在层级末端被放大（手指在 11 层深处），或者长武器把小角度误差放大成大位移。对策：调整这些骨骼的误差设置 / 虚拟顶点距离，或单独给这类动画更严格的压缩设置。</li>
+      <li><strong>“压缩的代价只在内存吗？”</strong> 还有<strong>解压 CPU</strong>：每个角色每帧每条参与混合的动画都要解压一次。混合空间里 3 个采样、再叠一个状态机过渡，就是 4~6 次解压。这也是惯性化能省开销的原因（第 7 章）。</li>
+      <li><strong>“Root 骨骼的误差为什么特别要紧？”</strong> 它影响所有骨骼，而且 Root Motion 的位移直接驱动角色移动，误差会累积到位置上。</li>
+    </ul>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>LBS：骨骼矩阵按权重相加再乘顶点，<strong>GPU 蒙皮</strong>；每顶点影响数、每 Section 骨骼数都有上限。</li>
+    <li>LBS 扭转时半径 = <strong>cos(θ/2)</strong>（E3：180° 塌成 0）；UE 用<strong>扭转骨 + 修正形变</strong>解决，DQS 引擎没内置。</li>
+    <li>AnimSequence = 骨骼轨道 + 曲线 + Notify + 同步标记 + Root Motion + 加性 / 压缩设置；普通 Notify 排队到游戏线程派发。</li>
+    <li>压缩三板斧：去常量轨（3.37x）→ 量化（8.60x）→ 关键帧精简 / 可变位率；<strong>误差沿层级累积</strong>（局部 0.5° → 组件 1.64°），ACL 用组件空间的虚拟顶点衡量。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：为什么量化四元数时可以丢掉 w？丢掉之后符号怎么办？</summary><p>单位四元数满足 x²+y²+z²+w²=1，知道 xyz 就能算出 |w|。而 q 和 −q 表示同一个旋转，所以压缩前把 w &lt; 0 的四元数整体取反，保证 w ≥ 0，解压时取 w = +√(1−x²−y²−z²)。要注意 w 接近 0 时，xyz 的量化误差会被这个开方放大，所以更精细的方案会丢掉绝对值最大的分量（smallest three）。</p></details>
+  <details class="quiz"><summary>自测：角色在 30 fps 的动画数据下，游戏跑 120 fps，画面会“一卡一卡”吗？</summary><p>不会。采样时按当前时间在前后两个 key 之间插值（旋转 nlerp、平移 lerp），每帧都得到新姿势。只有关闭插值、或用“Step”方式采样时才会出现定格感。真正会卡的是 URO 降频后又没开跳帧插值（第 9 章）。</p></details>
+</section>

@@ -1,0 +1,158 @@
+<section class="chapter" id="ch7">
+<div class="ch-head"><div class="no">CHAPTER 07</div><h1>探索与利用：从多臂老虎机到内在动机</h1><p class="lead">监督学习的数据是给定的，RL 的数据是自己挑的：今天选了哪个动作，决定了明天能学到什么。这就是探索与利用的两难。多臂老虎机去掉了“状态”，只剩下这个两难本身，所以理论最干净：遗憾、Hoeffding、UCB、Thompson 采样都在这里推得出来。再往后，深度 RL 用熵正则、噪声网络、计数奖励和“好奇心”把同样的思想扩展到巨大的状态空间。</p></div>
+
+<div class="goals"><div class="t">本章目标</div><ul>
+<li>写出累积遗憾的定义与分解 $\mathcal R_T=\sum_a\Delta_a\E[N_a(T)]$，理解“对数遗憾”是什么水平。</li>
+<li>从 Hoeffding 不等式推出 UCB1 的置信半径，说清公式里每一项的含义；理解 Thompson 采样的“概率匹配”。</li>
+<li>推出梯度老虎机的更新就是期望奖励的随机梯度上升（策略梯度的最简形式），理解基线为什么有用。</li>
+<li>在 10 臂测试平台、伯努利老虎机和链式 MDP 上实测各种探索方法，说清“局部探索”和“深度探索”的区别。</li>
+</ul></div>
+
+<div class="co net"><span class="h">30 秒面试版答案</span><p>探索是为了获得信息，利用是为了拿当前最好的奖励，衡量平衡得好不好的指标是累积遗憾：和“一直选最优臂”相比少拿的奖励，等于各个次优臂被拉的次数乘以它的差距之和。ε-greedy 以固定概率随机探索，遗憾线性增长；UCB 选“估计值 + 置信半径” $\hat\mu_a+\sqrt{2\ln t/N_a}$ 最大的臂——对不确定的臂保持乐观，拉得少的臂半径大会被尝试，拉多了半径收缩，只有真的好才会继续被选，遗憾按 $\ln T$ 增长，置信半径来自 Hoeffding 不等式。Thompson 采样从每个臂的后验里采一个样本、选最大的，等价于按“它是最优臂的后验概率”去选，实践中通常最好。梯度老虎机学一组偏好并用 softmax 选臂，更新 $H_k\mathrel{+}=\alpha(R-\bar R)(\mathbb 1[k=a]-\pi_k)$ 正好是期望奖励的随机梯度，是策略梯度的雏形。深度 RL 里，PPO 用熵正则保持随机性，DQN 用 ε-greedy 或噪声网络，稀疏奖励的游戏用计数奖励、RND、好奇心这类内在奖励做“深度探索”；要注意好奇心会被不可预测的噪声（“噪声电视”）吸引。</p></div>
+
+<h2>7.1 多臂老虎机与累积遗憾</h2>
+<p>K 个臂，每个臂 a 有未知的奖励分布、均值 $\mu_a$（Sutton 记为 $q_*(a)$）。每一步选一个臂、拿到一个随机奖励。最优臂 $a^*$ 的均值记为 $\mu^*$，次优臂的差距 $\Delta_a=\mu^*-\mu_a$。评价策略的标准是 T 步内的<strong>累积遗憾</strong>：</p>
+<!--deriv 遗憾分解：遗憾 = 每个次优臂的差距 × 它被拉的次数
+\mathcal R_T & \doteq T\mu^*-\E\Big[\sum_{t=1}^TR_t\Big]=\E\Big[\sum_{t=1}^T\big(\mu^*-\mu_{A_t}\big)\Big] || 与“每一步都选最优臂”相比少拿的期望奖励；第二步对 $R_t$ 在给定 $A_t$ 下取条件期望
+& = \E\Big[\sum_{t=1}^T\sum_a\mathbb 1[A_t=a]\,\Delta_a\Big] || 把 $\mu^*-\mu_{A_t}$ 写成对所有臂的求和
+* \mathcal R_T & = \sum_a\Delta_a\,\E\big[N_a(T)\big] || 交换求和次序；$N_a(T)$ 是 T 步内拉臂 a 的次数。所以“降遗憾”就是“少拉次优臂，尤其是差距大的”
+-->
+<p>两个基准：<strong>永不探索</strong>（贪心）可能一开始就锁死在次优臂上，遗憾线性增长；<strong>固定比例探索</strong>（ε-greedy）每步都有 ε 的概率拉次优臂，遗憾同样线性增长 $\approx\epsilon T\bar\Delta$。Lai &amp; Robbins（1985）证明了任何“合理”的算法都至少要付出对数遗憾：</p>
+$$\liminf_{T\to\infty}\frac{\E[N_a(T)]}{\ln T}\ \ge\ \frac{1}{\KL(\mu_a\,\Vert\,\mu^*)}\qquad\Rightarrow\qquad\mathcal R_T\ \gtrsim\ \Big(\sum_{a:\Delta_a>0}\frac{\Delta_a}{\KL(\mu_a\Vert\mu^*)}\Big)\ln T$$
+<p>直观：差距越小的臂越难区分，必须拉得越多；但只需要对数次。UCB 和 Thompson 采样都能达到对数量级。</p>
+
+<h2>7.2 ε-greedy 与乐观初值：10 臂测试平台</h2>
+<p>Sutton 第 2 章的 10 臂测试平台：每个问题的 $q_*(a)\sim\mathcal N(0,1)$，每次奖励 $\sim\mathcal N(q_*(a),1)$；每种方法跑 [[ch07.e1.RUNS]] 个随机问题、每个 [[ch07.e1.T]] 步，取平均（<code>demos/ch07_bandit.cpp</code> E1）。估计值用增量均值（第 5 章）：$Q_{n+1}=Q_n+\frac1n(R_n-Q_n)$。</p>
+<!--plot {"x":[0,1000],"y":[0,2.5],"yt":[0,0.5,1,1.5],"h":300,"xlabel":"步数","ylabel":"平均奖励（2000 个问题平均，每 10 步）","legend":"tr",
+"series":[{"path":"ch07.e1.runs.0.rew","n":"贪心（ε = 0）","c":"s"},{"path":"ch07.e1.runs.1.rew","n":"ε = 0.01","c":"a"},{"path":"ch07.e1.runs.2.rew","n":"ε = 0.1","c":"b"},{"path":"ch07.e1.runs.3.rew","n":"乐观初值 Q₀ = 5（贪心）","c":"g"},{"path":"ch07.e1.runs.4.rew","n":"UCB（c = 2）","c":"p"},{"path":"ch07.e1.runs.5.rew","n":"Thompson 采样","c":"r","sw":2.4}],
+"cap":"<b>图 7-1</b>　10 臂测试平台上的平均奖励（C++ 实测）。纯贪心最后只有 [[ch07.e1.runs.0.last_r|.2f]]；Thompson 采样最好（最后 100 步 [[ch07.e1.runs.5.last_r|.2f]]）。"} -->
+<!--plot {"x":[0,1000],"y":[0,165],"yt":[0,20,40,60,80,100],"h":290,"xlabel":"步数","ylabel":"选到最优臂的比例（%）","legend":"tr",
+"series":[{"path":"ch07.e1.runs.0.opt","n":"贪心","c":"s"},{"path":"ch07.e1.runs.1.opt","n":"ε = 0.01","c":"a"},{"path":"ch07.e1.runs.2.opt","n":"ε = 0.1","c":"b"},{"path":"ch07.e1.runs.3.opt","n":"乐观初值","c":"g"},{"path":"ch07.e1.runs.4.opt","n":"UCB","c":"p"},{"path":"ch07.e1.runs.5.opt","n":"Thompson","c":"r","sw":2.4}],
+"cap":"<b>图 7-2</b>　最优动作比例。最后 100 步：贪心 [[ch07.e1.runs.0.last_o|.0f]]%、ε = 0.01 为 [[ch07.e1.runs.1.last_o|.0f]]%、ε = 0.1 为 [[ch07.e1.runs.2.last_o|.0f]]%、乐观初值 [[ch07.e1.runs.3.last_o|.0f]]%、UCB [[ch07.e1.runs.4.last_o|.0f]]%、Thompson [[ch07.e1.runs.5.last_o|.0f]]%。"} -->
+<p>几个值得注意的现象：</p>
+<ol>
+<li><strong>ε 的取舍</strong>：ε = 0.1 早期学得快，但最终最多只能有约 91% 的时间选最优臂（另外 9% 被随机探索占掉）；ε = 0.01 早期慢，但长期会超过 ε = 0.1。这正是“衰减 ε”的动机。</li>
+<li><strong>乐观初值</strong>：把所有 $Q_0$ 设成 5（远高于任何真实值），贪心策略每拉一个臂就“失望”，于是转去试别的臂，前期自动做了系统性探索。第 11 步的最优比例高达 [[ch07.e1.runs.3.opt11|.0f]]%（10 个臂各试一次后，第 11 步选当前估计最高的那个）。缺点：只在开始时探索，对非平稳问题无效；依赖对奖励尺度的了解。</li>
+<li><strong>UCB 也有第 11 步的尖峰</strong>（[[ch07.e1.runs.4.opt11|.0f]]%），原因相同：先把每个臂拉一遍，之后探索项随访问次数快速缩小。</li>
+</ol>
+
+<h2>7.3 UCB：从 Hoeffding 不等式到置信上界</h2>
+<p>ε-greedy 的探索是“盲目”的：随机选臂时不区分“几乎确定很差的臂”和“还没怎么试过的臂”。更好的思路是<strong>面对不确定性保持乐观</strong>：给每个臂一个置信上界，按上界选。上界怎么定，要靠集中不等式：</p>
+<!--deriv 由 Hoeffding 不等式推出 UCB1
+\Pr\big(\bar X_n-\mu\ge\epsilon\big) & \le e^{-2n\epsilon^2} || Hoeffding：n 个取值在 [0, 1] 的独立样本，均值比真值高 ε 以上的概率指数小；反方向同理
+\Pr\Big(\mu\ge\hat\mu_a+\epsilon\Big) & \le e^{-2N_a\epsilon^2}\doteq\delta || 反过来看：真值超出“估计 + ε”的概率不超过 δ
+\epsilon & = \sqrt{\frac{\ln(1/\delta)}{2N_a}} || 对 ε 反解
+\delta=t^{-4}\ \Rightarrow & \ \epsilon=\sqrt{\frac{2\ln t}{N_a}} || 让失败概率随时间快速下降（Auer et al., 2002 的取法）
+* A_t & = \argmax_a\Big[\hat\mu_a+\sqrt{\frac{2\ln t}{N_a}}\Big] || UCB1：第一项是利用，第二项是探索奖励——拉得越少（$N_a$ 小）越大；时间越长（$\ln t$）每个臂都会被重新审视，但增长很慢
+-->
+<!--plot {"x":[1,100],"y":[0,1],"h":250,"xlabel":"样本数 n（Bernoulli(0.5)）","ylabel":"P(样本均值 − 0.5 ≥ 0.1)","legend":"tr",
+"series":[{"path":"ch07.e4.bound","n":"Hoeffding 上界 exp(−2nε²)","c":"r","dots":true},{"path":"ch07.e4.emp","n":"经验概率（20 万次重复）","c":"b","dots":true}],
+"cap":"<b>图 7-3</b>　Hoeffding 不等式的经验检验（C++ 实测，E4）。n = 50 时经验概率 [[ch07.e4.e50|.4f]]、上界 [[ch07.e4.b50|.4f]]：上界总是成立但比较松，这也是 UCB1 偏保守的原因。"} -->
+<!--plot {"x":[1,100],"y":[0,2.2],"h":230,"xlabel":"该臂已被拉的次数 N_a","ylabel":"置信半径 √(2 ln t / N_a)","legend":"tr",
+"series":[{"f":"math.sqrt(2*math.log(100)/x)","n":"t = 100","c":"b"},{"f":"math.sqrt(2*math.log(1000)/x)","n":"t = 1000","c":"g"},{"f":"math.sqrt(2*math.log(10000)/x)","n":"t = 10000","c":"r"}],
+"cap":"<b>图 7-4</b>　UCB 置信半径随拉动次数收缩（构建时按公式计算）。半径按 $1/\\sqrt{N_a}$ 收缩、按 $\\sqrt{\\ln t}$ 缓慢增长：长期不被拉的臂，上界会慢慢涨回来，保证不会被永久放弃。"} -->
+<p>UCB1 的遗憾上界是 $\mathcal R_T\le\sum_{a:\Delta_a>0}\frac{8\ln T}{\Delta_a}+O(1)$：对数增长，但常数比 Lai-Robbins 下界大。UCB 的思想在第 17 章 MCTS 的 UCT / PUCT 中原样出现：每个节点就是一个老虎机，子节点就是臂。</p>
+
+<h2>7.4 Thompson 采样：按“是最优的概率”去选</h2>
+<p>贝叶斯的做法：为每个臂维护均值的后验分布，每一步<strong>从每个后验采一个样本，选样本最大的臂</strong>，观察奖励后更新后验。伯努利奖励用 Beta 先验最方便：成功 s 次、失败 f 次后后验是 $\text{Beta}(1+s,1+f)$。它的性质叫<strong>概率匹配</strong>：</p>
+$$\Pr(A_t=a\mid\text{历史})=\Pr\big(a\text{ 是最优臂}\ \big|\ \text{历史}\big)$$
+<p>不确定的臂后验宽，偶尔会采到很大的样本而被选中（探索）；确定很差的臂几乎不会再被选；确定很好的臂大部分时间被选（利用）。不需要调探索参数，也很容易推广到上下文老虎机（推荐、广告、游戏内的个性化选择）。</p>
+
+<h2>7.5 梯度老虎机：最简单的策略梯度</h2>
+<p>前面的方法都在学“每个臂的价值”。另一种思路是直接学一个随机策略：每个臂一个偏好 $H_t(a)$，按 softmax 选臂 $\pi_t(a)=e^{H_t(a)}/\sum_be^{H_t(b)}$，偏好按下式更新：</p>
+<!--deriv 梯度老虎机的更新 = 期望奖励的随机梯度上升
+\frac{\partial\,\E[R_t]}{\partial H_t(k)} & = \sum_aq_*(a)\frac{\partial\pi_t(a)}{\partial H_t(k)} || $\E[R_t]=\sum_a\pi_t(a)q_*(a)$
+& = \sum_a\big(q_*(a)-B_t\big)\frac{\partial\pi_t(a)}{\partial H_t(k)} || 减去任意不依赖动作的基线 $B_t$：因为 $\sum_a\pi_t(a)=1$，$\sum_a\partial\pi_t(a)/\partial H_t(k)=0$
+& = \sum_a\pi_t(a)\big(q_*(a)-B_t\big)\big(\mathbb 1[a=k]-\pi_t(k)\big) || softmax 的导数 $\partial\pi(a)/\partial H(k)=\pi(a)(\mathbb 1[a=k]-\pi(k))$
+& = \E_{A_t\sim\pi_t}\Big[\big(q_*(A_t)-B_t\big)\big(\mathbb 1[A_t=k]-\pi_t(k)\big)\Big]=\E\Big[\big(R_t-B_t\big)\big(\mathbb 1[A_t=k]-\pi_t(k)\big)\Big] || 写成对 $A_t$ 的期望，再用 $\E[R_t\mid A_t]=q_*(A_t)$
+* H_{t+1}(k) & = H_t(k)+\alpha\big(R_t-\bar R_t\big)\big(\mathbb 1[A_t=k]-\pi_t(k)\big) || 用一个样本代替期望，基线取平均奖励 $\bar R_t$：这就是第 9 章的 REINFORCE（单步、无状态版），$\mathbb 1[A_t=k]-\pi_t(k)$ 正是 $\partial\log\pi/\partial H$
+-->
+<p>基线不改变期望梯度，但影响方差。把所有 $q_*$ 整体加 4（奖励全为正）后对比（E1）：有基线时最后 100 步选到最优臂的比例为 [[ch07.e1.runs.6.last_o|.0f]]%，没有基线只有 [[ch07.e1.runs.7.last_o|.0f]]%——奖励全为正时，没有基线的版本每拉一个臂都会提高它的偏好，只是幅度不同，学得慢且不稳（第 9 章表 9-1 是同一个现象）。</p>
+
+<h2>7.6 实测：参数研究与累积遗憾</h2>
+<p>每种方法都有一个超参数，扫一遍看前 1000 步的平均奖励（Sutton 图 2.6 的复现，每个点 2000 个问题，E2）：</p>
+<!--plot {"x":[0.0078,4],"logx":true,"y":[0.75,1.6],"h":280,"xlabel":"参数（ε / α / c / Q₀，对数刻度）","ylabel":"前 1000 步平均奖励","legend":"bl",
+"series":[{"path":"ch07.e2.runs.0.pts","n":"ε-greedy（ε）","c":"r","dots":true},{"path":"ch07.e2.runs.1.pts","n":"梯度老虎机（α）","c":"g","dots":true},{"path":"ch07.e2.runs.2.pts","n":"UCB（c）","c":"b","dots":true},{"path":"ch07.e2.runs.3.pts","n":"乐观初值贪心（Q₀，α = 0.1）","c":"k","dots":true}],
+"cap":"<b>图 7-5</b>　参数研究（C++ 实测）。每条曲线都是倒 U 形，最佳点：ε-greedy 在 ε = [[ch07.e2.runs.0.best_p|.4g]]（[[ch07.e2.runs.0.best|.3f]]），梯度老虎机在 α = [[ch07.e2.runs.1.best_p|.3g]]（[[ch07.e2.runs.1.best|.3f]]），UCB 在 c = [[ch07.e2.runs.2.best_p|.3g]]（[[ch07.e2.runs.2.best|.3f]]），乐观初值在 Q₀ = [[ch07.e2.runs.3.best_p|.3g]]（[[ch07.e2.runs.3.best|.3f]]）。UCB 最好而且对参数不太敏感。"} -->
+<p>再用 5 臂伯努利老虎机（$\mu=0.7,0.6,0.5,0.4,0.3$，T = [[ch07.e3.T]]，[[ch07.e3.RUNS]] 次运行）直接看累积遗憾的增长速度（E3）：</p>
+<!--plot {"x":[10,20000],"logx":true,"y":[0,460],"h":290,"xlabel":"步数 t（对数刻度）","ylabel":"累积遗憾","legend":"tl",
+"series":[{"path":"ch07.e3.runs.0.pts","n":"固定 ε = 0.1","c":"r","sw":2.4},{"path":"ch07.e3.runs.1.pts","n":"衰减 ε_t = min(1, 5K/t)","c":"a","sw":2.4},{"path":"ch07.e3.runs.2.pts","n":"UCB1","c":"b","sw":2.4},{"path":"ch07.e3.runs.3.pts","n":"Thompson 采样","c":"g","sw":2.4},{"path":"ch07.e3.lb","n":"Lai-Robbins 渐近斜率 Σ Δ/KL · ln t","c":"s","dash":true}],
+"cap":"<b>图 7-6</b>　累积遗憾（C++ 实测，横轴对数刻度：严格的对数遗憾在图上是直线）。固定 ε 向上弯得最厉害（线性遗憾）；UCB1 和衰减 ε 在这个时间范围内也还在向上弯，尚未进入渐近的直线段；Thompson 采样几乎是一条低斜率的直线。"} -->
+<!--dtab {"rows":"ch07d.slopes","cols":[["方法","name"],["t = 1000 的遗憾","r1000",".1f"],["t = 20000 的遗憾","end",".1f"],["斜率 ΔR/Δln t（t ≈ 200 → 2000）","slope0",".1f"],["斜率（t ≈ 2000 → 20000）","slope",".1f"],["次优臂共被拉的次数","pulls",".0f"]],
+"cap":"<b>表 7-1</b>　累积遗憾汇总（构建时由 C++ 输出计算）。Lai-Robbins 常数 $\\sum\\Delta_a/\\KL(\\mu_a\\Vert\\mu^*)$ = [[ch07.e3.lr|.2f]]。"} -->
+<p>读法：对数遗憾意味着两段的斜率应该相同。固定 ε 的斜率从 [[ch07d.slopes.0.slope0|.0f]] 涨到 [[ch07d.slopes.0.slope|.0f]]（线性遗憾）；UCB1 早期遗憾最高——它会把每个臂都系统地试足，而且 Hoeffding 界很松（图 7-3），斜率从 [[ch07d.slopes.2.slope0|.0f]] 涨到 [[ch07d.slopes.2.slope|.0f]]，说明 T = 20000 还在过渡阶段（UCB1 的界 $\sum8\ln T/\Delta_a$ 常数很大）；衰减 ε 的最终遗憾比 UCB1 低，但 $\epsilon_t=c/t$ 中的 c 要知道差距的量级才能调好，调错了会变成线性遗憾；Thompson 采样两段斜率几乎相同（[[ch07d.slopes.3.slope0|.1f]] 和 [[ch07d.slopes.3.slope|.1f]]），遗憾最低。Thompson 在这一段的局部斜率（[[ch07d.slopes.3.slope|.1f]]）甚至低于 Lai-Robbins 常数 [[ch07.e3.lr|.2f]]：下界是 $T\to\infty$ 时的渐近结论，有限 T 下的局部斜率可以更低，并不矛盾。</p>
+<h2>7.7 有状态时的探索：局部探索 vs 深度探索</h2>
+<p>老虎机只有一个状态，探索的价值立刻就能兑现。MDP 里不同：要到达远处的奖励，需要<strong>连续若干步</strong>朝同一个方向“冒险”。ε-greedy 每一步独立地随机，连续 N 步都走对的概率随 N 指数下降——这叫缺乏<strong>深度探索</strong>。用一个最简单的链来实测：状态 0…N−1，从 0 出发，动作左 / 右，只有走到最右端才有奖励 +1，每回合最多 N + 9 步，Q-learning（γ = 0.99），每个 N 跑 20 个种子，统计首次到达终点所需的回合数（中位数，上限 [[ch07.e5.CAP]] 回合，E5）：</p>
+<!--plot {"x":[0,52],"y":[1,6000],"logy":true,"xt":[4,8,12,16,20,25,30,40,50],"h":300,"xlabel":"链长 N","ylabel":"首次到达终点的回合数（中位数，对数刻度）","legend":"br","hlines":[[5001,"上限 5000 回合（没找到）","s"]],
+"series":[{"path":"ch07.e5.runs.0.pts","n":"ε-greedy（ε = 0.1）","c":"r","dots":true,"sw":2.4},{"path":"ch07.e5.runs.1.pts","n":"UCB 式动作选择（本地计数）","c":"a","dots":true},{"path":"ch07.e5.runs.2.pts","n":"计数奖励 β/√N(s,a)（经 TD 传播）","c":"b","dots":true,"sw":2.4},{"path":"ch07.e5.runs.3.pts","n":"乐观初值 Q₀ = 1（贪心）","c":"g","dots":true,"sw":2.4}],
+"cap":"<b>图 7-7</b>　链式 MDP 上的深度探索（C++ 实测）。ε-greedy 在 N = 20 时要 [[ch07.e5.runs.0.med.4|.0f]] 回合，N ≥ 25 基本找不到；只按本地计数选动作的 UCB 式方法稍好，但同样在 N = 25 失效；把计数奖励当作内在奖励、让它通过 TD 传播出去，N = 50 也能找到（中位数 [[ch07.e5.runs.2.med.8|.0f]] 回合）；乐观初值最快（N = 50 时 [[ch07.e5.runs.3.med.8|.0f]] 回合）。"} -->
+<p>这张图说明了深度探索的关键：<strong>“不确定性”必须能传播</strong>。只看本地计数的方法在每个状态独立地平衡左右，整体仍是一个随机游走；而乐观初值和传播出去的计数奖励，会让“远处还没去过的地方”的价值通过自举一路传回起点，于是 agent 会<strong>有方向地</strong>连续往外走。深度 RL 里的对应方法：</p>
+<div class="tbl"><table>
+<tr><th>方法</th><th>做法</th><th>特点</th><th>在哪用</th></tr>
+<tr><td>ε-greedy / 动作噪声</td><td>随机动作；DDPG 加高斯 / OU 噪声</td><td>简单，只有局部探索</td><td>DQN、DDPG（第 8、12 章）</td></tr>
+<tr><td>熵正则</td><td>损失里加 $-c\,\mathcal H(\pi)$</td><td>防止策略过早确定化；不提供方向</td><td>PPO / A2C（第 10、11 章），SAC 把熵写进目标（第 12 章）</td></tr>
+<tr><td>噪声网络（Noisy Net）</td><td>权重 $\mu+\sigma\odot\varepsilon$，σ 可学习，每回合采一次噪声</td><td>噪声在整个回合内一致，比逐步 ε 更“深”</td><td>Rainbow（第 8 章）</td></tr>
+<tr><td>计数 / 伪计数奖励</td><td>$r^+=\beta/\sqrt{N(s)}$；大状态空间用密度模型或哈希近似 N(s)</td><td>直接对应 UCB 的乐观思想</td><td>Montezuma 等稀疏奖励游戏</td></tr>
+<tr><td>RND（随机网络蒸馏）</td><td>固定一个随机网络 $f$，训练 $\hat f$ 去拟合它；预测误差 $\lVert\hat f(s)-f(s)\rVert^2$ 作为内在奖励</td><td>没见过的状态误差大；对环境随机性不敏感（目标是确定性的）</td><td>Burda et al. 2019，Montezuma 上的突破</td></tr>
+<tr><td>ICM（好奇心）</td><td>在学到的特征空间里预测下一状态，预测误差作为奖励；特征由“逆模型”（从 s、s′ 预测动作）训练，只保留与动作相关的信息</td><td>会被不可控的随机性吸引（噪声电视）</td><td>Pathak et al. 2017</td></tr>
+<tr><td>Go-Explore</td><td>记录到过的“有前景”的状态，先回到那里（需要可重置的模拟器），再从那里探索</td><td>把“回到前沿”和“从前沿探索”分开，解决“忘了怎么回去”的问题</td><td>Ecoffet et al. 2021，Montezuma / Pitfall</td></tr>
+</table></div>
+<p class="tcap"><b>表 7-2</b>　深度 RL 中的探索方法。</p>
+<div class="co warn"><span class="h">面试注意：噪声电视问题</span><p>基于“预测误差”的好奇心有个经典失效模式：如果环境里有一台不停播放随机画面的电视，下一帧永远预测不准，智能体会一直盯着电视看。游戏里的对应：随机掉落、粒子特效、其他玩家的随机行为、天气系统。缓解办法：RND 预测的是一个确定性函数的输出，不受转移随机性影响；ICM 用逆模型训练的特征过滤掉与动作无关的部分；或者干脆只对“状态是否新”计数（伪计数），不去预测未来。</p></div>
+
+<h2>7.8 游戏里的探索问题</h2>
+<ul>
+<li><strong>地图探索 / 稀疏奖励关卡</strong>：解谜、开放世界寻宝、迷宫类关卡，只有终点有奖励，必须用内在奖励或课程（第 16 章）；可重置的游戏环境让 Go-Explore 式的“回到前沿”成为可能（训练环境可以存档 / 读档）。</li>
+<li><strong>对抗游戏的策略多样性</strong>：自博弈容易收敛到少数打法（第 15 章），熵正则、种群训练、给 exploiter 单独的奖励都是“策略空间里的探索”。</li>
+<li><strong>熵系数怎么调</strong>：PPO 常用 0.01 左右；动作空间越大，初始熵越大，固定系数的相对作用越小，可按动作数归一化；观察熵曲线——掉得太快就加大，一直不降就减小或检查奖励是否有信号（第 11 章表 11-6）。也可以像 SAC 那样设定目标熵自动调节。</li>
+<li><strong>老虎机直接用在游戏运营与设计里</strong>：关卡难度、匹配参数、商城推荐、新手引导方案的在线选择都是（上下文）老虎机问题；Thompson 采样比 A/B 实验更快把流量倾斜到好的方案上，代价是统计推断不如固定分流干净。</li>
+<li><strong>第 17 章的 MCTS</strong>：每个树节点都在解一个老虎机问题，UCT 就是 UCB1。</li>
+</ul>
+
+<h3>手撕代码</h3>
+<p>下面的代码与 <code>demos/ch07_interview.py</code> 逐字相同；脚本精确验证了梯度老虎机的期望更新等于期望奖励的梯度、伪遗憾的分解恒等式，以及 UCB 半径与 Hoeffding 尾概率的对应：</p>
+<!--code:py:增量均值 / ε-greedy / UCB1 / Thompson / 梯度老虎机 / 遗憾（Python，面试手撕版）-->
+{{demo:ch07_interview.py#书中代码块}}
+<!--/code-->
+<!--code:text:python demos/ch07_interview.py 的输出-->
+{{demo:ch07_interview_output.txt}}
+<!--/code-->
+
+<h2>7.9 面试注意：易错说法</h2>
+<div class="tbl"><table>
+<tr><th>易错说法</th><th>问题在哪</th><th>更准确的说法</th></tr>
+<tr><td>“ε-greedy 的遗憾是对数的”</td><td>固定 ε 是线性的</td><td>固定 ε 每步都有 ε 概率犯错，遗憾线性增长；衰减 ε 才可能对数（图 7-6）</td></tr>
+<tr><td>“UCB 的第二项是方差”</td><td>概念混淆</td><td>是置信半径（由 Hoeffding 得到），随拉动次数 $1/\sqrt{N_a}$ 收缩、随 $\sqrt{\ln t}$ 缓慢增长</td></tr>
+<tr><td>“Thompson 采样是随机探索，和 ε-greedy 一样”</td><td>探索方式不同</td><td>Thompson 按“是最优臂的后验概率”选，确定很差的臂几乎不再被选；ε-greedy 对所有臂一视同仁</td></tr>
+<tr><td>“熵正则能解决稀疏奖励”</td><td>没有方向</td><td>熵只保持随机性，属于局部探索；稀疏奖励需要能传播的乐观 / 内在奖励（图 7-7）</td></tr>
+<tr><td>“好奇心奖励越大越好”</td><td>忽略噪声电视和目标偏离</td><td>内在奖励要随训练衰减或与任务奖励平衡；对随机性敏感的方法会被噪声吸引</td></tr>
+<tr><td>“梯度老虎机的基线必须是平均奖励”</td><td>基线的作用说错</td><td>任何不依赖动作的基线都不改变期望梯度；平均奖励只是降方差的好选择</td></tr>
+</table></div>
+
+<h3>追问树</h3>
+<!--code:text:探索与利用常见追问链-->
+探索与利用怎么平衡？
+├─ 怎么衡量？ → 累积遗憾 = Σ Δ_a·E[N_a(T)]；下界 Σ Δ/KL · ln T（Lai-Robbins）
+├─ UCB 公式每一项？ → μ̂_a 是利用；√(2 ln t / N_a) 是置信半径（Hoeffding 反解，δ = t⁻⁴）
+│   └─ 和 MCTS 的关系？ → UCT = 在树的每个节点上跑 UCB1（第 17 章）
+├─ Thompson 采样？ → 后验采样、概率匹配；Beta-伯努利共轭；实践中遗憾最低
+├─ 梯度老虎机？ → softmax 偏好 + (R − R̄)(1[k=a] − π_k)，= 期望奖励的 SGD = 单步 REINFORCE
+└─ 深度 RL 怎么探索？ → 熵正则 / 噪声网络（局部）；计数奖励、RND、ICM、Go-Explore（深度）
+    ├─ RND 为什么能鼓励探索？ → 新状态上拟合随机网络的误差大；目标确定，不怕环境随机性
+    └─ PPO 熵系数怎么调？ → 0.01 起步，看熵曲线；按动作数归一化；或目标熵自动调
+<!--/code-->
+
+<div class="recap"><div class="t">速记卡 · 第 7 章</div><ul>
+<li>遗憾 $\mathcal R_T=\sum_a\Delta_a\E[N_a(T)]$；固定 ε 线性，UCB / Thompson 对数；下界 $\sum\Delta_a/\KL\cdot\ln T$。</li>
+<li>Hoeffding $\Pr(\bar X-\mu\ge\epsilon)\le e^{-2n\epsilon^2}$ ⇒ UCB1 $\hat\mu_a+\sqrt{2\ln t/N_a}$。</li>
+<li>乐观初值：前期系统探索，只对平稳问题有效；UCB / 乐观初值都有“第 11 步尖峰”。</li>
+<li>Thompson：后验采样、概率匹配，Beta(1+s, 1+f)。</li>
+<li>梯度老虎机 $H_k\mathrel{+}=\alpha(R-\bar R)(\mathbb 1[k=a]-\pi_k)$ = 期望奖励的 SGD；基线降方差。</li>
+<li>深度探索：不确定性要能通过自举传播（乐观初值、计数奖励）；RND / ICM / Go-Explore；警惕噪声电视。</li>
+</ul></div>
+
+<details class="quiz"><summary>自测 1：10 臂测试平台上，ε = 0.1 的 ε-greedy 最多能有多少时间选到最优臂？</summary><p>贪心部分 90% 选最优臂（假设估计已正确），随机部分 10% 中有 1/10 恰好选中最优臂，共 $0.9+0.1\times0.1=91\%$。要突破这个上限，只能让 ε 衰减或换成 UCB / Thompson。</p></details>
+<details class="quiz"><summary>自测 2：如果奖励不在 [0, 1] 区间（比如游戏得分 0~1000），UCB1 公式要怎么改？</summary><p>Hoeffding 对区间 [a, b] 的版本是 $e^{-2n\epsilon^2/(b-a)^2}$，置信半径要乘以 $(b-a)$；或者先把奖励归一化到 [0, 1]。实践中常直接把 $\sqrt2$ 换成可调的 c，按奖励尺度调参（图 7-5 中 UCB 的最佳 c 不是 √2）。</p></details>
+<details class="quiz"><summary>自测 3：为什么图 7-7 中乐观初值比计数奖励更快？它有什么缺点？</summary><p>Q₀ = 1 等于假设“每个没试过的 (s, a) 都能拿到最大回报”，这是最强的乐观，而且从第一步起就在起作用；计数奖励要靠 TD 一步步把内在奖励传回去，还和 ε 随机动作混在一起。缺点：乐观初值依赖知道奖励上界，只在开始时有效（访问过后乐观就消失了），函数近似下也很难“初始化每个状态的值”，所以深度 RL 里用计数 / RND 之类的内在奖励来近似。</p></details>
+<details class="quiz"><summary>自测 4：在线给玩家推荐三种新手引导方案之一，目标是次日留存。用 A/B 实验还是 Thompson 采样？</summary><p>如果目标是“尽快让更多玩家用到最好的方案”，用 Thompson 采样（伯努利奖励，Beta 后验），它会自动把流量倾斜到表现好的方案，遗憾更小。如果目标是“得到一个干净的、可发表的因果结论”或要检验多个指标，固定比例的 A/B 实验更合适。留存是延迟反馈，老虎机要处理奖励延迟到达的问题。</p></details>
+</section>

@@ -1,0 +1,49 @@
+<section class="chapter" id="appA">
+  <div class="ch-head">
+    <div class="no">APPENDIX · A</div>
+    <h1>对照 Notion 原笔记：哪些可以直接用，哪些要改说法</h1>
+    <p class="lead">原笔记（《UE 动画系统》Notion 导出）的框架和大部分结论是对的，但有一些说法过于绝对，或者数字和机制不准确。面试官顺着这些点追问时最容易翻车，这里逐条给出更稳妥的说法和依据。</p>
+  </div>
+
+  <h2>A.1 原笔记里讲得好、可以直接用的地方</h2>
+  <ul>
+    <li><strong>“逻辑与姿态解耦”的总框架</strong>：EventGraph 收集数据、AnimGraph 求姿势；状态机管宏观状态、混合空间管连续参数、分层混合管局部覆盖、蒙太奇管代码触发的一次性动作——这条主线完全正确，可以作为回答的骨架。</li>
+    <li><strong>Skeleton 是“数据协议 / 字典”</strong>，不含顶点和蒙皮；<code>FReferenceSkeleton</code> 用扁平数组 + 父下标存骨骼（第 1 章 E1 的实测佐证了这种布局的好处）。</li>
+    <li><strong>位移重定向的三种模式</strong>：Root 用 Animation、躯干四肢用 Skeleton、Pelvis 用 AnimationScaled。</li>
+    <li><strong>蒙皮的 CPU / GPU 分工</strong>、逆绑定矩阵、Physics Asset 做命中检测而不是读回 GPU 顶点、VAT 做群体——都准确。</li>
+    <li><strong>Mesh Space Rotation Blend 的作用</strong>、蒙太奇 Section 做连招、Branching Point 比普通 Notify 更精确、状态机过渡期双份采样、惯性化只算目标——都准确（第 5、7 章有实测）。</li>
+    <li><strong>1D 混合空间 + 朝向调整（Orientation Warping）</strong>是 Lyra / Game Animation Sample 的思路，这个趋势判断是对的。</li>
+  </ul>
+
+  <h2>A.2 需要修正或补充的说法</h2>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>原笔记说法</th><th>问题</th><th>更准确的说法</th><th>依据</th></tr>
+    <tr><td>1</td><td>Blend Depth = 3 时，spine_01 / 02 / 03 分别得到 25% / 50% / 75%，neck 才到 100%</td><td class="no">数字对应的是 Depth = 4</td><td>Depth = N 时第 k 层（过滤骨骼自己 k = 0）权重是 min(1, (k+1)/N)。Depth = 3：33% / 67% / 100%；Depth = 4 才是 25% / 50% / 75% / 100%。负数表示排除这个分支</td><td>E4、图 5-1</td></tr>
+    <tr><td>2</td><td>混合空间里权重为 0 的动画“依然可能被采样”，所以不能把跳跃、攻击放进去</td><td class="no">机制说错了</td><td>只有输入点所在三角形里权重大于 0 的（最多 3 个）采样会被求值；但空间里所有动画资源都会被引用和加载。不把跳跃、攻击放进去的真正原因是：它们是离散事件，需要打断、触发通知、有开始和结束，不是“随参数连续变化”的东西</td><td>E5、第 4 章</td></tr>
+    <tr><td>3</td><td>1D 混合空间“能直接砍掉近 30% 的采样开销”</td><td class="mid">数字没有依据</td><td>1D 最多 2 个、2D 最多 3 个采样同时参与。省多少取决于解压和混合占总开销的比例，要用 Insights 实测，不要背具体百分比</td><td>第 4、9 章</td></tr>
+    <tr><td>4</td><td>SLERP “保证以最短路径、绝对匀速地旋转”</td><td class="mid">漏了前提</td><td>slerp 本身不保证走短路：q 和 −q 是同一个旋转，要先检查点积，小于 0 时取反。UE 的 <code>FQuat::Slerp</code> 内部做了这一步，手写时容易漏</td><td>B3.6、E2</td></tr>
+    <tr><td>5</td><td>动画序列在两帧之间“通过 Slerp 实时插值”</td><td class="mid">不够准确</td><td>关键帧插值和姿势混合通常用 nlerp（线性插值再归一化，UE 里如 <code>FQuat::FastLerp</code> + 归一化）：相邻关键帧夹角很小，nlerp 误差可忽略，且快约 4.9 倍</td><td>E2、第 3 章</td></tr>
+    <tr><td>6</td><td>四元数“连乘比矩阵乘法更快”，所以全面优于矩阵</td><td class="mid">只对了一半</td><td>组合两个旋转四元数更快（0.78 vs 7.64 ns）；但旋转大量向量时矩阵更快（0.50 vs 1.64 ns），所以 GPU 蒙皮用矩阵。各有分工</td><td>E11(h)</td></tr>
+    <tr><td>7</td><td>四元数“只需要简单地归一化就能变回合法旋转”，暗示不会形变</td><td class="mid">要补一句</td><td>四元数一样会漂移：不归一化连乘 100 万次后 |q| = 1.026，变换后的向量被放大 5.3%（比矩阵的 1.18% 还明显）。它的优势是修复只需一次归一化</td><td>E12(d)</td></tr>
+    <tr><td>8</td><td>AnimGraph 里“一旦使用 NOT 等运算节点就跌入蓝图虚拟机”</td><td class="no">与官方文档不符</td><td>官方列出的 Fast Path 包括：成员变量、<strong>取反的布尔成员变量</strong>、嵌套结构体成员（Break Struct，Break Transform 等有转换的除外）。乘法、函数调用、Select 等计算才会失去 Fast Path</td><td>UE 文档《动画优化》</td></tr>
+    <tr><td>9</td><td>“保持 Fast Path，才允许被丢进工作线程无锁并发”</td><td class="mid">两个概念混在一起</td><td>Fast Path 解决的是“引脚取值不走蓝图虚拟机”；多线程更新是另一个开关。官方文档还指出：需要 Root Motion 驱动角色移动时，Update 阶段无法并行（角色移动不是多线程的）</td><td>UE 文档、第 6 章</td></tr>
+    <tr><td>10</td><td>“资深开发会重写 NativeUpdateAnimation，彻底废弃 EventGraph 连线”</td><td class="mid">不够新</td><td><code>NativeUpdateAnimation</code> 仍然在游戏线程。UE5 推荐把计算放进 <code>NativeThreadSafeUpdateAnimation</code> / Blueprint Thread Safe Update Animation，用 Property Access 读数据</td><td>第 6 章</td></tr>
+    <tr><td>11</td><td>Proxy 双缓冲，“全程无锁操作”</td><td class="mid">说过头了</td><td>Proxy 的作用是让工作线程只碰拷贝出来的数据，避免数据竞争；游戏线程仍要在同步点等待任务完成（需要骨骼结果时会阻塞），并不是“没有同步”</td><td>第 6 章</td></tr>
+    <tr><td>12</td><td>虚拟骨骼“记录参考姿态下的相对变换”，“在求值最后一步执行偏移计算”</td><td class="no">机制不准确</td><td>官方文档：虚拟骨骼是<strong>源（父）骨骼的子骨骼，但变换匹配目标骨骼</strong>，随动画逐帧变化，不是参考姿势下的固定偏移。它不参与蒙皮</td><td>UE 文档《虚拟骨骼》</td></tr>
+    <tr><td>13</td><td>用 Socket 做 IK 目标“往往会拿到上一帧数据”，所以必须用虚拟骨骼</td><td class="mid">要分情况</td><td>在 AnimGraph 里，Two Bone IK 等节点的目标可以直接选骨骼或 Socket，用的是当前正在计算的姿势，没有延迟；一帧延迟出现在“游戏线程里调用 GetSocketTransform 再把结果传给动画蓝图”时。虚拟骨骼的真正价值是表达<strong>两根骨骼之间</strong>的相对关系，并且不用改 DCC 骨架</td><td>第 1、8 章</td></tr>
+    <tr><td>14</td><td>顶点用 float4 存 4 个权重、uint4 存 4 个骨骼索引；最多 4 根是硬件限制</td><td class="mid">细节不对</td><td>引擎实际用 8 位或 16 位整数压缩存权重和索引；每顶点最大影响数可按 LOD 配置，“4 根”是很多项目的美术规范和性能取舍，不是硬限制</td><td>第 2 章</td></tr>
+    <tr><td>15</td><td>“只要在 Server 端调用 PlayAnimMontage……就能同步当前播放位置和速率”</td><td class="no">机制说错了</td><td><code>PlayAnimMontage</code> 本身只在本地播放。ACharacter 只为 <strong>Root Motion 蒙太奇</strong>向模拟代理复制状态（RepRootMotion）；普通蒙太奇要靠多播 RPC，或 GAS 的 RepAnimMontageInfo 同步</td><td>第 7、10 章</td></tr>
+    <tr><td>16</td><td>串联 3 个 Layered Blend per Bone “底层要凭空多算 3 遍骨架矩阵”</td><td class="mid">说过头了</td><td>分层混合节点本身只是逐骨骼插值（E4：68 骨 0.26 us）；开销来自它的每个输入分支各自求值。同一子图用 Cached Pose 只算一次。合并 Slot、减少无用分支是对的，但“不能串联”不对</td><td>E4、第 5 章</td></tr>
+    <tr><td>17</td><td>Sync Marker：“强行拉伸或压缩其他跟随动画的播放速率”</td><td class="mid">说法不精确</td><td>同步组里权重最高者当 Leader 推进时间，Follower 不自己推进，而是被直接放到与 Leader 对应的位置（归一化位置，或同一对标记之间相同的比例）。混合空间内部的采样本来就自动同步</td><td>E6、第 4 章</td></tr>
+    <tr><td>18</td><td>2D 混合空间斜向时“必然”导致双腿麻花交叉、穿模</td><td class="mid">过于绝对</td><td>采样同步、方向动画质量好时斜向混合是可用的（大量项目在用）。朝向调整的主要好处是用更少的动画覆盖所有方向，并避开交叉步问题</td><td>第 4、8 章</td></tr>
+    <tr><td>19</td><td>惯性化“是 3A 项目优化同屏动画性能的必选方案”</td><td class="mid">说过头了</td><td>它适合短过渡（0.1~0.3 s）；源动画在过渡开始后的 Notify 不再触发，频繁打断会劣化。UE 5.3 的 Dead Blending 是实验性替代方案</td><td>E7、第 7 章</td></tr>
+    <tr><td>20</td><td>动画压缩“剔除所有 Scale 轨道，瞬间节省 30% 以上”</td><td class="mid">不精确</td><td>压缩会去掉所有<strong>常量轨道</strong>（不只是缩放：大部分骨头的平移也是常量，就是骨长）。E9 中这一步就把体积降到 1/3.37；再加量化可到 8.60 倍</td><td>E9、第 2 章</td></tr>
+  </table></div>
+
+  <h2>A.3 面试时怎么用这份对照</h2>
+  <ul>
+    <li><strong>少说“绝对”“唯一”“必选”</strong>：原笔记里“绝对不行”“唯一正确解”“必选方案”这类词，面试官一追问反例就站不住。换成“通常”“在 XX 场景下更合适”，再给出原因。</li>
+    <li><strong>具体数字要么来自实测，要么不说</strong>：“省 30%”这种数字没有出处时，宁可说“省多少要用 Insights 测”。本书的数字都能在 <code>demos/run_output.txt</code> 里找到来源。</li>
+    <li><strong>把“机制”说对比把“名词”说全更重要</strong>：比如 Blend Depth 的公式、虚拟骨骼挂在谁下面、PlayAnimMontage 会不会自动同步——这些一旦说错，前面讲得再多也会被扣分。</li>
+  </ul>
+</section>

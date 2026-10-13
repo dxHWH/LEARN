@@ -1,0 +1,290 @@
+<div class="part-head" data-toc="第三部分 · 基础设施">
+  <div class="no">PART THREE</div>
+  <h1>第三部分　基础设施</h1>
+  <p>事件、环形队列、计时器、对象池、线程安全队列、日志。TimerSystem 是全书重点，分上下两章（第 9、10 章）；本部分其余各章都围绕“它解决了什么、在哪种情况下会失效”展开。</p>
+</div>
+
+<section class="chapter" id="ch7">
+  <div class="ch-head">
+    <div class="no">CHAPTER 07</div>
+    <h1>EventSystem：从 Observer 到双缓冲延迟派发</h1>
+    <p class="lead">项目里所有“状态变了，UI 去更新”的路径都经过它。双缓冲让事件里发事件不会递归，这是亮点；溢出静默丢弃、异常中断派发、注销后仍被调用、闭包分配，是面试官最容易打的四个点。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能画出 Trigger → back → swap → front → Dispatch 的流程，并解释“A 的回调里发 B 为什么不会递归”</li>
+    <li>对比立即派发与延迟派发的取舍：递归深度、状态一致性、延迟、调试栈</li>
+    <li>说清 Priority 到底保证了什么、会不会饿死</li>
+    <li>说清队列满了当前怎么处理，以及不同事件该用哪种溢出策略</li>
+    <li>逐项说出一次 Trigger 有哪些堆分配，并给出低 GC 事件队列的设计空间</li>
+    <li>知道 4 个隐藏行为：按运行时类型分发、快照语义、多播异常中断、事件对象被延迟读取</li>
+  </ul></div>
+
+  <h2>7.1 这一章解决什么问题</h2>
+  <p>没有事件系统时，GameState 加了分要通知 UI，就得持有 UI 的引用；UI 换了、多了一个成就系统，GameState 也得改。事件系统把“谁关心”从发送方挪走：发送方只说“分数变了”，订阅方自己登记。这就是 <strong>Observer / Pub-Sub</strong>。它带来的第二个问题是<strong>派发时机</strong>：通知是当场执行（立即派发），还是先排队、稍后统一执行（延迟派发）？项目选了后者，并用双缓冲实现。</p>
+
+  <h2>7.2 当前项目怎么做：三个结构</h2>
+  <!--code:cs:EventSystem.cs:23-114（节选）-->
+public class EventSystem : MonoSingleton<EventSystem> {
+    private readonly int PRIORITY_LEVEL_NUM = (int)Priority.Max + 1;      // = 3（Logic / Appearance / Max）
+    private readonly int MAX_EVENTQUEUE_LENGTH = 2000;
+    private RingBuffer<Action>[] _frontBuffers;                            // 本帧要执行的
+    private RingBuffer<Action>[] _backBuffers;                             // 新触发的先放这里
+    private Dictionary<Type, Delegate> _listenersDic;                      // 事件类型 → 多播委托
+
+    public void Register<T>(Action<T> listener) where T : IEventArgs {
+        Type type = typeof(T);                                             // ① 注册用“静态类型”
+        _listenersDic[type] = _listenersDic.ContainsKey(type)
+            ? Delegate.Combine(_listenersDic[type], listener) : listener;
+    }
+    public void Trigger<T>(T e) where T : IEventArgs {
+        if (!_listenersDic.TryGetValue(e.GetType(), out var rawDelegate)) return;   // ② 查找用“运行时类型”
+        if (rawDelegate is Action<T> callback) {
+            Action task = () => callback(e);                               // ③ 闭包：此刻抓住委托快照和事件对象
+            _backBuffers[(int)e.Priority].TryEnqueue(task);                // ④ 返回值被忽略
+        }
+    }
+    private void Update() {
+        var temp = _frontBuffers; _frontBuffers = _backBuffers; _backBuffers = temp;   // ⑤ 交换
+        for (int i = 0; i < PRIORITY_LEVEL_NUM; ++i)
+            while (_frontBuffers[i].TryDequeue(out Action task)) task.Invoke();       // ⑥ 没有 try/catch
+    }
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>结构</th><th>内容</th><th>容量 / 内存</th></tr>
+    <tr><td><code>_listenersDic</code></td><td>事件类型 → 一个多播委托（内部是调用列表）</td><td>按事件类型数增长；每次 Register / UnRegister 都生成新的委托对象</td></tr>
+    <tr><td><code>_backBuffers[3]</code></td><td>本帧新触发的任务，按优先级分三个环形队列</td><td>每级 2000 个槽</td></tr>
+    <tr><td><code>_frontBuffers[3]</code></td><td>本帧正在派发的任务</td><td>同上；两组共 6 × 2000 = 12000 个引用槽（64 位下约 94 KB），其中 Max 级的 4000 个永远为空（实测 G3）</td></tr>
+  </table></div>
+
+  <h2>7.3 双缓冲：A 的回调里发 B，为什么不会递归</h2>
+  <!--code:text:Frame N / N+1 的状态变化-->
+Frame N（World.Update 里）   GameState.SetMatchState → Trigger(A)
+                              front = []      back = [A]
+
+Frame N · EventSystem.Update  swap            front = [A]     back = []
+                              执行 A 的回调 → 回调里 Trigger(B) → B 进入 back
+                              front = []      back = [B]       ← B 没有在本次 while 循环里被执行
+
+Frame N+1 · EventSystem.Update swap           front = [B]     back = []
+                              执行 B 的回调 → 回调里 Trigger(A) → A 进入 back …
+<!--/code-->
+  <p>关键在于：<strong>Dispatch 只消费 front，而 Trigger 只写 back</strong>。派发过程中新产生的事件进不了正在被消费的队列，于是“回调里再发事件”被拆成了“下一帧再处理”。【实测 E7-a】A、B 两个事件互相触发，5 帧里每帧恰好派发一个（A B A B A），最大调用深度始终是 1。如果是立即派发，这会是无限递归直到栈溢出。</p>
+  <div class="co deep"><span class="h">和 World 的 pending 列表是同一个思想</span>
+    <p>World 把“Tick 中新注册的 Actor”放进 pending，下一帧才加入；EventSystem 把“派发中新触发的事件”放进 back，下一帧才派发。两者解决的都是<strong>遍历中修改被遍历的集合</strong>，代价都是“新东西晚一帧生效”。第 3 章的结论在这里同样成立。</p>
+  </div>
+
+  <h2>7.4 立即派发 vs 延迟派发</h2>
+  <div class="tbl"><table>
+    <tr><th>维度</th><th>立即派发（C# event / UnityEvent 直接 Invoke）</th><th>延迟派发（本项目）</th></tr>
+    <tr><td>回调里发事件</td><td>嵌套调用，栈越来越深；互相触发就是无限递归 → StackOverflow</td><td>进入下一帧，栈深度恒为 1（E7-a）</td></tr>
+    <tr><td>状态重入</td><td>发送方还在修改自己的状态时，监听者已经回调进来读写它（例如分数加到一半就被 UI 读）</td><td>回调执行时发送方的那一步已经结束</td></tr>
+    <tr><td>顺序</td><td>深度优先，嵌套越深越难推理</td><td>广度优先，按帧分层：第 k 级连锁事件在第 k 帧处理（G2）</td></tr>
+    <tr><td>延迟</td><td>0</td><td>0～1 帧起步，每多一级连锁多 1 帧（G2）</td></tr>
+    <tr><td>读到的状态</td><td>事件发生那一刻的状态</td><td>派发时的状态——可能已经又变了（例如 Pawn 已经被 Destroy）</td></tr>
+    <tr><td>调试</td><td>调用栈能看到是谁发的</td><td>栈断开：断点在回调里只能看到 EventSystem.Update</td></tr>
+    <tr><td>适合</td><td>需要同步结果的（“能不能放技能”的校验、伤害修正链）</td><td>通知类（UI 刷新、音效、成就统计）</td></tr>
+  </table></div>
+  <p>【实测 G2】一条 A→B→C 的三级事件链，Trigger 发生在第 0 帧：如果 World.Update 先于 EventSystem.Update 执行，A、B、C 分别在第 0、1、2 帧处理；顺序反过来，就是第 1、2、3 帧。而项目没有固定这两个脚本的执行顺序（第 1 章 1.4），所以起点延迟是 0 还是 1 帧<strong>由 Unity 决定</strong>。</p>
+  <div class="co warn"><span class="h">面试注意：不要说“延迟派发更好”</span>
+    <p>它是用“晚一帧 + 栈断开 + 读到的不是当时的状态”换“不递归 + 不重入”。正确的说法是：通知类事件适合延迟派发；需要立刻得到结果的请求（“我能不能夺舍这个目标”）应该是直接的函数调用，不该走事件。</p>
+  </div>
+
+  <h2>7.5 四个隐藏行为</h2>
+  <h3>7.5.1 注册用 typeof(T)，查找用 e.GetType()</h3>
+  <p>【源码事实】Register 用编译期类型做键，Trigger 用对象的运行时类型查找，然后再用 <code>is Action&lt;T&gt;</code> 检查。两者不一致时会<strong>静默丢弃</strong>，没有任何日志：</p>
+  <div class="tbl"><table>
+    <tr><th>写法</th><th>查到的委托</th><th>is Action&lt;T&gt;</th><th>结果</th></tr>
+    <tr><td><code>Register&lt;ScoreChangedEventArgs&gt;</code> + <code>Trigger(new ScoreChangedEventArgs(...))</code></td><td>Action&lt;ScoreChanged&gt;</td><td>true</td><td class="yes">正常</td></tr>
+    <tr><td>同上注册，但 <code>AbstractEventArgs e = new ScoreChangedEventArgs(); Trigger(e)</code></td><td>Action&lt;ScoreChanged&gt;（按运行时类型找到了）</td><td>false：T 是基类，Action&lt;派生&gt; 不能当 Action&lt;基类&gt; 用</td><td class="no">丢弃</td></tr>
+    <tr><td><code>Register&lt;AbstractEventArgs&gt;</code>（想监听所有事件）+ 发派生事件</td><td>按派生类型查找，找不到</td><td>—</td><td class="no">丢弃</td></tr>
+  </table></div>
+  <p>Demo 里所有调用都用具体类型，所以没触发；但“写一个通用的事件转发 / 录制工具，用基类变量 Trigger”时一定会踩到。要么统一用 <code>typeof(T)</code>，要么明确规定“只按具体类型分发、不支持继承”。</p>
+
+  <h3>7.5.2 快照语义：注销之后还会被调用一次</h3>
+  <p>闭包在 Trigger 那一刻抓住了当时的多播委托。C# 的委托是不可变的，之后 UnRegister 生成的是新委托，不会影响已经入队的旧快照。【实测 E7-c】Trigger 之后、派发之前注销的监听者，下一帧仍被调用了 1 次。</p>
+  <p>什么时候会出事：SurvivalUIController 在 <code>OnDisable</code> 里注销。如果同一帧先有人 Trigger 了分数事件、然后 UI 被关掉或场景开始卸载，下一帧派发时会调用到一个已经被 Destroy 的 MonoBehaviour——访问 <code>PlayerScoreText.text</code> 就是 MissingReferenceException，而 EventSystem 没有 try/catch（7.5.3）。</p>
+
+  <h3>7.5.3 异常：一个监听者抛异常，影响三层</h3>
+  <p>【实测 G1】同一事件注册了“UI 分数 → 成就系统 → 音效”三个监听者，成就系统抛异常：</p>
+  <ol>
+    <li><b>同一事件</b>：多播委托按注册顺序调用，遇到异常立即中断——<strong>音效永远收不到这次事件</strong>。</li>
+    <li><b>同一帧的其他事件</b>：异常直接逃出 <code>Update</code>，while 循环中断，front 里剩下的事件都没派发。</li>
+    <li><b>之后的帧</b>：下一帧 swap 时，剩下的事件所在的旧 front 变成了 back，这一帧没有任何派发；再下一帧才轮到它们——<strong>晚了 2 帧，而且排在第 2 帧新触发的事件后面</strong>（E7-d：E2、E3 排到了 E4 之后）。</li>
+  </ol>
+  <p>对比：TimerSystem 的每个回调都包了 try/catch（第 10 章）。同一个作者在两个基础设施里做了不同的选择，面试时值得主动指出并说明应该统一。</p>
+
+  <h3>7.5.4 事件对象被延迟读取</h3>
+  <p>闭包捕获的是事件对象的<strong>引用</strong>，派发时才读字段。现在每次都 <code>new</code> 一个事件对象，没有问题；但如果为了省 GC 把事件对象做成复用的（比如一个静态的 <code>ScoreChangedEventArgs</code> 改字段后反复 Trigger），同一帧的三次 Trigger 到下一帧派发时会读到<strong>同一个最后的值</strong>。“对象池化 + 延迟派发”是一对天然冲突，第 11 章还会遇到。</p>
+
+  <h2>7.6 Priority：它到底保证了什么</h2>
+  <!--code:text:优先级定义与 Demo 用法-->
+enum Priority { Logic = 0, Appearance = 1, Max = 2 }
+MatchStateChangedEventArgs     Logic        比赛阶段切换
+PlayerRequestControlEventArgs  Logic        UI 请求控制权
+PlayerLifespanTimerEventArgs   Logic        寿命计时器句柄
+ScoreChangedEventArgs          Appearance   分数刷新（表现层）
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>问题</th><th>答案（源码事实 / 实测 G3）</th></tr>
+    <tr><td>保证了什么</td><td><strong>同一批次</strong>（同一次 swap 得到的 front）里，所有 Logic 事件先于所有 Appearance 事件执行</td></tr>
+    <tr><td>不保证什么</td><td>跨帧顺序：Logic 回调里新触发的 Appearance 事件进入下一帧（E7-e）；同级内按 Trigger 顺序</td></tr>
+    <tr><td>会饿死吗</td><td>不会。每帧清空 front 的全部三级；单帧 Trigger 2500 个 Logic + 10 个 Appearance，Appearance 10 个全部派发</td></tr>
+    <tr><td>容量是否独立</td><td>是。上例只丢了 Logic 级溢出的 500 个，Appearance 不受影响</td></tr>
+    <tr><td>Max 是什么</td><td>本意是“级数哨兵”，却被算进了级数（<code>Max + 1 = 3</code>），多分配了一级永远为空的队列</td></tr>
+    <tr><td>能限流吗</td><td>不能。每帧必须清空，没有“每帧最多处理 N 个、剩下的留到下一帧”的预算机制——事件洪水会直接变成一帧的卡顿</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">面试注意：优先级会不会饿死，取决于“每帧清空”还是“每帧有预算”</span>
+    <p>当前实现每帧清空所以不饿死，但也意味着没有削峰能力。如果加上“每帧最多派发 N 个”，低优先级就可能被持续的高优先级洪水饿死，这时要配老化（等待越久优先级越高）或者给每级单独预算。这就是操作系统调度里“优先级反转 / 饥饿 / aging”在游戏里的样子。</p>
+  </div>
+
+  <h2>7.7 队列满了怎么办：溢出策略</h2>
+  <p>【源码事实】<code>TryEnqueue</code> 满了返回 false，Trigger 忽略返回值。【实测 E7-b / G3】单帧单级第 2001 个事件开始被静默丢弃，无日志、无计数、调用方不知道。2000 个对 Demo 绰绰有余，但这类 bug 出现时最难查：现象是“偶尔 UI 没刷新”。</p>
+  <div class="tbl"><table>
+    <tr><th>策略</th><th>行为</th><th>适合的事件</th></tr>
+    <tr><td>DropNewest（当前，但是静默的）</td><td>丢掉新来的</td><td>可合并的状态通知：下一次分数事件会带来最新值</td></tr>
+    <tr><td>DropOldest</td><td>挤掉最老的</td><td>只关心最新的：鼠标位置、调试信息</td></tr>
+    <tr><td>合并（Coalesce）</td><td>同类型同 key 的事件只保留最后一个</td><td>分数、血量这类“状态型”事件——比扩容更根本</td></tr>
+    <tr><td>Resize</td><td>扩容</td><td>不能丢的：比赛阶段切换、玩家死亡。代价是偶发分配</td></tr>
+    <tr><td>Fallback 队列</td><td>溢出部分进一个可增长的 List</td><td>同上，正常路径保持零扩容</td></tr>
+    <tr><td>Assert / 报错</td><td>开发期直接中断</td><td>“理论上不可能满”的队列，用来尽早发现逻辑错误（例如事件互相触发的环）</td></tr>
+    <tr><td>Telemetry</td><td>记录每帧峰值、丢弃数</td><td>任何策略都应该配上；容量 2000 是拍脑袋还是有数据，靠它回答</td></tr>
+  </table></div>
+  <p>重点在于<strong>按事件语义选策略</strong>：“分数变了”丢一个无所谓，“玩家死了”丢了游戏就卡死在进行中。一个队列用一种策略处理所有事件，是当前设计的根本问题。</p>
+
+  <h2>7.8 GC：一次 Trigger 分配了什么</h2>
+  <div class="tbl"><table>
+    <tr><th>分配</th><th>在哪</th><th>什么时候</th></tr>
+    <tr><td>事件对象</td><td>调用方 <code>new ScoreChangedEventArgs(...)</code>（class）</td><td>每次</td></tr>
+    <tr><td>闭包对象（编译器生成的 display class，字段 = callback、e）</td><td>Trigger 内部</td><td><strong>每次，即使没有监听者</strong>——见下方说明</td></tr>
+    <tr><td>Action 委托</td><td><code>() =&gt; callback(e)</code></td><td>找到监听者时</td></tr>
+    <tr><td>多播委托 + 调用列表数组</td><td>Register / UnRegister 的 Delegate.Combine / Remove</td><td>每次注册注销（不在每帧路径上）</td></tr>
+    <tr><td>Dictionary 扩容、RingBuffer</td><td>Awake</td><td>一次（RingBuffer 容量固定，永不扩容）</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">为什么“没有监听者也会分配闭包”</span>
+    <p>【扩展知识，需用 IL 或 Profiler 确认】C# 编译器把被 lambda 捕获的局部变量和参数“提升”到一个编译器生成的类里，这个类的实例在<strong>被捕获变量所在作用域的入口</strong>创建。<code>e</code> 是参数，作用域是整个方法，所以闭包对象在 Trigger 第一行之前就 new 出来了，哪怕后面 <code>TryGetValue</code> 失败直接 return。SoulDecay 的 MatchStateChanged 没人监听，每次切阶段照样分配。可以用 sharplab.io 看编译结果，或在 Profiler 的 GC Alloc 列确认。</p>
+  </div>
+  <p>SurvivalGameState 的 BeginPlay 一次发 3 个分数事件，每次加分发 1 个；按上表每个事件约 3 次托管分配。频率很低，不是性能问题——但它说明了“框架宣称低 GC”和“框架的每次使用都在分配”之间的距离。</p>
+  <h3>真正低 GC 的事件队列，设计空间有哪些</h3>
+  <div class="cards">
+    <div class="card"><div class="t">按类型的泛型队列</div><p>每种事件一个 <code>EventQueue&lt;T&gt;</code>（静态泛型类），队列里直接存 T 而不是闭包；派发时取出 T 调 <code>Action&lt;T&gt;</code>。没有闭包、没有类型查找，代价是派发顺序只在同类型内有保证。</p></div>
+    <div class="card"><div class="t">struct 事件 + 预分配</div><p>事件定义为 struct，存进预分配的数组；结合上一条可以做到稳态零分配。注意 struct 里如果有引用，出队时要清槽（第 8 章 G5）。</p></div>
+    <div class="card"><div class="t">EventEnvelope</div><p>统一的信封 <code>{ int typeId; int payloadHandle; }</code>，payload 存在按类型分池的数组里，信封里只放句柄——这又回到了第 9 章的 Slot Map + generation。</p></div>
+    <div class="card"><div class="t">合并状态事件</div><p>分数、血量这类事件根本不需要排队：标脏，帧末统一推最新值（或者 UI 直接绑定可观察属性）。最省的分配是不发事件。</p></div>
+  </div>
+
+  <h2>7.9 ThreadSafeEventSystem：实现了，没人用</h2>
+  <p>【源码事实】同一文件里还有一个加锁版本：Register / UnRegister / Trigger 查字典时加 <code>_listenerDicLock</code>，入队和交换时加 <code>_swapLock</code>，底层用 ThreadSafeRingBuffer（每个操作自己又加一次锁）；派发仍在主线程的 Update 里。全仓库没有调用方。设计意图是“工作线程可以发事件，回调在主线程执行”，这个方向是对的（Unity API 只能在主线程调用），但有三个问题：</p>
+  <ul>
+    <li><b>拿不到实例</b>：工作线程第一次访问 <code>ThreadSafeEventSystem.Instance</code> 时，如果实例还没缓存，会走 <code>FindObjectOfType</code> / <code>new GameObject</code>，这些 Unity API 只能在主线程调用；正确用法是在主线程先取到引用再交给工作线程。</li>
+    <li><b>双重加锁</b>：外层 <code>_swapLock</code> 已经保证了入队和交换的互斥，内层 ThreadSafeRingBuffer 的锁是多余的开销（第 12 章 G7：同样的 lock 环形队列在 4 生产者时吞吐降到 1 生产者的约 1/4）。</li>
+    <li><b>继承了单线程版的所有问题</b>：溢出静默丢弃、无 try/catch、闭包分配（而且是在工作线程分配）。</li>
+  </ul>
+
+  <h2>7.10 与 Unity / UE 的原生机制对比</h2>
+  <div class="tbl"><table>
+    <tr><th>机制</th><th>派发</th><th>与本项目的区别</th></tr>
+    <tr><td>C# <code>event Action&lt;T&gt;</code></td><td>立即，同步</td><td>零基础设施，强类型；发送方必须暴露 event，订阅方要能拿到发送方</td></tr>
+    <tr><td>UnityEvent</td><td>立即</td><td>可在 Inspector 里配置，基于反射与序列化，比 C# event 慢</td></tr>
+    <tr><td>SendMessage / BroadcastMessage</td><td>立即，按方法名字符串</td><td>反射查找、拼错名字运行时才知道；只在 GameObject 层级内</td></tr>
+    <tr><td>UE 动态多播委托（<code>DECLARE_DYNAMIC_MULTICAST_DELEGATE</code>）</td><td>立即 Broadcast</td><td>可被蓝图绑定，带 UObject 弱引用，绑定对象被 GC 后自动失效——正好解决本项目 7.5.2 的“调用已销毁对象”</td></tr>
+    <tr><td>UE Gameplay Message Subsystem（Lyra 示例项目中的插件）</td><td>立即，按 GameplayTag 频道</td><td>解耦方式与本项目相同（按“频道”而非按发送者订阅），但用 Tag 层级代替 C# 类型</td></tr>
+    <tr><td>UE GAS 的 GameplayEvent</td><td>立即，发给 AbilitySystemComponent</td><td>用于触发技能，带 payload 结构体</td></tr>
+  </table></div>
+  <p>值得注意：主流引擎的事件 / 委托默认都是<strong>立即派发</strong>，延迟派发通常由业务自己按需加一层队列。项目把所有事件都做成延迟派发，是一个可以讨论的整体选择。</p>
+
+  <h2>7.11 Code Review：EventSystem 问题表</h2>
+  <div class="tbl"><table>
+    <tr><th>级别</th><th>问题</th><th>为什么 / 触发场景</th><th>最小修复（思路）</th><th>成熟设计</th></tr>
+    <tr><td>P0</td><td>派发无异常隔离</td><td>一个监听者抛异常，同事件后续监听者丢失、整帧中断、剩余事件晚 2 帧且乱序（G1、E7-d）</td><td>每个 task 外包 try/catch</td><td>逐个监听者调用（遍历调用列表），单个失败不影响其他</td></tr>
+    <tr><td>P0</td><td>溢出静默丢弃</td><td>第 2001 个起消失（E7-b、G3）</td><td>失败时打错误日志 + 计数</td><td>按事件语义选策略（7.7）+ 峰值统计</td></tr>
+    <tr><td>P1</td><td>快照语义</td><td>注销后仍被调用一次（E7-c），叠加 P0 会抛异常</td><td>闭包只捕获事件，派发时再查字典</td><td>订阅返回 token，注销即作废；或绑定 owner 自动失效</td></tr>
+    <tr><td>P1</td><td>注册 / 查找类型不一致</td><td>基类变量 Trigger 静默丢弃（7.5.1）</td><td>统一用 typeof(T)</td><td>明确“不支持继承分发”或按类型层级派发</td></tr>
+    <tr><td>P1</td><td>字典在 Awake 创建</td><td>OnEnable 里注册可能早于它（第 6 章 6.5）</td><td>改为字段初始化器</td><td>显式引导顺序</td></tr>
+    <tr><td>P1</td><td>派发时机依赖未定义的脚本顺序</td><td>事件延迟 0 或 1 帧（G2）</td><td><code>DefaultExecutionOrder</code></td><td>由 GameLoop 在固定时机 Pump</td></tr>
+    <tr><td>P2</td><td>每次 Trigger 约 3 次分配</td><td>无监听者也分配闭包（7.8）</td><td>先查字典、再进入构造闭包的局部函数</td><td>按类型的泛型队列（7.8）</td></tr>
+    <tr><td>P2</td><td>无削峰能力</td><td>事件洪水变成单帧卡顿</td><td>—</td><td>每帧预算 + 老化</td></tr>
+    <tr><td>P3</td><td>Max 级多分配一组空队列；类名与 <code>UnityEngine.EventSystems.EventSystem</code> 相同</td><td>浪费 4000 槽；场景里两个同名物体（第 6 章）</td><td>级数用 <code>(int)Max</code>；改名</td><td>—</td></tr>
+  </table></div>
+
+  <h2>7.12 测试现状</h2>
+  <p><code>EventSystemTest.cs</code> 注册 EventA / EventB 两个互相触发的回调，每帧打一行日志，<strong>没有任何断言</strong>，也没有挂在场景里——它演示的正好是 E7-a 的“不递归”，但只能靠人眼看日志。溢出、异常、注销时序、类型分发、优先级顺序全部没有测试。</p>
+
+  <h2>7.13 面试追问树</h2>
+  <!--code:text:追问树 · EventSystem-->
+Q7-1 讲一下你的事件系统
+ ├── Q7-2 回调里再 Trigger 一个事件会怎样？为什么不会栈溢出？
+ │    ├── Q7-3 那延迟派发有什么代价？                             ← 延迟、栈断开、读到的状态
+ │    └── Q7-4 和直接用 C# event 比，你为什么要做延迟？
+ ├── Q7-5 Priority 保证了什么？会饿死吗？
+ ├── Q7-6 RingBuffer 满了怎么办？                                 ← 压力题：静默丢弃
+ │    └── Q7-7 那你觉得哪种策略对？
+ ├── Q7-8 () => callback(e) 分配了什么？没有监听者也分配吗？        ← GC
+ │    └── Q7-9 怎么做一个真正低 GC 的事件队列？
+ ├── Q7-10 一个监听者抛异常会怎样？                               ← 反例
+ ├── Q7-11 UI 被销毁了还会收到事件吗？                            ← 快照语义
+ └── Q7-12 能用基类监听所有派生事件吗？                           ← 类型分发
+Q7-13 做成多线程呢？工作线程能直接 Trigger 吗？                    ← 发散到第 12 章
+Q7-14 联网游戏里事件系统和 RPC / 复制是什么关系？                 ← 发散
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q7-1 → Q7-4　讲一下事件系统；回调里发事件为什么不会栈溢出？</div>
+    <p><b>L1 · 30 秒</b>　按事件类型订阅的发布订阅系统，派发是延迟的：Trigger 只把任务放进 back 缓冲，EventSystem 每帧交换 front/back 再清空 front。回调里再发的事件只能进 back，下一帧才执行，所以不会递归。</p>
+    <p><b>L2 · 正常回答</b>　字典存“事件类型 → 多播委托”，缓冲是按优先级分级的环形队列，每级 2000 个。我测过 A、B 两个事件互相触发，每帧恰好派发一个，调用深度始终是 1；立即派发的话就是无限递归。延迟派发的另一个好处是监听者执行时发送方那一步已经做完，不会读到改了一半的状态。</p>
+    <p><b>L3 · 深入</b>　代价是：起步延迟 0 到 1 帧，而且取决于 EventSystem 和 World 谁先 Update，我没有固定这个顺序；每多一级连锁就多一帧；回调里读到的是派发时的状态而不是事件发生时的；调试栈断开。所以我会把它定位成“通知”通道，需要立即结果的请求还是直接函数调用。</p>
+    <p><b>L4 · 面试官攻击</b>　“UE 的委托都是立即 Broadcast 的，你这是不是过度设计？” → 部分同意。全部事件都延迟是我当时的统一选择，好处是一致、不会递归；但像“玩家请求控制权”这种请求式事件，立即调用更合适。更好的分层是：默认立即派发，业务按需把某些事件放进延迟队列，并且给延迟队列配异常隔离和溢出策略。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q7-6 / Q7-7　RingBuffer 满了怎么办？（压力题）</div>
+    <p><b>L1</b>　现在是静默丢弃：TryEnqueue 返回 false，Trigger 没有处理。这是一个问题。</p>
+    <p><b>L2</b>　单帧单级超过 2000 个才会触发，Demo 远到不了；但一旦出现就是“偶尔 UI 不刷新”这种很难查的 bug，至少要打错误日志和计数。</p>
+    <p><b>L3</b>　策略要按事件语义分：状态型事件（分数、血量）应该合并，只保留最新值，比扩容更根本；关键流程事件（死亡、阶段切换）不能丢，要么扩容、要么溢出到备用队列；只关心最新的可以挤掉最老的；“理论上不可能满”的队列开发期直接断言。再配上峰值统计，容量就有了依据。</p>
+    <p><b>L4 攻击</b>　“那你为什么不直接用 Queue&lt;T&gt;，让它自动扩容？” → 可以，自动扩容只在峰值时分配一次，之后容量保持。固定容量的价值是把“异常的事件量”暴露出来——但前提是溢出时要报出来，静默丢弃把这个价值也丢掉了。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q7-8 / Q7-9　闭包分配了什么？</div>
+    <p><b>L2</b>　编译器为被捕获的 callback 和 e 生成一个类，每次 Trigger 实例化一次；lambda 本身再生成一个 Action 委托。加上调用方 new 的事件对象，每次 Trigger 约三次分配。而且因为 e 是参数，闭包对象是在方法入口创建的，没有监听者的事件也会分配——比如 SoulDecay 里比赛阶段事件没人听，照样分配。</p>
+    <p><b>L3</b>　低 GC 的思路：按事件类型的泛型静态队列，队列里直接存事件本身而不是闭包；事件定义成 struct 存进预分配数组；状态型事件干脆不排队，标脏后帧末推送最新值。各有代价：泛型队列会丢失跨类型的全局顺序，struct 事件要注意出队清理里面的引用。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q7-10 / Q7-11　监听者抛异常？UI 销毁后还会收到吗？</div>
+    <p><b>L2</b>　抛异常影响三层：同一事件排在后面的监听者收不到，因为多播委托遇到异常就中断；这一帧剩下的事件都没派发，因为异常逃出了 Update；剩下的事件要晚两帧，还排在新事件后面——我把逻辑移植出来测过。TimerSystem 每个回调都有 try/catch，EventSystem 没有，这是我要统一的。</p>
+    <p><b>L3</b>　UI 销毁后还可能收到一次：闭包在 Trigger 时抓住了当时的委托，之后 OnDisable 里注销不影响已经入队的任务。同一帧“先发事件、后关 UI”就会调用到已销毁的组件，访问 TMP 文本抛 MissingReferenceException，再叠加上面的异常问题。修法是派发时再查字典，或者订阅绑定 owner、owner 销毁自动失效——UE 的动态委托对 UObject 就是这么做的。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q7-14　联网游戏里事件系统和 RPC / 属性复制是什么关系？（发散）</div>
+    <p><b>L2</b>　本地事件系统只在一个进程里传递。联网后，“分数变了”这类状态应该走属性复制：服务器改 GameState / PlayerState 的属性，客户端收到后在 OnRep 回调里发一个本地事件给 UI——事件系统变成了“复制属性 → 本地表现”的最后一环。“播放一个特效”这类一次性的表现走不可靠多播 RPC。不要把本地事件直接透传成网络消息：网络消息需要权威校验、序列化、带宽控制，本地事件系统不负责这些。</p>
+  </div>
+
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“双缓冲保证了事件的执行顺序和触发顺序完全一致。”</p>
+    <p><b>问题</b>：只在同一批次、同一优先级内成立；跨优先级 Logic 先于 Appearance；回调里触发的进入下一帧；异常后剩余事件会被排到新事件之后（E7-d）。</p>
+    <p><b>更好的回答</b>：“同一批次内先按优先级、再按触发顺序；连锁事件逐帧展开；异常会打乱顺序，这是当前实现缺 try/catch 导致的。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“用了 RingBuffer，所以事件系统是零 GC 的。”</p>
+    <p><b>问题</b>：RingBuffer 只是不扩容；队列里存的是闭包委托，每次 Trigger 都要新建闭包和委托，事件对象本身也是 class。</p>
+  </div>
+
+  <h2>7.14 发散：面试官会从这里追到的知识</h2>
+  <div class="cards">
+    <div class="card"><div class="t">消息队列与背压</div><p>生产速度大于消费速度时，要么阻塞生产者（有界阻塞队列）、要么丢、要么扩容。Kafka、TCP 滑动窗口、音频缓冲区都是同一个问题的不同答案。游戏主线程不能阻塞，所以只剩“丢”和“扩容”。</p></div>
+    <div class="card"><div class="t">C# 委托的实现</div><p>委托是对象：目标 + 方法指针；多播委托内部持有调用列表数组，Combine/Remove 返回新对象（不可变），所以在多线程下读取是安全的。<code>event</code> 关键字只是限制外部只能 += / -=。</p></div>
+    <div class="card"><div class="t">C++ 里的对应物</div><p><code>std::function</code> 有小对象优化，捕获少时不分配；信号槽（Qt、boost.signals2）解决的也是“槽被销毁后不要再调用”——用连接对象 / 弱引用追踪生命周期。</p></div>
+    <div class="card"><div class="t">命令模式与回放</div><p>如果把输入也做成事件并记录帧号，延迟派发的事件流就是一份可回放的录像；帧同步游戏的“输入即事件”就是这个思路。前提是派发顺序完全确定。</p></div>
+    <div class="card"><div class="t">UI 架构</div><p>事件推送是 MVC/MVP 里 Model → View 的通知；MVVM 用可观察属性和数据绑定代替手写事件。分数这类状态，绑定比事件更不容易出错（不会丢、不会重复）。</p></div>
+    <div class="card"><div class="t">操作系统的消息循环</div><p>Win32 的 GetMessage/DispatchMessage、PostMessage（异步入队）vs SendMessage（同步调用），就是延迟派发 vs 立即派发；Unity 自己的 PlayerLoop 也是一个大的消息循环。</p></div>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>结构：<strong>Dictionary&lt;Type, Delegate&gt;</strong> + 按优先级的 <strong>front/back 两组 RingBuffer&lt;Action&gt;（每级 2000）</strong>；Trigger 写 back，Update 交换后清空 front。</li>
+    <li>双缓冲让回调里发的事件进入下一帧：<strong>不递归、不重入</strong>（E7-a 深度恒为 1）；代价是<strong>延迟 0～1 帧起步、每级连锁 +1 帧</strong>（G2）、栈断开、读到派发时的状态。</li>
+    <li>Priority：同批次内 Logic 先于 Appearance；<strong>每帧清空所以不饿死，但也无法限流</strong>；Max 级多分配一组空队列（G3）。</li>
+    <li>四个隐藏行为：<strong>按运行时类型查找导致基类 Trigger 丢失</strong>、<strong>快照语义</strong>（E7-c）、<strong>多播异常中断 + 整帧中断 + 晚 2 帧乱序</strong>（G1/E7-d）、<strong>事件对象被延迟读取</strong>。</li>
+    <li>溢出：<strong>静默丢弃</strong>（E7-b）；按语义选 合并 / 扩容 / 丢最老 / 断言，并加统计。</li>
+    <li>GC：事件对象 + 闭包（<strong>无监听者也分配</strong>）+ 委托；低 GC 方向是按类型的泛型队列 / struct 事件 / 状态合并。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：第 N 帧依次 Trigger 了 Appearance 事件 X、Logic 事件 Y，Y 的回调里 Trigger 了 Logic 事件 Z。按派发顺序写出 X、Y、Z 在哪一帧、谁先谁后（假设 EventSystem 在 World 之后 Update）。</summary><p>第 N 帧：Y（Logic 级先）→ X（Appearance 级）；Z 在 Y 的回调里进入 back，第 N+1 帧派发。即 N: Y, X；N+1: Z。</p></details>
+  <details class="quiz"><summary>自测 2：为什么 UnRegister 之后，监听者在下一帧仍可能被调用一次？怎么改？</summary><p>Trigger 时闭包捕获了当时的多播委托对象；委托不可变，UnRegister 生成新对象，不影响队列里的旧快照。改法：闭包只捕获事件，派发时再从字典取最新委托；或订阅返回 token / 绑定 owner，派发前检查是否仍有效。</p></details>
+  <details class="quiz"><summary>自测 3：想把 ScoreChangedEventArgs 做成复用的单个对象来省 GC，会出什么问题？</summary><p>延迟派发时闭包持有的是同一个对象引用，同一帧多次 Trigger 到下一帧派发时都会读到最后一次写入的值，前几次加分的通知全部变成同一个数。复用事件对象必须配合立即派发，或者事件改成 struct 按值入队。</p></details>
+</section>

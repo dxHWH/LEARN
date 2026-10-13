@@ -1,0 +1,147 @@
+<section class="chapter" id="b2">
+  <div class="ch-head">
+    <div class="no">BASICS · B2</div>
+    <h1>位置、旋转、缩放与坐标空间</h1>
+    <p class="lead">“这根骨头在哪”这个问题，答案取决于“相对谁”。弄清变换和空间，FK、蒙皮矩阵、IK 都只是同一件事的不同用法。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>知道一个变换（Transform）由哪三部分组成，作用到点上的先后顺序</li>
+    <li>分清局部空间、组件空间、世界空间，会用“手在哪”的例子解释</li>
+    <li>手算一遍两节手臂的 FK，理解“父子级联”</li>
+    <li>知道矩阵是什么、乘法顺序为什么有两种约定，UE 里 FTransform 和 FQuat 的顺序为什么相反</li>
+    <li>用一个数值例子讲清“参考姿势的逆”在蒙皮里做了什么</li>
+  </ul></div>
+
+  <h2>B2.1 一个变换 = 缩放 + 旋转 + 平移</h2>
+  <p>描述一根骨头“怎么摆”，需要回答三个问题：<strong>多大</strong>（缩放 Scale）、<strong>朝哪</strong>（旋转 Rotation）、<strong>在哪</strong>（平移 Translation）。合起来常简称 <strong>TRS</strong>。UE 的 <code>FTransform</code> 就是这三样：<code>FVector Scale3D</code>、<code>FQuat Rotation</code>、<code>FVector Translation</code>。</p>
+  <p>把变换作用到一个点上，顺序是<strong>先缩放、再旋转、最后平移</strong>（<code>FTransform::TransformPosition</code>）。顺序不能随便换：</p>
+  <div class="tbl"><table>
+    <tr><th>点 (1, 0, 0)</th><th>第一步</th><th>第二步</th><th>结果</th></tr>
+    <tr><td>先绕 Z 转 90°，再平移 (10, 0, 0)</td><td>转完：(0, 1, 0)</td><td>平移：(10, 1, 0)</td><td><strong>(10, 1, 0)</strong></td></tr>
+    <tr><td>先平移 (10, 0, 0)，再绕 Z 转 90°</td><td>平移完：(11, 0, 0)</td><td>转完：(0, 11, 0)</td><td><strong>(0, 11, 0)</strong></td></tr>
+  </table></div>
+  <p>直观理解：先平移再旋转，旋转是绕<strong>原点</strong>转的，点已经被推远了，于是转出一个大圈。骨骼的变换总是“先在自己的位置上转好，再放到该放的地方”，所以是先旋转后平移。</p>
+
+  <h2>B2.2 坐标空间：同一只手，三种说法</h2>
+  <p>问“你的右手在哪？”，可以有三种回答，都对，只是参照物不同：</p>
+  <figure>
+  <svg viewBox="0 0 860 270" xmlns="http://www.w3.org/2000/svg">
+    <g stroke="#EEF0F3"><line x1="40" y1="60" x2="40" y2="250"/><line x1="120" y1="60" x2="120" y2="250"/><line x1="200" y1="60" x2="200" y2="250"/><line x1="280" y1="60" x2="280" y2="250"/><line x1="360" y1="60" x2="360" y2="250"/><line x1="440" y1="60" x2="440" y2="250"/><line x1="520" y1="60" x2="520" y2="250"/>
+      <line x1="40" y1="250" x2="520" y2="250"/><line x1="40" y1="170" x2="520" y2="170"/><line x1="40" y1="90" x2="520" y2="90"/></g>
+    <line x1="40" y1="250" x2="100" y2="250" stroke="#B91C1C" stroke-width="2.4" marker-end="url(#ar)"/><line x1="40" y1="250" x2="40" y2="190" stroke="#15803D" stroke-width="2.4" marker-end="url(#ag)"/>
+    <text x="46" y="266" class="xs b" style="fill:#B91C1C">世界原点</text>
+    <ellipse cx="300" cy="205" rx="34" ry="22" fill="#FEF6E4" stroke="#B45309"/>
+    <g transform="translate(300,205) rotate(-25)"><line x1="0" y1="0" x2="48" y2="0" stroke="#B91C1C" stroke-width="2" marker-end="url(#ar)"/><line x1="0" y1="0" x2="0" y2="-48" stroke="#15803D" stroke-width="2" marker-end="url(#ag)"/></g>
+    <text x="300" y="244" text-anchor="middle" class="xs b" style="fill:#B45309">角色根（组件原点）</text>
+    <g stroke="#111827" stroke-width="4" stroke-linecap="round"><line x1="330" y1="150" x2="392" y2="118"/><line x1="392" y1="118" x2="452" y2="72"/></g>
+    <g fill="#111827"><circle cx="330" cy="150" r="5"/><circle cx="392" cy="118" r="5"/></g>
+    <circle cx="452" cy="72" r="7" fill="#C2410C"/><text x="462" y="68" class="sm b" style="fill:#C2410C">右手</text>
+    <text x="318" y="140" text-anchor="end" class="xs">肩</text><text x="398" y="136" class="xs">肘</text>
+    <path d="M392,118 Q440,110 450,80" fill="none" stroke="#6D28D9" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#ap)"/>
+    <path d="M300,205 Q400,170 448,80" fill="none" stroke="#B45309" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#a)"/>
+    <path d="M40,250 Q240,120 444,74" fill="none" stroke="#B91C1C" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+    <g class="sm">
+      <text x="560" y="40" class="b">三种说法，都在描述同一只手</text>
+      <rect x="560" y="56" width="290" height="56" rx="8" fill="#F3EEFE" stroke="#6D28D9"/>
+      <text x="572" y="78" class="b" style="fill:#6D28D9">局部空间（相对父骨骼）</text><text x="572" y="98" class="xs">“在前臂末端，沿前臂方向 28 cm”</text>
+      <rect x="560" y="122" width="290" height="56" rx="8" fill="#FEF6E4" stroke="#B45309"/>
+      <text x="572" y="144" class="b" style="fill:#B45309">组件空间（相对角色根）</text><text x="572" y="164" class="xs">“在角色前方 40、右侧 25、离地 120 cm”</text>
+      <rect x="560" y="188" width="290" height="56" rx="8" fill="#FDEEEE" stroke="#B91C1C"/>
+      <text x="572" y="210" class="b" style="fill:#B91C1C">世界空间（相对地图原点）</text><text x="572" y="230" class="xs">“在地图坐标 (12040, −335, 220)”</text>
+    </g>
+  </svg>
+  <figcaption><b>图 B2-1</b>　三种坐标空间（俯视示意，数字为举例）。动画数据存的是局部空间；角色整体移动或转身时，局部空间和组件空间的数都不变，只有世界空间的数在变</figcaption>
+  </figure>
+  <div class="tbl"><table>
+    <tr><th>空间</th><th>参照物</th><th>为什么需要它</th></tr>
+    <tr><td><strong>局部空间</strong>（Local / Bone Space）</td><td>父骨骼</td><td>动画数据存这个：同一条“挥手”动画，角色站哪都能用；混合大多在这里做</td></tr>
+    <tr><td><strong>组件空间</strong>（Component / Mesh Space）</td><td>角色自己的原点（SkeletalMeshComponent）</td><td>“手离地多高”“头朝哪”这类问题要在这里回答：IK、瞄准、蒙皮矩阵</td></tr>
+    <tr><td><strong>世界空间</strong>（World Space）</td><td>整个关卡的原点</td><td>和别的物体打交道：武器挂点、射线检测、脚下的地面高度</td></tr>
+  </table></div>
+
+  <h2>B2.3 父子级联：FK 手算一遍</h2>
+  <p>两节手臂：肩膀转 30°，上臂长 30；肘部在此基础上再转 45°，前臂长 28。手在哪？（二维、单位 cm，数字来自实测 E11(g)）</p>
+  <figure>
+  <svg viewBox="0 0 860 280" xmlns="http://www.w3.org/2000/svg">
+    <line x1="110" y1="250" x2="330" y2="250" stroke="#9CA3AF" stroke-dasharray="4 3"/><text x="334" y="254" class="xs">x</text>
+    <line x1="110" y1="250" x2="110" y2="40" stroke="#9CA3AF" stroke-dasharray="4 3"/><text x="104" y="36" class="xs">y</text>
+    <line x1="213.9" y1="190" x2="257.2" y2="165" stroke="#9CA3AF" stroke-dasharray="3 3"/>
+    <path d="M150,250 A40,40 0 0,0 144.6,230" fill="none" stroke="#2F5BD3" stroke-width="1.8"/><text x="156" y="242" class="sm b" style="fill:#2F5BD3">30°</text>
+    <path d="M239.9,175 A30,30 0 0,0 221.7,161" fill="none" stroke="#C2410C" stroke-width="1.8"/><text x="242" y="160" class="sm b" style="fill:#C2410C">+45°</text>
+    <g stroke-linecap="round"><line x1="110" y1="250" x2="213.9" y2="190" stroke="#2F5BD3" stroke-width="6"/><line x1="213.9" y1="190" x2="242.9" y2="81.8" stroke="#C2410C" stroke-width="6"/></g>
+    <circle cx="110" cy="250" r="6" fill="#111827"/><circle cx="213.9" cy="190" r="6" fill="#111827"/><circle cx="242.9" cy="81.8" r="7" fill="#15803D"/>
+    <text x="96" y="268" class="xs">肩 (0, 0)</text><text x="168" y="214" class="xs">上臂 30</text><text x="196" y="132" class="xs">前臂 28</text>
+    <text x="222" y="205" class="xs b">肘 (25.98, 15.00)</text><text x="254" y="80" class="xs b" style="fill:#15803D">手 (33.23, 42.05)</text>
+    <g class="sm">
+      <text x="420" y="40" class="b">一层一层往下算（先父后子）</text>
+      <text x="420" y="70">① 肩：位置 (0, 0)，朝向 30°</text>
+      <text x="420" y="96">② 肘 = 肩的位置 + 沿“肩的朝向”走 30</text>
+      <text x="440" y="118" class="mono">= (30·cos30°, 30·sin30°) = (25.98, 15.00)</text>
+      <text x="420" y="144">　 肘的朝向 = 肩的朝向 + 自己的 45° = 75°</text>
+      <text x="420" y="170">③ 手 = 肘的位置 + 沿“肘的朝向”走 28</text>
+      <text x="440" y="192" class="mono">= (25.98 + 28·cos75°, 15 + 28·sin75°)</text>
+      <text x="440" y="212" class="mono">= (33.23, 42.05)</text>
+      <text x="420" y="242" class="xs">角度一路累加、位置一路累加 —— 这就是 comp[i] = local[i] × comp[parent]</text>
+      <text x="420" y="260" class="xs">只改肩膀的 30°，肘和手会自动跟着动，但它们自己的局部数据不变</text>
+    </g>
+  </svg>
+  <figcaption><b>图 B2-2</b>　FK（正向运动学）的手算：每根骨头的局部数据只说“相对父亲转了多少、离父亲多远”，组件空间的结果要从根往下一层层累积出来</figcaption>
+  </figure>
+  <p>三维里道理一样，只是“角度相加”变成了“旋转相乘”（三维旋转不能简单地把角度加起来，B3 会讲为什么），“沿朝向走 L”变成了“用父亲的旋转转一下自己的偏移，再加上父亲的位置”。这正是第 1 章那一行代码：</p>
+<!--code:cpp:FK 的一行核心（UE 的 FTransform 乘法：A * B = 先 A 后 B）-->
+for (int32 i = 1; i < NumBones; ++i)
+    ComponentSpace[i] = LocalSpace[i] * ComponentSpace[Parent[i]];
+// 展开看：位置 = 父旋转(父缩放 × 自己的局部位置) + 父位置；旋转 = 父旋转 · 自己的局部旋转
+<!--/code-->
+
+  <h2>B2.4 矩阵是什么，乘法顺序为什么有两种写法</h2>
+  <p><strong>矩阵</strong>就是一张数字表。一个 4×4 矩阵能把“缩放 + 旋转 + 平移”打包在一起，拿一个点去乘它，三件事一次做完；两个矩阵相乘，就是把两次变换<strong>合成一次</strong>。GPU 喜欢矩阵，因为“乘一个矩阵”是它最擅长的运算。</p>
+  <p>麻烦在于<strong>写法约定</strong>：同样是“先做 A 再做 B”，</p>
+  <div class="tbl"><table>
+    <tr><th>约定</th><th>“先 A 后 B”写作</th><th>谁在用</th></tr>
+    <tr><td>行向量（点写在左边：v · M）</td><td><code>A * B</code></td><td>UE 的 <code>FMatrix</code>、<code>FTransform</code>，DirectX 传统写法</td></tr>
+    <tr><td>列向量（点写在右边：M · v）</td><td><code>B · A</code></td><td>大多数数学课本、OpenGL / GLM、本书 demo 里的 3×3 矩阵</td></tr>
+    <tr><td><strong>UE 的 <code>FQuat</code></strong></td><td><code>B * A</code></td><td>四元数按数学惯例，<strong>和 FTransform 正好相反</strong>（B3.7）</td></tr>
+  </table></div>
+  <div class="co warn"><span class="h">面试注意：手写变换公式前，先说约定</span>
+    <p>“蒙皮矩阵是 InvBind × Current 还是 Current × InvBind？”两种写法在各自的约定下都对。面试时先说一句“按 UE 的 FTransform 约定，A*B 表示先 A 后 B”，再写公式，就不会被追问绕晕。最常见的翻车是在 UE 里混用 <code>FTransform</code> 和 <code>FQuat</code> 的乘法：前者先左后右，后者先右后左。</p>
+  </div>
+
+  <h2>B2.5 逆变换，以及“参考姿势的逆”在做什么</h2>
+  <p><strong>逆变换</strong>就是“撤销”：一个变换把点从 A 处搬到 B 处，它的逆就把点从 B 搬回 A。最常见的两个用法：</p>
+  <ul>
+    <li><strong>组件空间 → 局部空间</strong>：IK 改完了手在组件空间的位置，要转回“相对前臂”的局部数据，就乘一次父骨骼组件变换的逆。</li>
+    <li><strong>蒙皮里的“参考姿势的逆”</strong>（也叫逆绑定矩阵）：见下图。</li>
+  </ul>
+  <figure>
+  <svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg">
+    <g class="sm b" text-anchor="middle"><text x="145" y="24">① 绑定时（T-Pose）</text><text x="430" y="24">② 乘“参考姿势的逆”</text><text x="715" y="24">③ 乘“当前骨头的变换”</text></g>
+    <line x1="30" y1="140" x2="280" y2="140" stroke="#9CA3AF"/><text x="30" y="158" class="xs">0</text><text x="230" y="158" text-anchor="middle" class="xs">50</text><text x="252" y="158" text-anchor="middle" class="xs">55</text>
+    <line x1="230" y1="140" x2="244" y2="140" stroke="#2F5BD3" stroke-width="6" stroke-linecap="round"/><circle cx="230" cy="140" r="5" fill="#2F5BD3"/>
+    <circle cx="252" cy="140" r="6" fill="#C2410C"/><text x="222" y="122" text-anchor="middle" class="xs b" style="fill:#2F5BD3">手骨</text><text x="258" y="122" class="xs b" style="fill:#C2410C">顶点</text>
+    <text x="145" y="206" text-anchor="middle" class="xs">模型文件里：手骨在 x=50，顶点在 x=55</text><text x="145" y="222" text-anchor="middle" class="xs">（都是组件空间的绝对位置）</text>
+    <rect x="300" y="60" width="260" height="150" rx="10" fill="#FBFBFD" stroke="#E5E7EB"/>
+    <line x1="380" y1="140" x2="396" y2="140" stroke="#2F5BD3" stroke-width="6" stroke-linecap="round"/><circle cx="380" cy="140" r="5" fill="#2F5BD3"/>
+    <circle cx="410" cy="140" r="6" fill="#C2410C"/><text x="410" y="122" text-anchor="middle" class="xs b" style="fill:#C2410C">(+5, 0)</text>
+    <text x="380" y="164" text-anchor="middle" class="xs" style="fill:#2F5BD3">手骨自己的原点</text>
+    <text x="430" y="196" text-anchor="middle" class="xs">“这个顶点在手骨前方 5”</text><text x="430" y="232" text-anchor="middle" class="xs">55 − 50 = +5（只在加载时算一次）</text>
+    <line x1="600" y1="210" x2="840" y2="210" stroke="#9CA3AF"/><line x1="600" y1="210" x2="600" y2="40" stroke="#9CA3AF"/><text x="596" y="226" class="xs">0</text>
+    <line x1="810" y1="150" x2="810" y2="134" stroke="#2F5BD3" stroke-width="6" stroke-linecap="round"/><circle cx="810" cy="150" r="5" fill="#2F5BD3"/>
+    <circle cx="810" cy="120" r="6" fill="#C2410C"/><text x="820" y="124" class="xs b" style="fill:#C2410C">(70, 25)</text>
+    <text x="802" y="166" text-anchor="end" class="xs" style="fill:#2F5BD3">手骨现在在 (70, 20)，转了 90°</text>
+    <text x="715" y="238" text-anchor="middle" class="xs">(70, 20) + 把 (+5, 0) 转 90° 得到的 (0, +5) = (70, 25)</text>
+  </svg>
+  <figcaption><b>图 B2-3</b>　蒙皮的两步（示意，偏移量画得比坐标轴比例大）：先用“参考姿势的逆”算出顶点相对骨头在哪（②），再按骨头当前的摆法放回去（③）。骨头不动时两步互相抵消，模型保持绑定时的样子</figcaption>
+  </figure>
+  <p>把②③合成一个矩阵，就是第 1 章的<strong>蒙皮矩阵</strong>：<code>SkinMatrix = InvRefPose × CurrentComponent</code>（UE 约定，先逆绑定再当前）。CPU 每帧为每根骨头算一个，上传给显卡；显卡对每个顶点按权重把几根骨头的结果加起来（B1-1 里肘部 0.5/0.5 的顶点就是两个结果各取一半）。</p>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>变换 = 缩放 + 旋转 + 平移；作用到点上：<strong>先缩放、再旋转、后平移</strong>，顺序换了结果就变。</li>
+    <li>局部 = 相对父骨骼（动画存这个）；组件 = 相对角色根（IK、蒙皮）；世界 = 相对地图（挂件、射线）。</li>
+    <li>FK：从根往下逐层累积；手算例子：肩 30°、肘 +45° → 手在 (33.23, 42.05)。</li>
+    <li>矩阵 = 打包的变换，相乘 = 合成；<strong>UE：FTransform 的 A*B 先 A 后 B，FQuat 的 A*B 先 B 后 A</strong>。</li>
+    <li>逆 = 撤销；参考姿势的逆把顶点变成“相对骨头的位置”，再乘当前变换放回去 = 蒙皮矩阵。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：角色整体向前跑了 10 米，局部空间、组件空间、世界空间里手的坐标分别变不变？</summary><p>局部空间和组件空间都不变（相对父骨骼、相对角色根都没变），只有世界空间的坐标变了。这也是为什么动画数据存局部空间、蒙皮在组件空间做：角色在世界里怎么移动都不影响动画计算，最后乘一个“组件到世界”的变换就行。</p></details>
+  <details class="quiz"><summary>自测：为什么不直接用顶点的绝对坐标乘以骨头的当前变换，还要先乘参考姿势的逆？</summary><p>因为骨头的当前变换描述的是“骨头从它的原点出发怎么摆”，它只能正确地搬动“相对骨头”的坐标。顶点的绝对坐标是相对模型原点的，直接乘会把顶点绕模型原点转、再额外平移一次，模型会被甩飞。先乘参考姿势的逆，把顶点换成相对骨头的坐标，再乘当前变换，才是“粘在骨头上一起动”。</p></details>
+</section>

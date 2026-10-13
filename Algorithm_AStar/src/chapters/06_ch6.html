@@ -1,0 +1,245 @@
+<section class="chapter" id="ch6">
+  <div class="ch-head">
+    <div class="no">CHAPTER 06</div>
+    <h1>加速与平滑：JPS、分层寻路、双向搜索、拉绳</h1>
+    <p class="lead">A* 已经是最优效率的，想更快只能改变图本身：剪掉对称的路径，把图变小，或者预先算好一部分。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>理解 JPS 的“对称路径剪枝”思想、跳跃规则和适用条件</li>
+    <li>说清 HPA* 的预处理、抽象图搜索、细化三步，以及它的取舍</li>
+    <li>知道双向 A*、ALT 的思路和坑</li>
+    <li>会用拉绳（视线检测）把锯齿形的格子路径变平滑</li>
+  </ul></div>
+
+  <h2>6.1 JPS：跳过对称路径</h2>
+  <p>开阔的格子地图上，两点之间有大量代价相同的路径，比如“先右后下”和“先下后右”。A* 会把这些等价路径上的节点都放进 open。<strong>JPS（Jump Point Search，Harabor &amp; Grastien，2011）</strong>的观察是：沿着一个方向走时，大多数邻居经过当前格到达并不比绕别的路更好，可以直接剪掉。于是它沿直线或对角线一路“跳”过去，只在必须拐弯的地方（跳点）停下来、放进 open。</p>
+  <figure>
+  <svg viewBox="0 0 860 260" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(60,36)">
+      <g fill="#F3F4F6" stroke="#E5E7EB"><rect x="0" y="0" width="44" height="44"/><rect x="44" y="0" width="44" height="44"/><rect x="88" y="0" width="44" height="44"/><rect x="0" y="88" width="44" height="44"/><rect x="44" y="88" width="44" height="44"/><rect x="88" y="88" width="44" height="44"/></g>
+      <rect x="0" y="44" width="44" height="44" fill="#DBEAFE" stroke="#2F5BD3"/><rect x="44" y="44" width="44" height="44" fill="#FEF3C7" stroke="#B45309" stroke-width="2"/><rect x="88" y="44" width="44" height="44" fill="#DCFCE7" stroke="#15803D" stroke-width="2"/>
+      <text x="22" y="71" text-anchor="middle" class="b">P</text><text x="66" y="71" text-anchor="middle" class="b">X</text>
+      <line x1="30" y1="66" x2="56" y2="66" stroke="#2F5BD3" stroke-width="2" marker-end="url(#ab)"/>
+      <line x1="76" y1="66" x2="104" y2="66" stroke="#15803D" stroke-width="2" marker-end="url(#ag)"/>
+      <g class="xs" text-anchor="middle" style="fill:#9CA3AF"><text x="22" y="26">剪</text><text x="66" y="26">剪</text><text x="110" y="26">剪</text><text x="22" y="114">剪</text><text x="66" y="114">剪</text><text x="110" y="114">剪</text></g>
+      <text x="66" y="158" text-anchor="middle" class="sm b">① 直线走：只保留正前方</text>
+      <text x="66" y="176" text-anchor="middle" class="xs">其余邻居从 P 出发不经过 X</text>
+      <text x="66" y="192" text-anchor="middle" class="xs">也能同样好地到达</text>
+    </g>
+    <g transform="translate(360,36)">
+      <rect x="0" y="0" width="44" height="44" fill="#4B5563"/><rect x="44" y="0" width="44" height="44" fill="#DCFCE7" stroke="#B91C1C" stroke-width="2.4"/><rect x="88" y="0" width="44" height="44" fill="#F3F4F6" stroke="#E5E7EB"/>
+      <rect x="0" y="44" width="44" height="44" fill="#DBEAFE" stroke="#2F5BD3"/><rect x="44" y="44" width="44" height="44" fill="#FEF3C7" stroke="#B45309" stroke-width="2"/><rect x="88" y="44" width="44" height="44" fill="#DCFCE7" stroke="#15803D" stroke-width="2"/>
+      <g fill="#F3F4F6" stroke="#E5E7EB"><rect x="0" y="88" width="44" height="44"/><rect x="44" y="88" width="44" height="44"/><rect x="88" y="88" width="44" height="44"/></g>
+      <text x="22" y="71" text-anchor="middle" class="b">P</text><text x="66" y="71" text-anchor="middle" class="b">X</text>
+      <line x1="30" y1="66" x2="56" y2="66" stroke="#2F5BD3" stroke-width="2" marker-end="url(#ab)"/>
+      <line x1="66" y1="56" x2="66" y2="30" stroke="#B91C1C" stroke-width="2" marker-end="url(#ar)"/>
+      <text x="66" y="26" text-anchor="middle" class="xs b" style="fill:#B91C1C">强制</text>
+      <text x="66" y="158" text-anchor="middle" class="sm b">② 强制邻居：X 是跳点</text>
+      <text x="66" y="176" text-anchor="middle" class="xs">P 上方是墙，P 无法斜走到 X 上方</text>
+      <text x="66" y="192" text-anchor="middle" class="xs">（禁止切角），只能经过 X → 必须停下</text>
+    </g>
+    <g transform="translate(640,36)">
+      <g fill="#F3F4F6" stroke="#E5E7EB"><rect x="0" y="0" width="44" height="44"/><rect x="0" y="44" width="44" height="44"/><rect x="88" y="88" width="44" height="44"/><rect x="44" y="88" width="44" height="44"/></g>
+      <rect x="0" y="88" width="44" height="44" fill="#DBEAFE" stroke="#2F5BD3"/><rect x="44" y="44" width="44" height="44" fill="#FEF3C7" stroke="#B45309" stroke-width="2"/>
+      <rect x="88" y="44" width="44" height="44" fill="#EDE9FE" stroke="#6D28D9"/><rect x="44" y="0" width="44" height="44" fill="#EDE9FE" stroke="#6D28D9"/><rect x="88" y="0" width="44" height="44" fill="#DCFCE7" stroke="#15803D" stroke-width="2"/>
+      <text x="22" y="115" text-anchor="middle" class="b">P</text><text x="66" y="71" text-anchor="middle" class="b">X</text>
+      <line x1="30" y1="102" x2="54" y2="78" stroke="#2F5BD3" stroke-width="2" marker-end="url(#ab)"/>
+      <line x1="78" y1="66" x2="128" y2="66" stroke="#6D28D9" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#ap)"/>
+      <line x1="66" y1="56" x2="66" y2="6" stroke="#6D28D9" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#ap)"/>
+      <line x1="76" y1="56" x2="102" y2="30" stroke="#15803D" stroke-width="2" marker-end="url(#ag)"/>
+      <text x="66" y="158" text-anchor="middle" class="sm b">③ 斜着走：先做两次直线扫描</text>
+      <text x="66" y="176" text-anchor="middle" class="xs">向右、向上各扫一条直线，任一条</text>
+      <text x="66" y="192" text-anchor="middle" class="xs">找到跳点，X 就是跳点；否则再斜走一步</text>
+    </g>
+    <text x="430" y="250" text-anchor="middle" class="sm">停下的条件只有三种：到达终点、出现强制邻居、斜向扫描时直线方向发现了跳点；其余格子不入堆</text>
+  </svg>
+  <figcaption><b>图 6-1</b>　JPS 的三条规则（本书实现的是“禁止切角”的版本，和第 1 章的移动规则一致）</figcaption>
+  </figure>
+  <!--grid {"map":[
+    "....................",
+    "....................",
+    "..S.......#.........",
+    "..........#.........",
+    "....####..#....###..",
+    "....#.....#......#..",
+    "....#.....###....#..",
+    "....#............#..",
+    ".........#####...#G.",
+    "....................",
+    "...................."],
+    "per":2,"cell":20,"nums":"","arrows":false,
+    "panels":[
+      {"algo":"astar","title":"A*：展开 {exp} 个节点，代价 {cost}"},
+      {"algo":"jps","title":"JPS：展开 {exp} 个跳点，代价 {cost}"}],
+    "cap":"<b>图 6-2</b>　同一张图：A* 展开 104 个节点，JPS 只展开 23 个跳点，路径代价相同（216）。JPS 面板里蓝色格子是被展开的跳点，橙色折线连接的是路径上的跳点"} -->
+
+  <h3>伪代码</h3>
+<!--code:text:JPS · 伪代码-->
+JPS(S, G):  与 A* 相同的主循环，只是“邻居”换成“跳点”
+    cur = open 中 f 最小的节点
+    dirs = prune(cur, 从 parent 过来的方向)        // 图 6-1 的剪枝规则；起点取全部 8 个方向
+    for d in dirs:
+        jp = jump(cur, d)
+        if jp 存在: 按 A* 规则更新 g[jp] = g[cur] + octile(cur, jp)，放入 open
+
+jump(x, d):                                        // 沿方向 d 一直走
+    loop:
+        x = x + d
+        if x 是障碍: return 无
+        if x == G: return x
+        if d 是直线 且 x 有强制邻居: return x
+        if d 是斜向 且 (jump(x, d 的横向分量) 或 jump(x, d 的纵向分量) 有结果): return x
+        if d 是斜向 且 两侧直邻格不全可走: return 无     // 禁止切角
+<!--/code-->
+
+  <h3>实测 E6：JPS 什么时候快</h3>
+  <div class="tbl"><table>
+    <tr><th>地图</th><th>A* 展开</th><th>A* 耗时</th><th>JPS 跳点</th><th>JPS 扫描格子</th><th>JPS 耗时</th><th>加速比</th></tr>
+    <tr><td>开阔地</td><td>228</td><td>0.029 ms</td><td>3</td><td class="no">263620</td><td>0.444 ms</td><td class="no">0.1×（更慢）</td></tr>
+    <tr><td>随机障碍 25%</td><td>11758</td><td>1.385 ms</td><td>6285</td><td>49138</td><td>0.919 ms</td><td>1.5×</td></tr>
+    <tr><td>迷宫</td><td>79476</td><td>3.476 ms</td><td>23927</td><td>85316</td><td>1.325 ms</td><td>2.6×</td></tr>
+    <tr><td>房间</td><td>7822</td><td>0.953 ms</td><td>564</td><td>64090</td><td>0.214 ms</td><td class="yes">4.5×</td></tr>
+    <tr><td>U 型陷阱（E1）</td><td>52359</td><td>3.934 ms</td><td>7</td><td>—</td><td>0.524 ms</td><td class="yes">7.5×</td></tr>
+  </table></div>
+  <ul>
+    <li><strong>JPS 不是总能加速</strong>。开阔地上 A* 配合正确的平局决胜只展开 228 个节点，几乎是完美的；而 JPS 每次斜向一步都要向两个方向做直线扫描，扫描线会一直延伸到地图边缘，最后扫了 26 万格，反而慢了 15 倍。</li>
+    <li><strong>JPS 最擅长的是“大片开阔区域 + 若干障碍”</strong>：房间、U 型陷阱这类地图，A* 要把陷阱里的对称路径全部入堆，JPS 只扫描不入堆，堆操作少了一两个数量级。</li>
+    <li><strong>JPS 保证最短</strong>（E6 中 100% 最优），因为它剪掉的只是对称的等价路径。</li>
+  </ul>
+  <div class="co warn"><span class="h">面试注意：JPS 的适用条件</span>
+    <ul>
+      <li><strong>只适用于均匀代价的格子图</strong>：剪枝依赖“所有可走格代价相同”。有地形权重（沼泽、道路）就不能直接用。</li>
+      <li><strong>不适用于导航网格、路点图</strong>：那些图没有“直线方向”的概念。</li>
+      <li><strong>JPS+</strong>（Steve Rabin）预先计算每个格子在 8 个方向上到最近跳点或墙的距离，把扫描变成查表，通常比 JPS 快一个数量级以上；代价是地图一变就要重算受影响的行列，适合静态地图。</li>
+    </ul>
+  </div>
+
+  <h2>6.2 HPA*：把大图变小</h2>
+  <p>A* 的代价和图的规模直接相关。<strong>HPA*（Hierarchical Pathfinding A*，Botea 等，2004）</strong>把地图切成若干簇（cluster），只在簇的边界上选出“入口”节点，预先算好同一个簇内入口之间的距离，形成一张小得多的抽象图：</p>
+  <figure>
+  <svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg">
+    <g stroke="#9CA3AF" stroke-width="1" fill="#FFFFFF">
+      <rect x="40" y="40" width="360" height="180"/>
+    </g>
+    <g stroke="#111827" stroke-width="2.2">
+      <line x1="130" y1="40" x2="130" y2="220"/><line x1="220" y1="40" x2="220" y2="220"/><line x1="310" y1="40" x2="310" y2="220"/><line x1="40" y1="130" x2="400" y2="130"/>
+    </g>
+    <g fill="#4B5563">
+      <rect x="150" y="60" width="18" height="50"/><rect x="60" y="160" width="50" height="16"/><rect x="240" y="150" width="16" height="50"/><rect x="330" y="60" width="40" height="16"/>
+      <rect x="130" y="40" width="0" height="0"/>
+    </g>
+    <g stroke="#9CA3AF" stroke-width="1.3" stroke-dasharray="4 3">
+      <line x1="130" y1="85" x2="85" y2="130"/>
+      <line x1="130" y1="85" x2="220" y2="85"/><line x1="130" y1="85" x2="175" y2="130"/><line x1="220" y1="85" x2="175" y2="130"/>
+      <line x1="220" y1="85" x2="265" y2="130"/><line x1="220" y1="85" x2="310" y2="85"/><line x1="265" y1="130" x2="310" y2="85"/>
+      <line x1="310" y1="85" x2="355" y2="130"/>
+      <line x1="85" y1="130" x2="130" y2="175"/><line x1="175" y1="130" x2="130" y2="175"/><line x1="175" y1="130" x2="220" y2="175"/><line x1="130" y1="175" x2="220" y2="175"/>
+      <line x1="265" y1="130" x2="220" y2="175"/><line x1="265" y1="130" x2="310" y2="175"/><line x1="220" y1="175" x2="310" y2="175"/><line x1="355" y1="130" x2="310" y2="175"/>
+    </g>
+    <polyline points="70,70 130,85 220,85 265,130 310,175 370,190" fill="none" stroke="#C2410C" stroke-width="3.2" stroke-linejoin="round"/>
+    <g fill="#FFF4EC" stroke="#C2410C" stroke-width="1.8">
+      <circle cx="130" cy="85" r="6"/><circle cx="220" cy="85" r="6"/><circle cx="310" cy="85" r="6"/>
+      <circle cx="130" cy="175" r="6"/><circle cx="220" cy="175" r="6"/><circle cx="310" cy="175" r="6"/>
+      <circle cx="85" cy="130" r="6"/><circle cx="175" cy="130" r="6"/><circle cx="265" cy="130" r="6"/><circle cx="355" cy="130" r="6"/>
+    </g>
+    <circle cx="70" cy="70" r="8" fill="#2F5BD3"/><circle cx="370" cy="190" r="8" fill="#B91C1C"/>
+    <text x="220" y="246" text-anchor="middle" class="sm">粗黑线：簇边界　橙点：入口节点　虚线：簇内预计算的入口间距离</text>
+    <text x="220" y="266" text-anchor="middle" class="sm">橙色折线：在抽象图上 A* 得到的入口序列</text>
+    <g class="sm">
+      <text x="440" y="56" class="b">① 预处理（加载地图时，一次）</text>
+      <text x="456" y="76">切簇 → 在相邻簇的公共边上选入口 → 每个簇内用 A* / Dijkstra</text>
+      <text x="456" y="94">算出入口两两之间的距离，作为抽象图的边</text>
+      <text x="440" y="124" class="b">② 查询：插入起终点</text>
+      <text x="456" y="144">把 S、G 临时连到所在簇的入口（各做一次簇内搜索）</text>
+      <text x="440" y="174" class="b">③ 抽象图上做 A*</text>
+      <text x="456" y="194">节点只有几十上百个，极快</text>
+      <text x="440" y="224" class="b">④ 细化（可以按需、分段做）</text>
+      <text x="456" y="244">相邻两个入口之间在簇内做一次小 A*，拼出完整路径；</text>
+      <text x="456" y="262">单位只需要前两段就能出发，后面边走边算</text>
+    </g>
+  </svg>
+  <figcaption><b>图 6-3</b>　HPA* 的四个步骤。可以叠加多层：簇再组成更大的簇</figcaption>
+  </figure>
+  <ul>
+    <li><strong>收益</strong>：大地图上查询快一到两个数量级；内存只多了抽象图；细化可以分段做，降低首帧延迟。</li>
+    <li><strong>代价</strong>：结果通常比最短路长几个百分点（入口位置是固定选的），所以一般最后还要做平滑；地图修改时要重算受影响的簇。</li>
+    <li>导航网格本身也是一种“分层”：多边形已经比格子粗很多。超大世界还会在 navmesh tile 之上再建一层图（比如城镇、道路网络）。</li>
+  </ul>
+
+  <h2>6.3 双向 A* 与预计算启发</h2>
+  <div class="cards">
+    <div class="card"><div class="t">双向 A*</div><p>从起点和终点同时搜索，两边相遇时停止。直觉上两个半径减半的圆面积之和只有一个大圆的一半。</p><p><strong>坑</strong>：两边第一次相遇时得到的路径<strong>不一定最短</strong>。正确的停止条件是：已找到的最好路径长度 μ ≤ 两侧 open 中最小 f 的较大者（或使用更细的双向搜索终止条件）。实现复杂，在游戏里用得不多；它更大的价值是能更快地发现“终点被困在小区域里”。</p></div>
+    <div class="card"><div class="t">ALT（地标 + 三角不等式）</div><p>预先选 k 个地标 L，用 Dijkstra 算出每个地标到所有节点的距离 d(L, ·)。查询时：</p><p style="font-family:var(--mono);font-size:13px">h(n) = max<sub>L</sub> |d(L, G) − d(L, n)|</p><p>由三角不等式，它可采纳且一致，通常比几何距离准得多，迷宫、绕路多的地图上效果明显。代价是内存 k × V。</p></div>
+    <div class="card"><div class="t">完全预计算</div><p>节点少（如路点图几百个点）时，直接用 Floyd 或 n 次 Dijkstra 算出全源最短路的“下一跳表”，查询时 O(路径长度) 查表即可。内存 O(V²)，只适合小图。</p></div>
+  </div>
+
+  <h2>6.4 路径平滑：拉绳</h2>
+  <p>格子图上 8 方向的最短路，在真实空间里并不是最短的：它只能走 0°、45°、90° 这几个角度，看起来像锯齿。<strong>拉绳（string pulling）</strong>的思路很简单：从起点出发，沿着原始路径往后找，只要还能“看见”（中间没有障碍），就跳过中间的路点；看不见了，就把上一个看得见的点作为新的拐点。</p>
+  <!--grid {"map":[
+    "......#.............#.",
+    ".S....#...#...#.......",
+    "...#.###......#..#.#..",
+    "##..#...#.....#......#",
+    ".#..#..........#.#....",
+    "#.......#..........#..",
+    "..........##..........",
+    ".#.#.......##...#..#..",
+    "....#..##....#..#.....",
+    "#......#....#....#..G.",
+    "##....#.....#..##....#"],
+    "per":2,"cell":19,"nums":"","arrows":false,
+    "panels":[
+      {"algo":"astar","title":"A* 原始路径：{turns} 个路点（含起终点），长 {len} 格","line":true},
+      {"algo":"astar","smooth":true,"title":"拉绳后：{sm} 个路点，长 {smlen} 格"}],
+    "cap":"<b>图 6-4</b>　拉绳：绿色折线只在必须拐弯的地方拐弯。视线检测和寻路使用同样的“禁止切角”规则，平滑后的路径不会擦过墙角"} -->
+<!--code:cpp:拉绳：贪心找最远可见点-->
+// los：格子级视线检测，线段经过格角时，两侧格子都必须可走（与禁止切角一致）
+std::vector<int> string_pull(const Map& m, const std::vector<int>& path) {
+    std::vector<int> out = {path[0]};
+    size_t a = 0;
+    while (a + 1 < path.size()) {
+        size_t b = a + 1;
+        while (b + 1 < path.size() && los(m, path[a], path[b + 1])) ++b;   // 能看见就继续往后
+        out.push_back(path[b]);
+        a = b;
+    }
+    return out;
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>E10：40 条路径平均</th><th>原始路点</th><th>拉绳后路点</th><th>原始长度</th><th>拉绳后长度</th><th>缩短</th><th>平滑耗时</th></tr>
+    <tr><td>开阔地</td><td>3.0</td><td>2.0</td><td>266.6</td><td>252.3</td><td>5.36%</td><td>0.033 ms</td></tr>
+    <tr><td>随机障碍 25%</td><td>103.6</td><td>63.5</td><td>282.9</td><td>272.3</td><td>3.73%</td><td>0.005 ms</td></tr>
+    <tr><td>房间</td><td>26.1</td><td>15.0</td><td>280.0</td><td>269.7</td><td>3.66%</td><td>0.007 ms</td></tr>
+  </table></div>
+  <p>平滑的耗时不到寻路的 1%（随机图上 A* 1.3 ms，平滑 0.005 ms），路径短了 4%～5%，拐点少了 40%。开阔地的平滑反而最慢，是因为直线很长，每次视线检测要走过很多格子。</p>
+  <div class="co deep"><span class="h">深入一层：Theta* 与“任意角度”寻路</span>
+    <p>拉绳是寻路之后的后处理，结果仍然受原始路径走向的约束，不一定是真实空间里的最短路。<strong>Theta*</strong>（Nash 等，2007）把视线检测放进搜索过程：更新邻居时，如果邻居能直接看见当前节点的 parent，就把邻居的 parent 设为“祖父”，g 用直线距离计算。这样搜出来的路径天然是任意角度的，代价是每次松弛都多一次视线检测。导航网格上对应的做法是第 7 章的漏斗算法。</p>
+  </div>
+
+  <h2>6.5 交互实验：A* 对比 JPS</h2>
+  <p>在“房间”和“U 型陷阱”上，JPS 只展开少数几个跳点（蓝色），浅紫色是它沿直线扫描过但没有入堆的格子；换到“空地”，扫描线铺满了半张图。</p>
+  <div class="lab cmplab" id="lab-jps" data-algos="astar:octile,jps" data-map="rooms" data-w="48" data-h="28" data-seed="4"></div><!--/lab-->
+  <p>下面是 JPS 的单步演示：每展开一个跳点，消息栏会显示剪枝后剩几个方向、每个方向扫描了多少格、是否找到新的跳点。可以和 A* 切换着看。</p>
+  <div class="lab gridlab" id="lab-jps-step" data-algo="jps" data-map="rooms" data-w="40" data-h="24" data-seed="6" data-speed="6" data-title="交互实验 · JPS 单步演示（浅紫色 = 扫描过但没有入堆的格子）"></div><!--/lab-->
+
+  <h2>6.6 加速手段汇总</h2>
+  <div class="tbl"><table>
+    <tr><th>手段</th><th>改变了什么</th><th>保证最短</th><th>需要预处理</th><th>动态障碍</th><th>适用</th></tr>
+    <tr><td>更好的 h / 平局决胜</td><td>展开顺序</td><td class="yes">✔</td><td>—</td><td class="yes">✔</td><td>所有</td></tr>
+    <tr><td>加权 A*</td><td>展开顺序</td><td class="mid">≤ w 倍</td><td>—</td><td class="yes">✔</td><td>所有</td></tr>
+    <tr><td>JPS</td><td>剪掉对称路径</td><td class="yes">✔</td><td>—</td><td class="yes">✔</td><td>均匀代价格子图</td></tr>
+    <tr><td>JPS+</td><td>扫描查表</td><td class="yes">✔</td><td>✔</td><td class="mid">局部重算</td><td>静态格子图</td></tr>
+    <tr><td>HPA*</td><td>图变小</td><td class="no">近似</td><td>✔</td><td class="mid">重算簇</td><td>大地图</td></tr>
+    <tr><td>导航网格</td><td>图变小</td><td class="mid">近似最短</td><td>✔（离线烘焙）</td><td class="mid">tile 重建</td><td>3D 游戏</td></tr>
+    <tr><td>ALT</td><td>更准的 h</td><td class="yes">✔</td><td>✔</td><td class="no">✘</td><td>绕路多的静态图</td></tr>
+    <tr><td>拉绳 / Theta*</td><td>路径形状</td><td>更接近真实最短</td><td>—</td><td class="yes">✔</td><td>格子图</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><strong>JPS</strong>：剪掉对称路径，只把跳点入堆；保证最短；只适用均匀代价格子图。房间图快 4.5 倍，开阔地反而慢（扫描铺满全图）。JPS+ 预计算跳跃距离。</li>
+    <li><strong>HPA*</strong>：切簇 → 入口 → 抽象图 A* → 分段细化；快一到两个数量级，结果近似最短。</li>
+    <li><strong>双向 A*</strong>：第一次相遇不一定最短；<strong>ALT</strong>：地标 + 三角不等式，h 更准，内存 k×V。</li>
+    <li><strong>拉绳</strong>：贪心跳到最远可见点，路点少 40%、长度短 4%，耗时不到寻路的 1%；视线检测要和切角规则一致。</li>
+  </ul></div>
+</section>
