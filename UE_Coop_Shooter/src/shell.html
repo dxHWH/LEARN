@@ -178,6 +178,47 @@ details.quiz[open] summary{margin-bottom:6px}
 .tag{display:inline-block;font-size:11.5px;font-weight:700;padding:0 6px;border-radius:5px;margin-right:4px;vertical-align:1px}
 .tag.p0{background:#FDE2E2;color:#B91C1C}.tag.p1{background:#FFEDD5;color:#C2410C}.tag.p2{background:#FEF3C7;color:#B45309}.tag.p3{background:#E5E7EB;color:#4B5563}
 .tag.src{background:#EAF0FD;color:#2F5BD3}.tag.inf{background:#F3EEFE;color:#6D28D9}.tag.ex{background:#EAF7EF;color:#15803D}
+/* ---------- 口径篇：场景坑位卡 ---------- */
+.pit{background:#fff;border:1px solid var(--line);border-radius:14px;margin:24px 0;overflow:hidden}
+.pit .ph{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;padding:10px 18px;background:#111827;color:#fff}
+.pit .ph .pn{font-family:var(--mono);font-size:12.5px;font-weight:700;color:#FCD34D;letter-spacing:.08em}
+.pit .ph .pt{font-weight:800;font-size:17px}
+.pit .ph .pc{margin-left:auto;font-size:12.5px;color:#CBD5E1}
+.pit .pr{display:grid;grid-template-columns:108px minmax(0,1fr);gap:10px;padding:8px 18px;border-top:1px solid var(--line);font-size:15px;line-height:1.75}
+.pit .pr .pl{font-weight:800;font-size:13px;padding-top:3px}
+.pit .pr p{margin:1px 0}
+.pit .pr ul,.pit .pr ol{margin:1px 0;padding-left:20px}
+.pit .need .pl{color:var(--ink3)}
+.pit .trap{background:var(--red-soft)}.pit .trap .pl{color:var(--red)}
+.pit .why .pl{color:var(--purple)}
+.pit .see{background:#FFFBF5}.pit .see .pl{color:var(--accent)}
+.pit .avoid .pl{color:var(--amber)}
+.pit .right{background:var(--green-soft)}.pit .right .pl{color:var(--green)}
+.pit .say{background:var(--brand-soft)}.pit .say .pl{color:var(--brand)}
+@media print{.pit{break-inside:auto}.pit .pr{break-inside:avoid}}
+.pitch{background:#fff;border:1px solid var(--line);border-left:5px solid var(--accent);border-radius:12px;padding:8px 20px 12px;margin:16px 0}
+.pitch .q{font-weight:800;font-size:16px;margin:10px 0 2px;color:var(--accent)}
+.pitch .seg{font-family:var(--mono);font-size:12px;color:var(--ink3);font-weight:700;margin-right:6px}
+/* ---------- 当前做法 / 最小修复 / 理想方案 ---------- */
+.tag.cur{background:#9A3412;color:#fff}.tag.ideal{background:#166534;color:#fff}.tag.min{background:#92400E;color:#fff}
+.state{display:flex;gap:10px;align-items:flex-start;border-radius:10px;padding:8px 14px;margin:14px 0;font-size:14.8px;line-height:1.75;border:1px solid}
+.state .sl{flex:none;font-weight:800;font-size:12.5px;padding:1px 8px;border-radius:5px;color:#fff;margin-top:3px;white-space:nowrap}
+.state > div{min-width:0}
+.state p{margin:2px 0}
+.state.cur{background:#FFF7F2;border-color:#F3C7A8}.state.cur .sl{background:#9A3412}
+.state.ideal{background:#F0FAF3;border-color:#BFE6CC}.state.ideal .sl{background:#166534}
+.state.min{background:#FFFBEB;border-color:#F3DDA8}.state.min .sl{background:#92400E}
+.tbl.cmp th.cur{background:#9A3412;color:#fff}.tbl.cmp th.ideal{background:#166534;color:#fff}.tbl.cmp th.min{background:#92400E;color:#fff}
+.tbl.cmp th{white-space:normal}
+.tbl.cmp td:first-child{font-weight:700;color:#111827;min-width:5.2em}
+.tag.prob{background:#B91C1C;color:#fff}
+.state.prob{background:#FEF2F2;border-color:#F5C2C2}.state.prob .sl{background:#B91C1C}
+.state ol,.state ul{margin:2px 0;padding-left:20px}.state li{margin:2px 0}
+.pb{margin-top:5px;padding-top:4px;border-top:1px dashed #F3C7A8;color:#991B1B;font-size:13.2px;line-height:1.65}
+.tbl.cmp th.prob{background:#B91C1C;color:#fff}.tbl td.pbc{background:#FFF7F7;color:#7F1D1D}
+.pit .see .ref{grid-column:2;font-size:12.8px;color:#9A3412;margin-top:0}
+.pit .min{background:#FFFBEB}.pit .min .pl{color:#92400E}
+.ans .tag.cur,.ans .tag.ideal{margin-right:6px}
 .foot{margin-top:80px;padding-top:20px;border-top:1px solid var(--line);color:var(--ink3);font-size:13px;text-align:center}
 
 @media (max-width:1000px){
@@ -284,7 +325,7 @@ details.quiz[open] summary{margin-bottom:6px}
     const h=n.querySelector(".ch-head h1");
     const no=n.querySelector(".ch-head .no");
     const a=document.createElement("a"); a.className="ch"; a.href="#"+n.id;
-    a.textContent=(no?no.textContent.replace(/^\s*(CHAPTER|BASICS\s*·|APPENDIX\s*·)\s*/i,"").trim()+" · ":"")+h.textContent;
+    a.textContent=(no?no.textContent.replace(/^\s*(CHAPTER|BASICS\s*·|APPENDIX\s*·|BRIEFING\s*·)\s*/i,"").trim()+" · ":"")+h.textContent;
     li.appendChild(a); links.push([n,a,li]);
     n.querySelectorAll("h2").forEach(h2=>{
       if(!h2.id) h2.id="s"+(++secCounter);

@@ -4,9 +4,10 @@
   <p class="sub">一个从单机 FPS 改成双人合作打僵尸的 UE 5.5 蓝图 Demo：先把它的 28 个蓝图逐节点读出来，找出它真实的运行方式和问题；再按 UE 联机的正确方式，把“开火到击中僵尸”“角色、控制器、武器怎么绑定”“弱网卡顿怎么优化”“子弹同步与换弹”这几道面试题讲透，每个结论都有源码证据或实测数据。</p>
   <div class="meta">
     <span class="pill b">原工程审计：19 个 RPC · 11 个复制变量 · 23 条问题</span>
-    <span class="pill o">7 组网络行为实测（MSVC /O2）</span>
+    <span class="pill o">10 组网络行为实测（MSVC /O2）</span>
     <span class="pill g">逐类蓝图事件图表 40+ 张（每张标出执行端 / 复制变量 / RPC / 组播）· 2 个交互实验</span>
-    <span class="pill p">12 条追问链 + 56 道面试题 + 速记卡</span>
+    <span class="pill p">12 条追问链 + 62 道面试题 + 速记卡</span>
+    <span class="pill o">口径篇：当前做法 · 存在的问题 · 理想方案 · 项目描述与口径 · 14 个场景的坑与正确实现</span>
   </div>
 </div>
 
@@ -19,32 +20,40 @@
 
   <div class="ans">
     <div class="q">问 ①：从按下开火到击中僵尸，中间发生了什么？</div>
-    <p><strong>本机</strong>：Enhanced Input 触发武器的 <code>StartFire</code>；本地先检查本地记录的弹药和状态，<strong>立刻</strong>播开火动画、枪口火焰、声音，并预测扣一发（这些都是表现，不是结果）。然后把这一发的信息发给服务器：<code>ServerFire(序号, 射线起点, 方向, 客户端时间)</code>。</p>
+    <p><span class="tag cur">当前做法</span>原 Demo <strong>没有射线检测</strong>：本机每 0.12 秒发一条 Server_Fire，服务器先组播开火动画、再查弹药，然后<strong>生成一颗复制的子弹 Actor</strong>；子弹在服务器和客户端各飞一份，撞到僵尸后在碰撞事件里调用 Apply Damage（客户端那次被引擎的 Authority Only 拦下，伤害实际只在服务器生效）。下面是重构后的做法。</p>
+    <p><span class="tag prob">存在的问题</span>① 按下后约 {{v:E1[s=0,rtt=200].own:.0f}} ms 才看到自己开枪（表现等组播，E1）；② 组播排在弹药检查之前，打空也播，还会打断换弹动画；③ 远端看到子弹凭空出现在约 {{v:E1[s=0,rtt=200].pop:.1f}} m 外，每发一个复制 Actor（E7：约 {{v:E7.0.4}} vs {{v:E7.1.4}} B/s）；④ 伤害写在每一端都会触发的碰撞里、Instigator 为空——客户端没扣血只是被引擎拦下；⑤ 后坐力只对主机生效；⑥ 没有延迟补偿，横移僵尸命中率只有 {{v:E3[v=480,rtt=200].none:.1f}}%（E3）。</p>
+    <p><span class="tag ideal">理想方案</span><strong>本机</strong>：Enhanced Input 触发武器的 <code>StartFire</code>；本地先检查本地记录的弹药和状态，<strong>立刻</strong>播开火动画、枪口火焰、声音，并预测扣一发（这些都是表现，不是结果）。然后把这一发的信息发给服务器：<code>Server_FireShot(序号, 起点, 方向, 客户端时间, 命中目标)</code>。</p>
     <p><strong>服务器</strong>：校验（活着、没在换弹、射速、弹药、起点和方向是否合理）→ 扣弹 → 做射线检测（PvP 要按客户端时间回溯目标，PvE 打僵尸可以放宽成“客户端判定 + 服务器容差校验”）→ 命中后 <code>ApplyPointDamage</code>，Instigator 填开火者的 Controller、DamageCauser 填武器。僵尸的 <code>TakeDamage</code> <strong>只在服务器</strong>改血量；血量归零就进入死亡状态、停 AI、给开火者的 PlayerState 加分。</p>
     <p><strong>回到各端</strong>：弹药按 <code>COND_OwnerOnly</code> 复制回开火者，用序号对账，UI 不回跳；开火计数 <code>BurstCounter</code> 按 <code>COND_SkipOwner</code> 复制给另一端，让对方播开火表现；僵尸的血量 / 死亡标志通过 OnRep 让每一端播受击和倒地。本机感觉零延迟，另一端大约晚“半个 RTT + 一个网络帧”看到，<strong>伤害和死亡只以服务器为准</strong>。</p>
   </div>
 
   <div class="ans">
     <div class="q">问 ②：控制的角色、控制器、武器应该怎么绑定？</div>
-    <p>GameMode 在服务器为每个登录的 <code>PlayerController</code> 生成 Pawn 并 <code>Possess</code>；Possess 会把 Pawn 的 Owner 设成这个 PC。PC 只存在于服务器和它自己的客户端，所以 Owner 链“武器 → Pawn → PC → 网络连接”决定了：<strong>谁能在这个 Actor 上调用 Server RPC</strong>、<code>COND_OwnerOnly</code> 发给谁、Client RPC 去哪。</p>
+    <p><span class="tag cur">当前做法</span>原 Demo 在角色 BeginPlay 里由服务器生成武器（生成时 Owner 为空，之后补 SetOwner），武器引用复制后挂到第一人称手臂上；角色只有手臂模型，输入映射用 0 号控制器添加，没有自定义 PlayerController / PlayerState。</p>
+    <p><span class="tag prob">存在的问题</span>① 武器的 BeginPlay 早于 SetOwner，初始化拿不到持有者，只能靠 for_server 补丁；② 0 号控制器在服务器上永远是主机的——客户端玩家死亡时禁用输入传进去的是主机的控制器，不生效，死者仍能操作；③ 对方看到的是一双漂浮的手臂；④ 准备列表存的是 PC 引用，复制到客户端为空。</p>
+    <p><span class="tag ideal">理想方案</span>GameMode 在服务器为每个登录的 <code>PlayerController</code> 生成 Pawn 并 <code>Possess</code>；Possess 会把 Pawn 的 Owner 设成这个 PC。PC 只存在于服务器和它自己的客户端，所以 Owner 链“武器 → Pawn → PC → 网络连接”决定了：<strong>谁能在这个 Actor 上调用 Server RPC</strong>、<code>COND_OwnerOnly</code> 发给谁、Client RPC 去哪。</p>
     <p>武器在<strong>服务器</strong>生成，生成参数里直接给 <code>Owner = Pawn</code>、<code>Instigator = Pawn</code>（不要先生成再 SetOwner，BeginPlay 会早于 SetOwner）；挂到第三人称模型的手部 Socket，另一份挂到只有自己看得见的第一人称手臂；<code>CurrentWeapon</code> 复制并在 OnRep 里做挂接和动画层切换。输入映射在“成为本地控制者”时添加（<code>NotifyControllerChanged</code> / <code>PawnClientRestart</code>），不要在 BeginPlay 里用 <code>GetPlayerController(0)</code>。分数、是否准备这类跟人走的数据放 <code>PlayerState</code>。</p>
   </div>
 
   <div class="ans">
     <div class="q">问 ③：弱网造成卡顿，应该怎么优化？</div>
-    <p><strong>先测再改</strong>：PIE 打开网络模拟（100~200 ms、5~10% 丢包），用 <code>stat net</code>、<code>p.NetShowCorrections 1</code>、Networking Insights 判断是哪一类问题。</p>
+    <p><span class="tag cur">当前做法</span>原 Demo 没有做任何弱网处理：开火、换弹的表现都等服务器组播回来；冲刺标志只在服务器生效，客户端持续被拉回；每发子弹一条 Reliable RPC 加一个复制 Actor；也没有延迟补偿。</p>
+    <p><span class="tag prob">存在的问题</span>RTT 200 ms 时按下开火约 {{v:E1[s=0,rtt=200].own:.0f}} ms 才有反应（E1）；冲刺时每秒被纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次、平均拉回 {{v:E6[c=0,rtt=100].avg:.1f}} cm（RTT 100 ms，E6）；丢包 10% 时伤害请求 P99 延迟 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms（E2）；不补偿时横移僵尸命中率 {{v:E3[v=480,rtt=200].none:.1f}}%（E3）——而且这些在 PIE 零延迟下全都看不出来，原版从没在网络模拟下测过。</p>
+    <p><span class="tag ideal">理想方案</span><strong>先测再改</strong>：PIE 打开网络模拟（100~200 ms、5~10% 丢包），用 <code>stat net</code>、<code>p.NetShowCorrections 1</code>、Networking Insights 判断是哪一类问题。</p>
     <p>① <strong>操作反馈慢</strong> → 客户端预测：开火表现、弹药、换弹动画本地先播，服务器确认后对账；② <strong>移动被拉回</strong> → 所有影响移动速度的状态（冲刺、瞄准、下蹲）必须进 CharacterMovement 的 SavedMove 一起预测，不能另走 RPC，更不能两端各算各的（实测：冲刺只在服务器生效时每秒纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次）；③ <strong>明明瞄准了却没打中</strong> → 服务器按开火时刻回溯目标，或客户端判定 + 服务器容差（实测：目标 4.8 m/s、RTT 200 ms 时不补偿命中率只有 {{v:E3[v=480,rtt=200].none:.1f}}%）；④ <strong>消息堆积、带宽高</strong> → 逐发 Reliable 改为计数器 / 带序号的 Unreliable，表现类消息一律不用 Reliable，降低 NetUpdateFrequency、用休眠和相关性，抛射物用“假子弹”。远端角色靠插值平滑，服务器 Tick 和带宽上限按需要调整。</p>
   </div>
 
   <div class="ans">
     <div class="q">问 ④：子弹同步、换弹是怎么实现的？</div>
-    <p><strong>弹药</strong>：服务器权威，<code>COND_OwnerOnly</code> 只复制给持枪者；本地预测扣弹，显示值 = 服务器弹数 − 还没被服务器确认的发数，避免 OnRep 把 UI 拉回去（实测：直接覆盖每次连射平均回跳 {{v:E5.1.rb:.0f}} 次，序号对账 {{v:E5.2.rb:.0f}} 次）。<strong>别人看到的子弹</strong>：命中扫描武器只同步“开了几枪 + 打在哪”，各端本地画曳光和弹孔；真抛射物由服务器权威生成，开火者本地先放一颗不复制的假子弹，不要每发生成一个复制 Actor。</p>
-    <p><strong>换弹</strong>是服务器上的一个小状态机：<code>ServerStartReload</code> → 检查“备弹 &gt; 0 且弹匣未满且不在换弹” → <code>bPendingReload = true</code>（SkipOwner 复制给别人播动画）→ 服务器计时器到点后<strong>一次性</strong>计算 <code>take = min(弹匣空位, 备弹)</code> 再加减 → 状态复位。换弹期间开火被拒；切枪或死亡要取消计时器且不改弹药。本机立即播换弹蒙太奇，不等服务器。</p>
+    <p><span class="tag cur">当前做法</span>原 Demo 的“子弹同步”就是复制子弹 Actor（每发一个，带移动复制），不是射线；5 个弹药变量无条件复制给所有人、只在服务器扣；换弹是“先清零 → 组播动画 → Delay → 计算”的一段脚本，计算函数漏连返回节点，备弹不够补满时吞掉整个弹匣。</p>
+    <p><span class="tag prob">存在的问题</span>① 弹匣 3 / 备弹 7 时换弹，换完变 0 / 0，一局打空再换只能打出 {{v:E4.session.0.2}} / 40 发（E4）；② Delay 不可取消，换弹中途死亡，已清零的子弹就没了；③ 弹药只在服务器扣，UI 晚一个往返才变，本机按旧值判断还能不能打；④ 弹药广播给所有人；⑤ 换弹动画等组播，晚加入看不到对方在换弹。</p>
+    <p><span class="tag ideal">理想方案</span><strong>弹药</strong>：服务器权威，<code>COND_OwnerOnly</code> 只复制给持枪者；本地预测扣弹，显示值 = 服务器弹数 − 还没被服务器确认的发数，避免 OnRep 把 UI 拉回去（实测：直接覆盖每次连射平均回跳 {{v:E5.1.rb:.0f}} 次，序号对账 {{v:E5.2.rb:.0f}} 次）。<strong>别人看到的子弹</strong>：命中扫描武器只同步“开了几枪 + 打在哪”，各端本地画曳光和弹孔；真抛射物由服务器权威生成并按射手延迟快进，开火者本地先放一颗不复制的假子弹，命中只认服务器那一颗；高射速不要每发生成一个复制 Actor（第 5B 章）。</p>
+    <p><strong>换弹</strong>是服务器上的一个小状态机：<code>Server_StartReload</code> → 检查“备弹 &gt; 0 且弹匣未满且不在换弹” → <code>bPendingReload = true</code>（SkipOwner 复制给别人播动画）→ 服务器计时器到点后<strong>一次性</strong>计算 <code>take = min(弹匣空位, 备弹)</code> 再加减 → 状态复位。换弹期间开火被拒；切枪或死亡要取消计时器且不改弹药。本机立即播换弹蒙太奇，不等服务器。</p>
   </div>
 
   <div class="co warn"><span class="h">面试注意：这个 Demo 原来的实现，面试官最可能抓住的五处</span>
     <ul>
-      <li><strong>伤害在每一端都算了一遍</strong>：子弹是复制 Actor，它的 <code>ReceiveHit</code> 在服务器和每个客户端都会触发，里面直接 <code>ApplyDamage</code>，客户端会本地扣僵尸血、本地触发死亡（第 1、4 章）。</li>
+      <li><strong>子弹是复制 Actor，结果写在每一端都会执行的地方</strong>：没有射线检测，子弹的 <code>ReceiveHit</code> 在服务器和每个客户端都会触发，里面直接 <code>ApplyDamage</code>、不填 Instigator——客户端那次只是被引擎的 Authority Only 拦下才没扣血；同样的写法下，僵尸死亡组播里的“补刷”就真的在每一端都执行了，客户端多出只有自己看得到的僵尸（第 1、4 章，K0）。</li>
       <li><strong>开火表现要等服务器多播回来</strong>：按下后约一个 RTT 才看到枪口动画；多播还排在弹药检查之前，打空了也会“空放”动画（E1）。</li>
       <li><strong>换弹会吞子弹</strong>：备弹不够补满时，“剩余子弹计算”函数的 false 分支没有连到返回节点，返回 0，弹匣被清空（E4：换弹前 3/7，换完 0/0）。</li>
       <li><strong>冲刺 / 瞄准两端不一致</strong>：冲刺标志只在服务器、瞄准标志只在本机，MaxWalkSpeed 两端不同，持续被服务器拉回（E6）。</li>
@@ -53,22 +62,24 @@
   </div>
 
   <h2>面试时怎么介绍这个 Demo</h2>
-  <div class="co tip"><span class="h">推荐口径（约 1 分钟）</span>
-    <p>“这是我早期的一个 UE 5.5 蓝图 Demo，先做成单机打僵尸，后来改成双人 Listen Server 合作。当时对 UE 网络不熟，基本是‘哪里不同步就补一个 Multicast’，结果出现了开火延迟、伤害在客户端被重复计算、换弹吞子弹、冲刺被拉回这些问题。后来我把它系统复盘了一遍：明确了服务器权威和 Owner 链，开火改成客户端预测 + 服务器校验 + 计数器复制，换弹改成服务器状态机，冲刺放进 CharacterMovement 的预测里，并在 200 ms / 10% 丢包下做了对比测试。”</p>
-    <p>要点：<strong>先承认问题、再讲原理、最后给数据</strong>。面试官问“你的 Demo”时真正想考的是你能不能看出问题，而不是 Demo 本身做得多完整。</p>
+  <div class="co tip"><span class="h">推荐口径（约 1 分钟，完整版见口径篇 K1）</span>
+    <p>“这是我早期的一个 UE 5.5 纯蓝图 Demo：两个人在咖啡店地图里合作打僵尸，撑 3 分钟获胜。先做成单机，后来改成双人 Listen Server。当时对 UE 网络不熟，基本是‘哪里不同步就补一个 Multicast’，结果出现了开火延迟、伤害在客户端被重复结算、换弹吞子弹、冲刺被拉回这些问题。后来我系统复盘了一遍：把蓝图逐节点读出来定位问题，归纳成几类根因；按服务器权威 + 本机预测 + 状态复制重新设计——开火本机先演、服务器校验、计数器复制，换弹做成服务器状态机，冲刺放进 CharacterMovement 的移动预测；关键结论在 200 ms / 10% 丢包的网络模型实验里做了对比。”</p>
+    <p>要点：<strong>先给画面、再承认问题、再讲原理、最后给数据</strong>；并且按时态说话——原版是“做过的”，复盘和模型实验是“验证过的”，重构是“设计的”（已经在引擎里做完的部分才说“做了”）。面试官看不到这个 Demo，他想考的是你能不能看出问题，而不是 Demo 本身做得多完整。</p>
   </div>
 
   <h2>本书怎么读</h2>
   <div class="cards">
+    <div class="card"><div class="t">第零部分 · 口径篇（先读）</div><p>K0：先分清书里哪些是<strong>当前做法</strong>（原 Demo 真实的实现，例如子弹是复制 Actor、没有射线）、哪些是<strong>理想方案</strong>（重构设计）；K1：面试官看不到 Demo，怎么讲——项目档案、10 秒 / 1 分钟 / 3 分钟讲法、三种时态、统一数字与术语、白板图；K2：14 个功能场景的“容易踩的坑 → 怎么避免 → 正确实现”，只讲方法不讲代码。</p></div>
     <div class="card"><div class="t">第一部分 · 复盘原 Demo</div><p>第 1 章：28 个蓝图逐节点读出来后的真实运行方式与 23 条问题；第 2 章：只讲本 Demo 用得到的 UE 网络基础。</p></div>
-    <div class="card"><div class="t">第二部分 · 面试四问</div><p>第 3 章绑定；第 4 章开火到击中；第 5 章子弹同步与换弹；第 6 章弱网优化。每章：30 秒答案 → 原理 → 原实现对照 → 正确实现 → 实测 → 坑位 → 自测。</p></div>
+    <div class="card"><div class="t">第二部分 · 面试四问</div><p>第 3 章绑定；第 4 章开火到击中；第 5 章子弹同步与换弹；第 5B 章追问“不用射线、硬用实体子弹怎么做”；第 6 章弱网优化。每章：30 秒答案 → 原理 → 原实现对照 → 正确实现 → 实测 → 坑位 → 自测。</p></div>
     <div class="card"><div class="t">第三部分 · 重做：合格的联机 Demo</div><p>第 7 章 Gameplay 框架（World / Controller / Player BP 的 OOP 关系、生命周期、启动时序）；第 8 章合格标准、类清单、复制总表与接收矩阵、RPC 与组播总表、执行端速查；第 9~13 章逐类蓝图事件图表（框架层、玩家层、武器、僵尸 AI、UI）；第 14 章测试、调试与演示。</p></div>
-    <div class="card"><div class="t">第四部分 · 面试防守</div><p>第 15 章 12 条追问链与危险说法对照；第 16 章 56 道面试题与速记卡。</p></div>
+    <div class="card"><div class="t">第四部分 · 面试防守</div><p>第 15 章 12 条追问链与危险说法对照；第 16 章 62 道面试题与速记卡。</p></div>
     <div class="card"><div class="t">附录 A · 问题全清单与审计方法</div><p>每条问题对应的蓝图节点编号、后果和修复；没有 UE 编辑器时如何把 .uasset 读成伪代码。</p></div>
   </div>
 
   <div class="co ver"><span class="h">关于证据等级与实测</span>
     <p>原工程：<code>github.com/dxHWH/-demo</code>，快照 commit <code>d7e5c75</code>，UE 5.5，纯蓝图（没有 Source 目录）。仓库里大量美术资产与逻辑无关，只拉取了 <code>Content/Blueprints</code>、<code>Content/UI</code>、主地图与 <code>Config</code>。蓝图用自写的解析脚本 <code>tools/bpdump.py</code> 从 .uasset 读出节点、引脚连线、RPC 标志和复制设置，导出在 <code>audit/*.txt</code>，书中节点编号（如 <code>#150</code>）都能在里面查到。</p>
-    <p>书中用三种标签区分可信度：<span class="tag src">源码事实</span>蓝图里确实这么连的；<span class="tag inf">推断</span>根据 UE 运行规则推出的运行时后果（没有在编辑器里实跑，附录 A 给出验证方法）；<span class="tag ex">实测 Ex</span>来自 <code>demos/coop_net_demo.cpp</code> 的离散事件模拟——它不跑 UE，而是按 UE 的默认参数（服务器网络 Tick 30 Hz、Reliable 有序重传、<code>MAXPOSITIONERRORSQUARED=3</code> 等）复现与本 Demo 相关的网络行为，用来比较方案的<strong>相对</strong>好坏，不代表某台机器上的绝对值。</p>
+    <p>书中用三种标签区分<strong>说的是哪一套</strong>：<span class="tag cur">当前做法</span>原 Demo 真实的实现；<span class="tag min">最小修复</span>保留原结构只改错误；<span class="tag prob">存在的问题</span>当前做法的问题，A# 指附录 A 的问题编号；<span class="tag ideal">理想方案</span>重构设计（第三部分的全部图表）。对照总表见 K0。</p>
+    <p>再用三种标签区分可信度：<span class="tag src">源码事实</span>蓝图里确实这么连的；<span class="tag inf">推断</span>根据 UE 运行规则推出的运行时后果（没有在编辑器里实跑，附录 A 给出验证方法）；<span class="tag ex">实测 Ex</span>来自 <code>demos/coop_net_demo.cpp</code> 的离散事件模拟——它不跑 UE，而是按 UE 的默认参数（服务器网络 Tick 30 Hz、Reliable 有序重传、<code>MAXPOSITIONERRORSQUARED=3</code> 等）复现与本 Demo 相关的网络行为，用来比较方案的<strong>相对</strong>好坏，不代表某台机器上的绝对值。</p>
   </div>
 </section>

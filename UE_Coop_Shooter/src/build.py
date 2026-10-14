@@ -21,6 +21,13 @@ import bpmacros as BM
 ROOT = pathlib.Path(__file__).resolve().parent
 OUT = ROOT.parent / "UE_Coop_Shooter.html"
 DATA = json.loads((ROOT.parent / "demos" / "figdata.json").read_text(encoding="utf-8"))
+# 第 5B 章：实体子弹实验（demos/projectile_demo.cpp → figdata_proj.json），另起一个文件，不重跑旧实验
+DATA.update({k: v for k, v in json.loads((ROOT.parent / "demos" / "figdata_proj.json").read_text(encoding="utf-8")).items() if k != "_"})
+DATA["E9c"] = {nm: {k: [[r["rtt"], r[k]] for r in DATA["E9"] if r["vp"] == vp] for k in ("local", "c0", "s0", "s2", "s3", "s4", "m0", "m2", "m3", "m4")}
+               for vp, nm in ((200, "rifle"), (40, "slow"))}
+_r = {x["rtt"]: x for x in DATA["E9"] if x["vp"] == 200}
+assert _r[200]["s0"] < 20 and _r[200]["s2"] < 20 and _r[200]["s3"] > 80 and _r[100]["s2"] > _r[100]["s0"], "E9 关键结论变了，检查正文"
+assert all(x["re2"] < x["re2c"] or x["rtt"] <= 100 for x in DATA["E8"]), "E8 快进上限结论变了"
 
 CODE_RE = re.compile(r"<!--code:(\w+):(.*?)-->\n?(.*?)\n?<!--/code-->", re.S)
 MACRO_RE = re.compile(r"<!--(bars|lanes|plot|dtab|bpgraph|seq|tree|spans|bpnet|repmx)\s+(\{.*?\})\s*-->", re.S)
@@ -312,12 +319,21 @@ def dtab(d):
     return "\n".join(out)
 
 
+STATE_TAG = {"cur": '<span class="tag cur">当前做法</span>', "ideal": '<span class="tag ideal">理想方案</span>', "min": '<span class="tag min">最小修复</span>'}
+STATE_NAME = {"cur": "当前做法", "ideal": "理想方案", "min": "最小修复"}
+
+
 def macro(m: re.Match) -> str:
     kind, body = m.group(1), m.group(2)
     try:
         d = json.loads(body)
     except json.JSONDecodeError as e:
         raise SystemExit(f"[{kind}] JSON 错误: {e}\n{body[:200]}")
+    st = d.get("state")
+    if st and d.get("cap"):
+        tag = STATE_TAG[st]
+        m2 = re.match(r"^(<b>[^<]*</b>\s*|表 [A-Z]?\d+[A-Z]?-\d+[a-z]?\s*)", d["cap"])
+        d["cap"] = (m2.group(1) + tag + d["cap"][m2.end():]) if m2 else tag + d["cap"]
     if kind in BM.MACROS:
         return BM.MACROS[kind](d)
     return {"bars": bars, "lanes": lanes, "plot": plot, "dtab": dtab}[kind](d)

@@ -1,0 +1,97 @@
+<section class="chapter" id="ch15">
+  <div class="ch-head">
+    <div class="no">CHAPTER 15</div>
+    <h1>60 题速问速答与速记卡</h1>
+    <p class="lead">每题先给能直接说出口的一两句话，括号里是展开时去哪一章找论据和数字。面试前一天按组过一遍，答不上来的回到对应章节。</p>
+  </div>
+
+  <h2>15.1 项目与架构（1–8）</h2>
+  <details class="quiz"><summary>1. 一句话介绍这个项目。</summary>Unity 2D 横版动作 RPG：状态机驱动玩家 13 个状态和骷髅 6 个状态，动画事件驱动命中，冲刺分身、三段连招、弹反、四模式飞剑，加属性 / 异常 / 掉落 / 装备 / 合成。（Ch0.3）</details>
+  <details class="quiz"><summary>2. 项目规模？</summary>自写 C# 57 个文件、3543 行；1 个场景；5 个 AnimatorController、23 个片段；5 个物品资源。（Ch0.2）</details>
+  <details class="quiz"><summary>3. 为什么 Player 和 Enemy 继承 Entity？代价？</summary>复用组件缓存、地面 / 墙检测、翻转、击退；代价是能力组合时继承树开岔，减速这种“非共有行为”被塞进基类。（Q1-1）</details>
+  <details class="quiz"><summary>4. 状态为什么是普通 C# 类？</summary>不需要 Transform 和生命周期，一次性创建、切换零分配、可单测；代价是借宿主组件跑协程。（Q1-2）</details>
+  <details class="quiz"><summary>5. 模块间怎么通信？问题在哪？</summary>直接引用 + 三个单例 + 委托；单例让“谁都能写玩家”，依赖隐式、无法单测。（Q1-3、图 1-5）</details>
+  <details class="quiz"><summary>6. 一帧里命中发生在哪个阶段？</summary>动画更新阶段（Update 之后），由 AttackTrigger 事件触发 OverlapCircleAll + DoDamage。（图 1-4）</details>
+  <details class="quiz"><summary>7. 项目最严重的 4 个问题？</summary>运行时代码 using UnityEditor（打包失败）、分身攻击空引用、死亡可被冲刺 / 接剑打断、两个单例写反。（附录 A #1~#4）</details>
+  <details class="quiz"><summary>8. 你怎么验证这些问题的？</summary>纯逻辑逐行移植成 C++ 跑脚本化输入和蒙特卡洛（E1~E11）；依赖引擎时序的标为推断并给出 Play Mode 验证步骤（附录 B）。（Ch0.1）</details>
+
+  <h2>15.2 生命周期与引擎（9–16）</h2>
+  <details class="quiz"><summary>9. Awake 和 Start 的区别？</summary>Awake 实例化时立即调用，Start 在首次 Update 前；同批对象所有 Awake 先于任何 Start。Awake 做自我初始化，Start 做跨对象连接。（Q2-1）</details>
+  <details class="quiz"><summary>10. 项目里哪个初始化放错了阶段？</summary>Entity 在 Start 里取组件；运行时生成的怪在 Awake 与 Start 之间被打中会空引用。（Ch2.2）</details>
+  <details class="quiz"><summary>11. 正确的单例怎么写？</summary>后来者自毁并 return；只读属性；OnDestroy 只在 Instance 是自己时清空。项目里 PlayerManager / SkillManager 写成了“销毁旧的且不登记新的”。（Ch2.3）</details>
+  <details class="quiz"><summary>12. Destroy 后对象立刻是 null 吗？</summary>不是，帧末才销毁；之后 == null 为真（fake null），但 ?. / ?? / is null 不认。（Ch2.4）</details>
+  <details class="quiz"><summary>13. Script Execution Order 能被子类继承吗？</summary>Project Settings 里的不能（按具体脚本记录）；代码里 [DefaultExecutionOrder] 可以。项目把 300 配在父类 CharacterStats 上无效。（Ch2.5）</details>
+  <details class="quiz"><summary>14. 为什么编辑器能跑、打包失败？</summary>运行时脚本 using 了 UnityEditor 命名空间，打包时运行时程序集不引用编辑器程序集。用 asmdef 和 #if UNITY_EDITOR 防。（Ch2.6）</details>
+  <details class="quiz"><summary>15. Unity 序列化器对 [Serializable] 自定义类字段有什么特殊行为？</summary>不支持 null，会构造默认实例；项目里格子的 item 因此“不为 null 但 data 为 null”，开局点空格空引用。（Ch10.3）</details>
+  <details class="quiz"><summary>16. renderer.material 和 sharedMaterial 的区别？</summary>material 读取时会克隆一份实例（破坏合批、需手动销毁）；sharedMaterial 是共享资源；按对象改参数用 MaterialPropertyBlock。（Ch11.3）</details>
+
+  <h2>15.3 状态机与动画（17–26）</h2>
+  <details class="quiz"><summary>17. 父类 Update 里切了状态，子类代码还会执行吗？</summary>会，return 只退出父类；所以 Idle / Move 判 currentState != this。Fall 没判，落地贴墙一帧切两次。（E1-S1）</details>
+  <details class="quiz"><summary>18. 墙滑有什么 bug？</summary>没有“墙没了 → Fall”出口，滑过平台侧面下沿后在半空以 2 m/s 慢落 60 帧。（E1-S2）</details>
+  <details class="quiz"><summary>19. 死亡能被打断吗？</summary>能：全局冲刺检测和接剑强切都不看当前状态，死亡后按 Shift 或剑飞回都会“复活”。（E1-S3/S4）</details>
+  <details class="quiz"><summary>20. 怎么防非法切换？</summary>统一 Request 入口 + 可打断等级 + 同帧取最高 + 每帧至多提交一次；Death 只接受 Revive。（Ch3.9）</details>
+  <details class="quiz"><summary>21. 预输入怎么做？</summary>输入快照入带时间戳缓冲，动作在可取消窗口消费 0.1~0.2 s 内的指令；窗口由动画 / 时间轴标记。（Ch3.8）</details>
+  <details class="quiz"><summary>22. Animator 为什么用 bool 不用 Trigger？</summary>bool 与逻辑状态一一对应、不会残留；Trigger 可能未被消费而挂着。唯一该用 Trigger 的掷剑却挂在“AimSword 变假”上。（Q4-5）</details>
+  <details class="quiz"><summary>23. 动画事件什么时候触发？</summary>动画阶段、片段时间首次越过事件时刻的那一帧；受帧率、速度、打断、剔除影响。（Q4-2）</details>
+  <details class="quiz"><summary>24. 瞄准时按冲刺会怎样？</summary>推断：AimSword 变假 → Animator 播掷剑片段 → 事件照样掷剑，方向是上一次松键时的旧值。（图 4-2）</details>
+  <details class="quiz"><summary>25. 眩晕闪烁为什么不生效？</summary>InvokeRepeating("RedColorBlink") 调用的方法在 EntityFX 里不存在；而且 CancelInvoke() 会把异常状态变色一并取消。（Ch4.4 ④）</details>
+  <details class="quiz"><summary>26. 帧同步游戏能用动画事件做命中吗？</summary>不能，触发帧各端不同；命中进逻辑时间轴，动画事件只做表现。（Ch4.5）</details>
+
+  <h2>15.4 时间与帧率（27–32）</h2>
+  <details class="quiz"><summary>27. Update 和 FixedUpdate？</summary>渲染帧 vs 固定 0.02 s 物理步；Update 设的速度在下一个物理步生效；输入在 Update 读。（Q5-1）</details>
+  <details class="quiz"><summary>28. 设 velocity 要乘 deltaTime 吗？</summary>不要，velocity 本身是每秒的量；直接改 position 才要乘。（Q5-2）</details>
+  <details class="quiz"><summary>29. 冲刺距离随帧率变吗？</summary>变：Update 计时决定持续时长，120 / 144 fps 下部分情况 4.5 m；卡 250 ms 冲到 [[e10.hitch.250.max|.1f]] m。按物理步计数解决。（E10）</details>
+  <details class="quiz"><summary>30. 周期计时器怎么写？</summary>累加：timer -= dt; while (timer ≤ 0) { timer += period; Fire(); }。到点重置会漂移：点燃 30 fps 少跳一次。（Q5-3）</details>
+  <details class="quiz"><summary>31. 旋转剑 hitCoolDown = 0 有什么问题？</summary>命中次数 = 帧数，240 fps 的伤害是 30 fps 的 8 倍。（图 5-3）</details>
+  <details class="quiz"><summary>32. 瞄准虚线为什么比剑高？</summary>虚线是连续抛物线，Box2D 是半隐式欧拉，差 ½·g·s·Δt·t，1.68 s 时约 [[e9.45_168.ady|.2f]] m；用离散闭式解即可对齐。（E9）</details>
+
+  <h2>15.5 战斗与数值（33–42）</h2>
+  <details class="quiz"><summary>33. 攻击判定缺了什么？</summary>LayerMask、Hurtbox 分层、按实体去重、免分配查询。（Ch6.2）</details>
+  <details class="quiz"><summary>34. 为什么闪避了还会闪白击退？</summary>DamageEffect 先于 DoDamage 调用，二者互不知道结果。（图 6-1）</details>
+  <details class="quiz"><summary>35. 弹反成功窗口多宽？</summary>按键在命中前约 1 s 到命中帧之间都成功，宽 [[e2.60.cw|.2f]] s；原教程写法 [[e2.60.ow|.2f]] s。（E2）</details>
+  <details class="quiz"><summary>36. 弹反成功为什么还掉血？</summary>骷髅的 AttackTrigger 在 player.DamageEffect（完成弹反）之后照样调用 DoDamage。（Ch6.3 情形 B）</details>
+  <details class="quiz"><summary>37. 击退方向有什么错？</summary>用受击者自己的朝向而非攻击来源方向，背后挨打会被打向攻击者。（Ch6.3）</details>
+  <details class="quiz"><summary>38. 暴击率 0 会暴击吗？</summary>会，1%：<code>Random.Range(0,100) &lt;= 0</code> 命中 0 这一个值。（E3）</details>
+  <details class="quiz"><summary>39. 冰冻破甲写错了什么？</summary>判断的是攻击者 isChilled 而不是目标；结果变成“被冰冻的攻击者打人更疼”。（表 7-2）</details>
+  <details class="quiz"><summary>40. 敌人每级 +25% 有什么问题？</summary>在“当前值”上加，成了复利：10 级 [[e4.10.mul|.2f]]× 而不是 [[e4.10.lmul|.2f]]×。（E4）</details>
+  <details class="quiz"><summary>41. 多段冻结为什么会提前解冻？</summary>每次命中开一个协程，最早的到点就解冻；应维护截止时间取最大值。（E8）</details>
+  <details class="quiz"><summary>42. 属性修正怎么叠加？</summary>(base + ΣFlat) × (1 + ΣPercentAdd) × ΠPercentMult，修正带来源、脏标记缓存。（Ch7.8）</details>
+
+  <h2>15.6 技能与 AI（43–50）</h2>
+  <details class="quiz"><summary>43. CanUseSkill 有什么问题？</summary>查询带副作用（直接释放并扣冷却）；应为 TryActivate 或 CanActivate + Commit。（Q8-2）</details>
+  <details class="quiz"><summary>44. 分身为什么打不出伤害？</summary>攻击回调用 GetComponentInParent&lt;Player&gt;() 找玩家，分身是独立根物体，找不到 → 空引用。（Ch8.3）</details>
+  <details class="quiz"><summary>45. 分身朝向为什么会错？</summary>旋转写在 foreach 里，找到敌人后每遍历一个碰撞体都可能再转 180°，结果取决于奇偶。（E11）</details>
+  <details class="quiz"><summary>46. 飞剑四种模式怎么扩展？</summary>改成行为组合（Damage / Stick / Bounce / Pierce / Spin / Homing），新增模式只加一个类。（Ch8.4）</details>
+  <details class="quiz"><summary>47. 骷髅为什么每帧自己切到自己？</summary>Battle 继承了 GroundState 的“看见玩家 → 切 Battle”；10 s 自转移 [[E7.A.self]] 次，附带 GameObject.Find。（E7）</details>
+  <details class="quiz"><summary>48. 骷髅为什么追不到也不放弃？</summary>战斗计时器每帧被重置，超时条件永远为假；玩家跳上平台后在脚下来回转身。（表 9-2）</details>
+  <details class="quiz"><summary>49. 骷髅能隔墙看见玩家吗？</summary>能，射线 LayerMask 只含 Player 层；正确做法是候选 + 遮挡射线。（Q9-3）</details>
+  <details class="quiz"><summary>50. 百怪同屏怎么优化 AI？</summary>去掉每帧查找、感知降频分帧、AI LOD、批量 Tick、攻击令牌、对象池、动画剔除。（场景 9-1）</details>
+
+  <h2>15.7 物品、UI 与工程（51–60）</h2>
+  <details class="quiz"><summary>51. 背包为什么用 List + Dictionary？</summary>List 保序、Dictionary 按定义找堆叠；代价是双结构同步、没有物品实例。（Ch10.2）</details>
+  <details class="quiz"><summary>52. 合成有什么 bug？</summary>每种材料只扣一份，10 皮 10 铁做 [[e6.10_10.bc]] 件而不是 [[e6.10_10.fc]] 件。（E6）</details>
+  <details class="quiz"><summary>53. 配置掉率 35.4% 实际是多少？</summary>[[e5.Nice_Armor.final|.1f]]%：<code>&lt;=</code> 多 1%，“最多 3 件”的截断再拉低。（E5）</details>
+  <details class="quiz"><summary>54. 掉落物为什么偏左？</summary>int 版 Random.Range(-5, 5) 取 −5~4，均值 [[E5.vmean]] m/s。（Ch10.5）</details>
+  <details class="quiz"><summary>55. 事件订阅放哪？</summary>OnEnable / OnDisable 成对；项目 Start 订阅、OnDisable 退订，禁用再启用后不刷新。（Ch11.2）</details>
+  <details class="quiz"><summary>56. event 和 public Action 字段的区别？</summary>event 外部只能 += / −=；public 字段可被赋值冲掉订阅或被外部直接调用。（Q11-2）</details>
+  <details class="quiz"><summary>57. 项目有哪些 GC 来源？</summary>OverlapCircleAll 数组、字符串拼接日志、new List、每次命中的协程与 WaitForSeconds。（Ch12.3）</details>
+  <details class="quiz"><summary>58. 对象池的三个坑？</summary>状态没重置、旧引用指向新对象（用代数句柄）、残留 Invoke / 协程。（Ch12.4）</details>
+  <details class="quiz"><summary>59. .gitignore 哪里写错了？</summary><code>/[Logs]/</code> 是字符集，匹配单字符目录；应写 <code>/[Ll]ogs/</code>。Logs 和 UserSettings 共 12 个文件进了仓库。（Ch12.5）</details>
+  <details class="quiz"><summary>60. 给你两周你先做什么？</summary>先错后构：第 1 天打包与 P0，2~5 天状态 / 数值 / 帧率，6~10 天输入层、伤害管线、Buff、物品实例与对象池，每步配测试。（图 12-2）</details>
+
+  <h2>15.8 速记卡</h2>
+  <div class="cards">
+    <div class="card"><div class="t">E1 状态机</div><p>落地贴墙一帧两跳；墙到头慢落 60 帧；死亡后 Shift / 接剑复活；取消第 1 段连招仍 +1。</p></div>
+    <div class="card"><div class="t">E2 弹反</div><p>开窗 0.083~0.417 s；按键成功区间 [[e2.60.cw|.2f]] s（原写法 [[e2.60.ow|.2f]] s）；成功仍掉血。</p></div>
+    <div class="card"><div class="t">E3 伤害</div><p>暴击 (c+1)%；闪避正确；冰冻判攻击者；RoundToInt 银行家舍入。</p></div>
+    <div class="card"><div class="t">E4 成长</div><p>每级 +25% 当前值 → 10 级 [[e4.10.mul|.2f]]×（线性 [[e4.10.lmul|.2f]]×）。</p></div>
+    <div class="card"><div class="t">E5 掉落</div><p>每件 +1%；0 也掉；35.4% → [[e5.Nice_Armor.final|.1f]]%；平均 [[E5.exp|.2f]] 件；x 速度偏左。</p></div>
+    <div class="card"><div class="t">E6 合成</div><p>每种材料只扣 1 份：10 皮 10 铁 → [[e6.10_10.bc]] 件（应 [[e6.10_10.fc]]）。</p></div>
+    <div class="card"><div class="t">E7 AI</div><p>10 s 自转移 [[E7.A.self]] 次、Find [[E7.A.finds]] 次；平台下 10 s 转身 [[E7.C.flips]] 次、从不放弃。</p></div>
+    <div class="card"><div class="t">E8 冻结</div><p>重叠协程最早者解冻 → 实际冻住 [[e8r.min|.0f]]%~[[e8r.max|.0f]]%；改截止时间取最大。</p></div>
+    <div class="card"><div class="t">E9 轨迹</div><p>半隐式欧拉比连续抛物线低 ½·g·s·Δt·t；1.68 s 时 [[e9.45_168.ady|.2f]] m。</p></div>
+    <div class="card"><div class="t">E10 帧率</div><p>冲刺 120 / 144 fps 偶尔 4.5 m、卡 250 ms 冲 [[e10.hitch.250.max|.1f]] m；点燃 30 fps 少一跳；冷却 0 命中数 = 帧数。</p></div>
+    <div class="card"><div class="t">E11 分身朝向</div><p>旋转写进循环 → 正确率 50%~83% 随碰撞体个数跳动；分身攻击另有空引用（P0）。</p></div>
+    <div class="card"><div class="t">四个 P0</div><p>using UnityEditor；分身 player 为 null；死亡可打断；单例写反。</p></div>
+  </div>
+</section>

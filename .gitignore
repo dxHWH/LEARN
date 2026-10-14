@@ -22,6 +22,7 @@ Thumbs.db
 # 嵌套的独立 Git 仓库（各自已托管在 GitHub）
 Gameplay_Framework/repo/
 UE_Coop_Shooter/repo/
+RPG_Demo/repo/
 
 # Python
 __pycache__/

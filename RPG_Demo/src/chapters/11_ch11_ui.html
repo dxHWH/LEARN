@@ -1,0 +1,174 @@
+<section class="chapter" id="ch11">
+  <div class="ch-head">
+    <div class="no">CHAPTER 11</div>
+    <h1>UI 与表现层：血条、受击闪白与视差背景</h1>
+    <p class="lead">表现层的面试题看起来“简单”，追问却很深：事件订阅放在哪个生命周期、<code>renderer.material</code> 为什么会悄悄复制材质、多个系统同时改颜色谁说了算、UI 刷新怎么不卡。项目里已经写好了一个没用上的 Shader，正好拿来讲“从改材质到改参数”的演进。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清事件订阅的对称原则，以及 <code>public Action</code> 字段和 <code>event</code> 的区别</li>
+    <li>理解 <code>sr.material</code> 的复制语义、颜色写者冲突，以及 MaterialPropertyBlock / Shader 参数方案</li>
+    <li>能推导视差背景的公式，并说出 Canvas 重建、虚拟列表、飘字池这些 UI 性能要点</li>
+  </ul></div>
+
+  <h2>11.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>血条挂在角色下面的世界空间 Canvas 上，Start 里订阅 <code>onHealthChanged</code> 和 <code>onFlipped</code>（角色翻转时把血条反向旋转回来），OnDisable 里退订——订阅与退订不对称，禁用再启用后血条就不再刷新；两个回调都是 public 委托字段而不是 event，外部可以用 = 把别人的订阅冲掉。受击闪白是把 SpriteRenderer 的材质临时换成纯色材质 0.2 s，异常状态用 InvokeRepeating 每 0.3 s 切换颜色；问题是 <code>sr.material</code> 会为每个角色复制一份材质实例，闪白、异常色、眩晕取消三方都直接写颜色。项目里已经有一个支持闪白强度和闪烁参数的 SpriteStatusFX Shader，但没有材质用它——用 MaterialPropertyBlock 改它的参数就是正确的方向。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "UI 与表现层", "rows": [["事件订阅", "Start 订阅、OnDisable 退订（不对称）", "P2 禁用再启用后血条不再刷新；Start 之前被禁用时退订空引用（#28）", "OnEnable / OnDisable 成对，OnEnable 里立即刷新一次", "禁用再启用、对象池复用后仍能刷新", ""], ["回调类型", "<code>public System.Action</code> 字段", "P2 外部可以 <code>= null</code> 冲掉所有订阅，或直接调用伪造通知（#28）", "<code>event</code>", "外部不能冲掉订阅或伪造通知", ""], ["受击闪白", "临时换纯色材质；<code>sr.material</code> 为每个角色克隆材质实例", "P2 每个角色一份材质副本：打断合批，销毁时不释放（#29）", "所有角色共享 SpriteStatusFX 材质，用 MaterialPropertyBlock 写参数", "保持合批、没有泄漏", ""], ["颜色写者", "闪白协程、异常色 InvokeRepeating、眩晕取消三方直接写 color", "P2 异常在闪白期间结束时，颜色被“恢复”成过期的异常色并永久残留（推断，#29）", "每帧由“当前生效的效果集合”推导参数（反馈导演）", "不会残留异常色", ""], ["视差背景", "Update 里读相机位置，用 GameObject.Find 找相机", "隐患 相机在 LateUpdate 才移动，背景读到上一帧位置，快速移动时抖动（推断）；按名字找相机", "LateUpdate 且在相机更新之后读取；Camera.main 或注入", "相机移动时背景不滞后一帧", ""], ["血条规模", "每个角色一个世界空间 Canvas（只有两个角色，够用）", "局限 两个角色没问题；同屏几十个时每个角色一张 Canvas 会成为瓶颈", "数量多时屏幕空间统一绘制 + 对象池 + LOD", "千怪同屏可行", ""]]} -->
+
+
+  <h2>11.2 血条：订阅放在哪里</h2>
+<!--code:cs:UI_HealthBar.cs:13-41 ‖ P2 Start 订阅、OnDisable 退订不对称：禁用再启用后不再刷新，Start 前被禁用时退订空引用；public Action 字段可被外部冲掉（#28）-->
+private void Start()
+{
+    entity  = GetComponentInParent<Entity>();
+    myStats = GetComponentInParent<CharacterStats>();
+    UpdateHealthUI();
+    entity.onFlipped        += FlipUI;           // 订阅在 Start
+    myStats.onHealthChanged += UpdateHealthUI;
+}
+private void FlipUI() => myTransform.Rotate(0, 180, 0);   // 父物体转 180°，子 UI 再转回来，文字不镜像
+private void OnDisable()
+{
+    entity.onFlipped        -= FlipUI;           // 退订在 OnDisable
+    myStats.onHealthChanged -= UpdateHealthUI;
+}
+<!--/code-->
+<!--spans {"ph":["Awake","OnEnable","Start","运行中","OnDisable","再次 OnEnable","OnDestroy"],"labw":170,
+"rows":[["源码",[[2,2,"b","订阅"],[4,4,"r","退订"],[5,6,"r","不再订阅 → 不刷新"]]],["推荐",[[1,1,"g","订阅"],[3,3,"g","刷新"],[4,4,"g","退订"],[5,5,"g","订阅"]]]],
+"cap":"图 11-1　订阅生命周期：源码“Start 订阅、OnDisable 退订”不对称——对象被禁用再启用（UI 面板开关、对象池复用）后不会重新订阅。规则：OnEnable / OnDisable 成对，或 Start / OnDestroy 成对"} -->
+  <ul>
+    <li><span class="tag bug">问题</span> <span class="sev p2">P2</span> 如果对象在 Start 之前就被禁用（例如生成时立即 SetActive(false)），OnDisable 先于 Start 执行，<code>entity</code> 还是 null，退订时空引用。</li>
+    <li><b>public Action vs event</b>：<code>public System.Action onHealthChanged;</code> 允许任何人写 <code>stats.onHealthChanged = Foo;</code>，一行代码就冲掉了所有已有订阅，也允许外部直接 <code>onHealthChanged()</code> 伪造通知。加上 <code>event</code> 关键字后，外部只能 += / −=。</li>
+    <li><b>只刷新血量不刷新上限</b>：装备改变最大生命时不触发事件，血条上限要等下一次受伤（第 7 章）。</li>
+    <li><b>翻转的写法</b>：Entity.Flip 用 <code>transform.Rotate(0, 180, 0)</code> 翻转整棵层级（攻击点、检测点、子 UI 一起翻），所以 UI 需要“反向转回来”。另一种写法是只翻 SpriteRenderer.flipX 或 scale.x = −1，各有对子物体的影响，选定一种后要在整个项目里一致。</li>
+  </ul>
+
+  <h2>11.3 受击闪白与异常色：谁在写颜色</h2>
+<!--code:cs:EntityFX.cs:21-59（精简） ‖ P2 读 sr.material 为每个角色克隆材质（打断合批、不释放）；闪白、异常色、眩晕取消三方抢写颜色（推断残留异常色，#29）-->
+private void Start() { sr = GetComponentInChildren<SpriteRenderer>(); originMat = sr.material; }   // ← 读取 .material 会复制一份实例
+private IEnumerator FlashFX()
+{
+    isFlashing = true;
+    sr.material = hitMat;                  // FlashFXMaterial：内置纯色 Shader，整张图变白
+    Color currentColor = sr.color;         // 记下“此刻”的颜色（可能是异常色）
+    sr.color = Color.white;
+    yield return new WaitForSeconds(0.2f);
+    sr.color = currentColor;               // 0.2 s 后恢复成记下的颜色
+    sr.material = originMat;
+    isFlashing = false;
+}
+private void CancelColorChange() { CancelInvoke(); sr.color = Color.white; }   // 取消该组件上所有 Invoke
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>问题</th><th>说明</th></tr>
+    <tr><td><code>sr.material</code> 复制材质 <span class="tag ext">扩展</span></td><td>Renderer.material 的 getter 在材质被共享时会克隆一份并让该渲染器从此使用克隆体。每个角色一份 Sprites-Default 的副本：破坏动态合批（材质不同不能合批），而且克隆体不会随对象销毁自动释放，需要在 OnDestroy 里 <code>Destroy(originMat)</code>。只想读应使用 <code>sr.sharedMaterial</code>。</td></tr>
+    <tr><td>颜色的三个写者</td><td>闪白协程（记下颜色、0.2 s 后恢复）、异常状态 InvokeRepeating（每 0.3 s 在两种颜色间切换，闪白期间靠 isFlashing 跳过）、CancelColorChange（取消全部 Invoke 并设白）。<span class="tag inf">推断</span> 如果异常状态恰好在闪白的 0.2 s 内结束，CancelColorChange 先把颜色设白，随后闪白协程把颜色恢复成“闪白开始时记下的异常色”——异常结束了，颜色却永久残留。</td></tr>
+    <tr><td>CancelInvoke() 误伤</td><td>眩晕结束时调用 CancelColorChange，会把点燃 / 冰冻的变色一并取消（第 4 章）。</td></tr>
+    <tr><td>未使用的 Shader</td><td><code>Assets/Script/SpriteStatusFX.shader</code> 已经支持 <code>_FlashAmount</code>（闪白强度）和 <code>_BlinkColor / _BlinkIntensity / _BlinkSpeed</code>（状态闪烁），但没有任何材质引用它。</td></tr>
+  </table></div>
+<!--tline {"x":[0,3.2],"labw":170,"ticks":[0,0.3,0.6,0.9,1.2,1.5,1.8,2.1,2.4,2.7,3.0],"xlabel":"时间 / s（示意）",
+"rows":[
+ {"n":"点燃变色 InvokeRepeating","segs":[[0,0.3,"r","红"],[0.3,0.6,"o","浅红"],[0.6,0.9,"r","红"],[0.9,1.2,"o",""],[1.2,1.5,"r",""],[1.5,1.8,"o",""],[1.8,2.0,"r","红"]]},
+ {"n":"受击闪白协程","segs":[[1.9,2.1,"b",""]],"pts":[[2.1,"b","1.9 s 记下红色 → 2.1 s 恢复红色"]]},
+ {"n":"异常结束 CancelColorChange","pts":[[2.0,"s","设白 + 取消 Invoke"]]},
+ {"n":"最终颜色","segs":[[2.1,3.2,"r","红色永久残留"]]}],
+"cap":"图 11-2　颜色写者冲突（示意，推断）：闪白开始时记下的是异常色，异常在闪白期间结束，闪白结束时把异常色“恢复”回去。根因是每个写者都写绝对值，没有“颜色 = f(当前所有效果)”的推导"} -->
+<!--code:cs:【改进】用 MaterialPropertyBlock 驱动 SpriteStatusFX 的参数（C#，未在 Unity 中编译）-->
+static readonly int FlashId = Shader.PropertyToID("_FlashAmount");
+static readonly int BlinkId = Shader.PropertyToID("_BlinkIntensity");
+static readonly int BlinkColorId = Shader.PropertyToID("_BlinkColor");
+MaterialPropertyBlock mpb;                    // 所有角色共用同一个 SpriteStatusFX 材质，参数各自写在 MPB 里
+float flashUntil;
+
+void LateUpdate()                             // 每帧由“当前所有效果”推导一次，不再有写者冲突
+{
+    sr.GetPropertyBlock(mpb);
+    mpb.SetFloat(FlashId, Time.time < flashUntil ? 1f : 0f);
+    var top = buffs.TopVisualAilment();       // 优先级最高的异常（来自 Buff 系统）
+    mpb.SetFloat(BlinkId, top != null ? 1f : 0f);
+    if (top != null) mpb.SetColor(BlinkColorId, top.color);
+    sr.SetPropertyBlock(mpb);
+}
+public void Flash(float sec) => flashUntil = Mathf.Max(flashUntil, Time.time + sec);
+<!--/code-->
+  <p>注意 MaterialPropertyBlock 与 SRP Batcher 不兼容（使用 MPB 的渲染器会退出 SRP Batcher 路径）；2D 内置管线下它能保持“同一材质”，对动态合批友好。若使用 URP 2D，也可以把闪白做成顶点色或改用 <code>sr.color</code> 的一个通道编码，避免打断合批——具体取舍要用 Frame Debugger 看批次。</p>
+
+  <h2>11.4 视差背景：一行公式</h2>
+<!--code:cs:ParalleBackGround.cs:14-34 ‖ 隐患 在 Update 里读 Cinemachine 相机位置（它在 LateUpdate 才移动），背景滞后一帧（推断）；按名字 Find 相机-->
+void Start()  { cam = GameObject.Find("Main Camera"); length = GetComponent<SpriteRenderer>().bounds.size.x; xPosition = transform.position.x; }
+void Update()
+{
+    float distanceToMove = cam.transform.position.x * parallaxEffect;          // 背景跟随相机的比例
+    float distanceMoved  = cam.transform.position.x * (1 - parallaxEffect);    // 相机相对背景走了多远
+    transform.position = new Vector3(xPosition + distanceToMove, transform.position.y);
+    if (distanceMoved > xPosition + length)      xPosition += length;          // 无限循环：整段平移一个图宽
+    else if (distanceMoved < xPosition - length) xPosition -= length;
+}
+<!--/code-->
+  <p>parallaxEffect = 1 时背景完全跟随相机（看起来无限远），= 0 时静止（和前景同深度）。三个追问点：① 用 Update 读相机位置，而 Cinemachine 默认在 LateUpdate 更新相机——背景用的是上一帧的相机位置，相机移动时背景会滞后一帧抖动，应改成 LateUpdate 并保证在相机之后执行（或订阅 CinemachineBrain 的更新事件）<span class="tag inf">推断</span>；② <code>GameObject.Find("Main Camera")</code> 依赖对象名，<code>Camera.main</code> 或注入更稳；③ 世界坐标离原点很远时 float 精度下降，大地图需要“原点重置”（floating origin）。</p>
+
+  <h2>11.5 UI 性能要点（扩展）</h2>
+  <div class="tbl"><table>
+    <tr><th>主题</th><th>要点</th></tr>
+    <tr><td>Canvas 重建</td><td>同一 Canvas 下任一元素变化会触发整张 Canvas 的网格重建（Rebuild）；动静分离：常驻 HUD、频繁变化的血条 / 飘字、背包面板各用独立 Canvas 或子 Canvas</td></tr>
+    <tr><td>布局</td><td>LayoutGroup / ContentSizeFitter 在任一子元素变化时会重算整组，背包格子这类固定布局可以在编辑期算好</td></tr>
+    <tr><td>射线检测</td><td>不需要交互的 Image / Text 关掉 Raycast Target，减少 GraphicRaycaster 的遍历</td></tr>
+    <tr><td>世界空间血条</td><td>每个角色一个 Canvas 开销大；数量多时改为屏幕空间统一绘制（一个 Canvas、对象池、每帧把世界坐标转屏幕坐标）</td></tr>
+    <tr><td>飘字</td><td>对象池 + TextMeshPro + 共享材质；数字图集化；同一帧同一目标的多次伤害合并显示</td></tr>
+    <tr><td>数据绑定</td><td>UI 订阅数据变化（MVP / MVVM），而不是每帧轮询；项目的血条是事件驱动的，方向正确</td></tr>
+  </table></div>
+
+  <h2>11.6 面试追问</h2>
+<!--code:text:追问树-->
+血条怎么刷新？（Q11-1）
+├─ 订阅在哪里做？为什么要退订？（Q11-1 L2）
+├─ event 和 Action 字段有什么区别？（Q11-2）
+├─ 受击闪白怎么做？为什么不直接改 material？（Q11-3）
+│   └─ 闪白和中毒变色同时发生怎么办？（Q11-4 → 图 11-2）
+└─ 1000 个怪的血条怎么做？（场景 11-2）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q11-1　血条怎么刷新？订阅放在哪？</div>
+    <p><b>L2</b>　属性组件在血量变化时触发 onHealthChanged，血条订阅后刷新 Slider。订阅和退订必须成对：OnEnable / OnDisable 或 Start / OnDestroy。不退订的话，血条被销毁后属性组件还持有它的委托，下次触发会访问已销毁对象（MissingReferenceException），也阻止 GC 回收。</p>
+    <p><b>L3 · 项目</b>　我写成了 Start 订阅、OnDisable 退订，禁用再启用后就不刷新了；如果对象在 Start 前被禁用，退订时还会空引用。改成 OnEnable / OnDisable，并在 OnEnable 里立即刷新一次。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11-2　event 和 public Action 字段有什么区别？</div>
+    <p><b>L2</b>　event 对外只暴露 += 和 −=，只有声明它的类能调用和清空；public 字段可以被外部直接赋值（冲掉所有订阅）或直接调用（伪造事件）。我项目里两个回调都是 public 字段，应该加 event。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q11-3 → Q11-4　受击闪白怎么做？和中毒变色冲突怎么办？</div>
+    <p><b>L2</b>　我现在是临时换成一个纯色材质 0.2 s 再换回来。问题是 <code>sr.material</code> 读取时会克隆材质，每个角色一份，破坏合批也要手动销毁；而且闪白、中毒变色、眩晕取消三方都在直接写颜色，可能出现“中毒结束了颜色还残留”。</p>
+    <p><b>L3</b>　改成一个支持闪白和闪烁参数的 Shader（项目里已经写好了 SpriteStatusFX），所有角色共享一个材质，用 MaterialPropertyBlock 写各自的参数；每帧由“当前生效的效果”推导参数（闪白截止时间、最高优先级异常），而不是由效果去改颜色——和第 7 章的速度修正器是同一个思想。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“改颜色用 GetComponent&lt;SpriteRenderer&gt;().material.color = Color.red 就行。”</p>
+    <p><b>问题</b>：每个角色克隆一份材质，合批失效、内存泄漏；而且多个效果直接改同一个 color 会互相覆盖。</p>
+    <p><b>更好的回答</b>：“只读用 sharedMaterial；按对象改参数用 MaterialPropertyBlock 或顶点色；颜色由效果集合推导，不由效果直接写。”</p>
+  </div>
+
+  <h2>11.7 发散场景题</h2>
+  <div class="scene"><div class="q">场景 11-1　设计一个伤害飘字系统，要求暴击放大、同目标短时间多次伤害合并、不卡帧。</div>
+    <p class="why">为什么会问：客户端最常见的表现系统之一。</p>
+    <p>数据：伤害事件（目标、数值、类型、是否暴击）进入队列；合并：同一目标 0.1 s 内的同类伤害累加成一条；表现：对象池里的 TMP 文本，位置 = 目标头顶世界坐标转屏幕坐标 + 随机偏移，动画用曲线驱动（缩放 / 上浮 / 淡出，暴击用另一条曲线和颜色）；性能：单独 Canvas、共享材质、同屏上限（超出时丢弃最小的）。数据来自伤害管线的 HitResult（第 6 章），闪避显示 Miss。</p>
+  </div>
+  <div class="scene"><div class="q">场景 11-2　1000 个怪都要显示血条，怎么做？</div>
+    <p class="why">为什么会问：世界空间 UI 的规模问题。</p>
+    <p>不要每个怪一个世界空间 Canvas。方案一：一个屏幕空间 Canvas + 对象池，只给“受过伤 / 在镜头内 / 距离近”的怪分配血条，每帧更新位置；方案二：血条做成 SpriteRenderer（一张 9-slice 图 + Shader 控制填充比例），和怪物一起合批，甚至 GPU Instancing；方案三：完全由一个 Mesh 批量绘制。还要做 LOD：远处只在受伤后显示 2 s。</p>
+  </div>
+  <div class="scene"><div class="q">场景 11-3　策划要求“UI 不能直接调用游戏逻辑”，你怎么组织背包界面？</div>
+    <p class="why">为什么会问：UI 架构分层。</p>
+    <p>MVP：View（格子组件，只负责显示和把点击转成意图）、Presenter（把“点击格子 3”翻译成“请求装备容器 A 的第 3 格”，并订阅容器变化刷新 View）、Model（容器 + 事务，第 10 章）。项目里 UI_ItemSlot.OnPointerDown 直接调 Inventory.instance.EquipItem、还读 Input.GetKey(LeftControl)，View 与逻辑耦合；改完后 View 可以换皮、逻辑可以单测、联网时 Presenter 改成发请求即可。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>订阅 <b>OnEnable / OnDisable 成对</b>；回调用 <b>event</b> 而不是 public 字段（#28）。</li>
+    <li><code>sr.material</code> <b>克隆材质</b>（合批失效 + 需手动销毁）；只读用 sharedMaterial（#29）。</li>
+    <li>颜色有三个写者 → 可能残留异常色；改为 <b>MPB 写 Shader 参数 + 每帧由效果集合推导</b>（项目里的 SpriteStatusFX 已备好）。</li>
+    <li>视差：x = 起点 + 相机 x × 系数；在 LateUpdate、相机之后读取；Find 换 Camera.main。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么 UI 需要在角色翻转时“反向旋转”？</summary>Entity.Flip 用 transform.Rotate(0,180,0) 旋转整棵层级，子物体上的世界空间 Canvas 也被镜像，文字会反过来；FlipUI 再转 180° 抵消。</details>
+  <details class="quiz"><summary>自测 2：FlashFXMaterial 用的是什么 Shader？</summary>内置 GUI/Text Shader（fileID 10101），它只输出顶点色 × 贴图 alpha，配合 sr.color = white 就是整张图纯白——经典的闪白技巧。</details>
+  <details class="quiz"><summary>自测 3：MaterialPropertyBlock 有什么限制？</summary>使用 MPB 的渲染器不走 SRP Batcher；在内置管线 / 2D 下它保持共享材质，适合动态合批；需要用 Frame Debugger 确认批次。</details>
+</section>

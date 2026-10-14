@@ -9,14 +9,15 @@
     <li>用事件分发器代替 UMG 属性绑定函数（每帧执行）。</li>
     <li>说清“只有主机能重开”“暂停不暂停世界”在 UI 上怎么体现。</li>
   </ul></div>
+  <div class="state ideal"><span class="sl">理想方案</span><div>本章是重构后的 UI。下面第一张表的最后一列是原 Demo 对应界面的当前做法。</div></div>
 
-  <div class="tbl"><table>
-    <tr><th>界面</th><th>何时出现</th><th>读什么</th><th>写什么 / 请求什么</th><th>原 Demo</th></tr>
-    <tr><td>WBP_MainMenu</td><td>L_Menu 地图</td><td>GI.LastError、会话搜索结果</td><td>GI.HostGame / FindGames / JoinGame</td><td>没有联机入口；关卡蓝图里“按任意键开始”</td></tr>
-    <tr><td>WBP_Lobby</td><td>Phase = Waiting</td><td>GS.PlayerArray → 各 PS 的名字、bReady</td><td>PC.Server_SetReady</td><td>“等待其他玩家确认…”文本，无名单</td></tr>
-    <tr><td>WBP_HUD</td><td>Phase = Playing</td><td>AC_Health、武器显示弹数、GS 剩余时间与僵尸数</td><td>—</td><td>属性绑定每帧 Cast GetPlayerPawn(0)；倒计时自己算</td></tr>
-    <tr><td>WBP_Result</td><td>Phase = Won / Lost</td><td>GS.Phase、各 PS 的 Kills</td><td>PC.Server_RequestRestart（仅主机）、GI.LeaveGame</td><td>OpenLevel 重开、QuitGame</td></tr>
-    <tr><td>WBP_Pause</td><td>按 Esc</td><td>—</td><td>关闭自身 / GI.LeaveGame</td><td>SetGamePaused（客户端无效、主机冻结全员）</td></tr>
+  <div class="tbl cmp"><table>
+    <tr><th>界面（理想方案）</th><th>何时出现</th><th>读什么</th><th>写什么 / 请求什么</th><th class="cur">原 Demo（当前做法）</th></tr>
+    <tr><td>WBP_MainMenu</td><td>L_Menu 地图</td><td>GI.LastError、会话搜索结果</td><td>GI.HostGame / FindGames / JoinGame</td><td>没有联机入口；关卡蓝图里“按任意键开始”<div class="pb">⚠ 问题：打包后无法联机；菜单和对局写在同一个关卡蓝图里</div></td></tr>
+    <tr><td>WBP_Lobby</td><td>Phase = Waiting</td><td>GS.PlayerArray → 各 PS 的名字、bReady</td><td>PC.Server_SetReady</td><td>“等待其他玩家确认…”文本，无名单<div class="pb">⚠ 问题：看不到谁准备了、谁还没进来</div></td></tr>
+    <tr><td>WBP_HUD</td><td>Phase = Playing</td><td>AC_Health、武器显示弹数、GS 剩余时间与僵尸数</td><td>—</td><td>属性绑定每帧 Cast GetPlayerPawn(0)；倒计时自己算<div class="pb">⚠ 问题：<span class="tag p1">P1</span>每帧 Cast、武器没到时访问空引用（A#16）；<span class="tag p0">P0</span>两端倒计时不同、各自判胜（A#6）</div></td></tr>
+    <tr><td>WBP_Result</td><td>Phase = Won / Lost</td><td>GS.Phase、各 PS 的 Kills</td><td>PC.Server_RequestRestart（仅主机）、GI.LeaveGame</td><td>OpenLevel 重开、QuitGame<div class="pb">⚠ 问题：<span class="tag p0">P0</span>任一方点重开就断开联机（A#8）</div></td></tr>
+    <tr><td>WBP_Pause</td><td>按 Esc</td><td>—</td><td>关闭自身 / GI.LeaveGame</td><td>SetGamePaused（客户端无效、主机冻结全员）<div class="pb">⚠ 问题：<span class="tag p0">P0</span>暂停破坏联机（A#8）</div></td></tr>
   </table></div>
 
   <h2>0. UI 的网络规格：读哪些复制数据、发哪些 RPC</h2>
@@ -32,7 +33,7 @@
   <p class="tcap">表 13-1　UI 的网络规格。HUD 读的 Ammo 是 Owner Only：只有持枪者自己的客户端有这份数据——这正是 HUD 只显示“自己”的弹药所需要的</p>
 
   <h2>1. 主菜单</h2>
-<!--bpgraph {"cols":4,"rg":56,"title":"WBP_MainMenu · 事件图表","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"WBP_MainMenu · 事件图表","nodes":[
  {"id":"m0","k":"event","x":0,"y":0,"t":"Event Construct","net":"U"},
  {"id":"m1","k":"flow","x":1,"y":0,"t":"Branch","i":["NOT IsEmpty(GI.LastError)"],"ex":["True","False"]},
  {"id":"m2","k":"func","x":2,"y":0,"t":"Show Error Text","i":["← GI.LastError（随后清空）"],"ex":[],"rep":"L:GI.LastError，本机变量","var":"GI.LastError"},
@@ -50,7 +51,7 @@
 "cap":"<b>图 13-1</b>　主菜单。上一局断线的原因由 GameInstance 带过来（它跨地图存活），菜单打开时显示一次"} -->
 
   <h2>2. 大厅</h2>
-<!--bpgraph {"cols":4,"rg":56,"title":"WBP_Lobby · 事件图表","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"WBP_Lobby · 事件图表","nodes":[
  {"id":"l0","k":"event","x":0,"y":0,"t":"Event Construct","net":"U"},
  {"id":"l1","k":"func","x":1,"y":0,"t":"Bind OnPlayersChanged","s":"Target ← GS_Coop","i":["Event ← Refresh"]},
  {"id":"l2","k":"call","x":2,"y":0,"t":"Refresh","s":"先刷新一次","ex":[]},
@@ -67,7 +68,7 @@
 "cap":"<b>图 13-2</b>　大厅。OnPlayersChanged 由 PS_Coop 在 BeginPlay / EndPlay 时调用 GS 的分发器触发（PlayerState 在每一端都会 BeginPlay，所以有人加入、离开时各端名单都会刷新）。Widget 不是 Actor、没有网络连接，不能直接发 RPC"} -->
 
   <h2>3. HUD：事件驱动，不用属性绑定</h2>
-<!--bpgraph {"cols":4,"rg":56,"title":"WBP_HUD · 事件图表","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"WBP_HUD · 事件图表","nodes":[
  {"id":"h0","k":"cevent","x":0,"y":0,"t":"BindCharacter","s":"由角色本地初始化调用","net":"U","o":["Character"]},
  {"id":"h1","k":"func","x":1,"y":0,"t":"Bind OnHealthChanged","s":"Target ← Character.AC_Health","i":["Event ← UpdateHealth"],"rep":"RD:Health（RepNotify）→ OnRep 里广播"},
  {"id":"h2","k":"func","x":2,"y":0,"t":"Bind OnWeaponChanged","s":"Target ← Character","i":["Event ← BindWeapon"]},
@@ -88,7 +89,7 @@
   </div>
 
   <h2>4. 结算与暂停</h2>
-<!--bpgraph {"cols":4,"rg":56,"title":"WBP_Result / WBP_Pause · 事件图表","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"WBP_Result / WBP_Pause · 事件图表","nodes":[
  {"id":"r0","k":"event","x":0,"y":0,"t":"Event Construct","s":"WBP_Result","net":"U"},
  {"id":"r1","k":"func","x":1,"y":0,"t":"Set Title","i":["← GS.Phase == Won ? 胜利 : 失败"],"rep":"RD:GS.Phase（RepNotify）"},
  {"id":"r2","k":"func","x":2,"y":0,"t":"Set Visibility","s":"RestartButton","i":["← Is Server ? Visible : Collapsed"]},

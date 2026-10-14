@@ -1,0 +1,146 @@
+<section class="chapter" id="ch14">
+  <div class="ch-head">
+    <div class="no">CHAPTER 14</div>
+    <h1>30 道发散场景题：从这个项目出发能被问到的“你会怎么做”</h1>
+    <p class="lead">前面各章末尾的场景题紧贴源码；这一章是更开放的“设计一个……”“如果要……”。每题给出考点、答题框架和“本项目里能拿来举例的地方”——场景题最怕空谈，用自己项目的一个具体问题开头，答案立刻就有了分量。</p>
+  </div>
+  <div class="goals"><div class="t">答场景题的四步</div><ul>
+    <li><b>澄清约束</b>：规模多大、单机还是联网、平台、要不要策划可配</li>
+    <li><b>先给结构</b>：数据 / 逻辑 / 表现三层各是什么，画一张框图</li>
+    <li><b>再讲关键难点</b>：时序、一致性、性能、扩展，每个点给一个具体做法</li>
+    <li><b>落到项目</b>：“我在 RPGDemo 里就踩过……”，然后说代价与取舍</li>
+  </ul></div>
+
+  <h2>14.1 手感与战斗（8 题）</h2>
+  <div class="scene"><div class="q">S1　让 2D 跳跃“好手感”，你会加哪些机制？</div>
+    <p class="why">考点：平台跳跃手感的标准工具箱。</p>
+    <p>可变跳高（松开跳键时把上升速度乘 0.5）、顶点重力减小（apex hang）、下落重力加大（更干脆）、Coyote Time（离地后 0.1 s 仍可起跳）、Jump Buffer（落地前 0.1 s 按跳也算）、最大下落速度、空中水平加速度比地面小。<b>本项目</b>：跳跃是 Enter 时一次性 <code>vy = 20</code>，重力倍率 5，下落状态里水平速度直接设为 7——没有可变跳高与 Coyote，跑出平台边缘的下一帧就切 Fall。</p>
+  </div>
+  <div class="scene"><div class="q">S2　列一份“打击感”清单，并说明它们的时序。</div>
+    <p class="why">考点：表现系统的协同。</p>
+    <p>命中瞬间同时启动：顿帧（攻防双方动画减速 60~100 ms）→ 受击闪白（0.1 s）→ 击退 / 浮空 → 镜头震动（衰减曲线）→ 特效与音效（音效可略早于画面）→ 伤害数字 → 手柄震动。全部由 HitResult 驱动（Ch6.6），顿帧需要速度修正器栈支持（Ch7.7）。<b>本项目</b>：有闪白与击退，但击退方向按受击者朝向计算（#26）。</p>
+  </div>
+  <div class="scene"><div class="q">S3　设计一个带分支的连招系统（轻 / 重攻击组合出不同招式）。</div>
+    <p class="why">考点：数据驱动的连招树与取消窗口。</p>
+    <p>连招树：节点 = 招式（动画、判定、位移、可取消窗口），边 = 输入（轻 / 重 / 方向）+ 时间窗口；运行时当前节点在窗口内消费输入缓冲决定下一节点，超时回根。数据放 SO / 表，编辑器可视化。<b>本项目</b>：三段攻击由 comboCounter 线性递增，取消后计数照样 +1（E1-S5），位移和窗口写死在代码。</p>
+  </div>
+  <div class="scene"><div class="q">S4　做一个三阶段 Boss：50% 血量换招式、30% 召唤小怪、狂暴计时。</div>
+    <p class="why">考点：AI 的层次化与事件驱动。</p>
+    <p>外层阶段状态机（Phase1 / 2 / 3，转移条件为血量阈值或计时，转移时播过场并清理场上效果），内层每阶段一棵行为树；阶段切换期间无敌、打断当前技能（用 Ch3 的打断等级）；召唤用刷怪器 + 对象池；血量阈值监听 onHealthChanged（用 event，Ch11）。注意“一次伤害跨过两个阈值”要依次触发。</p>
+  </div>
+  <div class="scene"><div class="q">S5　实现“子弹时间”：玩家正常速度，敌人和投射物 0.3 倍速。</div>
+    <p class="why">考点：局部时间缩放。</p>
+    <p>全局 timeScale 做不到“玩家不变慢”。给实体一个本地时间系数：逻辑用 <code>dt × localScale</code>，Animator.speed 与刚体速度按系数缩放（或物理用自定义积分），粒子 simulationSpeed 同步；计时器、Buff 都读本地时间。这正需要 Ch7 的速度修正器栈——项目里冻结、减速、死亡已经在抢写 animator.speed，再加子弹时间只会更乱。</p>
+  </div>
+  <div class="scene"><div class="q">S6　2D 横版的相机怎么做才舒服？</div>
+    <p class="why">考点：相机系统的常见参数。</p>
+    <p>死区（小范围移动相机不动）、前瞻（朝移动方向偏移）、垂直方向只在落地后跟随（避免跳跃时镜头上下晃）、平滑阻尼、边界约束、震动（脉冲 + 衰减）、战斗时拉远 / Boss 时锁定。Cinemachine 提供大部分；注意相机在 LateUpdate 更新，依赖相机位置的视差背景要在它之后读取（Ch11.4）。</p>
+  </div>
+  <div class="scene"><div class="q">S7　角色控制器：用 Rigidbody2D 还是自己写 Kinematic 控制器？</div>
+    <p class="why">考点：物理驱动 vs 运动学驱动的取舍。</p>
+    <p>动态刚体：碰撞、推挤、斜坡自然得到，但手感受物理参数影响、帧率相关问题多（E10），状态机要和物理“抢”速度（项目里 isKnocked、SetVelocity 互相阻挡）。Kinematic：自己做射线 / Cast 检测与移动，手感完全可控、可确定性，代价是斜坡、平台、推挤都要自己写。精品动作 / 平台游戏多选后者；本项目用前者，冲刺距离随帧率与卡顿变化就是代价之一。</p>
+  </div>
+  <div class="scene"><div class="q">S8　设计浮空连段：把敌人打上天后可以空中追击。</div>
+    <p class="why">考点：受击状态、重力与判定的配合。</p>
+    <p>受击方新增 Launched / Airborne 状态（重力减小、每次被击中刷新滞空时间，次数上限防无限连）、落地进入 Knockdown；攻击方空中攻击有自己的判定与位移；连段计数衰减（每多一击击退 / 浮空效果递减）。全部写进技能数据与受击规则，伤害管线的 HitResult 告诉表现层该播哪种受击。</p>
+  </div>
+
+  <h2>14.2 系统设计（8 题）</h2>
+  <div class="scene"><div class="q">S9　设计任务系统（击杀 N 只骷髅、收集 M 张皮、和 NPC 对话）。</div>
+    <p class="why">考点：事件驱动 + 条件组合 + 存档。</p>
+    <p>任务配置：前置条件、目标列表（类型 + 参数 + 数量）、奖励；运行时进度存在玩家数据里；目标通过订阅游戏事件推进（EnemyKilled、ItemAdded、DialogueFinished），而不是在各系统里调用任务系统。<b>本项目</b>：要先有“击杀事件”——现在骷髅死亡只是切状态 + 掉落，且可能重复 Die（#7），任务计数会被刷。</p>
+  </div>
+  <div class="scene"><div class="q">S10　设计成就系统，要求不侵入战斗代码。</div>
+    <p class="why">考点：观察者模式与解耦。</p>
+    <p>与任务系统共用事件总线；成就是“监听器 + 条件 + 一次性奖励”；统计类成就（累计伤害）由统计服务汇总后推送。关键是事件定义稳定、带足够上下文（谁、对谁、用什么技能、是否暴击），这又回到 DamageInfo / HitResult（Ch6）。</p>
+  </div>
+  <div class="scene"><div class="q">S11　设计存档系统：背包、装备、位置、任务进度、设置。</div>
+    <p class="why">考点：序列化、版本兼容、可靠性。</p>
+    <p>可序列化的纯数据模型（与 MonoBehaviour 分离）→ 序列化（JSON 便于调试 / 二进制更小）→ 原子写（写临时文件再替换，防断电损坏）→ 版本号与迁移 → 引用用稳定 id（defId / GUID），不能存场景对象引用或数组下标。<b>本项目</b>：背包以 ScriptableObject 引用为键，直接序列化就会和资源 GUID 绑死（场景 10-3）。</p>
+  </div>
+  <div class="scene"><div class="q">S12　做一个技能编辑器给策划用。</div>
+    <p class="why">考点：工具链与数据结构。</p>
+    <p>时间轴编辑器（Timeline 扩展或自研 EditorWindow）：轨道 = 动画 / 判定 / 位移 / 状态窗口 / 表现；数据存 SO 或表；编辑器内逐帧预览（在编辑器里驱动 Animator 采样和判定 Gizmos）；运行时由逻辑帧驱动；校验（判定帧不能超出动画长度）。<b>本项目</b>：攻击位移 0.15 s、连招窗口 1.5 s、弹反持续 1 s 这些写死的数字都是编辑器的第一批“轨道”（Ch4 场景 4-4）。</p>
+  </div>
+  <div class="scene"><div class="q">S13　设计对话 / 剧情系统，支持分支和条件。</div>
+    <p class="why">考点：图结构数据与解释执行。</p>
+    <p>对话图（节点：台词 / 选项 / 条件分支 / 命令），用 Ink / Yarn 或自研节点编辑器；运行时解释执行，命令节点通过事件调用游戏系统（给物品、开任务）；本地化 key 而不是直接存文本；存档记录变量与已读节点。</p>
+  </div>
+  <div class="scene"><div class="q">S14　设计刷怪器：波次、权重、上限、不刷在玩家眼前。</div>
+    <p class="why">考点：配置、对象池、生成时机。</p>
+    <p>波次配置（时间 / 条件触发、怪物权重表、数量、上限）；生成点筛选（不在镜头内、与玩家距离区间、可达）；对象池 + OnSpawn 重置（Ch2 场景 2-3）；生成当帧不可被选中（Ch2 场景 2-2）。<b>本项目</b>：怪物取组件在 Start、死亡不回收（#32），都需要先改。</p>
+  </div>
+  <div class="scene"><div class="q">S15　给游戏做本地化（中 / 英 / 日），哪些地方要改？</div>
+    <p class="why">考点：数据与显示分离。</p>
+    <p>所有文本改为 key + 表格；字体回退（中日文字库体积）与 TMP 动态字体；数字 / 日期格式；文本长度变化导致 UI 布局溢出（自动缩放或预留）；图片中的文字单独出图。<b>本项目</b>：物品名直接写在 SO 的 itemName 里，<code>gameObject.name = "Item object - " + itemName</code> 也用它，改成 key 后要区分“调试名”和“显示名”。</p>
+  </div>
+  <div class="scene"><div class="q">S16　做新手引导：高亮按钮、强制玩家完成一次弹反。</div>
+    <p class="why">考点：引导系统与游戏逻辑的解耦。</p>
+    <p>引导步骤配置（条件、高亮目标、遮罩、等待事件）；高亮通过 UI 路径 / id 找目标；“完成一次弹反”监听 Parried 事件（需要 HitResult）；引导期间可以临时修改规则（骷髅只出可弹反的攻击、窗口放宽），用修正器实现而不是改源码。</p>
+  </div>
+
+  <h2>14.3 性能与工程（7 题）</h2>
+  <div class="scene"><div class="q">S17　游戏启动要 8 秒，怎么优化？</div>
+    <p class="why">考点：启动链路分析。</p>
+    <p>测：从进程启动到首帧、到可交互，分段打点。常见大头：首场景资源量、Resources 目录（会在启动时建立索引）、大量 Awake / Start 里同步加载、Shader 预热、单例初始化串行。优化：最小启动场景 + 异步加载主场景、按需加载、Shader 变体裁剪与分批预热、初始化分帧。</p>
+  </div>
+  <div class="scene"><div class="q">S18　包体超标 200 MB，怎么减？</div>
+    <p class="why">考点：资源与代码体积。</p>
+    <p>Build Report 看构成：纹理（压缩格式 ASTC / ETC2、尺寸、图集、去掉未用的 mip）、音频（压缩、流式）、Shader 变体、未引用资源被 Resources 带入、TMP 示例（本项目 Assets 里就带着 TextMesh Pro 的 Examples &amp; Extras）；代码裁剪（IL2CPP + Managed Stripping）；首包 + 分包下载（Addressables）。</p>
+  </div>
+  <div class="scene"><div class="q">S19　进战斗瞬间卡顿 300 ms，怎么查？</div>
+    <p class="why">考点：尖刺分析。</p>
+    <p>Profiler 抓那一帧：同步资源加载 / 实例化（第一次生成某种怪、第一次播特效）、Shader 首次编译、GC、大量 Awake。手段：预加载与预热（对象池 prewarm、ShaderVariantCollection.WarmUp）、异步实例化、分帧生成。<b>本项目</b>：瞄准点在 Start 一次性生成 25 个，是“预热”的正面例子；分身、飞剑、雷击则是首次使用时才实例化。</p>
+  </div>
+  <div class="scene"><div class="q">S20　2D 场景 Draw Call 很高，怎么降？</div>
+    <p class="why">考点：2D 合批。</p>
+    <p>Sprite Atlas 合图、同材质、同排序层连续绘制（排序打断合批）、减少材质实例（<code>sr.material</code> 克隆，Ch11）、Tilemap 使用 Chunk 模式、UI 动静分离、粒子共享材质。用 Frame Debugger 看每个批次被打断的原因。</p>
+  </div>
+  <div class="scene"><div class="q">S21　资源加载从 Resources 换成 Addressables，要注意什么？</div>
+    <p class="why">考点：异步加载与引用计数。</p>
+    <p>所有加载变为异步，调用方要处理“未加载完成”的状态；加载与释放成对（引用计数），忘记释放就是内存泄漏；分组策略（按场景 / 按功能 / 按更新频率）决定下载粒度；Play Mode 下用不同的模拟模式测试；直接引用（场景里拖的引用）仍会被打进依赖。</p>
+  </div>
+  <div class="scene"><div class="q">S22　线上需要热修一个数值 bug（比如合成少扣料），怎么做？</div>
+    <p class="why">考点：热更新方案。</p>
+    <p>数值类：配置热更（表 / SO 资源）即可。逻辑类（像 CanCraft 的扣料）：需要代码热更——Lua（xLua / ToLua）或 C# 热更（HybridCLR / ILRuntime）；更根本的是联网游戏里产出逻辑在服务器，修服务器即可、不必发客户端。热更前后的存档 / 数据要兼容。</p>
+  </div>
+  <div class="scene"><div class="q">S23　多人协作时，场景和预制体经常冲突，怎么办？</div>
+    <p class="why">考点：Unity 项目的协作规范。</p>
+    <p>Force Text 序列化 + 可读的 YAML；场景拆分（多场景叠加，按功能分人）；预制体嵌套与变体，减少对大场景的直接修改；SmartMerge（UnityYAMLMerge）作为合并工具；二进制资源用锁（SVN / Perforce 的锁定，或 Git LFS lock）。<b>本项目</b>：数值全在唯一的 SampleScene 里，任何调参都会改这个大文件。</p>
+  </div>
+
+  <h2>14.4 联网与扩展（7 题）</h2>
+  <div class="scene"><div class="q">S24　把这个 Demo 改成双人联机（状态同步），你的方案？</div>
+    <p class="why">考点：联网化的全景。</p>
+    <p>服务器权威：移动、伤害、掉落、合成都在服务器；客户端预测自己的移动与攻击动画（预表现），服务器纠正；其他玩家和怪物插值显示；命中判定服务器回溯；弹反按键带时间戳上传。改造前提：输入抽成 InputFrame（Ch3.8）、伤害管线（Ch6.6）、物品事务（Ch10.6）、随机数只在服务器。项目里“单例拿唯一玩家”的写法要全部改成按 id 查找。</p>
+  </div>
+  <div class="scene"><div class="q">S25　改成帧同步呢？哪些代码必须重写？</div>
+    <p class="why">考点：确定性的要求。</p>
+    <p>逻辑层必须确定：定点数代替 float（伤害公式、移动、计时器）、确定性 RNG 代替 UnityEngine.Random、固定逻辑帧代替 Update / deltaTime、自写碰撞检测代替 Physics2D、命中由逻辑时间轴而非动画事件、容器遍历顺序确定（Dictionary 遍历顺序不能依赖）。表现层（动画、特效、UI）保持 Unity。几乎所有 Player / Enemy / Stats 代码都要重写为“逻辑层”。</p>
+  </div>
+  <div class="scene"><div class="q">S26　做录像回放，要求能拖动进度条。</div>
+    <p class="why">考点：输入回放 vs 状态快照。</p>
+    <p>确定性逻辑下录输入（小、精确），拖动进度需要定期存“关键帧快照”以便跳转后重放；非确定性逻辑只能录状态（每 N 帧的实体状态 + 事件），回放时插值。本项目当前不满足确定性（Ch5 场景 5-4），只能走状态录制。</p>
+  </div>
+  <div class="scene"><div class="q">S27　单机游戏也要防作弊（排行榜、成就），能做什么？</div>
+    <p class="why">考点：客户端安全的边界。</p>
+    <p>关键数据加密 / 混淆存储（防内存修改器直接搜索）、数值校验（伤害上限、时间合理性）、存档签名、排行榜提交附带录像或关键统计由服务器复核、IL2CPP 提高反编译成本。承认边界：客户端没有真正的安全，只能提高成本、事后检测。</p>
+  </div>
+  <div class="scene"><div class="q">S28　同时支持键鼠、手柄、触屏，输入怎么设计？</div>
+    <p class="why">考点：输入抽象。</p>
+    <p>New Input System 的 Action Map：游戏逻辑只认 Action（Attack、Dash、Aim），不同设备绑定不同控件；瞄准在键鼠下是鼠标位置、手柄是右摇杆方向、触屏是拖拽，统一成“瞄准方向”向量；UI 提示随当前设备切换。<b>本项目</b>：瞄准直接读 <code>Input.mousePosition</code>，冲刺写死 LeftShift，需要先抽象。</p>
+  </div>
+  <div class="scene"><div class="q">S29　如果把这个项目移植到 Unreal，各部分对应什么？</div>
+    <p class="why">考点：跨引擎概念映射（游戏客户端岗常考）。</p>
+    <p>Entity → ACharacter（或 APawn + 组件）；状态机 → 自写 C++ 状态机 / StateTree / 动画蓝图状态机（只做表现）；动画事件 → AnimNotify / AnimNotifyState（区间窗口天然支持）；Stat / Buff / 技能 → GAS（Attribute、GameplayEffect、GameplayAbility、GameplayTag）；Inventory → UObject 数据 + 组件；ScriptableObject → DataAsset / DataTable；单例 → Subsystem；对象池 → 自写或插件；OverlapCircle → SweepMulti / OverlapMulti + Collision Channel。</p>
+  </div>
+  <div class="scene"><div class="q">S30　用 ECS（DOTS）重写战斗，你会怎么拆？</div>
+    <p class="why">考点：数据导向设计。</p>
+    <p>组件（纯数据）：Position、Velocity、Health、Faction、AttackState、HitboxTimeline、BuffBuffer、Cooldown；系统：InputSystem → StateSystem → MovementSystem → HitDetectionSystem（批量查询）→ DamageSystem（事件缓冲）→ BuffTickSystem → DeathSystem → PresentationSync（把结果同步给 GameObject 表现）。好处是批量与多线程；难点是动画事件驱动的命中要改成时间轴、表现层与 ECS 世界的同步（Ch1 场景 1-3）。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>场景题四步：<b>澄清约束 → 先给结构 → 关键难点 → 落到项目</b>。</li>
+    <li>几乎所有“扩展”题的前置条件都是同几件事：<b>输入抽象、伤害管线、修正器 / Buff、物品实例与事务、对象池、固定逻辑帧</b>——这也是第 12 章重构路线的后五天。</li>
+  </ul></div>
+</section>

@@ -50,7 +50,7 @@
     <tr><td>Client</td><td>发到拥有者客户端执行；没有拥有者时在服务器执行</td><td>在本地执行</td><td>在本地执行</td></tr>
     <tr><td>NetMulticast</td><td>服务器 + 所有相关的客户端执行</td><td class="mid">只在本地执行</td><td class="mid">只在本地执行</td></tr>
   </table></div>
-  <p class="tcap">RPC 可达性（与 Role 无关，只看调用端和 Owner 连接）。原 Demo：关卡蓝图的 Server_SetStart 由客户端调用 → 关卡脚本 Actor 不属于任何客户端连接 → 被丢弃；客户端本地扣血后调用 Multicast_Death → 只在本地执行</p>
+  <p class="tcap">RPC 可达性（与 Role 无关，只看调用端和 Owner 连接）。原 Demo：关卡蓝图的 Server_SetStart 由客户端调用 → 关卡脚本 Actor 不属于任何客户端连接 → 被丢弃；客户端调用的 Multicast 只在本地执行（原 Demo 的组播都由服务器调用，没有踩到这一条；它的问题是组播里做了补刷这类规则，见第 1 章）</p>
 
   <div class="co deep"><span class="h">Reliable 与 Unreliable</span>
     <ul>

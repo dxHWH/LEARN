@@ -1,0 +1,237 @@
+<section class="chapter" id="ch6">
+  <div class="ch-head">
+    <div class="no">CHAPTER 06</div>
+    <h1>战斗判定：攻击检测、受击反馈与弹反窗口</h1>
+    <p class="lead">“攻击判定怎么做”“弹反怎么实现”“为什么会多段命中”——这一章把一次命中拆成检测、结算、反馈三步，指出项目里“反馈和结算分家”导致的两个怪现象：闪避了也闪白击退、弹反成功照样掉血；再把弹反窗口按帧算清楚。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清 Hitbox / Hurtbox / LayerMask / 命中去重这四个概念，并对照项目里缺了哪些</li>
+    <li>理解“表现先行、结算在后、二者不通气”带来的两个 bug</li>
+    <li>用 E2 的数字讲清弹反成功窗口：本项目 [[e2.60.cw|.2f]] s、原教程写法 [[e2.60.ow|.2f]] s，以及为什么都偏宽</li>
+    <li>给出 DamageInfo → HitResult 的伤害管线，把弹反、闪避、无敌帧、霸体放进同一个判定入口</li>
+  </ul></div>
+
+  <h2>6.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>攻击判定在动画的命中帧用 <code>OverlapCircleAll</code> 取攻击点周围的碰撞体，对其中的敌人先调 <code>DamageEffect()</code>（闪白 + 击退协程），再调 <code>DoDamage()</code>（闪避 → 暴击 → 护甲）。问题有三：查询没有 LayerMask、每次分配数组、同一目标多个碰撞体会重复命中；反馈和结算是两个互不知情的调用，所以闪避时照样闪白击退，弹反成功时伤害照样结算；击退方向用的是“受击者自己的朝向”，背后挨打会被打向攻击者。弹反的判定是“受击那一刻处于反击状态、且怪物正在出手窗口内”，实测按键成功窗口约 [[e2.60.cw|.2f]] s。改进是统一成一个伤害管线：攻击方构造 DamageInfo，受击方返回 HitResult（Evaded / Parried / Blocked / Hit），反馈根据结果播放。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "战斗判定", "rows": [["检测", "9 处 OverlapCircleAll：无 LayerMask、按碰撞体遍历、每次分配数组", "P2 会查到地面与触发器；一个敌人两个碰撞体就挨两刀；每次调用都分配数组（#27）", "Hurtbox 层 + ContactFilter2D + 复用缓冲 + 按实体去重", "不误查地面 / 触发器；多碰撞体不多段命中；零分配", ""], ["裁决", "DamageEffect（表现）与 DoDamage（结算）两次独立调用", "P1 闪避了却闪白击退；弹反成功仍照常扣血（#5）", "攻击方构造 DamageInfo → 受击方 Receive 唯一裁决 → HitResult；表现只读结果", "闪避不再闪白；弹反成功不再掉血", ""], ["弹反窗口", "受击瞬间处于 1 s 的反击架势即成功；落空没有惩罚", "P2 按键窗口 [[e2.60.cw|.2f]] s 且可预按、落空无惩罚：弹反没有风险，不需要读招（E2）", "完美窗口从按键起算约 0.15 s；之后算格挡；落空进入收招硬直", "难度可控、需要读招（参数为设计值）", ""], ["击退方向", "按受击者自己的朝向", "P2 背对攻击者挨打会被打进攻击者怀里；玩家 knockBack 为 (0, 0)，受击时速度被清零（推断，#26）", "按攻击来源方向（DamageInfo.origin）", "背后挨打不会被打进攻击者怀里", ""], ["免疫与打断", "无无敌帧、无霸体；多次受击叠加多个击退协程", "隐患 冲刺穿怪照样挨打；连续受击叠加多个击退协程，最早结束的那个提前解除击退", "标签（Invulnerable / SuperArmor）+ 打断等级", "冲刺无敌、霸体攻击有统一表达", ""], ["同帧互砍", "结算顺序取决于 Animator 更新顺序（不确定）", "隐患 谁先扣血取决于 Animator 更新顺序：同样的操作结果不可复现", "本帧命中先收集，帧末按规则统一结算", "结果可预期、可复现", ""]]} -->
+
+
+  <h2>6.2 检测：一个圆、没有过滤、没有去重</h2>
+<!--code:cs:PlayerAnimationTriggers.cs:7-26 ‖ P1 表现（DamageEffect）与结算（DoDamage）分两次调用（#5）；OverlapCircleAll 无 LayerMask、按碰撞体不去重、每次分配（#27）；player 属性每次访问都向上查（#34）-->
+private Player player => GetComponentInParent<Player>();   // 属性：每次访问都向上查一次
+
+private void AttackTrigger()
+{
+    Collider2D[] colliders = Physics2D.OverlapCircleAll(player.attackCheck.position, player.attackCheckRadius);
+    foreach (Collider2D collider in colliders)
+    {
+        Enemy enemy = collider.GetComponent<Enemy>();
+        if (enemy != null)
+        {
+            enemy.DamageEffect();                    // ① 先播受击表现
+            player.stats.DoDamage(enemy.stats);      // ② 再结算（可能被闪避）
+        }
+    }
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>概念</th><th>项目现状</th><th>后果</th><th>改法</th></tr>
+    <tr><td><b>Hitbox</b>（攻击判定区）</td><td>一个圆：attackCheck（本地 x 1.2）、半径 0.9；三段攻击共用</td><td>三段攻击动作幅度不同却同一判定；空中 / 地面也同一判定</td><td>判定形状随技能数据配置（圆 / 盒 / 扇形 + 偏移 + 持续帧）</td></tr>
+    <tr><td><b>Hurtbox</b>（受击区）</td><td>直接用物理胶囊体</td><td>受击区与“推挤 / 站地面”的物理体绑死；想做“只打头”“蹲下躲刀”都做不了</td><td>单独的 Trigger 碰撞体，放在 Hurtbox 层</td></tr>
+    <tr><td><b>LayerMask</b></td><td>9 处 OverlapCircleAll 全都没传</td><td>结果里混着地面 Tilemap、玩家自己的血条 Trigger（Queries Hit Triggers 开着）、掉落物触发器，每个都要 GetComponent 一次</td><td>只查 Hurtbox 层；用 ContactFilter2D 统一配置</td></tr>
+    <tr><td><b>去重</b></td><td>按碰撞体遍历</td><td>一个敌人挂两个碰撞体就挨两刀（加头部判定、加盾牌碰撞体时立刻出现）</td><td>本次攻击维护 HashSet&lt;受击者&gt;，按“实体”而不是“碰撞体”去重</td></tr>
+    <tr><td><b>分配</b></td><td>每次 new 一个数组</td><td>一刀一次 GC 分配；旋转剑冷却为 0 时每帧一次（第 12 章）</td><td>NonAlloc / 带 List 结果的重载，复用缓冲</td></tr>
+  </table></div>
+
+  <h2>6.3 反馈与结算分家：两个怪现象</h2>
+<!--seq {"p":["攻击方\nAttackTrigger","受击方\nEntity / EntityFX","受击方\nCharacterStats","玩家看到的"],"pc":["b","o","g","s"],
+"s":[["—","情形 A：受击方闪避成功（evasion + agility 判定通过）"],
+[0,1,"DamageEffect()：闪白 0.2 s + HitKnockBack 协程","call"],[1,3,"看到：闪白、被击退","call"],
+[0,2,"DoDamage → CanTargetAvoidAttack = true → return","call"],[2,2,"没有扣血，也没有任何“闪避”反馈","g"],
+["—","情形 B：玩家在反击状态里被骷髅命中（弹反成功）"],
+[1,1,"Player.DamageEffect：处于反击 → CounterAttack()，骷髅被眩晕；return（不闪白）","o"],
+[0,2,"骷髅的 AttackTrigger 继续：enemy.stats.DoDamage(player.stats)","call"],[2,2,"照常闪避 / 暴击 / 护甲 → TakeDamage","r"],
+[2,3,"看到：弹反成功的动画，同时血条在掉","call"]],
+"cap":"图 6-1　反馈与结算是两次独立调用：情形 A 闪避了却闪白击退（玩家攻击敌人时）；情形 B 弹反成功却照样结算伤害（骷髅攻击玩家时）。当前骷髅 damage = 0，情形 B 暂时看不出来"} -->
+  <p><span class="tag bug">问题</span> <span class="sev p1">P1</span> 两个现象是同一个设计缺陷：<b>“这次攻击的结果是什么”没有一个唯一的裁决点</b>。表现层（闪白、击退、弹反）和数值层（闪避、伤害）各自判断，互不知道对方的结论。修法见 6.6 的伤害管线。</p>
+  <h3>击退的两个细节</h3>
+<!--code:cs:Entity.cs:66-73 与 SetVelocity:107-113 ‖ P2 击退方向取受击者朝向而非攻击来源；多次受击叠加协程，最早结束的那个提前解除击退（#26）-->
+protected virtual IEnumerator HitKnockBack()
+{
+    isKnocked = true;
+    rb.velocity = new Vector2(knockBackDistance.x * -facinDir, knockBackDistance.y);   // 方向 = 自己朝向的反方向
+    yield return new WaitForSeconds(knockBackDuration);
+    isKnocked = false;
+}
+public void SetVelocity(float _xVelocity, float _yVeloctiy) { if (isKnocked) return; ... }  // 击退期间状态改不了速度
+<!--/code-->
+  <ul>
+    <li><span class="tag bug">问题</span> <span class="sev p2">P2</span> 击退方向取决于<b>受击者面朝哪边</b>，而不是攻击来自哪边。骷髅背对玩家时被砍，会被击退到玩家怀里。应传入攻击者位置：<code>dir = sign(victim.x − attacker.x)</code>。</li>
+    <li><span class="tag inf">推断</span> 玩家的 knockBackDistance 是 (0, 0)、持续 0 s：每次受击都会把速度设成 (0, 0) 并锁住 SetVelocity 一帧——空中被打会瞬间失去上升 / 下落速度，表现为“顿一下再掉”。这可能被当成“受击硬直”接受了，但它是零值配置的副作用，而不是设计。</li>
+    <li>多次受击会叠加多个 HitKnockBack 协程，最早结束的那个把 isKnocked 置假——和 isBusy、冻结一样的“重叠协程最早者赢”问题（第 7 章 E8 量化）。</li>
+  </ul>
+
+  <h2>6.4 弹反：判定逻辑与 E2 成功窗口</h2>
+<!--code:cs:Player.cs:123-131 · PlayerCounterAttackState.cs:55-72 · Enemy.cs:100-109 ‖ P1 弹反只拦住了表现，伤害结算照常执行（#5）；架势 1 s 内任何时刻被打都算成功，按键窗口 [[e2.60.cw|.2f]] s（E2）-->
+public override void DamageEffect()                         // Player：受击时先看是不是在反击
+{
+    if (stateMachine.currentState == counterAttack) { counterAttack.CounterAttack(); return; }
+    base.DamageEffect();
+}
+public void CounterAttack()                                  // 以自己的攻击点找“正在出手”的敌人
+{
+    foreach (var c in Physics2D.OverlapCircleAll(player.attackCheck.position, player.attackCheckRadius))
+        if (c.GetComponent<Enemy>() is Enemy e && e.CanbeStunned())
+        {
+            player.animator.SetBool("SuccessfulCounterAttack", true);
+            stateTimer = 10;                                 // 之后只能靠成功动画的事件退出
+            player.isSuccessfulCounterAttacking = true;
+        }
+}
+public virtual bool CanbeStunned()                           // “查询”带副作用：关窗 + 子类里切到眩晕
+{
+    if (canBeStunned) { CloseCounterAttackWindow(); return true; }
+    return false;
+}
+<!--/code-->
+  <p>作者把教程的写法（反击状态每帧检查“附近有没有正在开窗的敌人”，代码还以注释形式留在 Update 里）改成了“<b>被打中的那一刻</b>才检查”。两种写法的成功条件不同：</p>
+  <ul>
+    <li><b>本项目</b>：骷髅的 AttackTrigger（0.4167 s）触发时，玩家仍处于反击状态。反击状态持续 1 s，所以 Q 必须在命中前 1 s 以内按下。</li>
+    <li><b>原教程写法</b>：反击状态的任意一帧 Update 里，骷髅的窗口开着（0.0833 s 开、0.4167 s 关）。反击状态与窗口有重叠即可。</li>
+  </ul>
+  <p>用逐帧模型扫按键时刻 τ（相对骷髅进入攻击的那一帧，1 ms 步长，24 个子相位取公共部分）<span class="tag ex">实测 E2</span> <span class="tag mdl">模型 R1~R3</span>：</p>
+<!--tline {"x":[-1.1,1.4],"labw":180,"ticks":[-1,-0.75,-0.5,-0.25,0,0.25,0.5,0.75,1,1.25],"xlabel":"相对骷髅进入攻击状态的时间 / s",
+"rows":[
+ {"n":"骷髅 Skeleton_Attack","segs":[[0,1.3333,"s","攻击片段 1.333 s（循环）"]],"pts":[[1.25,"s","结束事件"]]},
+ {"n":"弹反窗口 canBeStunned","segs":[[0.0833,0.4167,"a","开窗"]]},
+ {"n":"现状：Q 按下时刻","segs":[["e2.60.clo","e2.60.chi","g","宽 [[e2.60.cw|.2f]] s"]]},
+ {"n":"对照：原教程写法","segs":[["e2.60.olo","e2.60.ohi","b","宽 [[e2.60.ow|.2f]] s"]]},
+ {"n":"理想：完美窗口（示意）","segs":[[0.2167,0.4167,"g","按键后约 0.15~0.2 s"]]}],
+"marks":[[0.4167,"命中帧 0.417","r"],[0,"进入攻击","s"]],
+"cap":"图 6-2　弹反成功的按键时刻（60 fps，E2）。本项目的成功区间是“命中前约 1 s 到命中帧”，原教程写法再往前多 1/3 s；两者都能在骷髅<b>还没抬手</b>时就按好 Q 等着——最后一行是动作游戏常见的“只奖励临近命中的按键”的示意"} -->
+<!--dtab {"rows":"E2.rows","cols":[["帧率","fps"],["本项目：最早 / s","clo",".3f"],["最晚 / s","chi",".3f"],["宽度 / s","cw",".3f"],["原写法：最早 / s","olo",".3f"],["最晚 / s","ohi",".3f"],["宽度 / s","ow",".3f"]],"cap":"表 6-1　三种帧率下的成功区间。帧率只影响边界的量化：命中事件在“片段时间首次 ≥ 0.4167 s”的那一帧触发，30 fps 下这一帧在 0.433 s，所以 0.42 s 才按下也来得及；左边界由反击状态的 1 s 计时（float 累减）决定"} -->
+  <p>三点结论：</p>
+  <ol>
+    <li><b>窗口宽度 ≈ 反击状态持续时间（1 s）</b>，而不是骷髅的“破绽”时长。把 <code>counterAttackDuration</code> 调短会同时缩短“摆架子等弹反”的时间，这才是真正控制难度的旋钮。</li>
+    <li><b>可以无脑预按</b>：骷髅进入攻击前约 0.6 s 就按 Q，仍会成功。原写法更宽（只要求反击状态与 0.33 s 的窗口有重叠），提前 0.9 s 都行。</li>
+    <li><b>没有失败代价</b>：Q 落空只是在原地站 1 s（反击状态每帧 SetVelocity(0,0)），没有硬直或冷却；配合第 2 点，弹反几乎是“看到骷髅靠近就按”。</li>
+  </ol>
+  <div class="co warn"><span class="h">别忘了 6.3 的情形 B</span><p>即使弹反成功，骷髅的 AttackTrigger 在调用 <code>player.DamageEffect()</code> 之后照样执行 <code>enemy.stats.DoDamage(player.stats)</code>。另外，弹反成功的判定还依赖第 4 章说的“同一时刻 AttackTrigger 排在 CloseCounterAttackWindow 之前”——这是一个只存在于 .anim 文件事件顺序里的契约。</p></div>
+
+  <h2>6.5 无敌帧、霸体与多段命中</h2>
+  <p>项目里没有任何“免疫”概念：冲刺没有无敌帧，受击后没有短暂无敌，攻击没有霸体。在只有一只骷髅、伤害为 0 的场景里看不出来；一旦多个敌人同时攻击，玩家会在同一帧被多次结算、被多个击退协程拉扯。动作游戏里通常这样组织：</p>
+  <div class="tbl"><table>
+    <tr><th>机制</th><th>实现方式</th><th>放在哪里</th></tr>
+    <tr><td>闪避无敌帧</td><td>冲刺的某一段给受击者挂 Invulnerable 标签</td><td>技能时间轴的区间轨道（第 4 章）</td></tr>
+    <tr><td>受击后无敌</td><td>被击中后 0.3~0.5 s 内对同类攻击免疫（常见于平台跳跃）</td><td>受击方的状态 / 修正器</td></tr>
+    <tr><td>霸体 / 削韧</td><td>受击只扣血不打断；韧性值归零才进入硬直</td><td>受击方的“打断等级”（第 3 章的 InterruptLevel）</td></tr>
+    <tr><td>同一攻击不重复命中</td><td>每个攻击实例一个 HashSet&lt;受击者&gt;</td><td>攻击方的命中记录</td></tr>
+    <tr><td>多段攻击</td><td>每段一个命中组，组内去重、组间不去重；或按间隔重置记录</td><td>技能数据（命中次数上限、间隔）</td></tr>
+  </table></div>
+
+  <h2>6.6 改进：一个裁决点的伤害管线</h2>
+<!--flow {"h":224,"w":900,"cols":[14,196,378,560,742],"colw":[166,166,166,166,148],"rows":[20,136],"bh":60,
+"boxes":[
+ {"id":"a","cr":[0,0],"t":"攻击方构造 DamageInfo","s":"来源、类型、数值、方向","s2":"命中组 id、可否弹反","c":"b"},
+ {"id":"b","cr":[1,0],"t":"检测","s":"Hurtbox 层 · 去重","c":"b"},
+ {"id":"c","cr":[2,0],"t":"受击方 Receive()","s":"无敌？弹反？闪避？格挡？","s2":"唯一裁决点","c":"p","hl":true},
+ {"id":"d","cr":[3,0],"t":"HitResult","s":"Hit / Evaded / Parried","s2":"Blocked / Immune","c":"p"},
+ {"id":"e","cr":[4,0],"t":"数值结算","s":"只在 Hit / Blocked","c":"g"},
+ {"id":"f","cr":[2,1],"t":"反馈（按结果）","s":"闪白 / Miss 字 / 弹反火花","s2":"击退方向来自 DamageInfo","c":"o"},
+ {"id":"g","cr":[3,1],"t":"通知攻击方","s":"被弹反 → 攻击方进眩晕","c":"o"},
+ {"id":"h","cr":[4,1],"t":"事件总线","s":"连击数、成就、音效","c":"t"}],
+"arrows":[{"from":"a","to":"b","c":"b"},{"from":"b","to":"c","c":"b"},{"from":"c","to":"d","c":"p"},{"from":"d","to":"e","c":"g"},
+ {"from":"d","to":"f","c":"o","s":["b","t"],"p":[[643,80],[643,108],[461,108],[461,136]]},{"from":"d","to":"g","c":"o"},{"from":"d","to":"h","c":"t","s":["b","t"],"p":[[643,80],[643,108],[817,108],[817,136]]}],
+"cap":"图 6-3　改进后的伤害管线：受击方的 Receive 是唯一裁决点，表现、数值、攻击方的后续（被弹反进眩晕）都只读 HitResult"} -->
+<!--code:cs:【改进】DamageInfo / HitResult（C#，未在 Unity 中编译）-->
+public struct DamageInfo
+{
+    public Entity source; public Vector2 origin;  // 击退方向 = sign(victim.x - origin.x)
+    public int physical, fire, ice, lightning;
+    public bool parryable; public int hitGroup;   // 同组只命中一次
+}
+public enum HitResult { Hit, Evaded, Parried, Blocked, Immune }
+
+public interface IDamageable { HitResult Receive(in DamageInfo info); }
+
+// 受击方（玩家）：所有“这次算不算”的判断都在这里，按优先级
+public HitResult Receive(in DamageInfo info)
+{
+    if (tags.Has(Tag.Invulnerable))                return HitResult.Immune;
+    if (info.parryable && parry.IsPerfect(Time.time)) { info.source.OnParried(); return HitResult.Parried; }
+    if (stats.RollEvade())                         return HitResult.Evaded;
+    stats.Apply(info);                             // 暴击、护甲、元素、异常状态
+    fx.PlayHit(info.origin);                       // 反馈在结论之后
+    return HitResult.Hit;
+}
+<!--/code-->
+  <p>“完美弹反”的窗口 <code>parry.IsPerfect</code> 应该从<b>按下的时刻</b>算起（例如按下后 0.15 s 内），而不是“整个反击状态”；超过完美窗口但仍在架势中可以算格挡（减伤、扣耐力），落空则进入 0.3 s 的收招硬直——这三个参数就是弹反手感的全部旋钮。</p>
+
+  <h2>6.7 面试追问</h2>
+<!--code:text:追问树-->
+攻击判定怎么做的？（Q6-1）
+├─ 为什么用 Overlap 不用碰撞回调 OnTriggerEnter？（Q6-2）
+├─ 一刀会不会打中同一个敌人两次？（Q6-3 去重）
+├─ 弹反怎么实现？窗口多宽？（Q6-4 → E2）
+│   └─ 弹反成功为什么还掉血？（Q6-5 → 6.3 情形 B）
+├─ 闪避 / 无敌帧 / 霸体怎么做？（Q6-6 → 6.5）
+└─ 打击感怎么做？（Q6-7）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q6-1 → Q6-2　攻击判定怎么做？为什么用 Overlap 不用 OnTriggerEnter？</div>
+    <p><b>L2</b>　在动画命中帧做一次 OverlapCircle 查询，是“瞬时判定”：在哪一帧判、判多大范围完全由逻辑控制，结果立刻可用。OnTriggerEnter 是“持续判定”：需要一个跟随武器的触发器，回调在物理步之后发生，进入后不会再次触发（同一敌人站在里面不会被第二段攻击命中），而且时机受物理步与帧的对齐影响。近战挥砍多用瞬时查询，投射物多用触发器——项目里飞剑正是用 OnTriggerEnter2D。</p>
+    <p><b>L3</b>　无论哪种都要做三件事：只查 Hurtbox 层、按实体去重、结果交给唯一的裁决点。我项目里三件都没做全。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q6-3　一刀会不会打中同一个敌人两次？</div>
+    <p><b>L2</b>　按碰撞体遍历就会：敌人有身体和头两个碰撞体，就会被结算两次。我的骷髅现在只有一个胶囊体所以没出现；正确做法是取 <code>collider.attachedRigidbody</code> 或向上找实体组件，放进本次攻击的 HashSet 去重。</p>
+    <p><b>L3</b>　多段攻击（旋转剑）是另一回事：需要“同一目标间隔 x 秒才能再次命中”，记录表要带时间戳；我项目里旋转剑的间隔是全局的 hitTimer，对所有目标同时生效，而且冷却在场景里配成了 0。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q6-4 → Q6-5　弹反怎么实现？窗口多宽？为什么成功了还掉血？</div>
+    <p><b>L1</b>　怪物出手前用动画事件开“可被弹反”窗口；玩家按 Q 进入 1 s 的反击架势；被打中时如果在架势里、且怪物窗口开着，就眩晕怪物。</p>
+    <p><b>L2</b>　我用逐帧模型算过：成功的按键时刻是命中前约 1 s 到命中帧，宽 [[e2.60.cw|.2f]] s；教程原来的“每帧检查重叠”写法更宽，[[e2.60.ow|.2f]] s。两者都允许在怪物抬手前就按好等着，所以难度很低。</p>
+    <p><b>L3</b>　成功还掉血，是因为怪物的命中事件先调玩家的 DamageEffect（这里完成了弹反），再调 DoDamage——两次调用互不知道结果。我会把它改成一个 Receive 返回 HitResult，Parried 时不结算伤害，并把“完美窗口”改成从按键时刻起算的 0.15 s。</p>
+    <p><b>L4 · 攻击</b>　“1 s 的窗口是你故意设计的吗？”→ 不是，它是反击状态持续时间的副产品；我确认之后才意识到真正的难度旋钮在 counterAttackDuration 上。这也是我后来坚持“先量化再调参”的原因。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q6-7　打击感怎么做？</div>
+    <p><b>L2</b>　按时间顺序叠加：命中瞬间顿帧 50~100 ms（攻击方和受击方动画减速）、受击闪白（项目有）、击退 / 浮空（项目有但方向有误）、镜头震动（Cinemachine Impulse）、命中特效与音效、伤害数字、手柄震动。关键是“同一帧开始”且“顿帧期间其他反馈不停”。</p>
+    <p><b>L3</b>　顿帧会和冻结、减速抢写 animator.speed（第 7 章），所以要先有速度修正器栈；镜头震动和顿帧要用不受 timeScale 影响的时间。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“弹反就是在怪物攻击的时候按键。”</p>
+    <p><b>问题</b>：没有回答“按键和命中的时间关系”，也没有区分“架势持续时间”和“完美窗口”。</p>
+    <p><b>更好的回答</b>：“弹反由三个参数决定：完美窗口（从按键起算多久内被打中算完美）、架势持续时间（之后算格挡或落空）、落空惩罚（收招硬直）。我的项目里只有第二个，所以窗口宽达 1 s；改进是把完美窗口单独做出来。”</p>
+  </div>
+
+  <h2>6.8 发散场景题</h2>
+  <div class="scene"><div class="q">场景 6-1　同一帧里玩家和骷髅互相砍中，谁先结算？</div>
+    <p class="why">为什么会问：同帧事件顺序是实时战斗的经典难题。</p>
+    <p>现状：两边的命中都在各自 Animator 的事件里，执行顺序取决于 Animator 的更新顺序，<b>不确定</b>；先结算的一方可能把对方打死（骷髅死亡后关碰撞体），后结算的就落空。设计上要明确规则：① 同帧互相命中都生效（“相杀”）；② 按优先级（弹反 > 攻击）；③ 按攻击发起时间。实现上把命中“收集”到本帧的队列，帧末统一按规则结算，而不是在回调里立刻扣血。</p>
+  </div>
+  <div class="scene"><div class="q">场景 6-2　一刀砍中 20 个小怪，帧率掉了，怎么办？</div>
+    <p class="why">为什么会问：考察战斗峰值的性能意识。</p>
+    <p>热点：OverlapCircleAll 分配、每个碰撞体 GetComponent、每个受击者启动两个协程（闪白、击退）+ 改材质、伤害数字 UI 实例化。优化：NonAlloc + 层过滤、受击者组件缓存在 Hurtbox 上、受击表现用 MaterialPropertyBlock 和统一的计时器而不是协程、飘字对象池并合批、超过 N 个受击者时只对最近的 K 个播放完整表现。</p>
+  </div>
+  <div class="scene"><div class="q">场景 6-3　改成联机（状态同步），近战命中在哪里判定？</div>
+    <p class="why">为什么会问：从单机判定发散到网络。</p>
+    <p>服务器权威判定；客户端为了手感先播放挥刀和命中特效（预表现），但伤害数字和受击硬直等服务器结果。高延迟下“我看到砍中了却没伤害”的矛盾用延迟补偿缓解：服务器把受击者回溯到攻击者看到的时刻再做 Overlap。弹反这种“受击方按键”的机制更难：受击方的按键要发到服务器，服务器以“它看到的攻击时间”判定，窗口需要考虑 RTT——这也是很多联机动作游戏把弹反做成“预判架势”而不是“精确时机”的原因。</p>
+  </div>
+  <div class="scene"><div class="q">场景 6-4　策划要“背刺双倍伤害”，你会怎么加？</div>
+    <p class="why">为什么会问：检验伤害管线是否可扩展。</p>
+    <p>在 DamageInfo 里已经有 origin，受击方 Receive 里根据 origin 与自身朝向判断是否背后，乘以修正系数——一处修改。现状下要同时改 DoDamage（数值）和 DamageEffect（表现），而且击退方向本身就是按朝向算的，背刺时还会被打向攻击者。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>检测四件事：<b>Hitbox 形状、Hurtbox 分层、LayerMask、按实体去重</b>；项目 9 处 Overlap 都没过滤。</li>
+    <li>反馈与结算分家 → <b>闪避也闪白击退、弹反成功仍掉血</b>（#5）；击退方向用了受击者朝向（#26）。</li>
+    <li>E2：本项目弹反成功窗口 [[e2.60.cw|.2f]] s（命中前 ~1 s 到命中帧），原写法 [[e2.60.ow|.2f]] s；都能“预按”。</li>
+    <li>改进：<b>DamageInfo → Receive（唯一裁决）→ HitResult</b>；完美窗口从按键起算，落空有惩罚。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么 30 fps 下最晚按键时刻（[[e2.30.chi|.3f]] s）比事件时间 0.4167 s 还晚？</summary>命中事件在“片段时间首次 ≥ 0.4167 s”的那帧触发（R2），30 fps 下这一帧是 0.433 s；只要按键在这一帧的 Update 之前发生就会被读到（R3），玩家在同一帧里先进入反击状态、动画阶段再挨打，所以仍然成功。</details>
+  <details class="quiz"><summary>自测 2：CanbeStunned 有哪些副作用？</summary>基类里关闭弹反窗口并隐藏提示图标；骷髅子类里还会直接把骷髅切到眩晕状态。名字像查询，实际是命令。</details>
+  <details class="quiz"><summary>自测 3：只把 DamageEffect 和 DoDamage 的调用顺序对调能修好闪避闪白吗？</summary>不能。DoDamage 没有返回值，调用方仍然不知道是否闪避；必须让结算返回结果，再据此决定表现。</details>
+</section>

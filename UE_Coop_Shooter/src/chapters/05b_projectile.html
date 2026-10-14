@@ -1,0 +1,245 @@
+<section class="chapter" id="ch5b">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05B</div>
+    <h1>追问：不用射线检测，硬要用实体子弹，联机该怎么做</h1>
+    <p class="lead">面试官听完“步枪改成命中扫描”，很可能接着问：“如果策划就要看得见、能躲开、有下坠的子弹呢？”实体子弹不是错，原 Demo 的问题在于它是实体子弹里最朴素的写法。本章先讲什么情况下该用实体子弹，再给出两套正确做法——低射速的“预测抛射物”和高射速的“数据化弹道”，每一步都说清在哪端执行、复制什么，最后用 E8~E10 三组模型实验量化每一步解决了什么、没解决什么。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>能判断一种武器该用命中扫描、抛射物 Actor，还是数据化弹道。</li>
+    <li>说出实体子弹联机要回答的五个问题：谁生成、时间怎么对齐、谁判命中、别人怎么看到、什么时候销毁。</li>
+    <li>讲清“预测抛射物”四件套：本机假弹、服务器权威弹 + 快进、射手看不到真弹（或交接）、命中只认服务器并复制命中状态。</li>
+    <li>分清<strong>快进</strong>（追回“子弹出发晚”）和<strong>延迟补偿</strong>（追回“射手看到的目标是过去的”），并能用数据说明只做快进不够。</li>
+    <li>知道高射速实体子弹为什么不该每发生成一个复制 Actor。</li>
+  </ul></div>
+  <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 用的正是实体子弹：服务器收到 Server_Fire 后生成一颗复制的 BP_Bullet（Replicates + Replicate Movement，ProjectileMovement 初速 200 m/s，没改重力系数，默认受重力，20 m 处约下坠 5 cm，寿命 1 秒）；射手本机不生成任何东西，等子弹复制回来才看到；服务器和每个客户端各有一份子弹、各自碰撞，碰撞事件里调用 Apply Damage（客户端那次被 Authority Only 拦下）、撞到就 Destroy；生成时 Owner / Instigator 为空。</div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div><ol>
+    <li><span class="tag p1">P1</span>射手按下后约 {{v:E8[vp=200,rtt=200].own:.0f}} ms 才看到自己的子弹（RTT 200 ms，E8）。</li>
+    <li><span class="tag p1">P1</span>子弹在服务器上出发晚了一个上行延迟，射手看到的僵尸又是过去的：按看到的位置瞄得再准，RTT 200 ms 时服务器命中率也只有 {{v:E9[vp=200,rtt=200].s0:.1f}}%，客户端副本同样打不中（{{v:E9[vp=200,rtt=200].c0:.1f}}%）——玩家看到的是“子弹总从僵尸身边擦过”（E9）。</li>
+    <li><span class="tag p1">P1</span>远端第一次看到子弹时它已离枪口约 {{v:E8[vp=200,rtt=200].app0:.1f}} m，并且落后服务器那颗约 {{v:E8[vp=200,rtt=200].lag:.0f}} m（E8）。</li>
+    <li><span class="tag p1">P1</span>每发一个复制 Actor 并 30 Hz 复制移动：两人连射约 {{v:E10[w=rifle].b0}} B/s（E10，与 E7 同口径）。</li>
+    <li><span class="tag p2">P2</span>命中判定和命中表现各端各算：伤害靠引擎兜底，弹孔、血花以各自那颗子弹为准；撞到立即 Destroy，没有可复制的命中状态。</li>
+  </ol></div></div>
+
+  <div class="ans">
+    <div class="q">30 秒版：硬要用实体子弹怎么做</div>
+    <p>先看射速和飞行时间。<strong>低射速、看得见、能躲开的</strong>（火箭、榴弹、法球）用“预测抛射物”：射手按下时本机立刻生成一颗<strong>不复制的假弹</strong>做表现；服务器收到请求后生成<strong>权威的真弹</strong>，按射手的延迟把它<strong>快进</strong>到假弹应在的位置（快进量设上限，快进段先做一次射线）；真弹只复制首包、不复制移动，射手自己的客户端隐藏它（或与假弹交接）；<strong>命中只认服务器那一颗</strong>，命中后把命中位置作为复制状态发出去、延迟一会儿再销毁。快进只追回“子弹出发晚”，射手看到的目标本来就是过去的，所以 PvP 还要在服务器按射手看到的时刻回溯目标，PvE 可以让客户端上报命中、服务器容差校验。<strong>射速高、还要弹道下坠的</strong>不要每发生成 Actor，改成“数据化弹道”：服务器把子弹当数据逐帧分段射线，各端按开火计数和随机种子本地生成表现弹。</p>
+  </div>
+
+  <h2>1. 先选方案：什么时候才需要实体子弹</h2>
+<!--tree {"state":"ideal","cols":["武器类型","判断依据","做法"],"x":[12,300,590],"root":{"n":"要不要实体子弹","col":"s","d":"看飞行时间、射速、轨迹会不会变","w":"不是“越真实越好”","c":[
+ {"n":"步枪 / 手枪","col":"b","d":"飞行时间只有几帧，玩家分辨不出","w":"命中扫描 + 本地曳光（第 4 章）","c":[]},
+ {"n":"火箭 / 榴弹 / 法球","col":"g","d":"慢、看得见、能躲开，射速低","w":"方案 A：预测抛射物 Actor","c":[]},
+ {"n":"狙击 / 有下坠的步枪弹","col":"a","d":"要飞行时间和下坠，射速高","w":"方案 B：数据化弹道（不生成 Actor）","c":[]},
+ {"n":"导弹 / 手雷","col":"p","d":"会追踪、反弹、被打掉","w":"方案 A + 复制移动（或确定性种子）","c":[]}
+]},"cap":"<b>图 5B-1</b>　先选方案。原 Demo 的步枪 200 m/s、交战距离 10~30 m，飞行时间 0.05~0.15 s，属于第一行，却用了第二行的结构，而且是不带预测的版本"} -->
+  <div class="co tip"><span class="h">面试时先反问一句</span>
+    <p>“要实体子弹是为了什么？看得见、能躲、下坠，还是会反弹？”——这决定用哪套方案。如果只是“想要看得见的子弹”，命中扫描加本地曳光就能满足，成本最低；只有轨迹本身影响玩法时，才值得付出实体子弹的复杂度。</p>
+  </div>
+
+  <h2>2. 实体子弹联机要回答的五个问题</h2>
+  <div class="tbl cmp"><table>
+    <tr><th>问题</th><th class="cur">当前做法（原 Demo）</th><th class="prob">存在的问题</th><th class="ideal">理想做法</th></tr>
+    <tr><td>① 谁生成，什么时候生成</td><td>只有服务器，收到请求后才生成</td><td>射手等一个往返才看到；子弹出发晚一个上行延迟</td><td>射手本机立刻生成假弹（只做表现）；服务器生成真弹（只有它算数）</td></tr>
+    <tr><td>② 时间怎么对齐</td><td>不对齐</td><td>真弹永远落后假弹 / 射手的预期</td><td>服务器按射手 ping 的一半快进真弹，设上限；快进段先射线</td></tr>
+    <tr><td>③ 谁判命中</td><td>每个副本都撞、都调用 Apply Damage（客户端被引擎拦下）</td><td>血花和扣血可能对不上；伤害来源为空</td><td>只认服务器那一颗；PvP 加目标回溯，PvE 可客户端上报 + 容差校验</td></tr>
+    <tr><td>④ 别人怎么看到</td><td>复制 Actor + 30 Hz 复制移动；射手也只看这一颗</td><td>带宽大；远端子弹突现；客户端副本被移动更新拉来拉去</td><td>只发首包，各端按首包自己模拟；射手隐藏真弹；远端前推或平滑追上；命中状态复制</td></tr>
+    <tr><td>⑤ 什么时候销毁</td><td>撞到就 Destroy，寿命 1 秒</td><td>销毁可能先于命中信息到达，远端看不到爆炸</td><td>命中后停止、隐藏，短时间后再销毁（或 Tear Off）</td></tr>
+  </table></div>
+  <p class="tcap">表 5B-1　实体子弹联机的五个问题。第 3、4 节分别给出低射速和高射速两套答案</p>
+
+  <h2>3. 方案 A：预测抛射物（火箭、榴弹、法球）</h2>
+  <div class="state ideal"><span class="sl">理想方案</span><div>四件套：<strong>本机假弹</strong>（零延迟的表现）+ <strong>服务器权威弹并快进</strong>（结果只在这里产生，且和假弹对齐）+ <strong>射手看不到真弹</strong>（或与假弹交接）+ <strong>命中只认服务器、命中状态复制</strong>。Unreal Tournament（UE4 版，源码公开）的抛射物就是这个结构：客户端生成假弹，服务器按射手延迟“追帧”（catch-up），真弹到达后与假弹同步，预测时间有上限。</div></div>
+<!--seq {"state":"ideal","p":["射手本机\n（客户端）","服务器\n（主机进程）","远端客户端"],"pc":["g","b","o"],"s":[
+ ["—","① t = 0：射手按下"],
+ [0,0,"本机生成假弹（不复制），立刻起飞，播枪口火焰","g"],
+ [0,1,"Server_FireProjectile(序号, 起点, 方向, 客户端时间) · Reliable","net"],
+ ["—","② t ≈ 单程：服务器校验、生成真弹并快进"],
+ [1,1,"校验：存活 · 射速 · 弹药 · 起点 · 方向","b"],
+ [1,1,"快进量 = Min(射手 ping / 2, 上限)；快进段先做一次射线","b"],
+ [1,1,"没撞到：在快进点生成真弹（Owner / Instigator = 射手）","b"],
+ [1,2,"真弹首包：位置、朝向、FireSeq（只发一次）","rep"],
+ [1,0,"真弹首包到达射手：隐藏它，或按 FireSeq 与假弹交接","rep"],
+ [2,2,"远端：按自己的单程延迟前推，或从枪口平滑追上","o"],
+ ["—","③ 命中：只认服务器那一颗"],
+ [1,1,"真弹撞到目标 → Apply Damage（Instigator = 射手）","r"],
+ [1,1,"Set ImpactInfo → 停止、隐藏、0.3 s 后销毁","b"],
+ [1,2,"ImpactInfo 复制 → OnRep 播爆炸 / 弹孔","rep"],
+ [1,0,"ImpactInfo 复制 → 假弹已在附近播过就跳过，否则补播","rep"]
+],"cap":"<b>图 5B-2</b>　预测抛射物的一发完整时序。射手看到的是假弹，伤害只来自服务器那颗真弹；远端看到的是真弹的复制品。和图 K0-2（原 Demo 一发子弹）对照：原版缺了第 ① 段的假弹、第 ② 段的快进和第 ③ 段的命中状态复制"} -->
+
+  <h3>3.1 子弹类的网络规格</h3>
+<!--bpnet {"state":"ideal","cls":"BP_Projectile","parent":"Actor（ProjectileMovement + 碰撞球）","where":"服务器（真弹）+ 相关客户端（真弹复制品）+ 射手本机（假弹，不复制）","defaults":[["Replicates","✓ 真弹"],["Replicate Movement","✗ 直线 / 只受重力的轨迹是确定的；追踪、反弹才勾"],["Owner / Instigator","射手（生成参数里给）"],["非权威副本的碰撞","只挡世界，忽略 Pawn"]],
+"vars":[["ImpactInfo","S_Impact","RepNotify","None","服务器（命中时）","{Location, Normal, Surface}；各端据此播爆炸、弹孔"],
+["FireSeq","Integer","Replicated","Initial Only","服务器（生成时）","射手客户端用它找到自己的那颗假弹"],
+["bIsFake","Boolean","None","—","本机（生成假弹时）","本机生成的 Actor 在本机就是权威端，必须靠它区分"],
+["bImpacted","Boolean","None","—","各端","本端是否已经播过命中表现"],
+["Data","DA_Projectile","None","—","配置","速度、重力系数、伤害、爆炸半径、快进上限"]],
+"events":[["Event Hit / On Projectile Stop","引擎事件","引擎事件","—","A","每个副本都会触发：先分假弹 / 真弹 / 复制品"],
+["HandleImpact","自定义事件","Not Replicated","—","S","真弹命中；或快进段的射线命中"],
+["OnRep_ImpactInfo","RepNotify 函数","RepNotify 函数","—","R","各端补播命中表现（服务器 Set 时也执行）"],
+["Event BeginPlay","引擎事件","引擎事件","—","A","射手客户端收到真弹复制品时把它藏起来"]],
+"cap":"<b>图 5B-3</b>　BP_Projectile 的网络规格。没有任何 RPC：发射请求 Server_FireProjectile 在武器上（只有拥有者连接能调用）；子弹自己只复制两样东西——生成时的 FireSeq（Initial Only）和命中时的 ImpactInfo（RepNotify）"} -->
+
+  <h3>3.2 发射：武器上的事件图表</h3>
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"BP_WeaponBase · 发射实体子弹","nodes":[
+ {"id":"r0","k":"cevent","x":0,"y":0,"t":"FireProjectile","s":"本机开火循环（同 FireShot）","net":"L"},
+ {"id":"r1","k":"flow","x":1,"y":0,"t":"Branch","s":"主机玩家本身就是服务器","i":["Has Authority"],"ex":["True","False"]},
+ {"id":"r2","k":"call","x":2,"y":0,"t":"SpawnRealProjectile","s":"主机：直接生成真弹，快进量 0","ex":[]},
+ {"id":"r3","k":"func","x":1,"y":1,"t":"Spawn Actor BP_Projectile","s":"假弹：本机生成，不会复制","i":["bIsFake ← true","FireSeq ← LocalShotSeq"],"rep":"L:假弹只在射手本机","var":"假弹（本机生成的 Actor）"},
+ {"id":"r4","k":"call","x":2,"y":1,"t":"Server_FireProjectile","i":["Seq · Start · Dir · ClientTime"],"net":"SR","ex":[]},
+ {"id":"s0","k":"cevent","x":0,"y":2,"t":"Server_FireProjectile","net":"SR","o":["Seq","Start","Dir","ClientTime"]},
+ {"id":"s1","k":"flow","x":1,"y":2,"t":"Branch","s":"校验失败：只推进 AckSeq","i":["存活 · 射速 · 弹药","起点 · 方向"],"ex":["True","False"]},
+ {"id":"s2","k":"func","x":2,"y":2,"t":"Get CatchUp Time","s":"Min(Ping / 2, 上限)","o":["CatchUp"]},
+ {"id":"s3","k":"func","x":3,"y":2,"t":"Line Trace By Channel","s":"只扫快进那一段","o":["Hit","Out Hit"]},
+ {"id":"s4","k":"flow","x":0,"y":3,"t":"Branch","i":["快进段撞到了？"],"ex":["True","False"]},
+ {"id":"s5","k":"call","x":1,"y":3,"t":"HandleImpact","s":"直接按命中处理，不生成子弹","ex":[]},
+ {"id":"s6","k":"func","x":2,"y":3,"span":2,"t":"Spawn Actor BP_Projectile","s":"真弹：在快进点生成","i":["Location ← Start + Dir·V·CatchUp","Owner / Instigator ← 射手","FireSeq ← Seq"],"rep":"R:Initial Only → 首包发给相关客户端","var":"真弹的 FireSeq"}
+],"l":[["r0","r1"],["r1:True","r2"],["r1:False","r3"],["r3","r4"],["s0","s1"],["s1:True","s2"],["s2","s3"],["s3","s4"],["s4:True","s5"],["s4:False","s6"]],
+"g":[{"ids":["r0","r1","r2","r3","r4"],"t":"射手本机：假弹零延迟起飞，然后发请求","c":"g"},{"ids":["s0","s1","s2","s3","s4","s5","s6"],"t":"服务器：校验 → 快进 → 生成真弹（只有它造成伤害）","c":"b"}],
+"cap":"<b>图 5B-4</b>　发射流程。蓝图里没有“让 ProjectileMovement 多走一段时间”的节点，快进可以写成“先对快进段做一次射线，再在快进点生成”，效果与 C++ 里手动推进一次移动组件相同。主机玩家开火走 True 分支：它没有延迟，也就不需要假弹"} -->
+
+  <h3>3.3 命中与表现：子弹上的事件图表</h3>
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"BP_Projectile · 命中、爆炸与隐藏","nodes":[
+ {"id":"h0","k":"event","x":0,"y":0,"t":"Event Hit","s":"假弹 / 真弹 / 复制品都会触发","net":"A","o":["Other","Hit"]},
+ {"id":"h1","k":"flow","x":1,"y":0,"t":"Branch","s":"假弹在本机也是 Authority","i":["bIsFake"],"ex":["True","False"]},
+ {"id":"h2","k":"call","x":2,"y":0,"t":"PlayImpactFX","s":"预测播放，然后销毁假弹","rep":"L:只在射手本机","var":"bImpacted","ex":[]},
+ {"id":"h3","k":"flow","x":0,"y":1,"t":"Switch Has Authority","ex":["Authority","Remote"]},
+ {"id":"h4","k":"func","x":1,"y":1,"t":"Apply Radial Damage","s":"或 Apply Point Damage","i":["Instigator ← 射手 Controller","Causer ← self"]},
+ {"id":"h5","k":"set","x":2,"y":1,"t":"Set ImpactInfo","i":["← {Location, Normal, Surface}"],"rep":"RN:None → 各端 OnRep_ImpactInfo"},
+ {"id":"h6","k":"func","x":3,"y":1,"t":"停止 · 隐藏 · Set Life Span","s":"0.3 s：先让 ImpactInfo 复制出去","ex":[]},
+ {"id":"h7","k":"func","x":1,"y":2,"t":"Stop + Hide","s":"复制品：只停住，不判伤害","ex":[]},
+ {"id":"o0","k":"cevent","x":0,"y":3,"t":"OnRep_ImpactInfo","net":"R"},
+ {"id":"o1","k":"flow","x":1,"y":3,"t":"Branch","i":["本端已在附近播过？"],"ex":["True","False"]},
+ {"id":"o2","k":"call","x":2,"y":3,"t":"PlayImpactFX","s":"按服务器给的位置补播","ex":[]},
+ {"id":"b0","k":"event","x":0,"y":4,"t":"Event BeginPlay","net":"A"},
+ {"id":"b1","k":"flow","x":1,"y":4,"t":"Branch","s":"射手自己的客户端收到了真弹","i":["NOT Has Authority","AND Instigator 本地控制"],"ex":["True","False"]},
+ {"id":"b2","k":"func","x":2,"y":4,"span":2,"t":"Set Actor Hidden In Game + 关碰撞","s":"射手只看假弹（C++ 可用 IsNetRelevantFor 干脆不发给射手）","ex":[]}
+],"l":[["h0","h1"],["h1:True","h2"],["h1:False","h3"],["h3:Authority","h4"],["h4","h5"],["h5","h6"],["h3:Remote","h7"],["o0","o1"],["o1:False","o2"],["b0","b1"],["b1:True","b2"]],
+"g":[{"ids":["h0","h1","h2","h3","h4","h5","h6","h7"],"t":"碰撞：先分假弹 / 真弹 / 复制品，只有真弹造成伤害","c":"r"},{"ids":["o0","o1","o2"],"t":"命中表现以服务器为准，已经预测播过就不重复","c":"p"},{"ids":["b0","b1","b2"],"t":"射手不看真弹，避免“双子弹”","c":"t"}],
+"cap":"<b>图 5B-5</b>　命中与表现。最容易写错的是第一行：本机生成的假弹在本机的 Role 就是 Authority，只用 Switch Has Authority 区分会让假弹走进伤害分支——必须先判断 bIsFake。复制品的碰撞预设应忽略 Pawn，否则它会在客户端“打中”目标并停下，和服务器结果对不上"} -->
+
+  <h3>3.4 四个关键设置</h3>
+  <div class="tbl"><table>
+    <tr><th>设置</th><th>怎么做</th><th>为什么</th></tr>
+    <tr><td>不复制移动</td><td>直线或只受重力的子弹关掉 Replicate Movement（C++ 还可以用 bNetTemporary：只发首包）；首包里带着生成位置和朝向，各端按 ProjectileMovement 自己飞</td><td>轨迹是确定的，复制移动只会浪费带宽，还会把客户端副本拉来拉去；追踪、反弹的子弹才需要复制移动，这时打开 ProjectileMovement 的插值（Interp Movement）平滑修正</td></tr>
+    <tr><td>快进设上限</td><td>快进量 = Min(射手 ping / 2, 上限)，上限一般 50~150 ms；超出部分由射手自己承担（PvE 可以放宽）</td><td>完全快进对被瞄准的人不公平：高 ping 玩家的子弹在别人屏幕上“瞬移”，来不及反应（E8）</td></tr>
+    <tr><td>命中状态复制 + 延迟销毁</td><td>命中时写 ImpactInfo（RepNotify），停止、隐藏，0.3 s 后销毁；或 Tear Off 让各端接管</td><td>立即 Destroy 时，销毁可能比命中信息先到，远端只看到子弹凭空消失</td></tr>
+    <tr><td>生成时忽略射手</td><td>碰撞忽略 Instigator（Ignore Actor When Moving）；合作无友伤时碰撞通道直接忽略玩家</td><td>子弹在枪口生成，第一帧就会撞到射手自己的胶囊或武器</td></tr>
+  </table></div>
+  <p class="tcap">表 5B-2　方案 A 的关键设置</p>
+
+  <h3>3.5 交接还是隐藏：射手那一端怎么处理真弹</h3>
+  <p>真弹的复制品迟早会到达射手的客户端。两种处理方式：</p>
+  <ul>
+    <li><strong>隐藏</strong>（推荐先这样做）：射手只看假弹，复制品藏起来（C++ 里直接让它对射手不相关，连首包都不发）。命中表现由假弹预测播放，服务器的 ImpactInfo 到达后，如果位置差得远再补播一次。</li>
+    <li><strong>交接</strong>：复制品到达时按 FireSeq 找到对应的假弹，把真弹放到“首包位置 + 速度 × 单程估计”处，比较它和假弹的距离，差得不多就让真弹接管、销毁假弹（可以在几帧内平滑过去）。交接的好处是之后的轨迹以服务器为准（比如被别的物体挡住），代价是会有一次小跳变（E8：RTT 200 ms 时步枪弹平均约 {{v:E8[vp=200,rtt=200].jump:.0f}} cm、40 m/s 的慢速弹约 {{v:E8[vp=40,rtt=200].jump:.0f}} cm，来自网络抖动）。</li>
+  </ul>
+  <div class="co warn"><span class="h">面试注意：只加假弹不处理真弹，会看到两颗子弹</span>
+    <p>假弹在 t = 0 起飞，真弹的复制品要一个往返后才到。不隐藏、不快进时，射手会看到第二颗子弹落后约 {{v:E8[vp=200,rtt=200].gap0:.0f}} m 跟着飞（步枪弹，RTT 200 ms）；服务器快进后仍差约 {{v:E8[vp=200,rtt=200].gap2:.0f}} m（快进只追回上行那一半）。所以“隐藏或交接”是假弹方案必须配套的一步。</p>
+  </div>
+
+  <h2>4. 快进不等于延迟补偿：谁来判命中</h2>
+  <p>快进让服务器上的真弹和射手的假弹在空间上对齐，解决的是“<strong>子弹出发晚</strong>”。但射手瞄准时看到的僵尸，本身就是服务器上约半个 RTT 之前的位置（模拟代理靠复制快照显示）。真弹在服务器上飞向的是“现在”的僵尸，这个误差快进消不掉。E9 让射手按本机看到的位置和速度带提前量瞄准，比较四种判定：</p>
+<!--plot {"x":[0,200],"y":[0,100],"xticks":4,"yticks":5,"xlab":"RTT（ms）","ylab":"命中率 %","series":[["本机看到的命中","E9c.rifle.local","g"],["当前：服务器子弹","E9c.rifle.s0","r"],["假弹 + 快进","E9c.rifle.s2","a","dash"],["快进 + 目标回溯","E9c.rifle.s3","b"],["客户端判定 + 容差","E9c.rifle.s4","p","dash"]],"cap":"<b>图 5B-6</b>　E9：200 m/s 的子弹打 20 m 外横移 4.8 m/s 的僵尸（随机折返，胶囊半径 30 cm）。只做快进时，RTT 100 ms 还剩 {{v:E9[vp=200,rtt=100].s2:.0f}}%，RTT 200 ms 就掉到 {{v:E9[vp=200,rtt=200].s2:.0f}}%，和当前做法一样；加上目标回溯才回到本机看到的水平。“客户端判定 + 容差”与本机完全一致，但它信任客户端"} -->
+<!--plot {"x":[0,200],"y":[0,30],"xticks":4,"yticks":6,"xlab":"RTT（ms）","ylab":"命中率 %","series":[["本机看到的命中","E9c.slow.local","g"],["当前：服务器子弹","E9c.slow.s0","r"],["假弹 + 快进","E9c.slow.s2","a","dash"],["快进 + 目标回溯","E9c.slow.s3","b"]],"cap":"<b>图 5B-7</b>　E9：40 m/s 的慢速弹（飞 0.5 s），其余条件相同。目标在飞行途中随机折返，所以即使 RTT 为 0、提前量算得再准，命中率也只有约 {{v:E9[vp=40,rtt=0].local:.0f}}%——“能躲开”正是慢速弹的玩法意义。延迟带来的损失规律和步枪弹相同"} -->
+<!--dtab {"src":"E9","cols":[["弹速 m/s","vp","g"],["RTT ms","rtt","g"],["本机看到 %","local",".1f"],["当前 %","s0",".1f"],["快进 %","s2",".1f"],["快进不一致 %","m2",".1f"],["回溯 %","s3",".1f"],["回溯不一致 %","m3",".1f"],["容差 %","s4",".1f"]],"cap":"表 5B-3　E9 全表。“不一致”= 本机看到的结果（假弹打没打中）与服务器判定不同的比例，几乎全是“看到血花却没扣血”。每格约 1140 发；快进量 = 测得的平均单程延迟（RTT/2 + 平均抖动）；回溯按射手上报的“看到的服务器时刻”加上飞行时间，上限 200 ms；容差 = 胶囊半径 + 200 cm"} -->
+  <div class="co deep"><span class="h">为什么只做快进，RTT 一高就和不做一样差</span>
+    <p>200 m/s 的子弹打 20 m 只飞 0.1 s。RTT 200 ms 时快进量约 110 ms，比整个飞行时间还长：真弹在服务器上“一生成就已经到了目标处”，快进段的射线检查的是服务器<strong>此刻</strong>的僵尸——而射手瞄的是约半个 RTT 前看到的僵尸，误差约为僵尸 0.1 s 多的位移（50~60 cm），比胶囊半径 30 cm 还大。RTT 50 ms 时这个误差只有约 17 cm，所以快进还管用（{{v:E9[vp=200,rtt=50].s2:.0f}}%）。结论：<strong>快进追回子弹，回溯追回目标，两件事都要做</strong>；或者在 PvE 里用客户端判定 + 服务器容差，绕过回溯。</p>
+  </div>
+  <div class="tbl cmp"><table>
+    <tr><th>判定方式</th><th>本机与服务器一致</th><th>代价</th><th>适合</th></tr>
+    <tr><td>只认服务器子弹，不快进（当前做法）</td><td>RTT 200 ms 时服务器只命中 {{v:E9[vp=200,rtt=200].s0:.0f}}%</td><td>最简单；高延迟玩家几乎打不中移动目标</td><td>—</td></tr>
+    <tr><td>快进</td><td>RTT 50 ms 时 {{v:E9[vp=200,rtt=50].s2:.0f}}%，200 ms 时 {{v:E9[vp=200,rtt=200].s2:.0f}}%</td><td>易实现；只解决出发晚</td><td>低延迟局域网、慢速目标</td></tr>
+    <tr><td>快进 + 目标回溯</td><td>{{v:E9[vp=200,rtt=200].s3:.0f}}%，不一致 {{v:E9[vp=200,rtt=200].m3:.1f}}%</td><td>服务器要存目标历史，子弹每段都要按回溯后的位置检查；被打的人会“躲到墙后还被打中”</td><td>PvP</td></tr>
+    <tr><td>假弹上报命中 + 服务器容差</td><td>{{v:E9[vp=200,rtt=200].s4:.0f}}%，与本机完全一致</td><td>信任客户端，靠容差和轨迹合理性校验防作弊</td><td>PvE 合作（本 Demo）</td></tr>
+  </table></div>
+  <p class="tcap">表 5B-4　四种命中判定的取舍（步枪弹、RTT 200 ms 的数据）</p>
+
+  <h2>5. 别人看到的子弹：远端前推与公平性</h2>
+<!--dtab {"src":"E8","cols":[["弹速 m/s","vp","g"],["RTT ms","rtt","g"],["射手看到自己子弹 ms","own",".0f"],["双弹距·不快进 m","gap0",".1f"],["双弹距·快进 m","gap2",".1f"],["交接跳变 cm","jump",".0f"]],"cap":"表 5B-5　E8 射手视角。第 3 列是当前做法（等真弹复制回来）；第 4、5 列是“有假弹但不隐藏真弹”时两颗子弹的间距；第 6 列是交接时的跳变（真弹按单程估计前推后，与假弹的差，来自网络抖动）"} -->
+<!--dtab {"src":"E8","cols":[["弹速 m/s","vp","g"],["RTT ms","rtt","g"],["远端首次看到时离枪口 m","app0",".1f"],["远端落后服务器 m","lag",".1f"],["快进 + 远端前推后出现 m","app2f",".1f"],["前推误差 cm","err2f",".0f"]],"cap":"表 5B-6　E8 远端视角。“落后服务器”= 不前推时，远端显示的子弹比服务器那颗落后多少；前推 = 远端把收到的首包按自己的单程延迟估计向前推"} -->
+<!--dtab {"src":"E8","cols":[["弹速 m/s","vp","g"],["射手 RTT ms","rtt","g"],["被瞄准者反应：不快进 ms","re0",".0f"],["完全快进 ms","re2",".0f"],["快进上限 50 ms","re2c",".0f"]],"cap":"表 5B-6a　E8 公平性：被瞄准者（距射手 20 m）从屏幕上看到子弹到被服务器判定命中的时间，负数表示还没看到子弹就已经被打中"} -->
+  <p>从这三张表能读出三件事：</p>
+  <ul>
+    <li><strong>不前推，远端看到的子弹永远在服务器那颗后面</strong>：RTT 200 ms 时步枪弹落后约 {{v:E8[vp=200,rtt=200].lag:.0f}} m，爆炸会出现在子弹“前方”。</li>
+    <li><strong>前推对慢速弹有效，对步枪弹没意义</strong>：服务器快进加远端前推之后，40 m/s 的慢速弹首次出现在枪口前约 {{v:E8[vp=40,rtt=200].app2f:.1f}} m，误差约 {{v:E8[vp=40,rtt=200].err2f:.0f}} cm，配合几帧平滑完全可以接受；步枪弹会出现在约 {{v:E8[vp=200,rtt=200].app2f:.0f}} m 外——比 20 m 外的目标还远。所以步枪即使服务器用实体弹道，远端也应该按开火计数本地画曳光，而不是显示真弹。</li>
+    <li><strong>快进要设上限</strong>：40 m/s 的慢速弹，被瞄准者原本有约 {{v:E8[vp=40,rtt=200].re0:.0f}} ms 看到并躲开；射手 RTT 200 ms、完全快进时只剩 {{v:E8[vp=40,rtt=200].re2:.0f}} ms，上限 50 ms 时保住 {{v:E8[vp=40,rtt=200].re2c:.0f}} ms。合作打僵尸可以不设上限，PvP 必须设。</li>
+  </ul>
+
+  <h2>6. 方案 B：数据化弹道（射速高、还要下坠）</h2>
+  <div class="state ideal"><span class="sl">理想方案</span><div>子弹不再是 Actor，而是服务器上的一条数据（起点、速度、射手、剩余时间）。服务器每帧把每颗子弹推进一段，对这一段做射线（PvP 先把目标回溯到射手看到的时刻）；命中时施加伤害，并通过目标的 LastHit 复制命中信息。射手本机和其他端按同一个开火序号做随机种子，在本地生成不复制的表现弹（对象池），只用来画曳光和墙面弹孔。网络上传输的只有开火请求和开火计数，和命中扫描一样便宜。</div></div>
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"AC_Ballistics（挂在武器上）· 服务器逐帧推进","nodes":[
+ {"id":"a0","k":"event","x":0,"y":0,"t":"Event Tick","s":"只在服务器打开 Tick","net":"S"},
+ {"id":"a1","k":"flow","x":1,"y":0,"t":"For Each Bullet","i":["Array ← ActiveBullets"],"ex":["Loop Body","Completed"],"o":["Bullet"]},
+ {"id":"a2","k":"func","x":2,"y":0,"t":"计算下一段终点","s":"Pos + Vel·dt + ½·g·dt²","o":["End"]},
+ {"id":"a3","k":"func","x":3,"y":0,"t":"Line Trace（这一段）","s":"PvP：先回溯目标到射手看到的时刻","o":["Hit","Out Hit"]},
+ {"id":"a4","k":"flow","x":0,"y":1,"t":"Branch","i":["命中？"],"ex":["True","False"]},
+ {"id":"a5","k":"func","x":1,"y":1,"t":"Apply Point Damage","s":"目标的 LastHit 计数 +1（复制）","i":["Instigator ← 射手 Controller"]},
+ {"id":"a6","k":"set","x":2,"y":1,"t":"Set ActiveBullets","s":"更新 Pos / Vel；命中或超时就移除","rep":"L:子弹数组只在服务器","var":"ActiveBullets"},
+ {"id":"c0","k":"cevent","x":0,"y":2,"t":"PlayFireCosmetics","s":"本机预测或 OnRep_BurstCounter","net":"P"},
+ {"id":"c1","k":"func","x":1,"y":2,"span":2,"t":"从对象池取一颗表现弹","s":"同一种子 → 同一散布；只对墙面做弹孔，不判伤害","rep":"L:不复制，各端本地","var":"表现弹"}
+],"l":[["a0","a1"],["a1:Loop Body","a2"],["a2","a3"],["a3","a4"],["a4:True","a5"],["a5","a6"],["a4:False","a6"],["c0","c1"]],
+"g":[{"ids":["a0","a1","a2","a3","a4","a5","a6"],"t":"服务器：子弹是数据，逐帧分段射线","c":"b"},{"ids":["c0","c1"],"t":"各端：表现弹只是画面","c":"t"}],
+"cap":"<b>图 5B-8</b>　数据化弹道。开火请求、校验、AckSeq 对账与第 11 章的命中扫描完全相同，区别只在服务器把“一次射线”换成“逐帧推进的多段射线”。很多带下坠弹道的射击游戏用的都是这一类思路"} -->
+
+  <h2>7. 带宽：每发一个 Actor 有多贵</h2>
+<!--bars {"title":"两人同时开火时每秒网络消息量（量级估算，与 E7 同一字节口径）","unit":"B/s","fmt":".0f","labw":250,"items":[
+ ["—步枪（8.3 发 / 秒，子弹存活 0.25 s）",0],
+ ["当前：复制 Actor + 复制移动","E10[w=rifle].b0","r"],
+ ["方案 A：只发首包 + 命中状态","E10[w=rifle].b1","a"],
+ ["方案 A：且不发给射手","E10[w=rifle].b2","o"],
+ ["方案 B：数据化弹道","E10[w=rifle].b3","g"],
+ ["—榴弹 / 火箭（1 发 / 秒，存活 1 s）",0],
+ ["当前：复制 Actor + 复制移动","E10[w=rocket].b0","r"],
+ ["方案 A：只发首包 + 命中状态","E10[w=rocket].b1","a"],
+ ["方案 A：且不发给射手","E10[w=rocket].b2","o"],
+ ["方案 B：数据化弹道","E10[w=rocket].b3","g"]
+],"cap":"<b>图 5B-9</b>　E10。步枪射速下，方案 A 仍然要每秒开关十几个 Actor 通道（还有生成、销毁 Actor 的 CPU 开销），这就是高射速要换方案 B 的原因；火箭每秒一发，方案 A 的开销很小"} -->
+
+  <h2>8. 原 Demo 怎么改</h2>
+  <div class="tbl cmp"><table>
+    <tr><th>环节</th><th class="cur">当前做法</th><th class="prob">存在的问题</th><th class="min">最小修复（保留子弹 Actor）</th><th class="ideal">理想方案</th></tr>
+    <tr><td>子弹设置</td><td>Replicates + Replicate Movement；Owner / Instigator 为空</td><td>每发一条通道 + 30 Hz 移动更新；伤害来源为空</td><td>关掉 Replicate Movement；生成参数填 Owner / Instigator</td><td>步枪：改命中扫描或方案 B；火箭类：方案 A</td></tr>
+    <tr><td>射手看到自己的子弹</td><td>等真弹复制回来</td><td>约 {{v:E8[vp=200,rtt=200].own:.0f}} ms 延迟（RTT 200）</td><td>—（结构上做不到）</td><td>本机假弹立刻起飞；真弹对射手隐藏或交接</td></tr>
+    <tr><td>真弹出发时刻</td><td>服务器收到请求才生成</td><td>RTT 200 时服务器命中 {{v:E9[vp=200,rtt=200].s0:.0f}}%</td><td>—</td><td>快进 = Min(ping / 2, 上限)，快进段先射线</td></tr>
+    <tr><td>命中判定</td><td>每个副本都撞、都调用 Apply Damage</td><td>靠引擎兜底；血花与扣血可能对不上</td><td>碰撞事件里先 Switch Has Authority；复制品只挡墙面、不判伤害</td><td>只认真弹；PvE 客户端判定 + 容差，PvP 目标回溯</td></tr>
+    <tr><td>命中表现</td><td>各副本撞到哪就在哪播</td><td>各端弹孔、血花位置不同</td><td>服务器命中后复制 ImpactInfo，各端以它为准</td><td>同左，射手由假弹预测播放、偏差大时补播</td></tr>
+    <tr><td>销毁</td><td>撞到立即 Destroy</td><td>远端可能看不到命中</td><td>停止 + 隐藏 + Set Life Span(0.3)</td><td>同左（或 Tear Off）</td></tr>
+    <tr><td>远端看到</td><td>首包到达时子弹已离枪口约 {{v:E8[vp=200,rtt=200].app0:.1f}} m，并落后服务器</td><td>爆炸出现在子弹前方</td><td>—</td><td>慢速弹前推或平滑追上；步枪弹本地画曳光</td></tr>
+  </table></div>
+  <p class="tcap">表 5B-7　原 Demo 的子弹：当前做法 → 最小修复 → 理想方案。最小修复只能把“结果写法”改对，手感和带宽要靠结构调整</p>
+
+  <div class="co warn"><span class="h">面试注意：实体子弹的八个坑</span>
+    <ul>
+      <li><strong>假弹走进伤害分支</strong>：本机生成的 Actor 在本机就是 Authority，只靠 Switch Has Authority 区分会出错，要用 bIsFake。</li>
+      <li><strong>双子弹</strong>：有假弹却没隐藏真弹，射手看到两颗子弹一前一后（步枪弹 RTT 200 ms 时相距约 {{v:E8[vp=200,rtt=200].gap0:.0f}} m）。</li>
+      <li><strong>把快进当延迟补偿</strong>：快进只追回出发晚，射手看到的目标仍是过去的（RTT 200 ms 只做快进命中 {{v:E9[vp=200,rtt=200].s2:.0f}}%）。</li>
+      <li><strong>快进不设上限、快进段不做射线</strong>：高 ping 玩家的子弹瞬移、穿过近处的墙或目标；PvP 中被打的人来不及反应。</li>
+      <li><strong>命中后立即 Destroy</strong>：命中信息可能还没复制出去，远端看不到爆炸。</li>
+      <li><strong>复制品也对 Pawn 碰撞</strong>：远端看到子弹打中目标停下，服务器却判没中（或反过来）；复制品只挡墙面。</li>
+      <li><strong>子弹撞到射手自己</strong>：枪口生成第一帧就撞上自己的胶囊或武器，要忽略 Instigator。</li>
+      <li><strong>高射速仍每发一个复制 Actor</strong>：带宽和生成 / 销毁开销都随射速线性增长（E10）；对象池只适合不复制的表现弹，复制的 Actor 一般不池化。</li>
+    </ul>
+  </div>
+
+  <div class="co ver"><span class="h">关于 E8~E10 的模型</span>
+    <p>与 E1、E3 同一套假设：服务器网络 Tick 30 Hz，单程延迟 = RTT/2 + 0~20 ms 均匀抖动，模拟代理 = 最新快照 + 速度 × 收到后经过的时间；目标横移 4.8 m/s、0.25~0.9 s 随机折返，胶囊半径 30 cm；子弹直线飞行（不计 5 cm 量级的下坠）。服务器和客户端对单程延迟的估计 = 测得的平均 ping 的一半，不知道每个包的实际抖动。E10 的字节数是量级假设，真实值请用 Networking Insights 测。源码 <code>demos/projectile_demo.cpp</code>，输出 <code>demos/run_output_proj.txt</code>、<code>demos/figdata_proj.json</code>；带参数（如 <code>projectile_demo.exe E9</code>）只跑指定实验。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>先问为什么要实体子弹：飞行时间只有几帧就用命中扫描 + 曳光；慢、可躲用方案 A；射速高、要下坠用方案 B。</li>
+    <li>方案 A 四件套：<strong>本机假弹 + 服务器真弹快进（设上限、快进段先射线）+ 射手隐藏真弹或交接 + 命中只认服务器、ImpactInfo 复制、延迟销毁</strong>。</li>
+    <li><strong>快进追回子弹，回溯追回目标</strong>：RTT 200 ms 步枪弹只做快进命中 {{v:E9[vp=200,rtt=200].s2:.0f}}%，加回溯 {{v:E9[vp=200,rtt=200].s3:.0f}}%；PvE 可用客户端判定 + 容差。</li>
+    <li>真弹不复制移动（轨迹确定）；假弹在本机也是 Authority，要用 bIsFake 区分；复制品只挡墙面。</li>
+    <li>方案 B：子弹是服务器上的数据，逐帧分段射线；各端按种子本地生成表现弹，网络开销与命中扫描相当。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：射手的假弹打中了僵尸、播了血花，服务器的真弹却没打中，怎么处理？</summary>
+    以服务器为准：不扣血、不给命中提示（命中提示只由服务器的 Client RPC 或复制状态触发）；假弹的血花已经播了就算了，这是预测的代价。要减少这种情况：PvE 用“假弹上报命中 + 服务器容差校验”，两者一致；PvP 用快进 + 目标回溯（E9 中不一致率约 {{v:E9[vp=200,rtt=200].m3:.1f}}%）。不要为了“一致”把客户端的命中直接当结果，那等于把伤害交给客户端。
+  </details>
+  <details class="quiz"><summary>自测：为什么不能在 Event Hit 里只写一个 Switch Has Authority 就算“只在服务器结算”？</summary>
+    因为本机生成的假弹不复制，它在射手本机的 Role 就是 Authority，Switch Has Authority 会走 Authority 分支；如果分支里调用了 Apply Damage，射手本机就会对僵尸副本发起一次伤害（被 Pawn 的权限检查拦下也只是碰巧）。正确做法是先判断 bIsFake，再分权威真弹和复制品。
+  </details>
+  <details class="quiz"><summary>自测：火箭的真弹需要复制移动吗？</summary>
+    直线飞行或只受重力的火箭不需要：首包带着生成位置和朝向，各端用同一个 ProjectileMovement 设置会飞出同样的轨迹，最终以服务器的 ImpactInfo 为准。会追踪目标、会反弹、会被打掉的才需要复制移动，并打开插值平滑修正。
+  </details>
+</section>

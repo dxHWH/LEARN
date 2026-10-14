@@ -31,8 +31,8 @@ ASCII = {
  │ 冲刺：Server RPC 只改服务器│         │ ✗ 当前 = 剩余子弹计算()（返回0） │
  └────────────────────────┘            └────────────────────────────────┘
  ┌ ✗ BP_Bullet.ReceiveHit（每一端）┐    ┌ BP_Zombie（AI 在服务器）────────┐      ┌ 僵尸副本 ─────────────────┐
- │ 弹孔/音效/粒子：没问题        │ ──► │ ReceiveAnyDamage → 血量 −= 伤害 │ ───► │ ✗ 客户端调多播只在本地执行 │
- │ ApplyDamage：客户端也扣血     │     │ → HitReact / Death 多播          │      │ ✗ 重新生成 → 本地幽灵僵尸   │
+ │ 弹孔/音效/粒子：没问题        │ ──► │ ReceiveAnyDamage → 血量 −= 伤害 │ ───► │ ✗ 死亡组播里的补刷每端都执行│
+ │ ApplyDamage：客户端被引擎拦下 │     │ → HitReact / Death 多播          │      │ ✗ 重新生成 → 本地幽灵僵尸   │
  └──────────────────────────────┘     │ ✗ Death → 每端都调用 重新生成    │      └───────────────────────────┘
                                       └─────────────────────────────────┘
 """,
@@ -257,6 +257,7 @@ def block(n):
         no = inline(find(n, lambda k: "no" in k.cls())).strip()
         if no.startswith("CHAPTER"): no = no.replace("CHAPTER ", "第 ") + " 章"
         elif no.startswith("APPENDIX"): no = "附录 " + no.split("·")[-1].strip()
+        elif no.startswith("BRIEFING"): no = "口径篇 " + no.split("·")[-1].strip()
         h = inline(find(n, lambda k: k.tag == "h1")).strip(); lead = find(n, lambda k: "lead" in k.cls())
         return f"# {no} · {h}\n\n*{inline(lead).strip() if lead else ''}*\n\n"
     if "goals" in c: return "**本章目标**\n\n" + lst(find(n, lambda k: k.tag == "ul")) + "\n\n"
@@ -283,6 +284,31 @@ def block(n):
             if isinstance(k, Node) and "q" in k.cls(): out += f"**{inline(k).strip()}**\n\n"
             else: out += block(k)
         return out
+    if "state" in c and tag == "div":
+        sl = find(n, lambda k: "sl" in k.cls())
+        parts = []
+        for k in n.kids:
+            if k is sl: continue
+            if isinstance(k, Node) and k.tag == "div" and not find(k, lambda x: x.tag in ("p", "ul", "ol", "table", "div")):
+                parts.append(inline(k).strip())
+            else:
+                parts.append(block(k).strip())
+        body = "\n\n".join(x for x in parts if x)
+        return quote(f"**【{inline(sl).strip()}】** {body}") + "\n\n"
+    if "pit" in c:
+        pn = find(n, lambda k: "pn" in k.cls()); pt = find(n, lambda k: "pt" in k.cls()); pc = find(n, lambda k: "pc" in k.cls())
+        out = f"### {inline(pn).strip()} · {inline(pt).strip()}\n\n" + (f"*{inline(pc).strip()}*\n\n" if pc else "")
+        for r in [k for k in n.kids if isinstance(k, Node) and "pr" in k.cls()]:
+            pl = find(r, lambda k: "pl" in k.cls())
+            body = "".join(block(k) for k in r.kids if k is not pl).strip()
+            out += (f"**{inline(pl).strip()}**：{body}" if "\n" not in body else f"**{inline(pl).strip()}**\n\n{body}") + "\n\n"
+        return out
+    if "pitch" in c:
+        out = ""
+        for k in n.kids:
+            if isinstance(k, Node) and "q" in k.cls(): out += f"**{inline(k).strip()}**\n\n"
+            else: out += block(k)
+        return out
     if "lab" in c: return ""
     return "".join(block(k) for k in n.kids)
 
@@ -298,12 +324,17 @@ def pre(t):
     def mac(m):
         kind, d = m.group(1), json.loads(m.group(2))
         cap = html.unescape(re.sub(r"<[^>]+>", "", B.VAL_RE.sub(B.val_sub, d.get("cap", ""))))
-        PH.append(f"{MD_MACRO[kind](d)}\n\n*{cap}*"); return f"\n§§{len(PH) - 1}§§\n"
+        if d.get("state"):
+            m2 = re.match(r"^((?:图|表) [A-Z]?\d+[A-Z]?-\d+[a-z]?\s*)", cap)
+            tg = f"【{B.STATE_NAME[d['state']]}】"
+            cap = (m2.group(1) + tg + cap[m2.end():]) if m2 else tg + cap
+        PH.append(f"{B.VAL_RE.sub(B.val_sub, MD_MACRO[kind](d))}\n\n*{cap}*"); return f"\n§§{len(PH) - 1}§§\n"
     t = B.MACRO_RE.sub(mac, t)
     t = B.VAL_RE.sub(B.val_sub, t)
     def figure(m):
         cap = re.search(r"<figcaption>(.*?)</figcaption>", m.group(0), re.S); cap = html.unescape(re.sub(r"<[^>]+>", "", cap.group(1))) if cap else ""
-        key = re.match(r"(图 [A-Z]?\d+-\d+)", cap.strip()); art = ASCII.get(key.group(1)) if key else None
+        key = re.match(r"(图 [A-Z]?\d+[A-Z]?-\d+)", cap.strip()); art = ASCII.get(key.group(1)) if key else None
+        cap = re.sub(r"^(图 [A-Z]?\d+[A-Z]?-\d+\s*)(当前做法|理想方案|最小修复)", r"\1【\2】", cap.strip())
         if art is None: print("[warn] 图没有 ASCII 版：", cap[:30])
         PH.append((f"```text{art}```\n\n" if art else "") + f"*{cap.strip()}*"); return f"\n§§{len(PH) - 1}§§\n"
     t = re.sub(r"<figure>[\s\S]*?</figure>", figure, t)
@@ -316,7 +347,7 @@ def pre(t):
 
 HEADER = """# UE 双人联机射击 Demo：面试复盘与正确实现 —— 游戏客户端秋招面试指南
 
-> 配套电子书：`UE_Coop_Shooter.html`（含 40+ 张蓝图风格事件图表与 2 个交互实验）/ `UE_Coop_Shooter.pdf`；网络行为模拟：`demos/coop_net_demo.cpp`，输出：`demos/run_output.txt`、`demos/figdata.json`；
+> 配套电子书：`UE_Coop_Shooter.html`（含 40+ 张蓝图风格事件图表与 2 个交互实验）/ `UE_Coop_Shooter.pdf`；网络行为模拟：`demos/coop_net_demo.cpp`（E1~E7）与 `demos/projectile_demo.cpp`（E8~E10，实体子弹），输出：`demos/run_output.txt`、`demos/figdata.json`；
 > 原工程审计：`repo/`（dxHWH/-demo@d7e5c75 的逻辑资产快照）→ `audit/*.txt`（由 `tools/bpdump.py` 从 .uasset 导出的蓝图伪代码）。
 > 本文档与电子书由同一份源文件（`src/chapters/*.html`）生成，所有数字来自同一份实测数据。
 
@@ -327,6 +358,10 @@ HEADER = """# UE 双人联机射击 Demo：面试复盘与正确实现 —— �
 | 2026-10-12 15:51 | 秋招面试的岗位背景是游戏客户端，你需要详细回答我的问题，并做出深层次的技术解答，并将每一次提问的内容和回答的内容都落盘为md文档。适当控制深度，增可读性，并点出面试需要注意的问题。需求如下：https://github.com/dxHWH/-demo（这是一个极度失败的demo，这是早期从单人游戏在不熟悉UE网络系的前提下改到的双人游戏的）用一本新的电子书或者md回答面试中针对这个demo的回答与解析。（你需要用UE双人游戏中更合理的方式去实现，上面的链接只是一个不合适的实现，并且可能带有BUG），有以下问题供你参考：①描述游戏从开火到击中僵尸的工程中，发生了什么？②描述一下控制的角色、控制器、武器应该怎么绑定 ③如果弱网造成卡顿，应该怎么优化？④怎么实现子弹同步、换弹问题的？等等 | 第 0 章（四问 30 秒答案 + 怎么介绍项目）· 第 1 章（原 Demo 审计、问题清单）· 第 2 章（网络基础）· **第 3 章（问②绑定）· 第 4 章（问①开火到击中）· 第 5 章（问④子弹同步与换弹）· 第 6 章（问③弱网优化）** · 第 16 章（面试题 1~40 + 速记卡）· 附录 A（问题全清单、审计方法、实测总表） |
 | 2026-10-12 21:08 | 下一步，进一步优化重做的部分，并尽可能详细，最好文图并茂结合类似蓝图逻辑说明每一个类的事件图表，并再次集合UEGameplay框架说明（OOP：world 、 controller  、 player_BP等等）讲清楚一个合格的DEMO应该是什么这样的状态以及技术细节，增加可读性，并做好面试问题追问防守。 | 重写第三部分：**第 7 章（Gameplay 框架 OOP：World / GameInstance / Controller / Player BP 的运行时结构、继承树、五种关系、在哪端、生命周期、启动时序）· 第 8 章（合格 Demo 的 20 条验收标准、类清单、16 个复制变量与 7 个 RPC 总表、工程结构、蓝图 vs C++）· 第 9 章（GameInstance / GameMode / GameState / PlayerState / PlayerController 事件图表）· 第 10 章（BP_CoopCharacter / AC_Health / AnimBP 事件图表）· 第 11 章（BP_WeaponBase 五张事件图表 + 射速令牌桶）· 第 12 章（僵尸 / AIController / 行为树）· 第 13 章（UI）· 第 14 章（测试、调试、演示、README）**；新增第四部分：**第 15 章（12 条追问链 + 危险说法对照）**· 第 16 章扩充到 50 题；勘误：原 Demo 死亡时 DisableInput 实际不生效（第 1、3、10 章）；新增问题 #21、#22（僵尸随机各端不一致） |
 | 2026-10-13 10:23 | 在流程图那一部分，你还需要进一步明确 复制的属性、哪些时间是运行在服务器上、哪些是组播、哪些变量打开了复制。你需要讲解清楚 | 流程图全部补网络标注：**第 9 章 1.1~1.2（执行端标签怎么读、图 9-1a 判断事件在哪端执行、表 9-1 引擎事件分端、复制标注怎么读）**；第 9~12 章每个类开头新增“网络规格”面板（Class Defaults 复制开关 / 每个变量的 Replication 与 Condition / 每个事件的 Replicates、Reliable、在哪执行）；每张事件图表的 Set 节点标出 ⇄ RepNotify / ⇄ Replicated / ○ 不复制，入口节点标出执行端，图下附“本图网络摘要”（执行端 / 写入的复制变量 / 本端变量 / RPC / 组播）；第 13 章 UI 标出“⇠ 读复制值”并新增表 13-1；时序图（图 7-4、7-5、9-2、11-7）按进程分组；**第 8 章新增：打开复制的三层开关、表 8-4 复制接收矩阵（双人局每个变量发给谁）、表 8-3 RPC 与组播总表（8 RPC + 2 组播，含在哪调用 / 在哪执行）、5.1 组播去哪了（原 8 个组播逐个替换）、表 8-6 执行端速查**；第 11 章 OnRep_BurstCounter 在哪几台机器执行（蓝图 vs C++）；第 12 章 4.5 全书仅有的两个组播；第 16 章新增第 51~56 题 |
+| 2026-10-14 11:11 | 你要知道面试官是看不到这个DEMO的，我们需要自己对demo进行描述上的优化并对齐口径，并理清楚这种功能/需求场景下，更好的实现是什么？讲清楚实现方法而非代码。你可以把我们目前犯的问题看作是容易踩的坑，然后再描述如何避免和正确实现。更新一波电子书 | 新增**第零部分 · 口径篇**（排在全书最前）：**K1 把 Demo 讲清楚**（30 秒答案、讲 Demo 四段结构图、项目档案表、一局流程与“原版 / 重构后谁在管”、10 秒 / 1 分钟 / 3 分钟讲法与时间分配、做过 / 验证过 / 设计的三种时态口径、统一数字表 / 统一术语表 / 易前后不一的统一答案、白板图“一发子弹的三段”、讲 Demo 六个失误、追问入口表）；**K2 十四个功能场景**（六类根因图、场景总览表、14 张场景卡：需求 → 容易踩的坑（原版做法）→ 为什么会踩 → 玩家会看到 → 怎么避免 → 正确实现步骤 → 面试这样说；通用落地模板图；模板例外；七问自查表；拾取道具 / 开门两道迁移题）。**口径对齐（勘误）**：“SkipOwner 的 OnRep 不在服务器触发”改为“C++ 的 OnRep 不在服务器执行、蓝图 RepNotify 在服务器赋值时执行”（第 4、5、15 章）；第 15 章、第 8 章、第 0 章把“我做了 / 我测过”按时态改写；第 0 章 1 分钟口径与 K1 一致；RPC 名统一为 Server_FireShot / Server_StartReload；第 15 章危险说法表新增 3 行；第 16 章速记卡新增 2 张 |
+| 2026-10-14 14:32 | 你需要在电子书中区分当前做法和理想重构方案的做法，例如实际上我们没有做射线检测，而是使用了在服务端生成子弹actor并同步的方法。你需要说明清楚当前状态和理想状态，让读者能更清晰的认识。更新电子书 | 新增**口径篇 K0 · 先分清：当前做法 vs 理想方案**（三种标记 当前做法 / 最小修复 / 理想方案；类名对照表 K0-1；20 项功能总对照表 K0-2（当前 / 最小修复 / 理想）；**第 3 节子弹专题**：原 Demo 没有射线检测、服务器生成复制子弹 Actor 的完整时序图 K0-2、玩家可感知的问题表、理想路线 A 命中扫描 / 路线 B 做对的抛射物对照表 K0-3、面试口径；读书地图 K0-4）。全书标注：第 0 章四问每题先给〔当前做法〕再给〔理想方案〕；第 1 章整章标当前；第 3~6 章章首当前 / 理想横幅、章末“当前做法 vs 理想方案”对照表（第 4 章命中扫描与抛射物表、第 5 章补“子弹本身”一行）；第三部分 part-head 声明全部为理想方案，第 8~13 章章首横幅 + 原 Demo 对照表，所有事件图表 / 网络规格面板 / 时序图图注带〔理想方案〕标签；第 14 章 README 分 A（重构完成后）/ B（当前状态）两版；第 15 章 7 条追问链先交代当前做法；第 16 章新增第 57~60 题；K2 场景卡改为“当前做法（坑）/ 最小修复 / 理想实现”，7 个场景新增最小修复。**勘误**：原书“子弹在每一端都扣僵尸血”不准确——Apply Damage 与 Event AnyDamage 为 Authority Only，客户端那次不执行，僵尸只在服务器扣血；问题 #2 由 P0 降为 P2（P0 共 7 条），第 0、1、2、8、16 章与 K1、K2、附录 A 同步修改；真正在每端执行的是死亡组播里的补刷 |
+| 2026-10-14 15:23 | 你还需要点出当前做法存在的问题，更新电子书 | 全书每处〔当前做法〕之后补〔存在的问题〕（红色横幅 / ⚠ 行 / 红色列，带级别与附录 A 编号 A#n 和实测编号 En）：**K0 新增第 4 节“当前做法存在的问题：23 条按后果分五类”**（图 K0-3 问题分布、表 K0-4 分类表、30 秒答法），K0-1 改为“当前的主要问题”列，K0-2 二十个功能每行加 ⚠ 问题；第 0 章四问每题补问题段；第 1 章问题总数横幅；第 3~7 章章首“存在的问题”横幅；第 3、5 章章末与第 9~12 章章首对照表新增“存在的问题”列，第 13 章原 Demo 列加 ⚠；第 14 章补当前测试方式及其问题；第 15 章 7 条追问链补问题；K1 项目档案补问题；K2 场景卡“玩家会看到”改为“存在的问题”并注明对应附录 A 编号。**勘误**：原书“开局逻辑每端跑两遍”不准确——关卡蓝图只把 Start_Logic 绑在本地角色的委托上，每端只执行一次；真正的问题是依赖“关卡 BeginPlay 时本地角色已存在”的初始化时序（A#16），已同步修改 K2 场景 02、第 8 章表 8-5、K0 表 K0-2 |
+| 2026-10-14 15:41 | 再添加分析，如果不用射线检测，硬用实体子弹应该怎么做？ | 新增**第 5B 章“追问：不用射线检测，硬要用实体子弹，联机该怎么做”**：章首当前做法（原 Demo 就是最朴素的实体子弹）+ 存在的问题；图 5B-1 选方案（命中扫描 / 预测抛射物 / 数据化弹道 / 复制移动）；表 5B-1 实体子弹的五个问题（谁生成、时间怎么对齐、谁判命中、别人怎么看到、什么时候销毁）；**方案 A 预测抛射物**：图 5B-2 一发完整时序（本机假弹 → 服务器校验、快进、生成真弹 → 首包 → 射手隐藏 / 交接 → 命中只认服务器 → ImpactInfo 复制）、图 5B-3 BP_Projectile 网络规格、图 5B-4 武器发射事件图表（快进 = 先射线再在快进点生成）、图 5B-5 子弹命中与隐藏事件图表（假弹在本机也是 Authority，要用 bIsFake）、表 5B-2 四个关键设置、交接还是隐藏；**第 4 节 快进不等于延迟补偿**（图 5B-6/5B-7、表 5B-3/5B-4）；第 5 节远端前推与 PvP 公平性（表 5B-5/5B-6）；**方案 B 数据化弹道**（图 5B-8）；第 7 节带宽（图 5B-9）；表 5B-7 原 Demo 怎么改（当前 / 问题 / 最小修复 / 理想）；八个坑；3 道自测。新增 demo `demos/projectile_demo.cpp`（E8 视觉时序、E9 命中一致性、E10 带宽；输出 run_output_proj.txt / figdata_proj.json，不重跑旧实验）。同步：第 0 章问④、K0 第 3 节与读书地图、K1 统一数字、K2 场景 05、第 4/5 章指向、第 15 章链 2 追问 4、第 16 章 Q58 与新增 Q61~62（共 62 题）、附录 A.3 新增 E8~E10 |
 
 ## 目录
 

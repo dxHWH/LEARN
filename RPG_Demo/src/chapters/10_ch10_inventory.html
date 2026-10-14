@@ -1,0 +1,195 @@
+<div class="part-head" data-toc="PART IV · 物品、UI 与工程化"><div class="no">PART IV</div><h1>物品、UI 与工程化</h1><p>最后一次提交 “IventorySystem” 加入了背包、装备、合成、掉落和格子 UI。这是 RPG 客户端面试里最容易被追问到“数据结构 + 事务 + 防刷 + 存档”的部分；第 11、12 章再看表现层和整个工程的性能与规范。</p></div>
+
+<section class="chapter" id="ch10">
+  <div class="ch-head">
+    <div class="no">CHAPTER 10</div>
+    <h1>背包、装备、合成与掉落</h1>
+    <p class="lead">背包用“List 保序 + Dictionary 查找”的双结构，以 ScriptableObject 作键堆叠；装备通过修正器加属性；合成先校验后扣料；掉落先按概率筛选再无放回抽样。实测发现：合成每种材料只扣一份，10 皮 10 铁能做 [[e6.10_10.bc]] 件而不是 [[e6.10_10.fc]] 件；掉落判定多 1%，掉率填 0 的物品也会掉。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清背包双结构的取舍，以及“ScriptableObject 当键”意味着没有物品实例</li>
+    <li>走一遍装备流程，找出两处点击空格就空引用的原因（含 Unity 序列化器的一个特性）</li>
+    <li>用 E6 / E5 量化合成少扣料和掉落概率偏差</li>
+    <li>设计一个可存档、可联网校验的物品系统：定义 / 实例 / 容器 / 事务</li>
+  </ul></div>
+
+  <h2>10.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>物品定义是 ScriptableObject（类型、名称、图标、掉率；装备再加 14 项属性和配方）；背包、仓库、装备栏各用一个 List 保持显示顺序、一个 Dictionary 以 ItemData 为键找堆叠，任何变化后全量刷新格子 UI。装备时先卸同部位旧装备放回背包，再把新装备的属性加到玩家 Stat 上。合成先检查每种材料数量够不够，再扣料加成品；掉落先让每个候选按掉率独立判定，再从入选的里无放回抽最多 3 个。问题：以定义作键意味着没有物品实例（耐久、随机词条都做不了）；合成每种材料只调一次 RemoveItem，需要 2 张皮只扣 1 张；掉落用 <code>&lt;=</code> 比较 0~99，每件都多 1%，且“最多 3 件”的截断让真实掉率低于配置；点空的装备格和首次刷新前点空背包格都会空引用。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "背包、装备、合成与掉落", "rows": [["物品身份", "以 ItemData（ScriptableObject）作字典键，同种物品永远完全相同", "局限 做不了“+5 的剑”、耐久、词条；存档只能存配置引用", "稳定定义 id + 物品实例（uid、数量、耐久、词条）", "“+5 的剑”可以存在；存档只存实例", ""], ["容器", "背包 / 仓库 / 装备栏三套 List + Dictionary 复制代码；没有容量规则", "局限 三套几乎相同的代码，改一处要改三处；背包没有容量上限", "统一 Container（容量、格子、过滤规则）", "邮件、商店、交易复用同一套", ""], ["合成", "先校验数量，再对每种材料调用一次 RemoveItem", "P1 需要 2 张皮只扣 1 张：10 皮 10 铁做出 [[e6.10_10.bc]] 件，应为 [[e6.10_10.fc]] 件——可以刷装备（E6，#6）", "事务：只读校验全部条件 → 一次性提交 → 结果码", "不再“少扣料”", "模型验证：E6 理想版 [[e6.10_10.fc]] 件"], ["掉落", "整数 Random.Range + <code>&lt;=</code> 逐件判定；最多掉 3 件；初速度用 int 版 Random.Range", "P2 配置值 ≠ 实际概率：35.4% 实际 [[e5.Nice_Armor.final|.1f]]%，填 0 也有 [[E5.zero]]%；掉落物整体偏左（E5，#17）", "独立判定（Random.value）或权重表；float 版随机；由权威端抽取", "配置值 = 实际概率", "设计方案 · E5 只量化了现状偏差"], ["UI 刷新", "任何变化全量清空重画（一次装备刷新 3 次）", "局限 一次装备操作把所有格子重建 3 次；格子一多就卡", "SlotChanged(i) 事件增量刷新；格子多时虚拟列表", "大背包不卡", ""], ["格子视图", "格子上序列化了一个 InventoryItem 字段", "P1 开局点空背包格 / 空装备格即空引用（#13）", "视图只持有（容器, 下标），数据从容器读", "UI 不拥有数据", ""], ["存档 / 联网", "没有存档；所有操作在本地", "局限 关游戏全部丢失；联网后客户端可以任意改背包", "稳定 id + 版本迁移；联网时操作在服务器执行", "可存档、可防刷", ""]]} -->
+
+
+  <h2>10.2 数据模型：双结构 + 定义作键</h2>
+<!--flow {"h":270,"w":900,"cols":[14,244,474,694],"colw":[210,210,200,192],"rows":[24,114,200],"bh":58,
+"boxes":[
+ {"id":"def","cr":[0,0],"t":"ItemData（ScriptableObject）","ts":12,"s":"类型 · 名称 · 图标 · 掉率","c":"a"},
+ {"id":"eq","cr":[0,1],"t":"ItemData_Equipment","s":"部位 · 14 项属性 · 配方","c":"a"},
+ {"id":"ii","cr":[1,0],"t":"InventoryItem","s":"data 引用 + stackSize","s2":"既是“堆叠”也是“配方条目”","c":"b"},
+ {"id":"list","cr":[2,0],"t":"List<InventoryItem>","s":"显示顺序","c":"b"},
+ {"id":"dict","cr":[2,1],"t":"Dictionary<ItemData, …>","s":"按定义找堆叠","c":"b"},
+ {"id":"ui","cr":[3,0],"t":"UI_ItemSlot[]","s":"背包 4 · 仓库 3 · 装备 4","s2":"每次变化全量刷新","c":"t"},
+ {"id":"x","cr":[1,2],"t":"缺失：物品实例","s":"无唯一 id、无耐久 / 词条","s2":"同定义的物品永远合并","c":"r","hl":true},
+ {"id":"y","cr":[3,2],"t":"缺失：容量规则","s":"第 5 种物品 → 越界","s2":"（现有数据只有 3 种装备）","c":"r","hl":true}],
+"arrows":[{"from":"def","to":"ii","c":"a"},{"from":"eq","to":"def","c":"a","s":["t","b"]},{"from":"ii","to":"list","c":"b"},{"from":"ii","to":"dict","c":"b","s":["r","l"],"p":[[454,53],[464,53],[464,143],[474,143]]},{"from":"list","to":"ui","c":"t"},{"from":"dict","to":"ui","c":"t","s":["r","l"],"p":[[674,143],[684,143],[684,60],[694,60]]}],
+"cap":"图 10-1　背包数据模型（Inventory.cs）。三套“List + Dictionary”（背包 / 仓库 / 装备）结构相同、代码复制了三份；红框是两个结构性缺失"} -->
+  <div class="tbl"><table>
+    <tr><th>设计点</th><th>项目做法</th><th>好处</th><th>代价</th></tr>
+    <tr><td>双结构</td><td>List 保序 + Dictionary 查找</td><td>堆叠查找 O(1)，显示顺序稳定</td><td>两个结构要同步增删，任何一处漏写就不一致；删除时 <code>List.Remove</code> 是 O(n)</td></tr>
+    <tr><td>定义作键</td><td><code>Dictionary&lt;ItemData, InventoryItem&gt;</code></td><td>同类物品自动堆叠，引用比较极快</td><td>没有“这一把剑”的概念：耐久、强化等级、随机属性、绑定状态、获取时间都无处存放</td></tr>
+    <tr><td>全量刷新</td><td>每次增删都清空所有格子再按 List 重画</td><td>简单，不会不同步</td><td>一次装备操作刷新 3 次（AddItem、RemoveItem、EquipItem 末尾各一次）；格子多时浪费；格子数少于物品种类时直接越界</td></tr>
+    <tr><td>InventoryItem 复用为配方</td><td>Nice_Armor 的配方是 <code>List&lt;InventoryItem&gt;</code>（材料 + 数量）</td><td>少写一个类</td><td>运行时“堆叠”和设计期“配方条目”语义不同，构造函数里的 AddStack 对配方毫无意义</td></tr>
+  </table></div>
+
+  <h2>10.3 装备流程与两个空引用</h2>
+<!--seq {"p":["UI_ItemSlot","Inventory","ItemData_Equipment","PlayerStats","UI_EquipmentSlot"],"pc":["t","b","a","g","t"],
+"s":[["—","点击背包里的 Wooden_Sword（已穿着 Stolen_Sword）"],
+[0,1,"EquipItem(Wooden_Sword)","call"],[1,1,"遍历装备字典找同部位旧装备 → Stolen_Sword","b"],
+[1,2,"UnequipItem(旧)：RemoveModifiers()","call"],[2,3,"strength −20 …（14 项逐个按值删除）","call"],
+[1,1,"AddItem(旧) → 放回背包 → UpdateSlotUI ①","b"],
+[1,2,"新装备 AddModifiers()","call"],[2,3,"strength +10、agility +5 …","call"],
+[1,1,"RemoveItem(新) → UpdateSlotUI ②；末尾 UpdateSlotUI ③","b"],
+["—","点击装备栏的空格子"],
+[4,4,"OnPointerDown：item.data → item 为 null → NullReferenceException","r"]],
+"cap":"图 10-2　装备流程（Inventory.cs:152-187）。一次操作刷新 UI 三次；装备栏格子的点击处理没有判空（UI_EquipmentSlot.cs:14-19）"} -->
+  <p><span class="tag bug">问题</span> <span class="sev p1">P1</span> 两处点击空格的空引用原因不同：</p>
+  <ul>
+    <li><b>装备格</b>：<code>UI_EquipmentSlot.OnPointerDown</code> 直接 <code>item.data as ItemData_Equipment</code>，卸下后 <code>CleanUpSlot()</code> 把 item 置为 null，再点一次就空引用。基类 UI_ItemSlot 有 <code>if (item == null) return;</code>，子类重写时丢了。</li>
+    <li><b>背包格，首次刷新之前</b>：<code>public InventoryItem item</code> 是一个 <code>[Serializable]</code> 普通类字段。<b>Unity 序列化器不支持自定义类字段为 null</b>，会为它构造一个默认实例——ItemSlot.prefab 里就序列化着 <code>item: {data: {fileID: 0}, stackSize: 0}</code>。于是开局时每个格子的 item 都“不为 null 但 data 为 null”，基类的判空拦不住，点击空格走到 <code>item.data.itemType</code> 空引用。第一次拾取物品触发 UpdateSlotUI 之后，所有格子被 CleanUpSlot 置为真正的 null，问题就消失了——典型的“只在开局出现一次”的 bug。</li>
+  </ul>
+  <div class="co tip"><span class="h">怎么避免</span><p>格子不要把数据对象序列化进 Inspector：字段加 <code>[System.NonSerialized]</code> 或做成 private；判空写成 <code>item?.data == null</code> 一并检查；更根本的是格子只持有“容器 + 下标”，数据从容器读——UI 不拥有数据。</p></div>
+
+  <h2>10.4 E6：合成只扣一份材料</h2>
+<!--code:cs:Inventory.cs:189-223（精简） ‖ P1 每种材料只 RemoveItem 一次：需要 2 张皮只扣 1 张（E6，#6）；名字叫 Can 却完成了合成-->
+public bool CanCraft(ItemData_Equipment _itemToCraft, List<InventoryItem> _requiredMaterials)
+{
+    List<InventoryItem> materialsToRemove = new List<InventoryItem>();
+    foreach (var need in _requiredMaterials)
+    {
+        if (stashDictionary.TryGetValue(need.data, out InventoryItem have) && have.stackSize >= need.stackSize)
+            materialsToRemove.Add(have);                        // 校验的是“够不够 need.stackSize 个”
+        else { Debug.Log("not enough materials"); return false; }
+    }
+    foreach (var m in materialsToRemove) RemoveItem(m.data);    // ← 每种材料只移除 1 个
+    AddItem(_itemToCraft);
+    return true;                                                // 名字是 Can，实际已经合成了
+}
+<!--/code-->
+<!--dtab {"rows":"E6.rows","cols":[["初始 皮","s0"],["初始 铁","i0"],["现状：合成件数","bc"],["剩皮","bs"],["剩铁","bi"],["理想：合成件数","fc"],["剩皮","fs"],["剩铁","fi"]],"hlif":"bc != fc","cap":"表 10-1　Nice_Armor 配方 = Animal_Skin × 2 + Iron × 1（E6）。源码每件只消耗 1 张皮，皮的实际成本减半：当皮成为瓶颈时，同样的材料能多做接近一倍的成品"} -->
+  <p><span class="tag bug">问题</span> <span class="sev p1">P1</span> 这是一个<b>经济漏洞</b>：在有交易或数值成长的游戏里，合成成本减半会直接破坏产出平衡。修法一行：<code>for (int k = 0; k &lt; need.stackSize; k++) RemoveItem(need.data);</code>，更好的是给容器一个 <code>TryRemove(def, count)</code>。另外这个函数还有三个设计问题值得一起说：名字叫 Can 却完成了合成（应拆成 CanCraft + Craft）；校验和扣除分两步，单线程下没问题，但联网后必须在服务器上作为一个事务执行；失败时只打日志，UI 拿不到“缺什么”。</p>
+
+  <h2>10.5 E5：掉落概率与“最多 3 件”</h2>
+<!--code:cs:ItemDrop.cs:13-50（精简） ‖ P2 整数随机 + &lt;=：84.8% 等于 85%、填 0 仍有 1%；“最多 3 件”让 35.4% 变成 [[e5.Nice_Armor.final|.1f]]%（E5，#17）-->
+for (int i = 0; i < possibleDrop.Length; i++)
+    if (Random.Range(0, 100) <= possibleDrop[i].dropChance)    // 0~99 的整数 <= 84.8 → 85 个值命中
+        dropList.Add(possibleDrop[i]);
+int itemsToDrop = Mathf.Min(PossibleItemDrop, dropList.Count); // 最多 3 件
+for (int i = 0; i < itemsToDrop; i++)
+{
+    int randomIndex = Random.Range(0, dropList.Count);         // 无放回抽样
+    DropItem(dropList[randomIndex]); dropList.RemoveAt(randomIndex);
+}
+// DropItem：new Vector2(Random.Range(-5, 5), Random.Range(15, 20)) —— int 版，x ∈ {-5..4}
+<!--/code-->
+  <p>骷髅的 5 个候选掉率合计 261.7%，平均有 2.6 个通过筛选，经常超过 3 个而被截断。精确解（枚举 2⁵ 种筛选结果）与 100 万次蒙特卡洛 <span class="tag ex">实测 E5</span>：</p>
+<!--dtab {"rows":"E5.rows","cols":[["物品","name"],["配置 dropChance / %","chance",".1f"],["通过筛选 / %","filt",".1f"],["最终掉落 / %","final",".1f"],["蒙特卡洛 / %","mc",".2f"]],"cap":"表 10-2　每件物品的真实掉率：筛选阶段因 <= 多 1%（并把 84.8 这样的小数截掉），截断阶段又让每件少 3~5 个百分点。平均每只骷髅掉 [[E5.exp|.2f]] 件，什么都不掉的概率 [[E5.none|.2f]]%"} -->
+  <ul>
+    <li><b>配置值不是实际掉率</b>：策划在 Inspector 里看到 35.4%，实际 [[e5.Nice_Armor.final|.1f]]%。只要有“最多 N 件”，各物品就不再独立；要么文档写清“掉率 = 入选概率”，要么改成权重表一次抽 N 件。</li>
+    <li><b>小数位无效</b>：<code>Random.Range(0,100)</code> 是整数，84.8 和 84.0 效果相同（都是 85 个值）；dropChance 填 0 仍有 [[E5.zero]]% 掉率。</li>
+    <li><b>掉落向左偏</b>：x 初速度来自 int 版 <code>Random.Range(-5, 5)</code>，取值 −5~4，向左 [[E5.vneg]]%、向右 [[E5.vpos]]%、0 占 [[E5.vzero]]%，均值 [[E5.vmean]] m/s——掉落物整体偏左。应写 <code>Random.Range(-5f, 5f)</code>。</li>
+    <li>其他：<code>item</code> 字段序列化了却没用；每次掉落 <code>Debug.Log(_itemData)</code>；ItemObject 每帧检查 M 键（调试代码遗留，每个掉落物一份）。</li>
+  </ul>
+
+  <h2>10.6 改进：定义 / 实例 / 容器 / 事务</h2>
+<!--flow {"h":250,"w":900,"cols":[14,234,454,674],"colw":[206,206,206,212],"rows":[24,118],"bh":64,
+"boxes":[
+ {"id":"d","cr":[0,0],"t":"ItemDef（表 / SO）","s":"defId（稳定 GUID）","s2":"堆叠上限、品质、配方","c":"a"},
+ {"id":"i","cr":[1,0],"t":"ItemInstance","s":"uid、defId、count","s2":"耐久、词条、绑定","c":"b","hl":true},
+ {"id":"c","cr":[2,0],"t":"Container","s":"slots[]、容量、过滤规则","s2":"背包 / 仓库 / 装备共用","c":"b"},
+ {"id":"t","cr":[3,0],"t":"Transaction","s":"TryAdd / TryRemove / Move","s2":"Split / Merge / Craft，全成或全败","c":"p","hl":true},
+ {"id":"ev","cr":[0,1],"t":"事件","s":"SlotChanged(i)","s2":"增量刷新","c":"t"},
+ {"id":"ui","cr":[1,1],"t":"UI 绑定","s":"格子只持有（容器, 下标）","c":"t"},
+ {"id":"sv","cr":[2,1],"t":"存档","s":"[{defId, count, 实例数据}]","s2":"版本号 + 迁移","c":"g"},
+ {"id":"dr","cr":[3,1],"t":"掉落表","s":"权重 + 保底计数","s2":"服务器抽取","c":"g"}],
+"chains":[[["d","i","c","t"],{"c":"s"}]],
+"arrows":[{"from":"t","to":"ev","c":"t","s":["b","t"],"p":[[780,88],[780,104],[117,104],[117,118]]},{"from":"ev","to":"ui","c":"t"}],
+"cap":"图 10-3　可存档、可联网的物品系统：所有修改都走事务（失败不留半截状态），UI 只订阅“哪个格子变了”"} -->
+<!--code:cs:【改进】容器事务（C#，未在 Unity 中编译）-->
+public bool TryCraft(Recipe r, Container stash, Container bag)
+{
+    foreach (var need in r.inputs)                         // 1. 只读校验（含成品是否放得下）
+        if (stash.Count(need.defId) < need.count) return false;
+    if (!bag.CanAdd(r.output, 1)) return false;
+    foreach (var need in r.inputs)                         // 2. 提交：已校验过，不会半途失败
+        stash.Remove(need.defId, need.count);
+    bag.Add(ItemInstance.Create(r.output, 1));
+    Events.Raise(new Crafted(r.id));                       // 3. 通知（UI、任务、成就）
+    return true;
+}
+<!--/code-->
+
+  <h2>10.7 面试追问</h2>
+<!--code:text:追问树-->
+背包用什么数据结构？（Q10-1）
+├─ 为什么 List + Dictionary？删除的复杂度？（Q10-1 L2）
+├─ 一把“+5 的剑”和一把“+0 的剑”怎么区分？（Q10-2 → 定义 vs 实例）
+├─ 合成怎么保证不出错？联网后在哪做？（Q10-3 → E6）
+├─ 掉落概率怎么做？策划配 35% 实际是多少？（Q10-4 → E5）
+└─ 背包怎么存档？改了物品表旧存档怎么办？（场景 10-3）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q10-1　背包用什么数据结构？</div>
+    <p><b>L2</b>　List 保持显示顺序，Dictionary 以物品定义为键找到对应堆叠，加物品时 O(1) 判断是否已有堆叠；删除时字典 O(1)、List.Remove O(n)。三个容器（背包、仓库、装备栏）各一套。</p>
+    <p><b>L3</b>　如果背包是“格子制”（物品放在固定格子里、允许空洞），更自然的结构是定长数组 slots[capacity] + “defId → 格子下标集合”的索引；堆叠满了要找下一个同类格子或空格子。我项目里没有容量规则，UI 只有 4 格，物品种类超过 4 就会越界——现在只有 3 种装备，所以没触发。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q10-2　“+5 的剑”和“+0 的剑”怎么区分？</div>
+    <p><b>L2</b>　现在区分不了：字典以 ScriptableObject 定义为键，同一定义的物品会被合并成一个堆叠。要支持实例数据，必须引入 ItemInstance（唯一 id + 定义 id + 实例属性），可堆叠的材料按定义合并，不可堆叠的装备每件一个实例。</p>
+    <p><b>L3</b>　实例数据还决定了装备修正的来源：修正器挂“装备实例”，强化等级变化时重算该实例的修正；存档存实例列表。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q10-3　合成怎么保证不出错？</div>
+    <p><b>L2</b>　先只读校验全部条件（材料数量、成品放不放得下），再一次性提交；提交阶段不应该有可能失败的步骤。我原来的代码校验是对的，但提交时每种材料只 RemoveItem 一次，需要 2 张皮只扣 1 张，测出来 10 皮 10 铁能做 [[e6.10_10.bc]] 件而不是 [[e6.10_10.fc]] 件。</p>
+    <p><b>L3</b>　联网后合成必须在服务器执行：客户端只发“合成配方 X”，服务器按自己的背包数据做事务并回包；客户端可以预表现（先播特效）但背包以服务器为准。重复请求要用请求 id 去重，防止网络重发造成双扣或双得。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q10-4　掉落概率怎么做？</div>
+    <p><b>L2</b>　我的做法是每个候选独立判定，再从入选的里无放回抽最多 3 个。测出来两个偏差：判定用 <code>&lt;=</code> 比较 0~99 的整数，每件多 1%，掉率填 0 也会掉；“最多 3 件”的截断又让每件实际掉率比配置低 3~5 个点，比如 Nice_Armor 配 35.4% 实际 [[e5.Nice_Armor.final|.1f]]%。</p>
+    <p><b>L3</b>　按需求选模型：独立掉落（每件按概率，不设上限）、权重表（一次抽 N 件，概率 = 权重 / 总权重）、分组（先抽品质再抽物品）、保底（连续 K 次未出就必出，计数存在玩家身上）。权威端（服务器）抽取，客户端只表现。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“背包用 Dictionary 存，查找 O(1)，性能最好。”</p>
+    <p><b>问题</b>：只回答了查找。面试官真正想听的是堆叠规则、实例数据、容量与格子、事务、存档和联网校验。</p>
+    <p><b>更好的回答</b>：从“定义 / 实例 / 容器 / 事务”四层回答，再用自己项目的 bug 举例说明为什么需要每一层。</p>
+  </div>
+
+  <h2>10.8 发散场景题</h2>
+  <div class="scene"><div class="q">场景 10-1　设计一个 MMO 背包：200 格、可堆叠、可拆分、可整理、可交易。</div>
+    <p class="why">为什么会问：最常见的客户端系统设计题之一。</p>
+    <p>数据：slots[200] 存 ItemInstance 引用（或 uid），索引 defId → 格子集合；操作：Add（先填同类未满堆叠再找空格）、Split（从堆叠拆出 n 个到空格）、Merge、Move / Swap、Sort（按规则排序后重排，注意稳定排序与锁定格子）；交易：物品在交易期间被“锁定”，服务器以交易单为事务原子交换。客户端：所有操作发请求，服务器回包后应用（可做乐观预表现 + 回滚）；UI 用虚拟列表只渲染可见格子（场景 10-4）。</p>
+  </div>
+  <div class="scene"><div class="q">场景 10-2　有人用加速器 / 改包刷合成材料，你在客户端能做什么？</div>
+    <p class="why">为什么会问：防刷的边界意识。</p>
+    <p>客户端几乎做不了“防”，只能“不信任”：所有产出（掉落、合成、拾取）由服务器决定；客户端提交的只是意图。能做的是减小攻击面（不在客户端计算掉落、不在本地存可修改的权威数据）、上报异常（短时间大量请求）、协议加签和重放保护。项目里掉落在本地随机、合成在本地扣料，联网化时这两处都必须搬到服务器。</p>
+  </div>
+  <div class="scene"><div class="q">场景 10-3　物品表改版（删了一个物品、改了堆叠上限），旧存档怎么办？</div>
+    <p class="why">为什么会问：存档兼容是线上事故高发区。</p>
+    <p>存档里存稳定的 defId（GUID 或数字 id，不能存数组下标或资源路径）；存档带版本号，加载时按版本逐级迁移（删除的物品转换成补偿货币、堆叠超上限的拆成多格）；ScriptableObject 引用在存档里要转换成 id，不能直接序列化对象引用。项目里背包以 ScriptableObject 引用为键，直接序列化的话换个资源 GUID 就全丢。</p>
+  </div>
+  <div class="scene"><div class="q">场景 10-4　背包 1000 格，打开界面卡 200 ms，怎么优化？</div>
+    <p class="why">为什么会问：UI 性能的经典题。</p>
+    <p>① 虚拟列表 / 循环滚动：只实例化可见的 30~40 个格子，滚动时复用并重新绑定数据；② 增量刷新：容器发 SlotChanged(i)，只更新变化的格子，而不是像项目这样全量 CleanUp + Update；③ 图标异步加载、图集合批；④ 把背包 Canvas 与常驻 HUD 分开，避免格子变化触发整张 Canvas 重建；⑤ 打开时分帧填充。</p>
+  </div>
+
+  <div class="co tip"><span class="h">方法论延伸</span><p>背包、装备、技能三个系统的整体设计思路与“为什么这样设计”，见第 21 章；关卡与瓦片地图见第 19 章。</p></div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>背包：<b>List 保序 + Dictionary 查找</b>，以 SO 定义作键 → <b>没有物品实例</b>，没有容量规则。</li>
+    <li>空引用：装备格子类丢了判空；<b>Unity 序列化器给自定义类字段造默认实例</b> → 开局点空格空引用（#13）。</li>
+    <li>E6：合成每种材料只扣 1 份 → 10 皮 10 铁做 [[e6.10_10.bc]] 件（应为 [[e6.10_10.fc]]），经济漏洞（#6）。</li>
+    <li>E5：<code>&lt;=</code> 多 1%、0 也掉；“最多 3 件”截断后 35.4% → [[e5.Nice_Armor.final|.1f]]%；x 速度 int 随机偏左（#17）。</li>
+    <li>改进：<b>定义 / 实例 / 容器 / 事务</b> + 事件增量刷新 + 稳定 id 存档 + 服务器抽取。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么点空背包格的空引用“只出现在开局”？</summary>开局时格子的 item 是序列化器构造的默认实例（data 为 null），第一次 UpdateSlotUI 会对所有格子 CleanUpSlot，把 item 置为真正的 null，之后基类判空就能拦住。</details>
+  <details class="quiz"><summary>自测 2：10 皮 10 铁时，为什么源码版最后剩 1 皮 1 铁？</summary>每件只扣 1 皮 1 铁，但校验要求皮 ≥ 2：做到第 9 件后剩 1 皮 1 铁，皮不满足 2，停止。</details>
+  <details class="quiz"><summary>自测 3：怎样让“配置掉率 = 实际掉率”？</summary>去掉“最多 N 件”的截断，每件独立判定，并用 <code>Random.value * 100 &lt; chance</code>；需要上限时改用权重表，并在文档里写清“概率 = 权重 / 总权重”。</details>
+</section>

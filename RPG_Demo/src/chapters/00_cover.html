@@ -1,0 +1,214 @@
+<div class="cover">
+  <div class="kicker">RPGDEMO · 源码复盘 + CODE REVIEW + 面试追问 + 发散场景题</div>
+  <h1>RPGDemo 源码复盘<br><em>与游戏客户端面试</em></h1>
+  <p class="sub">以 dxHWH/RPGDemo（Unity 2022.3 · 2D 横版动作 RPG）的真实源码与场景数据为唯一依据：玩家 13 个状态怎么切、动画事件怎么驱动命中、弹反窗口到底多宽、伤害公式里藏着哪些 off-by-one、骷髅为什么每秒自己切换到自己几十次、掉落和合成为什么能“刷”。每一处都往下追到 Unity 生命周期、FixedUpdate、GC、对象池、数据驱动设计，再发散成面试官最爱出的场景题。最后的方法论篇站在“面试官看不到 Demo”的前提下，把每个功能讲成“需求 → 我的做法 → 常见的坑 → 更好的实现 → 取舍”：状态判定、滑墙、Tilemap 关卡搭建、输入缓冲与手感、背包 / 装备 / 技能的系统设计。全书把每个功能分成两条线：<b>现状</b>是 Demo 里真实存在的做法和它的问题，<b>理想</b>是重构 / 上线级方案（大多只是设计，少数做了 C++ 模型验证）；每章开头一张“现状 vs 理想”对照表，附录 D 汇总成一张阶梯图。</p>
+  <div class="meta">
+    <span class="pill b">21 章 + 附录 · 6 个部分（新增 Part VI 方法论篇）</span>
+    <span class="pill o">全书区分 现状（Demo 822270c）→ 问题（分级）→ 理想（重构方案）</span>
+    <span class="pill o">C++ 逐行移植实测 E1~E11 · F1~F5</span>
+    <span class="pill g">问题总表 36 条（P0~P3）</span>
+    <span class="pill p">每章：30 秒答案 · 四层追问 · 错误回答 · 场景题</span>
+  </div>
+</div>
+
+<section class="chapter" id="ch0">
+  <div class="ch-head">
+    <div class="no">CHAPTER 00</div>
+    <h1>读前须知、项目一页纸与面试地图</h1>
+    <p class="lead">先把三件事讲清楚：书里每句话的可信度怎么标；这个项目一句话、一分钟、三分钟分别怎么讲；面试官会从哪一行代码一路追问到哪里。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>认识 8 种事实标签，知道哪些结论是“读源码得到的”、哪些是“C++ 移植跑出来的”、哪些只是推断</li>
+    <li>分清两条线：<b>Demo 现在是什么样</b>（现状）和<b>理想方案应该什么样</b>（理想），以及讲的时候各用什么时态</li>
+    <li>拿到项目一页纸：规模、模块、场景里真正挂着的组件、关键序列化数值</li>
+    <li>背熟 1 分钟 / 3 分钟项目介绍，并知道每句话会把面试官引向哪一章</li>
+  </ul></div>
+
+  <h2>0.1 事实等级：每句话都要分清来源</h2>
+  <div class="tbl"><table>
+    <tr><th>标签</th><th>含义</th><th>例子</th></tr>
+    <tr><td><span class="tag src">源码</span></td><td>当前 commit（822270c）里逐行读过的真实行为，附文件名与行号</td><td><code>PlayerFallState.Update</code> 三个 if 之间没有 return（第 25~34 行）</td></tr>
+    <tr><td><span class="tag int">意图</span></td><td>从命名、注释推测的设计目标，不等于已实现</td><td>注释“冰冻状态下额外减少 15% 护甲值的伤害”</td></tr>
+    <tr><td><span class="tag bug">问题</span></td><td>缺陷、边界漏洞、注释与实现不一致；附严重度 <span class="sev p0">P0</span><span class="sev p1">P1</span><span class="sev p2">P2</span><span class="sev p3">P3</span></td><td>死亡后按 Shift 可以“复活”</td></tr>
+    <tr><td><span class="tag fix">改进</span></td><td>修改方向与关键代码骨架（C#，未在 Unity 中编译）；属于“理想”这条线（0.2）</td><td>状态机加“转移守卫 + 优先级”</td></tr>
+    <tr><td><span class="tag ext">扩展</span></td><td>项目没涉及、但面试会顺着追下去的知识</td><td>输入缓冲、Coyote Time、命中停顿</td></tr>
+    <tr><td><span class="tag ex">实测 Ex</span></td><td>把 C# 逻辑逐行移植成 C++（MSVC /O2）跑出的结果，数字全部来自 <code>demos/figdata.json</code></td><td>E7：骷髅 10 s 内自转移 [[E7.A.self]] 次</td></tr>
+    <tr><td><span class="tag mdl">模型</span></td><td>依赖 Unity 运行时顺序的部分，按下文 R1~R4 规则建模</td><td>协程在 Update 之后恢复</td></tr>
+    <tr><td><span class="tag inf">推断</span></td><td>根据源码 + 资源配置推出、但需要 Play Mode 验证的结论；附录 B 给验证步骤</td><td>瞄准时按 Dash 仍会掷剑</td></tr>
+    <tr><td><span class="tag now">现状</span></td><td>状态标记：Demo（822270c）里<b>真实存在</b>的做法，包括它的问题；能演示、有文件和行号</td><td>“空中用一条腰部射线判墙”</td></tr>
+    <tr><td><span class="tag ideal">理想</span></td><td>状态标记：重构 / 上线级方案；<b>不在 Demo 里</b>，除非注明“模型验证”，否则没有任何代码实现</td><td>“脚、腰两条射线按覆盖率判墙”</td></tr>
+  </table></div>
+  <div class="co ver"><span class="h">“实测”的边界与四条模型规则</span>
+    <p>本机没有 Unity，C# 编译器被安全策略禁用，所以纯逻辑（状态转移、计时器、概率、合成扣料）逐行移植成 C++ 验证；依赖 Unity 运行时的部分写成模型规则，书里遇到时标 <span class="tag mdl">模型</span>：</p>
+    <ul>
+      <li><b>R1 帧顺序</b>：FixedUpdate × N（含物理步）→ 所有 Update → 协程 <code>WaitForSeconds</code> 恢复 → 动画更新（触发动画事件）→ LateUpdate → 渲染。</li>
+      <li><b>R2 动画事件</b>：进入状态那一帧记为片段 0 时刻；事件在“片段时间首次 ≥ 事件时间”那一帧的动画阶段触发。</li>
+      <li><b>R3 延迟</b>：<code>Destroy</code> 在帧末生效；两帧之间的按键在下一帧的 Update 里被读到。</li>
+      <li><b>R4 精度</b>：<code>Time.deltaTime</code> 与所有计时器都是 <code>float</code>，移植时同样用 float。</li>
+    </ul>
+    <p>依赖 C# 运行时的结论（某次调用到底分配多少字节、协程对象的开销）只标 <span class="tag src">源码</span> 或 <span class="tag ext">扩展</span>，<b>不冒充实测</b>——面试时说“我推断会分配，并在 Profiler 的 GC Alloc 列验证过”比报一个没测过的数字安全得多。</p>
+  </div>
+
+  <h2>0.2 两条线：现状 vs 理想（全书读法）</h2>
+  <p>这本书讲的每个功能都有两种状态，必须分开看：<span class="tag now">现状</span> 是 Demo（commit 822270c）里<b>真实存在</b>的做法——包括它的问题，可以演示、能给出文件和行号；<span class="tag ideal">理想</span> 是“如果重做 / 做成上线项目应该怎么做”的<b>设计方案</b>——它不在 Demo 里。两条线一旦混在一起，读者会把设计当成已实现，面试时也会把“我会怎么做”说成“我做过”。所以全书每讲一个功能，都按下图从左走到右。</p>
+<!--flow {"h":192,"w":900,
+"rects":[{"x":6,"y":6,"w":292,"h":106,"c":"o","t":"现状 · Demo 822270c（真实存在）","fill":"#FFFBF7"},
+ {"x":304,"y":6,"w":292,"h":106,"c":"r","t":"坑 · 换个项目也会踩","fill":"#FFFAFA"},
+ {"x":602,"y":6,"w":292,"h":106,"c":"g","t":"理想 · 重构方案（设计）","fill":"#F6FCF8"},
+ {"x":6,"y":120,"w":888,"h":64,"c":"s","fill":"#FFFFFF"}],
+"bh":66,"bw":130,
+"boxes":[
+ {"id":"n1","x":16,"y":36,"t":"做法","s":"源码 · 文件与行号","s2":"能演示","c":"o"},
+ {"id":"n2","x":158,"y":36,"t":"问题","s":"实测 E1~E11 · F1~F5","s2":"或推断（待验证）","c":"o"},
+ {"id":"p1","x":314,"y":36,"t":"坑","s":"这类功能的通病","s2":"不只是我的 bug","c":"r"},
+ {"id":"p2","x":456,"y":36,"t":"根因","s":"缺了哪条设计规则","c":"r"},
+ {"id":"i1","x":612,"y":36,"t":"理想做法","s":"讲方法，不写代码","s2":"绿格落地徽标","c":"g"},
+ {"id":"i2","x":754,"y":36,"t":"取舍","s":"代价 · 何时不必做","c":"g"}],
+"chains":[[["n1","n2"],{"c":"o"}],[["n2","p1","p2"],{"c":"r"}],[["p2","i1","i2"],{"c":"g"}]],
+"texts":[{"x":152,"y":146,"a":"middle","cls":"sm b","fill":"#C2410C","t":"过去时：“我当时是……，测到……”"},
+ {"x":450,"y":146,"a":"middle","cls":"sm b","fill":"#B91C1C","t":"通用化：“这类功能常见的坑是……”"},
+ {"x":748,"y":146,"a":"middle","cls":"sm b","fill":"#15803D","t":"条件句：“如果重做，我会……因为……”"},
+ {"x":152,"y":170,"a":"middle","cls":"xs","t":"标记：橙色标签 · 橙框代码 · 现状图"},
+ {"x":450,"y":170,"a":"middle","cls":"xs","t":"标记：坑卡 · “坑 → 正解”表"},
+ {"x":748,"y":170,"a":"middle","cls":"xs","t":"标记：绿色标签 · 绿框代码 · 理想图"}],
+"cap":"图 0-1　一个功能的两条线。左边只写 Demo 里真实存在的东西；中间把问题提炼成通用的坑和根因；右边才是理想做法与取舍。三段的标记颜色和讲述时态都不同（下半部分），读者和面试官都不会把设计当成已实现"} -->
+  <div class="tbl"><table>
+    <tr><th>标记</th><th>长什么样</th><th>出现在哪</th><th>怎么读</th></tr>
+    <tr><td>正文标签</td><td><span class="tag now">现状</span> <span class="tag ideal">理想</span></td><td>段落开头、卡片、坑卡</td><td>标签后面那句话描述的是哪条线</td></tr>
+    <tr><td>代码块徽标</td><td><span class="cb now">当前源码 · 822270c</span><br><span class="cb ideal">理想方案 · 骨架</span></td><td>代码块标题栏（橙框 / 绿框）</td><td>橙框 = 仓库原文摘录，行号可查；绿框 = 理想方案的 C# 骨架，<b>没有在 Unity 里编译过</b>，只用来说明结构</td></tr>
+    <tr><td>图注徽标</td><td><span class="fs now">现状</span> <span class="fs ideal">理想方案</span><br><span class="fs vs">现状 vs 理想</span></td><td>图注最前面</td><td>现状图由源码 / 场景文件 / 实测数据画出；理想图是设计示意；对比图把两条线并列（橙 = 现状，绿 = 理想）</td></tr>
+    <tr><td>章首对照表</td><td>x.1 节的对照表（表头：现状 → 问题 → 理想）</td><td>第 1~12、17~21 章</td><td>橙列 = Demo 现在怎么做；<b>红列 = 这样做存在的问题</b>；绿列 = 理想怎么做；绿格底部的小徽标说明这个理想做法<b>落地到了哪一步</b>（下表）</td></tr>
+    <tr><td>现状问题条</td><td><span class="cpl">现状问题</span><span class="sev p1">P1</span> …</td><td>每个橙框代码块底部、每张现状图的图注下方</td><td>这段代码 / 这张图里的做法<b>错在哪、后果是什么、证据是什么</b>（附录 A 编号、实验编号或“推断”）</td></tr>
+  </table></div>
+  <p>“现状”只说 Demo 怎么做还不够，必须同时说清<b>这样做有什么问题</b>——否则读者分不清哪些现状是可以保留的、哪些是必须改的，理想方案也就失去了理由。全书的问题统一按下表分级：</p>
+  <div class="tbl"><table>
+    <tr><th>问题分级</th><th>含义</th><th>例</th></tr>
+    <tr><td><span class="sev p0">P0</span> <span class="sev p1">P1</span> <span class="sev p2">P2</span> <span class="sev p3">P3</span></td><td><b>缺陷</b>，严重度与附录 A 相同：P0 无法构建 / 核心约束被破坏，P1 明显错误的玩法结果，P2 边界与体验问题，P3 工程规范；括号里是附录 A 编号（#n）与实验编号</td><td>死亡后按冲刺“复活”（P0，E1-S3，#3）</td></tr>
+    <tr><td><span class="sev hz">隐患</span></td><td>Demo 里还没触发、或需要 Play Mode 验证，但条件一满足就会出错</td><td>弹反成功依赖同一时刻两个动画事件的排序</td></tr>
+    <tr><td><span class="sev lim">局限</span></td><td><b>不是 bug</b>：现在能用，但扩展、规模化、联网时会成为障碍</td><td>物品没有实例，做不了“+5 的剑”</td></tr>
+    <tr><td><span class="sev ok">✓ 无问题</span></td><td>现状做法正确，理想方案沿用</td><td>玩家用零摩擦物理材质，避免贴墙被挂住</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">读对照表的顺序：先看红列</span>
+    <p>每一行先读“当前做法”，再读“存在的问题”，最后看“理想方案”是不是<b>正好解决了这个问题</b>——如果理想方案解决的不是红列里写的问题，它就是过度设计。面试时也是这个顺序：“我当时这样做 → 后来发现它会导致……（证据）→ 所以正确做法是……”。缺陷（P0~P3）要讲证据，局限要讲“在什么条件下才会成为问题”，不要把局限说成 bug。</p>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>理想格的落地徽标</th><th>含义</th><th>面试时能说到什么程度</th></tr>
+    <tr><td><span class="vb s">设计方案 · 未实现</span></td><td>只是方案：Demo 里没有，本书也没写成可运行代码</td><td>“如果重做，我会……”——讲思路和取舍，不报数字</td></tr>
+    <tr><td><span class="vb g">模型验证：Ex / Fx</span></td><td>把理想规则写进了 C++ 移植模型，和现状对拍过（实验里的“修正版 / 理想版”就是它）</td><td>“我把修正规则放进移植模型对比过：现状 X，修正后 Y”——仍要说明是模型，不是 Unity 里改好的工程</td></tr>
+    <tr><td><span class="vb b">保持 · 现状已正确</span></td><td>现状就是对的，理想方案沿用</td><td>可以当亮点主动讲（“这一处我是有意这样做的”）</td></tr>
+    <tr><td><span class="vb p">公开参考</span></td><td>理想参数来自公开资料（例如 Celeste 的强制离墙 0.16 s），不是本书测的</td><td>注明出处：“参考了某游戏公开的数值”</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">理想不等于“全都要做”：分三档</span>
+    <p>同一个功能从现状走到理想，中间其实有三档：<b>修正</b>（在现有结构里只修错，例如冰冻破甲改成判断目标）→ <b>重构</b>（改结构，例如属性改成带来源的修正器栈；这是“重做这个 Demo 就该做到”的理想）→ <b>上线级</b>（规模化或联网才值得，例如服务器裁决、行为树、技能编辑器）。各章对照表的“理想重构方案”列以前两档为主，第三档出现在“代价”列和追问里。附录 D 用一张阶梯图把 12 个模块的四档并排画出来。</p>
+  </div>
+  <div class="co warn"><span class="h">讲的时候用不同的时态</span>
+    <p>现状用<b>过去时 + 证据</b>：“我当时用一条腰部射线判墙，后来测到它在脚底上方 [[F1.wallH|.2f]] m，接近墙顶时会有一段死区”；理想用<b>条件句 + 理由</b>：“如果重做，我会用脚、腰两条射线按覆盖率判，因为……”。<b>不要把理想说成做过</b>——面试官追问一句“这个参数你在 Demo 里调的是多少？”就会露馅（口径见第 16 章 16.3 的三种时态）。</p>
+  </div>
+
+  <h2>0.3 项目一页纸</h2>
+  <div class="tbl"><table>
+    <tr><th>项</th><th>事实</th></tr>
+    <tr><td>仓库 / 快照</td><td><code>github.com/dxHWH/RPGDemo</code>，main@<code>822270c</code>（4 次提交，最后一次 “IventorySystem” 加入背包 / 装备 / 合成 / 掉落）</td></tr>
+    <tr><td>引擎</td><td>Unity <b>2022.3.54f1c1</b>；包：2D Feature、Cinemachine（cinematic feature）、TextMeshPro、Visual Scripting、Timeline</td></tr>
+    <tr><td>规模</td><td>自写 C# <b>57 个文件 / 3543 行</b>：player 18 个（880 行）、Enemy 12（577）、Skill 8（671）、Stats 4（468）、Items and Iventory 7（453）、UI 4（148）、根目录 4（346）</td></tr>
+    <tr><td>场景</td><td>只有 <code>SampleScene</code>：1 个玩家 <code>player</code>、1 只骷髅 <code>Enenmy_Skeleton</code>、<code>PlayerManager</code>、<code>SkillManager</code>（挂 Dash / Clone / ThrowSword 三个技能）、<code>Inventory</code>、4 块 UI（背包 4 格、仓库 3 格、装备 4 格、合成 1 格）、Cinemachine 虚拟相机、两层视差背景</td></tr>
+    <tr><td>玩家数值</td><td>移速 7、跳跃 20（重力倍率 5 → 理论跳高 4.08 m）、冲刺 25 × 0.2 s、墙滑 2、攻击位移 [2, 1, 3]、反击持续 1 s；<b>damage 1000 / maxHealth 1000 / armor 10</b>（明显是测试值）</td></tr>
+    <tr><td>骷髅数值</td><td>移速 2、发现距离 5、攻击距离 1.75、攻击冷却 1、战斗距离 10；maxHealth 100、<b>damage 0</b>、iceDamage 20（魔法伤害调用被注释，所以骷髅现在打不疼玩家）</td></tr>
+    <tr><td>物品</td><td>5 个 ScriptableObject：Animal_Skin 84.8%、Iron 88.2%（材料）；Nice_Armor 35.4%、Stolen_Sword 32%、Wooden_Sword 21.3%（装备）；骷髅最多掉 3 件</td></tr>
+    <tr><td>物理</td><td>Fixed Timestep 0.02、Maximum Allowed Timestep 0.333；玩家 / 骷髅刚体开了 Interpolate + Continuous；飞剑刚体 Discrete、无插值；<code>Queries Hit Triggers</code> 开启</td></tr>
+    <tr><td>脚本执行顺序</td><td>meta 里设置了 CharacterStats 300、UI_HealthBar 400、ItemData 500、ItemDrop 600（第 2 章会讲其中两个其实没起作用）</td></tr>
+  </table></div>
+  <p>它的骨架来自一门流行的 Unity 2D RPG 教程（Entity → 状态机 → Skill → Stats → Inventory 的组织方式、命名和数值都高度一致），作者在此基础上做了自己的改动：弹反改成“受击时判定”、状态效果计时器重构成通用函数、魔法伤害改成“排序选最大元素”、掉落改成“先筛选再无放回抽样”。<b>面试时主动说明来源</b>，再重点讲“我改了什么、为什么改、改完发现了什么问题”——这比假装全部原创可信得多，也正是本书的组织方式。</p>
+
+  <h2>0.4 项目介绍：一句话、一分钟、三分钟</h2>
+  <div class="ans30"><span class="h">一句话</span>
+    <p>“一个 Unity 2D 横版动作 RPG Demo：用有限状态机组织玩家和怪物行为，用动画事件驱动命中，做了冲刺分身、三段连招、弹反、可回收的飞剑技能，以及属性 / 异常状态 / 掉落 / 装备 / 合成这一套数值与物品系统。”</p>
+  </div>
+  <div class="ans"><div class="q">一分钟版（按“结构 → 亮点 → 反思”组织）</div>
+    <p><b>结构</b>　所有角色继承 <code>Entity</code>（组件缓存、地面 / 墙检测、翻转、击退），行为由状态机驱动：玩家 13 个状态、骷髅 6 个状态，每个状态是一个普通 C# 类，Enter / Update / Exit 三段式，进入时把同名 Animator bool 置真。</p>
+    <p><b>亮点</b>　命中、结束、掷剑这些关键帧都放在动画事件里，逻辑和美术对齐；弹反我改成了“受击瞬间若处于反击状态且怪物正在出手就眩晕它”；伤害走闪避 → 暴击 → 护甲三步，魔法伤害按最高元素施加点燃 / 冰冻 / 感电，感电二次命中会召唤追踪雷击。</p>
+    <p><b>反思</b>　后来我用 C++ 把关键逻辑移植出来逐帧回放，发现了一批问题：状态转移缺守卫（死亡后还能冲刺“复活”）、怪物战斗状态每帧自己切换到自己、多个系统同时写移动速度、合成只扣一份材料。我知道怎么修，也知道这些问题在更大的项目里会变成什么。</p>
+  </div>
+  <div class="ans"><div class="q">三分钟版：在一分钟版基础上，每段多给一个“数字”</div>
+    <p>① 状态机：落地瞬间贴墙会在<b>一帧内连续切两次状态</b>（Fall→Idle→WallSlide，E1）；② 时间：冲刺在 Update 里计时、在 FixedUpdate 里位移，120 / 144 fps 下距离会在 4.5~5.0 m 之间跳，冲刺中卡一帧 250 ms 能冲出 [[e10.hitch.250.max|.1f]] m（E10）；③ 判定：弹反成功窗口实测 <b>[[e2.60.cw|.2f]] s</b>，比原教程写法的 [[e2.60.ow|.2f]] s 更严，但仍远宽于动作游戏常见的零点几秒，而且弹反成功时伤害照样结算（E2）；④ 数值：暴击判定用 <code>&lt;=</code>，暴击率 0 也有 1% 暴击（E3）；⑤ AI：骷髅战斗时每秒执行约 [[E7.A.fps|.0f]] 次 <code>GameObject.Find</code>（E7）；⑥ 物品：合成 Nice_Armor 需要 2 张皮却只扣 1 张，10 皮 10 铁能做 [[e6.10_10.bc]] 件而不是 [[e6.10_10.fc]] 件（E6）。最后说重构方向：转移表 + 守卫、DamageInfo 管线、Modifier 栈、物品实例化、对象池。</p>
+  </div>
+  <div class="co tip"><span class="h">面试官看不到 Demo</span><p>上面两个版本偏“复盘”；面向看不到 Demo 的面试官，第 16 章给出了<b>讲出画面的口播稿、术语对齐表、把问题讲成“坑与正解”的转换表</b>和方法论版的 1 分钟 / 3 分钟介绍，建议面试前以第 16 章为准。</p></div>
+  <div class="co warn"><span class="h">介绍项目时最常见的三个坑</span>
+    <p><b>① 只报功能清单</b>：“我做了冲刺、连招、弹反、背包……”——面试官听不到你的判断力。<b>② 夸大</b>：“我设计了一套完整的技能系统”——第一个追问“技能数据怎么配？”就会露馅（技能参数全在 MonoBehaviour 的序列化字段里）。<b>③ 回避问题</b>：被问到“有什么不足”只说“美术不好看”。更好的做法是主动抛出 1~2 个你测过的问题，把追问引到你准备好的地方（第 13 章专门练这个）。</p>
+  </div>
+
+  <h2>0.5 面试地图：每章会被问什么、会被追到哪里</h2>
+  <p>第三列是“为什么面试官会从这个项目追到那个知识点”——<b>能说出这条因果链，发散题就不再是背题</b>。</p>
+  <div class="tbl"><table>
+    <tr><th>章</th><th>面试官最可能问</th><th>会被追到哪里（发散）</th><th>为什么会追过去</th></tr>
+    <tr><td>Ch1 全景</td><td>介绍架构；为什么用继承 Entity；模块之间怎么通信</td><td>组合 vs 继承、ECS、依赖方向、事件总线</td><td>你说“架构”，面试官会验证你懂不懂分层和依赖</td></tr>
+    <tr><td>Ch2 生命周期</td><td>Awake / Start 分工；单例怎么写；Destroy 什么时候生效</td><td>PlayerLoop、脚本执行顺序、fake null、DontDestroyOnLoad、场景切换</td><td>项目的单例写反了，组件在 Start 里取，执行顺序配在了父类上</td></tr>
+    <tr><td>Ch3 状态机</td><td>状态机怎么设计；状态之间怎么切；怎么防止非法切换</td><td>HFSM、转移表、守卫与优先级、输入缓冲、状态机 vs 行为树</td><td>13 个状态 + 全局冲刺 + 外部强制切换，正好是“状态爆炸”的入口</td></tr>
+    <tr><td>Ch4 动画事件</td><td>命中帧怎么做；动画和逻辑谁驱动谁</td><td>Animator 参数设计、动画事件可靠性、逻辑时间轴（技能编辑器）</td><td>动画速度为 0、被打断、同时间点事件都会让逻辑出错</td></tr>
+    <tr><td>Ch5 时间与帧率</td><td>Update 和 FixedUpdate 区别；为什么移动要乘 deltaTime</td><td>固定步长、插值、帧率无关、确定性、轨迹预测</td><td>冲刺距离、点燃跳数、旋转剑命中数都随帧率变</td></tr>
+    <tr><td>Ch6 战斗判定</td><td>攻击判定怎么做；弹反怎么实现；为什么会多段命中</td><td>Hitbox / Hurtbox、命中去重、无敌帧、顿帧、伤害事件化</td><td>弹反窗口、受击清速度、多碰撞体重复命中</td></tr>
+    <tr><td>Ch7 数值</td><td>伤害公式；Buff 怎么做；属性修正怎么叠加</td><td>Modifier 栈、减伤公式、伪随机分布、Buff 生命周期</td><td>off-by-one、冰冻判定对象写反、等级复利、多个系统写同一字段</td></tr>
+    <tr><td>Ch8 技能</td><td>技能系统怎么设计；冷却放在哪；飞剑四种模式怎么扩展</td><td>数据驱动、策略模式、GAS、技能打断 / 预输入、投射物</td><td>“Can” 函数有副作用、bool 标志汤、分身空引用</td></tr>
+    <tr><td>Ch9 AI</td><td>怪物 AI 怎么写；为什么用状态机</td><td>行为树 / GOAP / Utility、感知系统、AI LOD、百怪性能</td><td>每帧自转移 + Find、战斗永不超时、追到平台下抽搐</td></tr>
+    <tr><td>Ch10 物品</td><td>背包数据结构；装备怎么加属性；掉落概率怎么做</td><td>模板 vs 实例、唯一 ID、存档、掉落表 / 保底、事务性合成、防刷</td><td>ScriptableObject 当字典键、合成少扣料、序列化默认对象</td></tr>
+    <tr><td>Ch11 UI 与表现</td><td>血条怎么刷新；受击闪白怎么做</td><td>MVC / MVVM、Canvas 重建、材质实例、MaterialPropertyBlock</td><td>事件订阅不对称、<code>sr.material</code> 会复制材质</td></tr>
+    <tr><td>Ch12 性能与工程</td><td>项目有哪些性能问题；怎么定位</td><td>Profiler、GC、对象池、NonAlloc、程序集、版本管理</td><td>9 处 OverlapCircleAll、字符串反射调用、Editor 命名空间进了运行时代码</td></tr>
+    <tr><td>Ch13~15</td><td>连续追问、场景题、速问速答</td><td>联网化、Boss、存档、技能编辑器、千怪同屏……</td><td>项目只是入口，面试官最终考的是“你会怎么做”</td></tr>
+    <tr><td><b>Ch16 口径</b></td><td>看不到 Demo 时你怎么描述；怎么证明是你做的；有什么不足</td><td>表达、诚实边界、项目包装</td><td>面试官只能通过你的语言理解项目</td></tr>
+    <tr><td><b>Ch17 状态判定</b></td><td>怎么判断着地 / 贴墙；射线够不够；坡怎么办</td><td>形状投射、接触法线、感知层、宽限与滞回、单向 / 移动平台</td><td>单射线只伸出脚底 4 cm，坡度约 [[F1.a1|.1f]]° 就失效</td></tr>
+    <tr><td><b>Ch18 滑墙</b></td><td>滑墙怎么设计；为什么墙顶会掉；单墙能不能爬</td><td>转移完整性、墙覆盖检测、粘墙 / 墙宽限 / 强制离墙时间</td><td>Demo 里单墙攀爬成败取决于手速</td></tr>
+    <tr><td><b>Ch19 Tilemap</b></td><td>关卡怎么搭；Tilemap 原理；为什么合并碰撞</td><td>稀疏存储、块渲染与图集、复合碰撞、规则瓦片、关卡度量</td><td>你说“用瓦片搭的”，就要讲清它是怎么工作的</td></tr>
+    <tr><td><b>Ch20 手感</b></td><td>没有输入缓冲怎么办；什么是土狼时间；跳跃为什么要可变</td><td>输入延迟链、宽容窗口、跳跃曲线、反馈导演</td><td>“按了没反应”是可以量化的</td></tr>
+    <tr><td><b>Ch21 系统设计</b></td><td>背包 / 装备 / 技能为什么这样设计</td><td>四层分离、属性修正 / 效果 / 标签三通道、事务、数据驱动、取舍</td><td>RPG 方向最常见的系统设计题</td></tr>
+  </table></div>
+
+  <h2>0.6 知识地图</h2>
+<!--flow {"h":356,"w":900,"cols":[14,236,458,680],"colw":[206,206,206,206],"rows":[42,134,206],
+"rects":[{"x":6,"y":6,"w":888,"h":26,"c":"s","t":"项目模块（第 1~12 章）  →  面试知识点（第 13~15 章汇总成追问链与场景题）","fill":"#FFFFFF"}],
+"boxes":[
+ {"id":"a","cr":[0,0],"t":"Entity / 生命周期","s":"Awake·Start·单例·Destroy","c":"b"},
+ {"id":"b","cr":[1,0],"t":"玩家状态机","s":"13 状态·全局冲刺·守卫","c":"b"},
+ {"id":"c","cr":[2,0],"t":"Animator + 动画事件","s":"命中帧·结束帧·掷剑帧","c":"b"},
+ {"id":"d","cr":[3,0],"t":"时间与帧率","s":"Update vs FixedUpdate","c":"b"},
+ {"id":"e","cr":[0,1],"t":"战斗判定","s":"OverlapCircle·弹反·击退","c":"o"},
+ {"id":"f","cr":[1,1],"t":"属性与伤害","s":"Stat·暴击·异常状态","c":"o"},
+ {"id":"g","cr":[2,1],"t":"技能","s":"冲刺分身·飞剑四模式·雷击","c":"o"},
+ {"id":"h","cr":[3,1],"t":"敌人 AI","s":"6 状态·感知·冷却","c":"o"},
+ {"id":"i","cr":[0,2],"t":"背包 / 装备 / 合成","s":"SO 作键·双结构","c":"g"},
+ {"id":"j","cr":[1,2],"t":"掉落","s":"筛选 + 无放回抽样","c":"g"},
+ {"id":"k","cr":[2,2],"t":"UI 与表现","s":"血条·闪白·视差","c":"g"},
+ {"id":"l","cr":[3,2],"t":"性能与工程","s":"GC·Find·对象池·.gitignore","c":"g"},
+ {"id":"m","x":14,"y":278,"w":872,"h":62,"t":"面试官最终考的四件事：时序是否正确 · 数据与行为是否解耦 · 性能是否可控 · 能否扩展到联网与大规模","s":"第 13 章 12 条追问链 · 第 14 章 30 道场景题 · 第 15 章 60 题速问速答","c":"p","hl":true}],
+"arrows":[{"from":"b","to":"c","c":"b"},{"p":[[783,90],[783,104],[339,104],[339,92]],"c":"b","label":"② 计时可靠吗？","lx":630,"ly":100},
+{"p":[[561,90],[561,120],[117,120],[117,132]],"c":"o","label":"① 何时判定命中？","lx":170,"ly":116}],
+"cap":"图 0-2　知识地图：上三行是项目模块（蓝 = 地基与手感，橙 = 战斗与行为，绿 = 物品 / UI / 工程），最后汇总成面试真正考察的四件事"} -->
+  <p>图中两条箭头是全书最重要的两条因果链：① <b>动画事件决定战斗判定何时发生</b>（第 6 章的弹反窗口完全由骷髅攻击片段里事件的时间点决定）；② <b>时间与帧率决定状态机里的计时是否可靠</b>（第 5 章会看到冲刺距离随帧率跳动）。</p>
+
+  <h2>0.7 本书实验清单</h2>
+  <p>E1~E11 来自 <code>demos/rpg_verify.cpp</code>（MSVC 14.44 <code>/O2</code>，无参数运行输出 <code>figdata.json</code> 与 <code>run_output.txt</code>），F1~F5 来自 <code>demos/feel_verify.cpp</code>（输出 <code>feeldata.json</code> / <code>feel_output.txt</code>），关卡数据来自 <code>tools/scan_tilemap.py</code> 解析场景得到的 <code>tilemap_dump.json</code>。正文里的每个实测数字都由构建脚本从 json 读取，不手写。</p>
+  <div class="tbl"><table>
+    <tr><th>编号</th><th>移植对象</th><th>回答的问题</th><th>对拍的两条线</th><th>章</th></tr>
+    <tr><td>E1</td><td>玩家 12 个状态类 + Player.Update</td><td>一帧两次转移、墙到头还在滑、死亡后冲刺 / 接剑“复活”、取消攻击后连招计数</td><td><span class="tag now">现状</span> 只复现问题（理想的 Request + 守卫未建模）</td><td>3</td></tr>
+    <tr><td>E2</td><td>CounterAttack + 骷髅攻击片段事件</td><td>弹反成功的按键时间窗多宽；与原教程写法对比；帧率影响</td><td><span class="tag now">现状</span> 本项目 vs 原教程两种现状写法；理想窗口为示意</td><td>6</td></tr>
+    <tr><td>E3</td><td>CharacterStats.DoDamage</td><td>暴击 / 闪避真实概率；冰冻判定对象写反的后果；暴击倍率</td><td><span class="tag now">现状</span> vs 修正（统一 Roll、判目标）</td><td>7</td></tr>
+    <tr><td>E4</td><td>EnemyStats.Modify</td><td>每级 +25% 是线性还是复利</td><td><span class="tag now">现状</span> 复利 vs 线性对照</td><td>7</td></tr>
+    <tr><td>E5</td><td>ItemDrop.GenerateDrop</td><td>每件物品真实掉率、平均掉几件、掉落初速度偏向</td><td><span class="tag now">现状</span> 精确解与蒙特卡洛对拍</td><td>10</td></tr>
+    <tr><td>E6</td><td>Inventory.CanCraft</td><td>合成少扣材料能多做几件</td><td><span class="tag now">现状</span> vs <span class="tag ideal">理想</span> 按数量扣料</td><td>10</td></tr>
+    <tr><td>E7</td><td>骷髅 4 个状态类</td><td>自转移次数、Find 调用频率、追到平台下会不会放弃</td><td><span class="tag now">现状</span> vs <span class="tag ideal">理想</span> 拒绝自转移 / 计时修正</td><td>9</td></tr>
+    <tr><td>E8</td><td>FreezeTimeFor 协程 × 多段命中</td><td>重叠协程让“冻结”实际只覆盖多少时间</td><td><span class="tag now">现状</span> vs <span class="tag ideal">理想</span> 冻结取最晚截止</td><td>7</td></tr>
+    <tr><td>E9</td><td>瞄准虚线公式 vs Box2D 积分</td><td>剑为什么总比虚线低一点，低多少</td><td><span class="tag now">现状</span> 连续抛物线 vs <span class="tag ideal">理想</span> 离散闭式解</td><td>5</td></tr>
+    <tr><td>E10</td><td>PlayerLoop 模型</td><td>冲刺距离、点燃跳数、旋转剑命中数随帧率怎么变；卡顿时冲刺多远</td><td><span class="tag now">现状</span> 只复现帧率依赖</td><td>5</td></tr>
+    <tr><td>E11</td><td>SkillController_Clone.FaceClosesttTarget</td><td>分身朝向判断写在循环里，正确率随碰撞体数量怎么变</td><td><span class="tag now">现状</span> 只复现朝向问题</td><td>8</td></tr>
+    <tr><td>F1</td><td>地面 / 墙探测点几何（feel_verify.cpp）</td><td>单射线能识别多陡的坡、墙检测覆盖多高</td><td><span class="tag now">现状</span> 单射线 vs <span class="tag ideal">理想</span> 三射线</td><td>17</td></tr>
+    <tr><td>F2 / F3</td><td>土狼时间 / 跳跃缓冲（帧相位模型）</td><td>不同窗口长度下“按了没反应”的比例</td><td><span class="tag now">现状</span> 无窗口 vs <span class="tag ideal">理想</span> 不同窗口长度</td><td>20</td></tr>
+    <tr><td>F4</td><td>跳跃曲线（Box2D 离散积分）</td><td>可变跳高、下落加重、顶点悬停分别改变什么；关卡度量</td><td><span class="tag now">现状</span> 固定跳高 vs <span class="tag ideal">理想</span> 可变跳高 / 下落加重</td><td>19 · 20</td></tr>
+    <tr><td>F5</td><td>下落 / 滑墙 / 蹬墙三状态 + 7 m 立柱</td><td>单墙攀爬是否可能、取决于什么；墙顶死区</td><td><span class="tag now">现状</span> 单腰部射线 vs <span class="tag ideal">理想</span> 加脚部射线</td><td>18</td></tr>
+  </table></div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>标签：<b>源码 / 意图 / 问题 / 改进 / 扩展 / 实测 / 模型 / 推断</b>；面试时也按这个口径说话。</li>
+    <li>两条线：<b>现状</b> = Demo 里真实存在（过去时 + 证据）；<b>理想</b> = 设计方案，多数未实现（条件句 + 理由）；理想分修正 / 重构 / 上线级三档。</li>
+    <li>项目一句话：<b>状态机 + 动画事件 + 数值物品系统</b>的 2D 动作 RPG；来源于教程，主动说明改动点。</li>
+    <li>三分钟版的骨架：每个模块一个“测出来的数字” + 一个“我会怎么修”。</li>
+  </ul></div>
+</section>

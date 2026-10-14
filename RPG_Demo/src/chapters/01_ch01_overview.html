@@ -1,0 +1,275 @@
+<div class="part-head" data-toc="PART I · 全景与地基"><div class="no">PART I</div><h1>全景与地基</h1><p>先看清项目的骨架：场景里到底挂了什么、类怎么继承、一帧里谁先谁后、谁依赖谁；再看 Unity 生命周期、单例与对象存亡这些“地基”问题——后面十几章的 bug，有一半根子在这里。</p></div>
+
+<section class="chapter" id="ch1">
+  <div class="ch-head">
+    <div class="no">CHAPTER 01</div>
+    <h1>项目全景：模块、对象图与一帧的调用顺序</h1>
+    <p class="lead">“介绍一下你的项目架构”是所有项目面的第一问。答好它需要三张图：运行时对象图、类继承树、一帧调用顺序；再加一张依赖图，说明“谁知道谁”。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出场景里真实存在的对象和组件（不是“代码里有的类”）</li>
+    <li>说清继承结构的好处与代价：Entity 基类、状态类层次、Stats 与 Skill 的子类</li>
+    <li>按 Unity 的帧顺序复述一次“按下攻击键 → 怪物掉血”的完整调用链</li>
+    <li>知道全书 36 个问题分布在哪些模块，面试时挑哪几个主动说</li>
+  </ul></div>
+
+  <h2>1.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>项目按“实体 + 状态机 + 子系统单例”组织：玩家和骷髅继承 <code>Entity</code>，在 Start 里缓存刚体、动画机、特效、属性组件；行为由普通 C# 状态类驱动，状态只在 Enter 时设 Animator bool；命中、动画结束、掷剑这些时刻由动画事件回调到 <code>*AnimationTrigger</code> 组件；技能挂在 <code>SkillManager</code> 上，玩家数据通过 <code>PlayerManager</code> 单例被技能、装备、怪物访问；属性在 <code>CharacterStats</code>，物品在 <code>Inventory</code> 单例。优点是上手快、各系统边界直观；代价是依赖都汇聚到“玩家”这个单点、状态类直接读输入、数据写在组件字段里，扩展和测试都难。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "架构总览", "rows": [["角色组织", "继承 <code>Entity</code>：组件缓存、检测、翻转、击退、受击都在基类；减速这种非共有行为也塞进基类", "局限 基类越来越胖：减速这类非共有能力也被所有角色继承；加“会飞的弓箭手”只能在继承树上开岔", "组合：检测、移动、击退、受击反馈做成独立组件；状态机通过接口（移动能力、可受伤）拿能力", "新角色按需组装，不在继承树上开岔；能力可单测", ""], ["模块通信", "3 个单例 + 直接引用 + public 委托，几乎所有依赖都指向 Player（图 1-5）", "P0 两个单例写反（#4）；所有依赖指向唯一的 Player，无法单测，换成多人 / 分身 / AI 托管要全部改", "组装处显式注入 + 事件总线；写操作收口到数据的拥有者（只有属性集能改属性）", "依赖显式；多人 / 托管 / 回放时不用替换“唯一玩家”", ""], ["数据位置", "数值序列化在场景与组件字段（移速、技能参数、AI 参数）", "局限 策划改数要开场景；技能、AI 参数绑在组件上，第二种怪物 / 第二套技能无法复用", "配置表 / ScriptableObject 定义 + 运行时实例；组件只存配置 id", "策划改数不开场景；可热更、可校验", ""], ["时序驱动", "Update 驱动状态，动画事件驱动命中，协程 / Invoke 驱动计时", "P2 结果随帧率与卡顿变化（冲刺距离、点燃跳数，E10，#20 #21）；冻结让动画停住时命中事件也停", "固定逻辑步驱动状态、计时与判定；动画只做表现（单机可保留动画事件命中，但语义要完整）", "帧率无关、可回放、可联网（第 4、5 章）", ""], ["调用方式", "19 处按字符串反射调用（协程 / Invoke）", "P1 改名不报错；眩晕闪红调用了不存在的方法，只在运行时打日志（#12 #33）", "直接调用、<code>nameof</code>、统一计时器", "改名时编译期报错", ""], ["做对的部分", "状态是对象而不是 switch；关键帧交给动画时间轴；物品用 ScriptableObject；Stat 有修正列表", "无 方向正确；问题在于没有在其上补齐分层", "保持这些方向，在其上补齐分层", "", "保持 · 现状方向正确"]], "foot": "图 1-5 是现状架构，图 1-6（1.7 节末）是理想架构；全书总表见附录 D。"} -->
+
+
+  <h2>1.2 目录与模块职责</h2>
+<!--tree {"cols":["目录 / 文件","职责","面试关注点"],"x":[12,300,620],"keys":["d","w"],
+"root":[{"n":"Assets/Script","col":"b","d":"57 个自写 C# 文件，3543 行","w":"","c":[
+ {"n":"Entity.cs · EntityFX.cs","col":"b","d":"角色基类：组件缓存、射线检测、翻转、击退；受击闪白与异常状态变色","w":"继承 vs 组合；组件在 Start 里取"},
+ {"n":"player/（18）","col":"o","d":"Player + 状态机 + 13 个状态类 + 动画事件转发","w":"状态爆炸、转移守卫（第 3 章）"},
+ {"n":"Enemy/（12）","col":"o","d":"Enemy 基类、骷髅 6 个状态、弹反窗口、冻结","w":"自转移、永不超时（第 9 章）"},
+ {"n":"Skill/（8）","col":"p","d":"Skill 基类（冷却）、冲刺 / 分身 / 飞剑、两个单例","w":"Can 函数副作用、标志汤（第 8 章）"},
+ {"n":"Stats/（4）","col":"g","d":"Stat（基础值 + 修正列表）、伤害公式、异常状态、等级成长","w":"off-by-one、复利（第 7 章）"},
+ {"n":"Items and Iventory/（7）","col":"t","d":"ItemData（SO）、背包 / 仓库 / 装备、掉落、拾取","w":"模板 vs 实例、合成扣料（第 10 章）"},
+ {"n":"UI/（4）","col":"t","d":"格子、装备格、合成格、血条","w":"订阅生命周期（第 11 章）"},
+ {"n":"Controller_ThunderStrike.cs","col":"s","d":"感电连锁时召唤的追踪雷击","w":"目标销毁、延迟结算"},
+ {"n":"ParalleBackGround.cs","col":"s","d":"按相机 x 的视差 + 无限循环背景","w":"Find(\"Main Camera\")"}]},
+ {"n":"Assets/Animation","col":"a","d":"5 个 AnimatorController、23 个片段（事件都在这里）","w":"Entry/Exit + bool 结构（第 4 章）"},
+ {"n":"Assets/Prefabs","col":"a","d":"Clone、Sword、AimDot、ThunderStrike、格子、掉落物","w":"运行时 Instantiate 的对象"},
+ {"n":"Assets/Scenes/SampleScene","col":"a","d":"唯一场景，所有数值都序列化在这里","w":"数值不在代码里"},
+ {"n":"Logs/ · UserSettings/","col":"r","d":"本不该入库的本机文件（12 个）","w":".gitignore 写错（第 12 章）"}]} -->
+  <p class="tcap">图 1-1　目录与职责：括号里是文件数。数值几乎全部序列化在场景和 SO 资源里——<b>读代码只能看到“怎么算”，看不到“算什么”</b>，这是复盘 Unity 项目必须同时读场景的原因。</p>
+
+  <h2>1.3 运行时对象图：场景里真正挂着什么</h2>
+  <p>用脚本 <code>.cs.meta</code> 的 guid 反查 <code>SampleScene.unity</code> 和 Prefab，得到下图。<b>“类存在”不等于“被使用”</b>：<code>Skill.FindClosestEnemy</code>、<code>Entity.SlowEntityBy</code> 基类版本、<code>ItemObject</code> 的 M 键调试代码都存在，但前两者没有调用方。</p>
+<!--flow {"h":478,"w":900,
+"rects":[{"x":6,"y":6,"w":430,"h":250,"c":"b","t":"player（GameObject，层 Player）"},{"x":446,"y":6,"w":448,"h":250,"c":"o","t":"Enenmy_Skeleton（层 Enemy）"},
+{"x":6,"y":266,"w":430,"h":118,"c":"p","t":"管理器（场景常驻）"},{"x":446,"y":266,"w":448,"h":118,"c":"t","t":"UI（Screen Space Canvas）"},
+{"x":6,"y":394,"w":888,"h":78,"c":"s","t":"运行时生成（Instantiate）","dash":true}],
+"boxes":[
+{"x":16,"y":30,"w":200,"h":64,"t":"Player : Entity","s":"状态机、冲刺参数、动作参数","s2":"Rigidbody2D(插值/连续) · Capsule","c":"b"},
+{"x":226,"y":30,"w":200,"h":64,"t":"PlayerStats","s":"damage 1000 · hp 1000 · armor 10","s2":"lightingDamage 10","c":"g"},
+{"x":16,"y":102,"w":200,"h":56,"t":"EntityFX","s":"闪白材质 · 三种异常色","c":"b"},
+{"x":226,"y":102,"w":200,"h":56,"t":"子物体 Animator","s":"SpriteRenderer · Animator","s2":"PlayerAnimationTriggers","c":"a"},
+{"x":16,"y":166,"w":200,"h":40,"t":"GroundCheck / WallCheck","s":"","c":"s"},
+{"x":226,"y":166,"w":200,"h":40,"t":"AttackCheck（r = 0.9）","c":"s"},
+{"x":16,"y":212,"w":410,"h":38,"t":"Entity_Stats_UI：血条 + 1×1 的 Trigger 碰撞体","ts":12,"c":"t"},
+{"x":456,"y":30,"w":210,"h":64,"t":"Enemy_Skeleton : Enemy","s":"6 状态 · 弹反窗口 · 冻结","s2":"移速 2 · 发现 5 · 攻击 1.75","c":"o"},
+{"x":674,"y":30,"w":210,"h":64,"t":"EnemyStats","s":"hp 100 · damage 0 · ice 20","s2":"level 0（等级成长未启用）","c":"g"},
+{"x":456,"y":102,"w":210,"h":56,"t":"ItemDrop","s":"5 个候选 · 最多 3 件","c":"t"},
+{"x":674,"y":102,"w":210,"h":56,"t":"子物体 Animator","s":"Enemy_SkeletonAnimationTrigger","c":"a"},
+{"x":456,"y":166,"w":210,"h":40,"t":"EntityFX","c":"o"},
+{"x":674,"y":166,"w":210,"h":40,"t":"counterImage（弹反提示）","c":"s"},
+{"x":456,"y":212,"w":428,"h":38,"t":"Entity_Stats_UI：血条 UI_HealthBar","ts":12,"c":"t"},
+{"x":16,"y":290,"w":130,"h":84,"t":"PlayerManager","s":"player 引用","s2":"单例","c":"p"},
+{"x":154,"y":290,"w":150,"h":84,"t":"SkillManager","s":"Dash cd 1 · Clone","s2":"ThrowSword（Regular）","c":"p"},
+{"x":312,"y":290,"w":116,"h":84,"t":"Inventory","s":"三套 List+Dict","s2":"单例","c":"p"},
+{"x":456,"y":290,"w":100,"h":84,"t":"背包","s":"ItemSlot × 4","c":"t"},
+{"x":562,"y":290,"w":100,"h":84,"t":"仓库","s":"ItemSlot × 3","c":"t"},
+{"x":668,"y":290,"w":100,"h":84,"t":"装备","s":"装备格 × 4","c":"t"},
+{"x":774,"y":290,"w":110,"h":84,"t":"合成","s":"CraftSlot × 1","s2":"Nice_Armor","c":"t"},
+{"x":16,"y":418,"w":160,"h":44,"t":"Clone","s":"每次冲刺 1 个","c":"s"},
+{"x":186,"y":418,"w":160,"h":44,"t":"Sword","s":"同时最多 1 把","c":"s"},
+{"x":356,"y":418,"w":160,"h":44,"t":"AimDot × 25","s":"Start 时一次性生成","c":"s"},
+{"x":526,"y":418,"w":170,"h":44,"t":"ThunderStrike","s":"感电二次命中时","c":"s"},
+{"x":706,"y":418,"w":178,"h":44,"t":"Item object - No Data","s":"每件掉落 1 个","c":"s"}],
+"cap":"图 1-2　运行时对象图（由 guid 反查 SampleScene.unity / Prefab 得到）。注意玩家血条上挂了一个 Trigger 碰撞体，而项目开启了 Queries Hit Triggers——它会出现在玩家所有 OverlapCircleAll 的结果里"} -->
+
+  <h2>1.4 类继承树</h2>
+<!--tree {"cols":["类","基类 / 形态","备注"],"x":[12,330,560],"keys":["d","w"],
+"root":[{"n":"MonoBehaviour","col":"s","d":"Unity 组件","w":"","c":[
+ {"n":"Entity","col":"b","d":"角色基类","w":"Awake 空、Start 取组件、虚函数 Die / DamageEffect","c":[
+  {"n":"Player","col":"b","d":"Entity","w":"在 Awake 里 new 出 13 个状态对象"},
+  {"n":"Enemy","col":"o","d":"Entity","w":"弹反窗口、冻结、减速","c":[{"n":"Enemy_Skeleton","col":"o","d":"Enemy","w":"6 个状态；重写 CanbeStunned / Die"}]}]},
+ {"n":"CharacterStats","col":"g","d":"属性与伤害","w":"Update 里推进异常状态计时","c":[{"n":"PlayerStats","col":"g","d":"CharacterStats","w":"Die → player.Die"},{"n":"EnemyStats","col":"g","d":"CharacterStats","w":"等级修正 + 掉落"}]},
+ {"n":"Skill","col":"p","d":"冷却计时","w":"CanUseSkill 里直接 UseSkill","c":[{"n":"Skill_Dash · Skill_Clone · Skill_ThrowSword","col":"p","d":"Skill","w":"ThrowSword 重写 Update 未调 base"}]},
+ {"n":"UI_ItemSlot","col":"t","d":"IPointerDownHandler","w":"左键装备 / Ctrl 丢弃","c":[{"n":"UI_EquipmentSlot · UI_CraftSlot","col":"t","d":"UI_ItemSlot","w":"卸下 / 合成"}]},
+ {"n":"其余组件","col":"s","d":"EntityFX、各种控制器","w":"AnimationTrigger、SkillController_*、ItemObject 等小组件"}]},
+ {"n":"PlayerState（普通类）","col":"b","d":"Enter / Update / Exit","w":"持有 Player、StateMachine、rb","c":[
+  {"n":"PlayerGroundedState","col":"b","d":"PlayerState","w":"地面通用输入：攻击 / 反击 / 瞄准 / 跳 / 掉落","c":[{"n":"Idle · Move","col":"b","d":"Grounded","w":"Update 开头判 currentState != this"}]},
+  {"n":"PlayerAirState","col":"b","d":"PlayerState","w":"空壳","c":[{"n":"Jump · Fall","col":"b","d":"Air","w":"Fall 有一帧双转移"}]},
+  {"n":"Dash · WallSlide · WallJump · PrimaryAttack","col":"b","d":"PlayerState","w":"直接继承基类"},{"n":"CounterAttack · AimSword · CatchSword · Death","col":"b","d":"PlayerState","w":"直接继承基类；Death 隐藏了基类字段 player"}]},
+ {"n":"EnemyState（普通类）","col":"o","d":"Enter / Update / Exit","w":"Exit 时记录 lastAnimBoolName","c":[
+  {"n":"Enemy_SkeletonGroundState","col":"o","d":"EnemyState","w":"发现玩家 → Battle；Enter 里 GameObject.Find","c":[{"n":"Idle · Move · Battle","col":"o","d":"Ground","w":"Battle 继承它 → 每帧自转移"}]},
+  {"n":"Attack · Stun · Death","col":"o","d":"EnemyState","w":""}]},
+ {"n":"ScriptableObject","col":"a","d":"资源","w":"","c":[{"n":"ItemData","col":"a","d":"SO","w":"类型、名称、图标、掉率","c":[{"n":"ItemData_Equipment","col":"a","d":"ItemData","w":"14 项属性 + 配方；AddModifiers 直接改玩家"}]}]},
+ {"n":"[Serializable] Stat · InventoryItem","col":"s","d":"可序列化普通类","w":"InventoryItem 同时被当作“运行时堆叠”和“配方条目”"}]} -->
+  <p class="tcap">图 1-3　类继承树。三种“继承”值得区分：MonoBehaviour 组件继承（Entity 系）、普通 C# 状态类继承（复用 Enter/Update/Exit 模板）、ScriptableObject 数据继承（ItemData 系）。</p>
+
+  <h2>1.5 一帧里发生了什么：从按键到怪物掉血</h2>
+  <p>把“玩家按左键 → 第一段攻击命中骷髅”按 Unity 的帧顺序（规则 R1）展开。这张图是第 3~6 章的公共底图：状态机在 Update、命中在动画事件、位移在下一帧的物理步。</p>
+<!--seq {"p":["Unity\nPlayerLoop","物理\nFixedUpdate","Player\n+ 状态","Skill /\nSkillManager","Animator\n事件","Enemy\n+ Stats"],"pc":["s","t","b","p","a","o"],
+"s":[["—","第 k 帧：玩家按下鼠标左键"],
+[0,1,"按累计时间跑 0~N 个物理步（0.02 s）","call"],[1,1,"用上一帧设置的 rb.velocity 积分位置","t"],
+[0,2,"Player.Update()","call"],[2,3,"DashInputCheck → dash.CanUseSkill()","call"],
+[2,2,"Idle.Update → Grounded：GetKeyDown(Mouse0) → ChangeState(攻击)","b"],
+[2,2,"Attack.Enter：设 Attack=true、ComboAttack=0、rb.velocity = 位移","b"],
+[0,4,"动画更新：Exit → Entry → Empty → playerAttack1","call"],
+["—","第 k+21 帧（片段 0.357 s）"],
+[4,2,"AttackTrigger()：OverlapCircleAll(半径 0.9)","call"],[2,5,"enemy.DamageEffect()：闪白 + 击退协程","call"],
+[2,5,"player.stats.DoDamage(enemy.stats)：闪避→暴击→护甲","call"],[5,5,"TakeDamage → 血量 ≤ 0 → Die → 死亡状态 + 掉落","o"],
+["—","第 k+43 帧（片段 0.714 s）"],
+[4,2,"AnimationTrigger() → triggerCalled = true","call"],[0,2,"下一帧 Attack.Update：triggerCalled → ChangeState(Idle)","call"]],
+"cap":"图 1-4　一次近战命中的完整调用链（60 fps）。命中不在 Update 里，而在动画更新阶段——这决定了第 6 章弹反窗口的边界"} -->
+
+  <h2>1.6 依赖图：谁知道谁</h2>
+<!--flow {"h":300,"w":900,"cols":[16,246,476,706],"colw":[190,190,190,180],"rows":[20,120,220],
+"boxes":[
+ {"id":"st","cr":[0,0],"t":"玩家状态类 ×13","s":"读 Input、改 rb、调 player.*","c":"b"},
+ {"id":"es","cr":[0,1],"t":"骷髅状态类 ×6","s":"Find + PlayerManager","c":"o"},
+ {"id":"tr","cr":[0,2],"t":"*AnimationTrigger","s":"GetComponentInParent 每次查","c":"a"},
+ {"id":"pl","cr":[1,1],"t":"Player","s":"状态机 · skill · sword","c":"b","hl":true},
+ {"id":"pm","cr":[2,0],"t":"PlayerManager.Instance","s":".player","c":"p"},
+ {"id":"sm","cr":[2,1],"t":"SkillManager.Instance","s":".dash .clone .throwSword","c":"p"},
+ {"id":"inv","cr":[2,2],"t":"Inventory.instance","s":"背包 / 装备 / 合成","c":"p"},
+ {"id":"sk","cr":[3,0],"t":"Skill / 技能控制器","s":"player.stats.DoDamage","c":"p"},
+ {"id":"eq","cr":[3,1],"t":"ItemData_Equipment","s":"AddModifiers 改 PlayerStats","c":"a"},
+ {"id":"ui","cr":[3,2],"t":"UI 格子 / ItemObject","s":"点击 / 拾取","c":"t"}],
+"arrows":[{"from":"st","to":"pl","c":"b"},{"from":"es","to":"pl","c":"o"},{"from":"tr","to":"pl","c":"a"},
+{"from":"pl","to":"sm","c":"b"},{"from":"pm","to":"pl","c":"p","s":["b","t"],"p":[[571,68],[571,92],[341,92],[341,120]]},
+{"from":"sk","to":"pm","c":"p"},{"from":"eq","to":"pm","c":"a","s":["l","r"],"p":[[706,144],[690,144],[690,44],[666,44]]},{"from":"ui","to":"inv","c":"t"},{"from":"inv","to":"eq","c":"t","s":["r","l"],"p":[[666,244],[686,244],[686,154],[706,154]]}],
+"cap":"图 1-5　依赖图：几乎所有箭头最终指向 Player（★）。三个单例让任何代码都能“伸手”拿到玩家——方便，但也意味着没有任何一处能单独测试，换一个玩家（多人、分身、AI 托管）全都要改"} -->
+
+  <h2>1.7 架构评价：做对了什么、代价是什么、理想架构</h2>
+  <div class="cards">
+    <div class="card"><div class="t">✔ 状态是对象，不是 switch</div><p>每个状态一个类，Enter / Exit 成对设置 Animator bool，新增状态不碰其他状态的代码。<span class="tag src">源码</span> PlayerState.cs:25-44</p></div>
+    <div class="card"><div class="t">✔ 关键帧交给美术时间轴</div><p>命中、结束、掷剑由动画事件触发，改动画节奏不用改代码。</p></div>
+    <div class="card"><div class="t">✔ 数值与资源分离的雏形</div><p>物品用 ScriptableObject，Stat 用“基础值 + 修正列表”，装备卸下能精确撤销。</p></div>
+    <div class="card"><div class="t">✔ 自己做过的重构</div><p>异常状态计时器抽成 <code>HandleStatus(ref…)</code>；元素伤害改成排序选最大；掉落改成无放回抽样。</p></div>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>代价</th><th>源码证据</th><th>后果</th><th>章</th></tr>
+    <tr><td>状态类直接读 <code>Input</code></td><td>PlayerState.cs:35-36、GroundedState.cs:25-46</td><td>无法重绑定按键、无法做输入缓冲 / 回放 / AI 托管、无法单测</td><td>3</td></tr>
+    <tr><td>状态切换没有统一入口规则</td><td>Player.cs:117（全局冲刺）、:140（接剑强切）</td><td>死亡可被打断，“吸收态”不成立</td><td>3</td></tr>
+    <tr><td>单例当服务定位器</td><td>PlayerManager / SkillManager / Inventory</td><td>隐式依赖、初始化顺序敏感、单例本身写反</td><td>2</td></tr>
+    <tr><td>多个系统写同一个字段</td><td>moveSpeed、animator.speed、sr.color、rb.velocity</td><td>减速 / 冻结 / 死亡 / 闪烁互相覆盖</td><td>7 · 11</td></tr>
+    <tr><td>字符串反射</td><td><code>StartCoroutine("…")</code> 5 处、<code>Invoke</code> 10 处、<code>InvokeRepeating</code> 4 处</td><td>改名不报错，调用不存在的方法只在运行时打日志</td><td>4 · 12</td></tr>
+    <tr><td>数据写在组件字段</td><td>技能参数、AI 参数都在 MonoBehaviour 上</td><td>无法复用到第二种怪物 / 第二套技能，策划改数要开场景</td><td>8 · 9</td></tr>
+  </table></div>
+
+  <p><span class="tag ideal">理想</span> 把上表六条代价倒过来，就是理想架构的六条规则：<b>依赖只向下</b>（规则层 → 能力组件 → 只读配置，没有谁伸手去拿“唯一的玩家”）；<b>写入口唯一</b>（只有状态机能切状态、只有属性集能改属性、只有容器操作能改物品）；<b>表现层只订阅</b>（Animator、特效、UI 不回写逻辑）；<b>数据只读</b>（组件只存配置 id）；<b>输入与 AI 走同一个意图接口</b>（缓冲、回放、AI 托管都接在这里）；<b>组装根注入</b>（取代 3 个单例）。与图 1-5 对照看：箭头从“全部指向 Player”变成“分层向下 + 事件向上”。</p>
+<!--flow {"h":364,"w":900,
+"rects":[{"x":6,"y":6,"w":888,"h":70,"c":"p","fill":"#FBF9FF"},{"x":6,"y":92,"w":888,"h":70,"c":"b","fill":"#F7F9FE"},
+ {"x":6,"y":178,"w":888,"h":70,"c":"t","fill":"#F5FBFA"},{"x":6,"y":264,"w":888,"h":70,"c":"a","fill":"#FFFCF5"}],
+"cols":[122,318,514,710],"colw":[180,180,180,180],"rows":[17,103,189,275],"bh":48,
+"boxes":[
+ {"id":"d0","cr":[0,0],"t":"调试 HUD","s":"切换日志 · 被丢弃的输入","c":"p"},
+ {"id":"d1","cr":[1,0],"t":"Animator 参数","s":"按逻辑状态设置，不反推","c":"p"},
+ {"id":"d2","cr":[2,0],"t":"特效 · 音效 · 顿帧","s":"订阅 HitResult","c":"p"},
+ {"id":"d3","cr":[3,0],"t":"UI ViewModel","s":"订阅属性 / 槽位变化","c":"p"},
+ {"id":"c0","cr":[0,1],"t":"意图","s":"输入缓冲 / AI 黑板 → 同一接口","c":"b"},
+ {"id":"c1","cr":[1,1],"t":"状态机","s":"Request → 守卫 → 帧末提交","c":"b"},
+ {"id":"c2","cr":[2,1],"t":"技能管线","s":"能否 → 提交 → 时间轴 → 效果","c":"b"},
+ {"id":"c3","cr":[3,1],"t":"伤害裁决 Receive","s":"DamageInfo → HitResult","c":"b"},
+ {"id":"b0","cr":[0,2],"t":"感知层","s":"每物理步一次 · 接触快照","c":"t"},
+ {"id":"b1","cr":[1,2],"t":"运动器","s":"固定步 · 速度合成","c":"t"},
+ {"id":"b2","cr":[2,2],"t":"属性集 + 修正栈","s":"按来源注册 / 撤销","c":"t"},
+ {"id":"b3","cr":[3,2],"t":"容器（事务）","s":"背包 · 装备栏 · 合成","c":"t"},
+ {"id":"a0","cr":[0,3],"t":"角色配置","s":"碰撞尺寸 · 感知参数","c":"a"},
+ {"id":"a1","cr":[1,3],"t":"动作配置","s":"移速 · 跳跃曲线 · 冲刺","c":"a"},
+ {"id":"a2","cr":[2,3],"t":"技能 / 效果配置","s":"冷却 · 消耗 · 效果列表","c":"a"},
+ {"id":"a3","cr":[3,3],"t":"物品配置","s":"定义 id · 修正 · 配方","c":"a"}],
+"arrows":[{"from":"c0","to":"c1","c":"b"},{"from":"c1","to":"c2","c":"b"},{"from":"c2","to":"c3","c":"b"},
+ {"p":[[260,189],[260,170],[360,170],[360,151]],"c":"t","label":"事实快照","lx":214,"ly":174},
+ {"p":[[440,151],[440,189]],"c":"b","label":"期望速度","lx":446,"ly":174},
+ {"p":[[580,151],[580,189]],"c":"b","label":"消耗 / 修正","lx":586,"ly":174},
+ {"p":[[760,151],[760,170],[660,170],[660,189]],"c":"b","label":"扣血","lx":766,"ly":174},
+ {"p":[[710,213],[694,213]],"c":"t"},
+ {"p":[[340,103],[340,84],[212,84],[212,65]],"c":"p","dash":true},
+ {"p":[[440,103],[440,65]],"c":"p","dash":true,"label":"事件","lx":446,"ly":88},
+ {"p":[[604,103],[604,65]],"c":"p","dash":true},
+ {"p":[[800,103],[800,65]],"c":"p","dash":true},
+ {"p":[[212,237],[212,275]],"c":"a","dash":true,"label":"读配置","lx":218,"ly":260},
+ {"p":[[408,237],[408,275]],"c":"a","dash":true},
+ {"p":[[604,237],[604,275]],"c":"a","dash":true},
+ {"p":[[800,237],[800,275]],"c":"a","dash":true}],
+"texts":[{"x":16,"y":37,"cls":"sm b","fill":"#6D28D9","t":"表现层"},{"x":16,"y":55,"cls":"xs","fill":"#6D28D9","t":"只订阅，不回写"},
+ {"x":16,"y":123,"cls":"sm b","fill":"#2F5BD3","t":"规则层"},{"x":16,"y":141,"cls":"xs","fill":"#2F5BD3","t":"唯一写入口"},
+ {"x":16,"y":209,"cls":"sm b","fill":"#0F766E","t":"能力组件"},{"x":16,"y":227,"cls":"xs","fill":"#0F766E","t":"可单测 · 可复用"},
+ {"x":16,"y":295,"cls":"sm b","fill":"#B45309","t":"数据层"},{"x":16,"y":313,"cls":"xs","fill":"#B45309","t":"只读配置"},
+ {"x":450,"y":354,"a":"middle","cls":"sm","t":"组装根（加载场景 / 生成角色时）创建组件并注入依赖：没有单例，也就没有“唯一的玩家”"}],
+"cap":"图 1-6　理想架构（设计方案，Demo 未实现）：依赖只向下（规则层 → 能力组件 → 只读配置），表现层只通过事件（紫色虚线）拿到结果；玩家输入和 AI 决策走同一个“意图”接口，输入缓冲、回放、AI 托管都接在这里；装备 = 容器之间移动物品 + 按来源注册属性修正（右侧短箭头）。对照图 1-5：原来所有箭头指向 Player，现在每一层只认识下一层"} -->
+  <div class="co warn"><span class="h">图 1-6 是设计，不是 Demo</span>
+    <p>Demo 里没有一个组件是按这张图拆的。面试时这样说：“现在的结构是所有东西都指向玩家对象、靠三个单例连接（图 1-5）；如果重做，我会按四层拆。顺序是先修错、再改结构（第 12 章图 12-2）：先把输入抽成意图、把伤害收口到受击方裁决，再把速度和颜色这类多方抢写的字段改成修正器推导，最后做物品实例和对象池。”</p>
+  </div>
+
+  <h2>1.8 问题总览：36 条分布在哪里</h2>
+  <div class="tbl"><table>
+    <tr><th>模块</th><th><span class="sev p0">P0</span></th><th><span class="sev p1">P1</span></th><th><span class="sev p2">P2</span></th><th><span class="sev p3">P3</span></th><th>代表问题（附录 A 编号）</th></tr>
+    <tr><td>生命周期 / 单例 / 构建</td><td>2</td><td>0</td><td>1</td><td>1</td><td>#1 运行时代码引用 UnityEditor；#4 单例写反；#31 执行顺序配在父类；#35 .gitignore</td></tr>
+    <tr><td>玩家状态机</td><td>1</td><td>2</td><td>0</td><td>0</td><td>#3 死亡可打断；#14 墙到头还在滑；#15 一帧两次转移</td></tr>
+    <tr><td>动画事件</td><td>0</td><td>1</td><td>1</td><td>0</td><td>#12 调用不存在的 RedColorBlink；#25 瞄准被打断仍掷剑（推断）</td></tr>
+    <tr><td>时间与帧率</td><td>0</td><td>0</td><td>3</td><td>0</td><td>#20 冲刺距离；#21 点燃跳数 / 旋转剑；#22 瞄准虚线偏差</td></tr>
+    <tr><td>战斗判定</td><td>0</td><td>1</td><td>2</td><td>0</td><td>#5 弹反成功仍掉血；#26 击退方向；#27 无 LayerMask / 去重</td></tr>
+    <tr><td>属性与数值</td><td>0</td><td>3</td><td>4</td><td>0</td><td>#7 死后重复 Die；#10 冰冻判错对象；#11 冻结协程重叠；#16 暴击 +1%</td></tr>
+    <tr><td>技能</td><td>1</td><td>0</td><td>2</td><td>0</td><td>#2 分身攻击空引用；#23 朝向判断写进循环；#24 冷却永不递减</td></tr>
+    <tr><td>敌人 AI</td><td>0</td><td>2</td><td>1</td><td>0</td><td>#8 每帧自转移 + Find；#9 永不超时；#32 尸体不回收</td></tr>
+    <tr><td>物品</td><td>0</td><td>2</td><td>1</td><td>0</td><td>#6 合成少扣料；#13 点空格空引用；#17 掉率 +1% / 偏左</td></tr>
+    <tr><td>UI / 表现</td><td>0</td><td>0</td><td>2</td><td>0</td><td>#28 订阅不对称；#29 材质实例 / CancelInvoke</td></tr>
+    <tr><td>代码质量</td><td>0</td><td>0</td><td>0</td><td>3</td><td>#33 字符串反射；#34 Find / 热路径查组件；#36 命名与“Can”副作用</td></tr>
+    <tr><td><b>合计</b></td><td><b>4</b></td><td><b>11</b></td><td><b>17</b></td><td><b>4</b></td><td>36 条，完整清单见附录 A</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">面试时挑哪几个主动说</span>
+    <p>选“<b>能演示、有数字、有通用教训</b>”的三个：① 死亡可被冲刺打断（状态机守卫，人人都会被问）；② 骷髅每帧自转移（继承复用带来的隐性行为，附带性能数字）；③ 合成少扣料（事务性，能自然引到服务器校验与防刷）。避免主动说 P3 的命名问题——它只会让面试官觉得你在凑数。</p>
+  </div>
+
+  <h2>1.9 面试追问</h2>
+<!--code:text:追问树：从“介绍一下架构”出发-->
+介绍一下项目架构（1.1）
+├─ 为什么 Player/Enemy 用继承？什么时候该用组合？（Q1-1）
+│   └─ 如果要加“会飞的弓箭手”和“可召唤的宠物”呢？（场景 1-1）
+├─ 状态为什么是普通 C# 类而不是 MonoBehaviour？（Q1-2）
+├─ 模块之间怎么通信？为什么用单例？（Q1-3 → 第 2 章）
+│   └─ 不用单例怎么拿到玩家？依赖注入 / 服务定位器 / 事件？（Q1-4）
+└─ 一帧里先执行什么？命中发生在哪个阶段？（Q1-5 → 第 4、6 章）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q1-1　为什么用继承 Entity？</div>
+    <p><b>L1 · 30 秒</b>　玩家和怪物共享组件缓存、地面 / 墙检测、翻转、击退和受击表现，抽到 Entity 里避免重复。</p>
+    <p><b>L2 · 正常回答</b>　Entity 提供的是“所有可战斗角色都有的能力”，并用虚函数留了扩展点：<code>DamageEffect</code> 玩家重写成“反击状态下先尝试弹反”，<code>Die</code> 各自切到死亡状态，<code>SlowEntityBy</code> 玩家多改跳跃和冲刺速度。</p>
+    <p><b>L3 · 深入</b>　继承的问题在“能力组合”出现时暴露：想要一个不会受击闪白的木桩、一个会墙滑的怪物，就得在继承树上开岔或塞开关。组合的做法是把“地面检测”“击退”“受击闪白”做成独立组件（Unity 本身就是组件模型），角色按需挂载；状态机通过接口拿能力（<code>IMover</code>、<code>IDamageable</code>），而不是拿具体的 <code>Player</code>。</p>
+    <p><b>L4 · 面试官攻击</b>　“那你为什么不一开始就用组合？”→ 两个角色的规模下继承最省事，我也确实复用了一大块代码；但我在 Entity 里已经看到了坏味道：<code>SlowEntityBy</code> 的基类实现只调了一个 Invoke、什么都没减速，子类各自重写——这说明“减速”并不是所有实体的共同行为，它更适合成为一个修正器组件（第 7 章）。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q1-2　状态为什么不是 MonoBehaviour？</div>
+    <p><b>L2</b>　状态只是行为的切片，不需要 Transform、生命周期和 Inspector；做成普通类可以在 Awake 里一次性 new 出来、零 GetComponent、切换时没有 enable / disable 的开销，也方便做成可测试的纯逻辑。代价是状态里不能直接用协程和 Invoke，所以代码里会看到 <code>player.StartCoroutine("BusyForSeconds", .1f)</code> 这样借宿主组件跑协程的写法。</p>
+    <p><b>L3</b>　更进一步可以让状态完全不认识 <code>Player</code>，只依赖一个“上下文”接口（输入快照、移动能力、动画参数），这样同一套状态能给玩家、AI 托管、回放共用。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q1-3 → Q1-4　模块怎么通信？为什么用单例？不用单例怎么办？</div>
+    <p><b>L2</b>　三种方式并存：直接引用（状态持有 Player）、单例（技能、装备、怪物通过 PlayerManager 拿玩家）、委托（<code>onFlipped</code>、<code>onHealthChanged</code> 通知血条）。单例的好处是写起来快，坏处是隐式依赖：看 <code>ItemData_Equipment</code> 的签名完全不知道它会去改玩家属性。</p>
+    <p><b>L3</b>　替代方案按“侵入性”从低到高：① 在场景组装处显式注入（SkillManager 在 Awake 里把 player 传给每个 Skill）；② 服务定位器加接口（<code>Services.Get&lt;IPlayerProvider&gt;()</code>，可在测试里替换）；③ 事件总线（装备变化发 <code>EquipmentChanged</code>，由 PlayerStats 自己订阅修改属性）；④ DI 框架（VContainer / Zenject）。对这个规模我会选 ①+③：依赖显式、写操作收口到属性所有者。</p>
+    <p><b>L4 · 攻击</b>　“事件总线不是也是全局的吗？”→ 是，但它把“谁改玩家属性”收口到了 PlayerStats 自己；单例的问题不在全局，而在<b>任何人都能写</b>。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q1-5　一帧里先执行什么？命中发生在哪个阶段？</div>
+    <p><b>L2</b>　FixedUpdate（物理）→ Update（脚本，状态机在这里）→ 协程恢复 → 动画更新（动画事件在这里触发，命中判定就在这时做）→ LateUpdate → 渲染。所以“按键在 Update 里被读到、速度在本帧设置、位移在下一帧的物理步才发生、命中在本帧或之后某帧的动画阶段”。</p>
+    <p><b>L3</b>　这个顺序会直接影响结论：第 6 章算弹反窗口时，玩家的反击状态是在 Update 里退出的，而怪物的 AttackTrigger 在动画阶段触发——同一帧里玩家先退出、怪物后命中，窗口的右边界就差了一帧。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“我用了 MVC 架构，Player 是 Model，状态机是 Controller，Animator 是 View。”</p>
+    <p><b>问题</b>：Player 里既有数据又有行为还有协程，状态类直接读输入也直接写刚体——套名词会被一行代码问倒。</p>
+    <p><b>更好的回答</b>：“它是 Unity 常见的组件 + 状态机结构；数据和表现没有严格分层，例如状态在 Enter 里直接设 Animator 参数。如果要分层，我会先把输入抽成快照、把伤害抽成事件。”</p>
+  </div>
+
+  <h2>1.10 发散场景题</h2>
+  <div class="scene"><div class="q">场景 1-1　策划要加“会飞的弓箭手”和“玩家的召唤宠物”，你要改哪些文件？</div>
+    <p class="why">为什么会问：考察你对继承结构的扩展成本有没有概念。</p>
+    <p>弓箭手：新建 <code>Enemy_Archer</code> + 一套状态类（照抄骷髅的 6 个，Battle 改成保持距离、Attack 改成发射投射物），新写投射物控制器；“会飞”要绕开 <code>IsGroundedDetected</code> 和 Move 状态里的边缘检测——<b>状态类与具体子类强绑定</b>（<code>Enemy_SkeletonMoveState</code> 持有 <code>Enemy_Skeleton</code>），几乎无法复用。宠物：它既不是 Player 也不是 Enemy，却要能攻击敌人、被敌人攻击、跟随玩家；现有的“敌人只打 <code>Player</code> 组件”“玩家攻击只认 <code>Enemy</code> 组件”需要换成阵营 / 接口判断。结论：先引入 <code>IDamageable</code> + 阵营（Team），再把感知、移动、攻击拆成可组合的组件或行为树节点（第 9 章）。</p>
+  </div>
+  <div class="scene"><div class="q">场景 1-2　新人接手这个项目，你会先让他读哪三个文件？</div>
+    <p class="why">为什么会问：考察你能不能抓住系统的“主干”。</p>
+    <p>① <code>Player.cs</code>（状态在哪里创建、Update 里先做什么）；② <code>PlayerGroundedState.cs</code>（大部分输入分支在这里，读懂它就读懂了操作逻辑）；③ <code>CharacterStats.cs</code>（伤害、异常状态、死亡全在这里）。再配一张图 1-4，告诉他“命中在动画事件里”，否则他会在 Update 里找半天攻击判定。</p>
+  </div>
+  <div class="scene"><div class="q">场景 1-3　如果要做成 ECS（DOTS），哪些部分最容易迁移，哪些最难？</div>
+    <p class="why">为什么会问：考察数据与行为分离的理解。</p>
+    <p>最容易：Stat / 伤害公式（纯数据 + 纯函数）、异常状态计时（可以是一个 System 批量递减）、掉落概率（纯函数）。最难：动画事件驱动的命中（ECS 里通常改成“技能时间轴组件 + System 在固定逻辑帧判定”）、状态类里读输入和直接写刚体的写法、依赖单例的所有代码。迁移顺序也就是重构顺序：先把数据和计算从 MonoBehaviour 里拔出来。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>三张图：<b>对象图</b>（场景里真挂了什么）、<b>继承树</b>（组件 / 状态类 / SO 三种继承）、<b>一帧顺序</b>（Fixed → Update → 协程 → 动画事件）。</li>
+    <li>依赖全部汇聚到 Player；三个单例让“谁都能写玩家”。</li>
+    <li>36 个问题：P0 4 个、P1 11 个；面试主动讲 <b>死亡可打断 / 每帧自转移 / 合成少扣料</b>。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么说“读 Unity 项目必须同时读场景”？</summary>数值（移速、伤害、掉率、技能类型）几乎都序列化在场景和 SO 里，代码只给出公式；例如骷髅 damage=0、分身 canAttack=1、飞剑类型 Regular，这些都决定了 bug 是否会触发。</details>
+  <details class="quiz"><summary>自测 2：一次近战命中的伤害结算发生在 Update 里吗？</summary>不是。Update 里只是进入攻击状态；伤害在动画更新阶段由 AttackTrigger 事件触发的 OverlapCircleAll + DoDamage 完成。</details>
+  <details class="quiz"><summary>自测 3：图 1-5 里，哪条依赖最该先拆？</summary>ItemData_Equipment → PlayerManager → PlayerStats：数据资源直接修改运行时对象，既隐式又无法测试；改成装备系统发事件、PlayerStats 自己应用修正。</details>
+</section>

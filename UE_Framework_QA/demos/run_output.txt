@@ -1,0 +1,21 @@
+event_vs_function_sim  _MSC_VER=1944
+
+[D1] BlueprintNativeEvent 的分派路径
+  纯 C++ 类：OnHit(10)            hp=90
+      - C++ 默认实现：扣血 10
+  蓝图子类：OnHit(10) + OnHit_Impl(10) hp=80
+      - 蓝图覆写：播受击特效，然后调用父类
+      - C++ 默认实现：扣血 10
+      - C++ 默认实现：扣血 10
+  flags：OnHit=0x7（Native|Event|BlueprintEvent）  AddScore=0x9（Native|BlueprintCallable）
+
+[D2] 事件图的 UberGraphFrame（可挂起） vs Function 栈帧（不可挂起）
+  t=0.0 OnInteract(who=1)：开门动画，Delay 2.0s 后自动关门
+  t=0.5 OnInteract(who=2)：Delay 正在等待，本次执行被忽略（但 Who 引脚已被改成 2）
+  t=2.0 Delay 完成，从续点继续：关门，读取 Who=2  <- 读到的是最后一次调用写进来的值
+  Function CalcDamage(50,30)=70：同步返回，sizeof(UberGraphFrame)=8 字节常驻在每个实例上
+
+[D3] 调用开销（1 亿次，/O2）
+  C++ 直调 AddScore                 9.7 ms  (0.10 ns/次)
+  ProcessEvent + 每次查表         166.4 ms  (1.66 ns/次)
+  ProcessEvent + 缓存 UFunction   108.1 ms  (1.08 ns/次)   score=100000000

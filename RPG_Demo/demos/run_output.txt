@@ -1,0 +1,164 @@
+RPGDemo 逻辑移植实测（dxHWH/RPGDemo@822270c）
+
+==== E1 玩家状态机：脚本化输入逐帧回放（60 fps，帧号从 0 开始）
+  [S1] 空中向右移动，落地那一帧刚好贴墙
+    f4   t=0.083  Fall         （无转移）                    → Fall          vx=  7.0 vy=-10.0  bools=Air
+    f5   t=0.100  Fall         Fall→Idle，Idle→WallSlide     → WallSlide     vx=  7.0 vy=  0.0  bools=WallSlide
+    f6   t=0.117  WallSlide    WallSlide→Idle                   → Idle          vx=  0.0 vy=  0.0  bools=Idle
+    f7   t=0.133  Idle         Idle→Move                        → Move          vx=  0.0 vy=  0.0  bools=Move
+    f8   t=0.150  Move         （无转移）                    → Move          vx=  7.0 vy=  0.0  bools=Move
+  [S2] 贴墙下滑到墙的下沿以下（墙在半空结束），一直按住 →
+    f9   t=0.167  WallSlide    （无转移）                    → WallSlide     vx=  0.0 vy= -2.0  bools=WallSlide
+    f10  t=0.183  WallSlide    （无转移）                    → WallSlide     vx=  0.0 vy= -2.0  bools=WallSlide
+    f40  t=0.683  WallSlide    （无转移）                    → WallSlide     vx=  0.0 vy= -2.0  bools=WallSlide
+    f69  t=1.167  WallSlide    （无转移）                    → WallSlide     vx=  0.0 vy= -2.0  bools=WallSlide
+    f70  t=1.183  WallSlide    WallSlide→Idle                   → Idle          vx=  0.0 vy=  0.0  bools=Idle
+    f71  t=1.200  Idle         Idle→Move                        → Move          vx=  0.0 vy=  0.0  bools=Move
+  [S3] 死亡 → 按 Shift 冲刺 → 再按 →
+    f10  t=0.183  Idle         Idle→Death                       → Death         vx=  0.0 vy=  0.0  bools=Die
+    f11  t=0.200  Death        （无转移）                    → Death         vx=  0.0 vy=  0.0  bools=Die
+    f39  t=0.667  Death        （无转移）                    → Death         vx=  0.0 vy=  0.0  bools=Die
+    f40  t=0.683  Death        Death→Dash                       → Dash          vx= 25.0 vy=  0.0  bools=Dash
+    f52  t=0.883  Dash         Dash→Idle                        → Idle          vx=  0.0 vy=  0.0  bools=Idle
+    f60  t=1.017  Idle         Idle→Move                        → Move          vx=  0.0 vy=  0.0  bools=Move
+  [S4] 掷出飞剑后死亡 → 剑飞回身边 → 再按 →
+    f10  t=0.183  Idle         Idle→Death                       → Death         vx=  0.0 vy=  0.0  bools=Die
+    f11  t=0.200  Death        （无转移）                    → Death         vx=  0.0 vy=  0.0  bools=Die
+    f39  t=0.667  Death        （无转移）                    → Death         vx=  0.0 vy=  0.0  bools=Die
+    f40  t=0.683  Death        Death→CatchSword                 → CatchSword    vx= -6.0 vy=  0.0  bools=CatchSword
+    f54  t=0.917  CatchSword   CatchSword→Idle                  → Idle          vx=  0.0 vy=  0.0  bools=Idle
+    f61  t=1.033  Idle         Idle→Move                        → Move          vx=  0.0 vy=  0.0  bools=Move
+  [S5] 第 1 段攻击在命中帧（0.357 s）前被 Dash 取消，随后再按左键
+    f0   t=0.017  Idle         Idle→PrimaryAttack               → PrimaryAttack vx=  2.0 vy=  0.0  bools=Attack
+    f12  t=0.217  PrimaryAttack PrimaryAttack→Dash               → Dash          vx= 25.0 vy=  0.0  bools=Dash
+    f24  t=0.417  Dash         Dash→Idle                        → Idle          vx=  0.0 vy=  0.0  bools=Idle
+    f40  t=0.683  Idle         Idle→PrimaryAttack               → PrimaryAttack vx=  1.0 vy=  0.0  bools=Attack
+
+==== E2 弹反窗口：Q 的按下时刻 τ（相对骷髅进入攻击状态）落在哪里能弹反成功
+     骷髅 Skeleton_Attack 事件：OpenCounterAttackWindow 0.0833 s；AttackTrigger 与 CloseCounterAttackWindow 同在 0.4167 s
+     本项目：受击那一刻处于 CounterAttack 状态才算成功；原课程写法（已被注释）：反击状态的每帧 Update 里检查窗口
+   30 fps  本项目：稳定成功 τ∈[-0.566, +0.432] 宽 0.998 s   原写法：稳定成功 τ∈[-0.899, +0.399] 宽 1.298 s
+   60 fps  本项目：稳定成功 τ∈[-0.599, +0.416] 宽 1.015 s   原写法：稳定成功 τ∈[-0.932, +0.399] 宽 1.331 s
+  144 fps  本项目：稳定成功 τ∈[-0.589, +0.416] 宽 1.005 s   原写法：稳定成功 τ∈[-0.923, +0.409] 宽 1.331 s
+
+==== E3 暴击 / 闪避的真实概率（Random.Range(0,100) 是 0..99 的整数）
+  critRate+agility=  0  设计   0.0%  公式 (c+1)/100=  1.0%  蒙特卡洛   0.99%
+  critRate+agility=  5  设计   5.0%  公式 (c+1)/100=  6.0%  蒙特卡洛   6.02%
+  critRate+agility= 20  设计  20.0%  公式 (c+1)/100= 21.0%  蒙特卡洛  21.03%
+  critRate+agility= 50  设计  50.0%  公式 (c+1)/100= 51.0%  蒙特卡洛  51.05%
+  critRate+agility= 99  设计  99.0%  公式 (c+1)/100=100.0%  蒙特卡洛 100.00%
+  evasion+agility=  0   设计   0.0%  蒙特卡洛   0.00%
+  evasion+agility= 10   设计  10.0%  蒙特卡洛  10.01%
+  evasion+agility= 30   设计  30.0%  蒙特卡洛  30.04%
+  护甲 10、伤害 30 的一次普通攻击（RoundToInt 为银行家舍入：10×0.85=8.5 → 8）：
+    双方都正常              源码 20   修正后 20
+    目标被冰冻（设计意图：破甲） 源码 20   修正后 22
+    攻击者被冰冻           源码 22   修正后 20
+  damage 20 + strength  0：普通 20，暴击 30（×1.50）
+  damage 20 + strength 10：普通 30，暴击 48（×1.60）
+  damage 20 + strength 50：普通 70，暴击 140（×2.00）
+
+==== E4 EnemyStats.Modify：每级加“当前值的 25%” → 复利；设计直觉是线性
+  Lv1   damage   10（线性  10.0）  maxHealth   100（线性  100.0）  倍率 1.00x / 线性 1.00x
+  Lv2   damage   12（线性  12.5）  maxHealth   125（线性  125.0）  倍率 1.25x / 线性 1.25x
+  Lv3   damage   15（线性  15.0）  maxHealth   156（线性  150.0）  倍率 1.56x / 线性 1.50x
+  Lv4   damage   19（线性  17.5）  maxHealth   195（线性  175.0）  倍率 1.95x / 线性 1.75x
+  Lv5   damage   24（线性  20.0）  maxHealth   244（线性  200.0）  倍率 2.44x / 线性 2.00x
+  Lv6   damage   30（线性  22.5）  maxHealth   305（线性  225.0）  倍率 3.05x / 线性 2.25x
+  Lv7   damage   38（线性  25.0）  maxHealth   381（线性  250.0）  倍率 3.81x / 线性 2.50x
+  Lv8   damage   48（线性  27.5）  maxHealth   476（线性  275.0）  倍率 4.76x / 线性 2.75x
+  Lv9   damage   60（线性  30.0）  maxHealth   595（线性  300.0）  倍率 5.95x / 线性 3.00x
+  Lv10  damage   75（线性  32.5）  maxHealth   744（线性  325.0）  倍率 7.44x / 线性 3.25x
+
+==== E5 骷髅掉落：5 个候选、PossibleItemDrop=3；先按 dropChance 逐个筛选，再无放回抽 min(3, 入选数) 个
+  Animal_Skin   dropChance  84.8  →  通过筛选  85.0%  →  最终掉落  80.5%（蒙特卡洛 80.46%）
+  Iron          dropChance  88.2  →  通过筛选  89.0%  →  最终掉落  84.5%（蒙特卡洛 84.51%）
+  Nice_Armor    dropChance  35.4  →  通过筛选  36.0%  →  最终掉落  32.3%（蒙特卡洛 32.32%）
+  Stolen_Sword  dropChance  32.0  →  通过筛选  33.0%  →  最终掉落  29.4%（蒙特卡洛 29.33%）
+  Wooden_Sword  dropChance  21.3  →  通过筛选  22.0%  →  最终掉落  19.2%（蒙特卡洛 19.20%）
+  平均每只掉 2.459 件（蒙特卡洛 2.458）；什么都不掉 0.552%；dropChance 填 0 仍有 1% 概率通过筛选
+  掉落横向初速度 Random.Range(-5,5)：向左 50%，0 占 10%，向右 40%，均值 -0.5 m/s
+
+==== E6 合成 Nice_Armor（配方：Animal_Skin×2 + Iron×1）：CanCraft 校验数量，但每种材料只 RemoveItem 一次
+  初始 皮×2  铁×1   源码：合成 1 件，剩 皮×1 铁×0   修正：合成 1 件，剩 皮×0 铁×0
+  初始 皮×3  铁×1   源码：合成 1 件，剩 皮×2 铁×0   修正：合成 1 件，剩 皮×1 铁×0
+  初始 皮×4  铁×2   源码：合成 2 件，剩 皮×2 铁×0   修正：合成 2 件，剩 皮×0 铁×0
+  初始 皮×6  铁×6   源码：合成 5 件，剩 皮×1 铁×1   修正：合成 3 件，剩 皮×0 铁×3
+  初始 皮×10 铁×10  源码：合成 9 件，剩 皮×1 铁×1   修正：合成 5 件，剩 皮×0 铁×5
+
+==== E7 骷髅 AI：Battle 继承 GroundState → 看见玩家时每帧“自己切到自己”；battle 计时每帧重置 → 永不超时
+  [A 玩家站在前方 2.5 m] 源码   10 s：Battle.Enter  257 次（自转移  252），GameObject.Find  258 次（25.8 次/秒），出手  5 次，一帧两次转移 5 次
+  [A 玩家站在前方 2.5 m] 修正版   10 s：Battle.Enter    5 次（自转移    0），GameObject.Find    6 次（0.6 次/秒），出手  5 次，一帧两次转移 0 次
+  [B 玩家站在身后 1.5 m] 源码   10 s：Battle.Enter  250 次（自转移  245），GameObject.Find  251 次（25.1 次/秒），出手  5 次，一帧两次转移 5 次
+  [C 玩家跳上 4 m 高平台] 源码   13 s：Battle.Enter   72 次（自转移   69），GameObject.Find   73 次（5.6 次/秒），出手  2 次，一帧两次转移 2 次
+        玩家跳上平台后 10 s：仍在追击 10.0 s，从不放弃，转身 547 次，在玩家脚下 [-0.50, 0.00] m 来回
+  [C 玩家跳上 4 m 高平台] 修正版   13 s：Battle.Enter    3 次（自转移    0），GameObject.Find    6 次（0.5 次/秒），出手  2 次，一帧两次转移 0 次
+        玩家跳上平台后 10 s：仍在追击 5.7 s，第 5.71 s 放弃，转身 289 次，在玩家脚下 [-9.68, 0.00] m 来回
+
+==== E8 每次命中都 StartCoroutine(FreezeTimeFor 0.7s)：最早那个协程到点就解冻，后面的命中白冻
+   60 fps  hitCoolDown=0.00  命中 121 次  应全程冻结，实际冻结  26.4%（修正版 100.0%）
+   60 fps  hitCoolDown=0.20  命中  10 次  应全程冻结，实际冻结  41.2%（修正版 100.0%）
+   60 fps  hitCoolDown=0.35  命中   6 次  应全程冻结，实际冻结  30.4%（修正版 100.0%）
+   60 fps  hitCoolDown=0.50  命中   5 次  应全程冻结，实际冻结  49.7%（修正版 100.0%）
+   60 fps  hitCoolDown=0.70  命中   3 次  应全程冻结，实际冻结  33.9%（修正版 100.0%）
+  144 fps  hitCoolDown=0.00  命中 289 次  应全程冻结，实际冻结  26.0%（修正版 100.0%）
+  144 fps  hitCoolDown=0.20  命中  10 次  应全程冻结，实际冻结  51.1%（修正版 100.0%）
+  144 fps  hitCoolDown=0.35  命中   6 次  应全程冻结，实际冻结  84.6%（修正版 100.0%）
+  144 fps  hitCoolDown=0.50  命中   5 次  应全程冻结，实际冻结  48.3%（修正版 100.0%）
+  144 fps  hitCoolDown=0.70  命中   3 次  应全程冻结，实际冻结  33.3%（修正版 100.0%）
+
+==== E9 瞄准虚线用连续抛物线，Rigidbody2D 用半隐式欧拉（Δt=0.02）：同一 x 处剑比虚线低 ½·g·s·Δt·t
+  20°  t=0.50 s  x= 16.44  虚线 y=  -0.73  实际 y=  -0.95  差 -0.221 m（公式 -0.221）
+  20°  t=1.00 s  x= 32.89  虚线 y= -12.50  实际 y= -12.94  差 -0.441 m（公式 -0.441）
+  20°  t=1.50 s  x= 49.33  虚线 y= -35.30  实际 y= -35.96  差 -0.662 m（公式 -0.662）
+  20°  t=1.68 s  x= 55.25  虚线 y= -46.21  实际 y= -46.95  差 -0.742 m（公式 -0.742）
+        离散闭式解 y_n = v·nΔt + g·s·Δt²·n(n+1)/2 与逐步积分最大误差 4.26e-14
+  45°  t=0.50 s  x= 12.37  虚线 y=   4.38  实际 y=   4.16  差 -0.221 m（公式 -0.221）
+  45°  t=1.00 s  x= 24.75  虚线 y=  -2.27  实际 y=  -2.71  差 -0.441 m（公式 -0.441）
+  45°  t=1.50 s  x= 37.12  虚线 y= -19.96  实际 y= -20.63  差 -0.662 m（公式 -0.662）
+  45°  t=1.68 s  x= 41.58  虚线 y= -29.04  实际 y= -29.78  差 -0.742 m（公式 -0.742）
+        离散闭式解 y_n = v·nΔt + g·s·Δt²·n(n+1)/2 与逐步积分最大误差 4.26e-14
+  70°  t=0.50 s  x=  5.99  虚线 y=   7.64  实际 y=   7.42  差 -0.221 m（公式 -0.221）
+  70°  t=1.00 s  x= 11.97  虚线 y=   4.24  实际 y=   3.80  差 -0.441 m（公式 -0.441）
+  70°  t=1.50 s  x= 17.96  虚线 y= -10.20  实际 y= -10.86  差 -0.662 m（公式 -0.662）
+  70°  t=1.68 s  x= 20.11  虚线 y= -18.09  实际 y= -18.84  差 -0.742 m（公式 -0.742）
+        离散闭式解 y_n = v·nΔt + g·s·Δt²·n(n+1)/2 与逐步积分最大误差 5.33e-14
+
+==== E10 帧率依赖：Update 里计时 + 物理在 FixedUpdate 里积分
+  Dash   30 fps：持续  7 帧，距离 5.00 ~ 5.00 m（均值 5.000，设计 5.00）
+  Dash   60 fps：持续 13 帧，距离 5.00 ~ 5.00 m（均值 5.000，设计 5.00）
+  Dash  120 fps：持续 24 帧，距离 4.50 ~ 5.00 m（均值 4.791，设计 5.00）
+  Dash  144 fps：持续 29 帧，距离 4.50 ~ 5.00 m（均值 4.861，设计 5.00）
+  Dash  240 fps：持续 49 帧，距离 5.00 ~ 5.00 m（均值 5.000，设计 5.00）
+  Dash  60 fps，冲刺第 2 帧卡顿  50 ms：距离 5.00 ~ 5.00 m
+  Dash  60 fps，冲刺第 2 帧卡顿 100 ms：距离 5.00 ~ 5.00 m
+  Dash  60 fps，冲刺第 2 帧卡顿 250 ms：距离 6.50 ~ 7.00 m
+  Dash  60 fps，冲刺第 2 帧卡顿 500 ms：距离 8.50 ~ 9.00 m
+  点燃  30 fps：2 s 内跳 6 次伤害，首跳 0.033 s，间隔 0.3333 s（设计 0.3）
+  点燃  60 fps：2 s 内跳 7 次伤害，首跳 0.017 s，间隔 0.3000 s（设计 0.3）
+  点燃 144 fps：2 s 内跳 7 次伤害，首跳 0.007 s，间隔 0.3056 s（设计 0.3）
+  点燃 240 fps：2 s 内跳 7 次伤害，首跳 0.004 s，间隔 0.3042 s（设计 0.3）
+  旋转剑 hitCoolDown=0.00  30 fps：2 s 命中  61 次
+  旋转剑 hitCoolDown=0.00  60 fps：2 s 命中 121 次
+  旋转剑 hitCoolDown=0.00 144 fps：2 s 命中 289 次
+  旋转剑 hitCoolDown=0.00 240 fps：2 s 命中 480 次
+  旋转剑 hitCoolDown=0.10  30 fps：2 s 命中  21 次
+  旋转剑 hitCoolDown=0.10  60 fps：2 s 命中  18 次
+  旋转剑 hitCoolDown=0.10 144 fps：2 s 命中  20 次
+  旋转剑 hitCoolDown=0.10 240 fps：2 s 命中  20 次
+  旋转剑 hitCoolDown=0.35  30 fps：2 s 命中   6 次
+  旋转剑 hitCoolDown=0.35  60 fps：2 s 命中   6 次
+  旋转剑 hitCoolDown=0.35 144 fps：2 s 命中   6 次
+  旋转剑 hitCoolDown=0.35 240 fps：2 s 命中   6 次
+
+==== E11 分身朝向：旋转判断写在 foreach 里面 → 找到敌人后每遍历一个碰撞体就可能再转 180°
+  碰撞体 1 个：1 个敌人时朝向正确 100.0%（理论：敌人在右 100%、在左 ⌈n/2⌉/n=100.0% → 平均 100.0%）  2 个敌人   0.0%
+  碰撞体 2 个：1 个敌人时朝向正确  75.0%（理论：敌人在右 100%、在左 ⌈n/2⌉/n= 50.0% → 平均  75.0%）  2 个敌人  49.9%
+  碰撞体 3 个：1 个敌人时朝向正确  83.3%（理论：敌人在右 100%、在左 ⌈n/2⌉/n= 66.7% → 平均  83.3%）  2 个敌人  75.1%
+  碰撞体 4 个：1 个敌人时朝向正确  74.9%（理论：敌人在右 100%、在左 ⌈n/2⌉/n= 50.0% → 平均  75.0%）  2 个敌人  62.7%
+  碰撞体 5 个：1 个敌人时朝向正确  80.1%（理论：敌人在右 100%、在左 ⌈n/2⌉/n= 60.0% → 平均  80.0%）  2 个敌人  72.5%
+  碰撞体 6 个：1 个敌人时朝向正确  75.1%（理论：敌人在右 100%、在左 ⌈n/2⌉/n= 50.0% → 平均  75.0%）  2 个敌人  64.8%
+  碰撞体 7 个：1 个敌人时朝向正确  78.4%（理论：敌人在右 100%、在左 ⌈n/2⌉/n= 57.1% → 平均  78.6%）  2 个敌人  71.4%
+  碰撞体 8 个：1 个敌人时朝向正确  75.1%（理论：敌人在右 100%、在左 ⌈n/2⌉/n= 50.0% → 平均  75.0%）  2 个敌人  66.1%
+
+写出 figdata.json（10486 字节）

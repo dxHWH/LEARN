@@ -7,11 +7,11 @@
     <tr><td>事件分发器</td><td>各端：OnHealthChanged(New, Delta)、OnHit(HitInfo)、OnDeadVisual()；仅服务器：OnDeath(Killer)</td></tr>
     <tr><td>谁在用</td><td>BP_CoopCharacter、BP_Zombie；以后的油桶、可破坏物也能直接挂</td></tr>
   </table></div>
-<!--bpnet {"cls":"AC_Health","parent":"ActorComponent","where":"随所属 Actor（玩家、僵尸各挂一个）","defaults":[["Component Replicates","✓ 必须勾"],["所属 Actor 的 Replicates","✓ 前提：Actor 不复制，组件也不会复制"]],
+<!--bpnet {"state":"ideal","cls":"AC_Health","parent":"ActorComponent","where":"随所属 Actor（玩家、僵尸各挂一个）","defaults":[["Component Replicates","✓ 必须勾"],["所属 Actor 的 Replicates","✓ 前提：Actor 不复制，组件也不会复制"]],
 "vars":[["Health","Float","RepNotify","None","服务器（HandleDamage）","OnRep → OnHealthChanged：血条、受伤后处理"],["bIsDead","Boolean","RepNotify","None","服务器（HandleDamage）","OnRep → OnDeadVisual：布娃娃、关碰撞、关本地输入"],["LastHit","S_HitInfo","RepNotify","None","服务器（RecordHit）","{Counter, Point, bHeadshot}；OnRep → OnHit：受击动作、血迹"],["MaxHealth","Float","None","—","配置","100"],["PrevHealth","Float","None","—","各端（在 OnRep 里）","算 Delta：只在本端有意义"]],
 "events":[["Event BeginPlay","引擎事件","引擎事件","—","A","Authority 分支里才绑定伤害事件"],["HandleDamage","自定义事件","Not Replicated","—","S","Owner.OnTakeAnyDamage（只在服务器绑定）"],["RecordHit","自定义事件","Not Replicated","—","S","Owner.OnTakePointDamage"],["OnRep_Health / LastHit / bIsDead","RepNotify 函数","RepNotify 函数","—","R","变量变化"],["OnHealthChanged / OnHit / OnDeadVisual","事件分发器","事件分发器","—","R","在 OnRep 里广播"],["OnDeath","事件分发器","事件分发器","—","S","HandleDamage 判死 → 角色 / 僵尸 HandleDeath"]],
 "cap":"<b>图 10-6a</b>　AC_Health 的网络规格。规则（扣血、判死、OnDeath）只在服务器；表现（三个 OnRep 和它们广播的分发器）在所有端。没有任何 RPC"} -->
-<!--bpgraph {"cols":4,"rg":56,"title":"AC_Health · 伤害管线（只在服务器）","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"AC_Health · 伤害管线（只在服务器）","nodes":[
  {"id":"h0","k":"event","x":0,"y":0,"t":"Event BeginPlay","net":"A"},
  {"id":"h1","k":"flow","x":1,"y":0,"t":"Switch Has Authority","ex":["Authority","Remote"]},
  {"id":"h2","k":"func","x":2,"y":0,"t":"Bind OnTakeAnyDamage","s":"Target ← Get Owner","i":["Event ← HandleDamage"]},
@@ -28,7 +28,7 @@
 ],"l":[["h0","h1"],["h1:Authority","h2"],["h2","h3"],["h3","h4"],["x0","x1"],["x1:False","x2"],["x2","x3"],["x3:True","x4"],["x4","x5"],["y0","y1"]],
 "g":[{"ids":["h0","h1","h2","h3","h4"],"t":"只有服务器订阅伤害：伤害管线天然只在服务器","c":"b"},{"ids":["x0","x1","x2","x3","x4","x5"],"t":"HandleDamage（仅服务器）：已死忽略、扣血、判死","c":"r"},{"ids":["y0","y1"],"t":"RecordHit：只记录命中信息，不扣血","c":"s"}],
 "cap":"<b>图 10-6</b>　AC_Health 伤害管线。ApplyPointDamage 会同时触发 AnyDamage 与 PointDamage：血量只在 AnyDamage 里扣（僵尸攻击用的 ApplyDamage 也走这里），PointDamage 只记命中点，避免扣两次"} -->
-<!--bpgraph {"cols":4,"rg":46,"title":"AC_Health · OnRep：只广播，不改状态","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":46,"title":"AC_Health · OnRep：只广播，不改状态","nodes":[
  {"id":"o0","k":"event","x":0,"y":0,"t":"OnRep_Health","net":"R"},
  {"id":"o1","k":"call","x":1,"y":0,"t":"Call OnHealthChanged","i":["New ← Health","Delta ← Health − PrevHealth"]},
  {"id":"o2","k":"set","x":2,"y":0,"t":"Set PrevHealth","i":["← Health"],"ex":[],"rep":"L:各端各自记"},
@@ -50,11 +50,11 @@
   </div>
 
   <h2>7. AnimBP：只读、线程安全</h2>
-<!--bpnet {"cls":"ABP_Coop3P / ABP_Coop1P","parent":"AnimInstance","where":"每个骨骼网格各一份，各端本地","defaults":[["Replicates","✗ AnimInstance 不是 Actor，不能复制"]],
+<!--bpnet {"state":"ideal","cls":"ABP_Coop3P / ABP_Coop1P","parent":"AnimInstance","where":"每个骨骼网格各一份，各端本地","defaults":[["Replicates","✗ AnimInstance 不是 Actor，不能复制"]],
 "vars":[["Speed / Direction","Float","None","—","每端（读角色速度）","模拟代理的速度来自 ReplicatedMovement"],["AimPitch","Float","None","—","每端","别人：RemoteViewPitch；自己：控制旋转"],["bIsAiming","Boolean","None","—","每端","1P 读本地预测值；3P 读角色复制的 bIsAiming"],["bInAir / bIsDead","Boolean","None","—","每端","读 CMC 与 AC_Health 的复制状态"]],
 "events":[["Thread Safe Update Animation","引擎事件","引擎事件","—","A","每帧（工作线程）"]],
 "cap":"<b>图 10-8a</b>　动画蓝图的网络规格：它本身什么都不复制，只“读”已经复制下来的角色状态。动画要同步，就同步驱动动画的那几个状态"} -->
-<!--bpgraph {"cols":3,"rg":46,"title":"ABP_Coop3P · Thread Safe Update Animation","nodes":[
+<!--bpgraph {"state":"ideal","cols":3,"rg":46,"title":"ABP_Coop3P · Thread Safe Update Animation","nodes":[
  {"id":"t0","k":"event","x":0,"y":0,"t":"Thread Safe Update Animation","s":"BlueprintThreadSafeUpdateAnimation","net":"A"},
  {"id":"t1","k":"set","x":1,"y":0,"t":"Set Speed / Direction","s":"Property Access：Velocity","rep":"L:AnimBP 变量"},
  {"id":"t2","k":"set","x":2,"y":0,"t":"Set AimPitch","s":"别人的俯仰来自 RemoteViewPitch","i":["← Normalize(GetBaseAimRotation.Pitch)"],"rep":"L:AnimBP 变量"},

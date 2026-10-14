@@ -1,0 +1,190 @@
+<section class="chapter" id="ch5">
+  <div class="ch-head">
+    <div class="no">CHAPTER 05</div>
+    <h1>时间与帧率：Update、FixedUpdate 与“帧率无关”</h1>
+    <p class="lead">“为什么要乘 deltaTime”“Update 和 FixedUpdate 有什么区别”是 Unity 面试的开胃菜。这个项目给了三个会被追问到底的实例：冲刺距离随帧率跳动、点燃和旋转剑的伤害次数随帧率变化、瞄准虚线和剑的真实轨迹对不上。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出“渲染帧 + 固定物理步”两条时间线，说清 Update 里设的速度何时生效</li>
+    <li>区分三类时间代码：一次性设速度（与帧率无关）、Update 计时决定持续时长（会量化）、计时器重置丢余量（会漂移）</li>
+    <li>用 E10 的数字说明冲刺 / 点燃 / 旋转剑在 30~240 fps 下的差异，以及一帧卡顿的后果</li>
+    <li>推导半隐式欧拉的离散轨迹，算出瞄准虚线与剑的偏差，并给出“完全对得上”的写法</li>
+  </ul></div>
+
+  <h2>5.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>Update 每渲染帧一次、间隔不定；FixedUpdate 按固定 0.02 s 一步、一帧里可能 0 次或多次，物理在它之后积分。项目的移动是“在 Update 里设 rb.velocity、由物理步积分”，持续移动没问题；但<b>持续时长在 Update 里用 deltaTime 计时</b>的动作（冲刺 0.2 s）会被量化：120 / 144 fps 下冲刺距离在 4.5~5.0 m 间跳，冲刺中卡一帧 250 ms 能冲到 [[e10.hitch.250.max|.1f]] m。计时器用“到点就重置为冷却值”而不是“累加”，点燃在 30 fps 下 2 秒只跳 [[e10.ign.30.ticks]] 次（60 fps 是 [[e10.ign.60.ticks]] 次），冷却为 0 的旋转剑命中次数直接等于帧数。瞄准虚线用连续抛物线，物理是离散积分，同一 x 处剑比虚线低 ½·g·s·Δt·t，1 秒时约 [[e9.45_100.ady|.2f]] m。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "时间与帧率", "rows": [["持续时长", "冲刺在 Update 里用 deltaTime 计时 0.2 s，位移由物理积分", "P2 120 / 144 fps 时冲刺有时只有 [[e10.dash.120.min|.1f]] m（设计 5 m，E10，#20）", "按物理步计数（0.2 s = 10 步）或沿预设曲线 MovePosition", "任何帧率都是 5.00 m", ""], ["卡顿", "没有单帧 dt 保护，冲刺照常按 Update 计时", "P2 卡一帧 250 ms 冲出 [[e10.hitch.250.max|.1f]] m，平台边缘会冲下悬崖（E10）", "固定步计数天然免疫；或给逻辑 dt 设上限", "平台边缘不会因卡顿冲下悬崖", ""], ["周期计时", "到点重置（点燃 0.3 s、旋转剑 hitCoolDown）", "P2 30 fps 下点燃少跳；hitCoolDown = 0 时旋转剑命中数 = 帧数（E10，#21）", "累加计时 + while 处理一帧多次；伤害类放固定逻辑帧统一 tick", "30 fps 下点燃不再少跳；冷却 0 不再等于帧数", ""], ["轨迹预测", "瞄准虚线用连续抛物线，比剑高 ½·g·s·Δt·t", "P2 剑总比瞄准虚线低：t = [[E9.rows.3.t|.2f]] s 时差 [[E9.rows.3.dy|.2f]] m（E9，#22）", "离散闭式解按物理步画点；有碰撞时用 PhysicsScene2D 预演", "虚线与实际轨迹一致", "模型验证：E9 离散闭式解与逐步积分最大误差 5.33e-14（三种角度）"], ["投射物物理", "飞剑 Discrete 碰撞、无插值；旋转停住后直接改 transform", "P2 高速时可能穿过薄墙（Discrete）；高刷新率屏幕上飞剑抖动（无插值，#22）", "Continuous + Interpolate；移动用 <code>rb.MovePosition</code>", "高速不穿薄墙、高刷屏不抖", ""], ["输入读取", "在 Update 里读按键", "无 读取位置正确；问题在于读到当帧就消费、不缓冲（20.1）", "保持“Update 读输入”，但存成意图交给固定步消费", "", "保持 · 读取位置正确"]]} -->
+
+
+  <h2>5.2 两条时间线</h2>
+<!--tline {"x":[0,0.1],"labw":150,"ticks":[0,0.02,0.04,0.06,0.08,0.1],"xlabel":"时间 / s",
+"rows":[
+ {"n":"渲染帧（60 fps）","segs":[[0,0.01667,"b","帧 1"],[0.01667,0.03333,"o","帧 2"],[0.03333,0.05,"b","帧 3"],[0.05,0.06667,"o","帧 4"],[0.06667,0.08333,"b","帧 5"],[0.08333,0.1,"o","帧 6"]]},
+ {"n":"物理步（50 Hz）","pts":[[0.02,"g",""],[0.04,"g",""],[0.06,"g",""],[0.08,"g",""],[0.1,"g",""]]},
+ {"n":"渲染帧（144 fps）","segs":[[0,0.00694,"b",""],[0.00694,0.01389,"o",""],[0.01389,0.02083,"b",""],[0.02083,0.02778,"o",""],[0.02778,0.03472,"b",""],[0.03472,0.04167,"o",""],[0.04167,0.04861,"b",""],[0.04861,0.05556,"o",""],[0.05556,0.0625,"b",""],[0.0625,0.06944,"o",""],[0.06944,0.07639,"b",""],[0.07639,0.08333,"o",""],[0.08333,0.09028,"b",""],[0.09028,0.09722,"o",""]]}],
+"cap":"图 5-1　两条时间线：50 Hz 物理配 60 fps 渲染，平均每 6 帧里 5 帧各跑 1 个物理步、1 帧不跑；144 fps 时大多数帧不跑物理步。规则 R1：每帧先跑完累积的物理步，再跑 Update——<b>Update 里设的速度，最早在下一个物理步才产生位移</b>"} -->
+  <div class="tbl"><table>
+    <tr><th>类别</th><th>项目中的例子</th><th>与帧率的关系</th></tr>
+    <tr><td>① 一次性设速度，交给物理</td><td>跳跃 <code>SetVelocity(vx, 20)</code>、墙跳、弹反击退、接剑反冲</td><td class="yes">无关：物理按固定步积分</td></tr>
+    <tr><td>② 每帧设同一个速度，持续移动</td><td>Move、WallSlide、骷髅追击</td><td class="yes">基本无关（速度在帧间不变，物理步数 ∝ 时间）</td></tr>
+    <tr><td>③ <b>Update 计时决定持续时长</b></td><td>冲刺 0.2 s、攻击位移 0.15 s、弹反 1 s、骷髅待机 1 s</td><td class="mid">量化：时长被向上取整到帧，物理步数随之跳动</td></tr>
+    <tr><td>④ <b>到点重置的周期计时器</b></td><td>点燃 0.3 s 一跳、旋转剑 hitCoolDown、Skill 冷却</td><td class="no">漂移：每次丢掉超出的那一点，周期变长</td></tr>
+    <tr><td>⑤ 每帧按 dt 缩放的连续量</td><td>分身淡出 <code>alpha -= dt·speed</code>、剑回收 <code>MoveTowards(…, speed·dt)</code></td><td class="yes">无关（误差在最后一帧）</td></tr>
+    <tr><td>⑥ 协程 / Invoke 的等待</td><td><code>WaitForSeconds(0.2)</code> 闪白、<code>Invoke("DestroyMe", 7)</code></td><td class="mid">量化到帧（最多晚一帧）</td></tr>
+  </table></div>
+
+  <h2>5.3 E10：冲刺距离随帧率与卡顿变化</h2>
+<!--code:cs:PlayerDashState.cs:16-45（只看与时间有关的部分） ‖ P2 时长按 Update 计时、位移按物理步积分：120 fps 时距离最短 [[e10.dash.120.min|.2f]] m，卡顿 250 ms 冲出 [[e10.hitch.250.max|.1f]] m（E10，#20）-->
+public override void Enter()  { base.Enter(); stateTimer = dashDuration; /* 0.2 */ ... }
+public override void Update()
+{
+    base.Update();                                      // stateTimer -= Time.deltaTime
+    ...
+    player.SetVelocity(player.dashDir * player.dashSpeed, 0);   // 25 m/s
+    if (stateTimer < 0f) stateMachine.ChangeState(player.idleState);   // Exit 里把 vx 设回 0
+}
+<!--/code-->
+  <p>冲刺距离 = 25 m/s × 0.02 s × “看到 vx = 25 的物理步数”。物理步数取决于冲刺持续了几帧、每帧落了几个物理步。用 PlayerLoop 模型（R1、R4，物理步相位在 [0, 0.02) 内取 400 个值）扫一遍 <span class="tag ex">实测 E10</span> <span class="tag mdl">模型</span>：</p>
+<!--bars {"title":"冲刺距离（设计 5.00 m），每个帧率取 400 个相位","unit":"m","labw":190,"max":9.5,"fmt":".2f","items":[
+ ["30 fps 最小 / 最大","e10.dash.30.min","g","[[e10.dash.30.min|.2f]] / [[e10.dash.30.max|.2f]] m"],
+ ["60 fps","e10.dash.60.min","g","[[e10.dash.60.min|.2f]] / [[e10.dash.60.max|.2f]] m"],
+ ["120 fps","e10.dash.120.min","a","[[e10.dash.120.min|.2f]] / [[e10.dash.120.max|.2f]] m（均值 [[e10.dash.120.mean|.2f]]）"],
+ ["144 fps","e10.dash.144.min","a","[[e10.dash.144.min|.2f]] / [[e10.dash.144.max|.2f]] m（均值 [[e10.dash.144.mean|.2f]]）"],
+ ["240 fps","e10.dash.240.min","g","[[e10.dash.240.min|.2f]] / [[e10.dash.240.max|.2f]] m"],
+ ["—60 fps，冲刺开始后第 2 帧卡顿",0],
+ ["卡 50 ms","e10.hitch.50.max","g","[[e10.hitch.50.min|.2f]] ~ [[e10.hitch.50.max|.2f]] m"],
+ ["卡 100 ms","e10.hitch.100.max","g","[[e10.hitch.100.min|.2f]] ~ [[e10.hitch.100.max|.2f]] m"],
+ ["卡 250 ms","e10.hitch.250.max","r","[[e10.hitch.250.min|.2f]] ~ [[e10.hitch.250.max|.2f]] m"],
+ ["卡 500 ms（dt 被截到 0.333）","e10.hitch.500.max","r","[[e10.hitch.500.min|.2f]] ~ [[e10.hitch.500.max|.2f]] m"]],
+"cap":"图 5-2　冲刺距离（前 5 行柱长取最小值，卡顿行取最大值）。120 / 144 fps 时有一部分相位只跑了 9 个物理步（4.5 m）；卡顿超过 0.2 s 时，冲刺在卡顿那一帧就结束，但这一帧里物理已经按 25 m/s 跑完了全部积压的步数"} -->
+  <p>两个现象各有原因：</p>
+  <ul>
+    <li><b>120 / 144 fps 偶尔短 0.5 m</b>：冲刺在 Update 里共持续 [[e10.dash.120.frames]] / [[e10.dash.144.frames]] 帧，扣掉进入那一帧，速度只在 0.2 s 的“大约”时间里生效；0.2 / (1/120) 恰好是 24，float 累减 24 次后的结果落在 0 的哪一侧，决定了冲刺多一帧还是少一帧——这是 R4（float 计时）的典型边界效应。60 fps 恰好落在另一侧，所以稳定 5.00 m。</li>
+    <li><b>卡顿冲得更远</b>：卡顿帧的 deltaTime 很大，状态在这一帧的 Update 里结束，但物理在这一帧的开头已经以 25 m/s 补跑了整段积压时间。卡 250 ms 时多冲 30%~40%，在平台边缘就是“冲刺掉下悬崖”。Maximum Allowed Timestep = 0.333 把 500 ms 卡顿也截成了 0.333 s，否则会更远。</li>
+  </ul>
+  <div class="co tip"><span class="h">改法：让“时长”和“位移”用同一个时钟</span>
+    <p>① 冲刺在 FixedUpdate 里按<b>物理步计数</b>：Enter 记 <code>remainSteps = round(0.2 / fixedDeltaTime) = 10</code>，FixedUpdate 里每步减 1，减到 0 结束——任何帧率、任何卡顿都是 10 步 5.00 m；② 或者干脆不用速度，用 <code>MovePosition</code> 沿预先算好的曲线走完 5 m，碰墙提前结束；③ 至少在逻辑上对单帧 dt 做上限（例如 1/20 s），避免卡顿放大位移。</p>
+  </div>
+
+  <h2>5.4 E10：周期计时器“到点重置”会漂移</h2>
+<!--code:cs:CharacterStats.cs:71-85 与 SkillController_ThrowSword.cs:144-157 ‖ P2 到点重置丢掉了超出的时间，实际周期被向上取整到帧；hitCoolDown = 0 时每帧命中（E10，#21）-->
+igniteDamageTimer -= dt;
+if (igniteDamageTimer < 0)
+{
+    igniteDamageTimer = igniteDamageCooldown;   // 0.3：直接覆盖，丢掉了超出的那部分
+    DecreaseHealthBy(igniteDamage);
+}
+// 旋转剑：同样的写法，hitCoolDown 在场景里配的是 0 → 每帧都命中
+hitTimer -= Time.deltaTime;
+if (hitTimer <= 0) { hitTimer = hitCoolDown; /* OverlapCircleAll + 伤害 + 冻结 */ }
+<!--/code-->
+  <p>到点重置时，实际周期是“冷却时间向上取整到帧”，近似为 $T_{\text{实际}} = \lceil T / \Delta t \rceil \cdot \Delta t$（float 累减让“恰好整除”的情况落在哪一侧不确定）。点燃持续 2 s、冷却 0.3 s：</p>
+<!--dtab {"rows":"E10.ign","cols":[["帧率","fps"],["2 s 内伤害次数","ticks"],["首跳时刻 / s","first",".3f"],["平均间隔 / s","iv",".4f"]],"hlif":"ticks < 7","cap":"表 5-1　点燃跳数（E10）。首跳总在第一帧：igniteDamageTimer 初值为 0，被点燃后的第一次 Update 就扣到负数。30 fps 下间隔被拉长到 0.333 s，少跳一次（伤害 −14%）"} -->
+<!--gbars {"groups":{"path":"e10g.groups"},"series":[{"n":"hitCoolDown = 0（场景配置）","v":{"path":"e10g.s0"},"c":"r"},{"n":"= 0.1","v":{"path":"e10g.s10"},"c":"a"},{"n":"= 0.35（代码默认）","v":{"path":"e10g.s35"},"c":"g"}],"fmt":".0f","h":280,"gname":"帧率","cap":"图 5-3　旋转剑 2 秒内的命中次数（E10）。场景里 hitCoolDown 配成 0，命中次数 = 帧数：240 fps 的玩家伤害是 30 fps 的 8 倍；冷却 0.1 时 30 fps 反而比 60 fps 多打 3 次——又是 float 边界"} -->
+  <p>场景里的飞剑类型是 Regular，旋转模式目前不会触发；但 hitCoolDown = 0 是一个“换个枚举值就爆炸”的配置。改法与冲刺相同：<b>累加而不是覆盖</b>（<code>timer += cooldown</code>，一帧内用 while 处理多次），或在固定步里计数；伤害类周期效果最好放进固定逻辑帧（Buff 系统统一 tick，第 7 章）。</p>
+
+  <h2>5.5 E9：瞄准虚线为什么总比剑高一点</h2>
+<!--code:cs:Skill_ThrowSword.cs:145-151（虚线）与 SetupSword（实际发射） ‖ P2 虚线用连续抛物线，实际是半隐式欧拉积分：剑总比虚线低 ½·g·s·Δt·t（E9，#22）-->
+// 虚线：连续时间抛物线 p(t) = p0 + v0·t + ½·g·s·t²
+Vector2 position = (Vector2)player.transform.position + new Vector2(
+        AimaDirection().x * launchForce.x * t,
+        AimaDirection().y * launchForce.y * t) + 0.5f * (Physics2D.gravity * swordGravityScale) * (t * t);
+// 实际：rb.velocity = finalDir（= 方向 ⊙ launchForce），rb.gravityScale = swordGravityScale，交给 Box2D 积分
+<!--/code-->
+  <p>Box2D 用<b>半隐式欧拉</b>：先用重力更新速度，再用新速度更新位置。把它展开成闭式解：</p>
+<!--deriv 半隐式欧拉的离散轨迹（竖直方向，线阻尼为 0）
+v_n & = v_{n-1} + g s\,\Delta t = v_0 + n\,g s\,\Delta t || 每步先更新速度（g = −9.81，s = gravityScale）
+y_n & = y_{n-1} + v_n\,\Delta t = \sum_{k=1}^{n} v_k\,\Delta t || 再用“新”速度更新位置
+ & = v_0\,n\Delta t + g s\,\Delta t^2\,\frac{n(n+1)}{2} || 等差数列求和
+ & = v_0 t + \tfrac12 g s\,t^2 + \tfrac12 g s\,\Delta t\, t || 代入 t = nΔt
+* y_n - y(t) & = \tfrac12\, g s\,\Delta t\, t || 与连续抛物线的差：随 t 线性增长，g < 0 → 剑更低
+-->
+  <p>水平方向没有加速度，两者的 x 完全相同，所以“同一时刻的差”就是“同一 x 处的差”。代入场景值（gravityScale 4.5、Δt 0.02、launchForce (35, 28)）<span class="tag ex">实测 E9</span>：</p>
+<!--plot {"x":[26,42],"y":[-31,-3],"h":290,"xlabel":"水平距离 / m（只画下落段，放大看差距）","ylabel":"高度 / m","legend":"bl",
+"series":[{"n":"瞄准虚线（连续抛物线）","path":"e9p.dot","c":"b","dash":true},{"n":"Box2D 实际轨迹（每 6 步取一点）","path":"e9p.sim","c":"r","dots":true}],
+"cap":"图 5-4　45° 掷剑：虚线与实际轨迹（E9）。最后一个瞄准点在 t = 24 × 0.07 = 1.68 s，此时剑比虚线低 [[e9.45_168.ady|.3f]] m，与公式 ½·g·s·Δt·t 的 [[e9.45_168.af|.3f]] m 一致"} -->
+<!--dtab {"rows":"E9.rows","cols":[["角度 / °","ang"],["t / s","t",".2f"],["x / m","x",".2f"],["虚线 y","dot",".2f"],["实际 y","sim",".2f"],["偏差 / m","dy",".3f"],["公式 ½gsΔt·t","f",".3f"]],"cap":"表 5-2　三个角度的偏差完全相同——它只取决于时间，不取决于角度；离散闭式解与逐步积分的最大误差约 4e-14（只剩浮点舍入）"} -->
+  <p>0.44 m（1 秒处）在 2D 横版里大约是角色身高的五分之一，玩家会觉得“剑总是比瞄准的低一点”。修法：虚线直接用离散闭式解 $p_n = p_0 + v_0 n\Delta t + g s \Delta t^2 \frac{n(n+1)}{2}$，取 $n$ 为物理步数，就和 Box2D 逐步积分逐位一致（只要没有阻尼和碰撞）；需要考虑碰撞时，用 <code>PhysicsScene2D</code> 在一个隐藏的物理场景里 <code>Simulate</code> 预演。</p>
+  <div class="co deep"><span class="h">另外三个与时间有关的细节</span>
+    <ul>
+      <li><b>插值</b>：玩家和骷髅的刚体开了 Interpolate，渲染位置在物理步之间平滑；飞剑没开，在 144 fps 屏幕上它每 0.02 s 才跳一次位置，快速飞行时会有“抖动感” <span class="tag inf">推断</span>。</li>
+      <li><b>直接改 transform 的刚体</b>：旋转剑停住后用 <code>transform.position = MoveTowards(...)</code> 移动一个带 Rigidbody2D 的物体（项目关闭了 Auto Sync Transforms），物理世界里的位置要到下一次模拟前同步——中间的 Overlap 查询会用旧位置。应改用 <code>rb.MovePosition</code>。</li>
+      <li><b>隧穿</b>：飞剑刚体是 Discrete 碰撞检测，速度约 35 m/s，每步移动 0.7 m，而剑的触发器半径只有 0.35 m——薄墙和瘦小的敌人可能被直接穿过。玩家和骷髅用的是 Continuous，飞剑也应该改。</li>
+    </ul>
+  </div>
+
+  <h2>5.6 面试追问</h2>
+<!--code:text:追问树-->
+Update 和 FixedUpdate 的区别？（Q5-1）
+├─ 为什么移动要乘 deltaTime？设 velocity 也要乘吗？（Q5-2）
+├─ 冲刺 / 攻击位移在高帧率下距离会变吗？卡顿时呢？（Q5-3 → E10）
+├─ 计时器怎么写才帧率无关？（Q5-4）
+├─ 固定步长游戏循环怎么写？为什么要插值？（Q5-5）
+└─ 轨迹预测怎么和物理对上？（Q5-6 → E9）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q5-1　Update 和 FixedUpdate 的区别？</div>
+    <p><b>L1</b>　Update 每渲染帧一次，间隔是 deltaTime、不固定；FixedUpdate 按 fixedDeltaTime（默认 0.02 s）固定间隔，一帧里可能执行 0 次或多次，物理模拟紧跟在它后面。</p>
+    <p><b>L2</b>　所以输入在 Update 读（GetKeyDown 只在一帧为真，FixedUpdate 可能漏掉），物理相关的力和持续推进放 FixedUpdate；在 Update 里直接设 velocity 是可以的，它在下一个物理步生效。</p>
+    <p><b>L3 · 项目</b>　我的冲刺在 Update 里计时、靠物理积分位移，测出来 120 / 144 fps 下距离会少 0.5 m，冲刺中卡顿 250 ms 能多冲 30%；改成按物理步计数后任何帧率都是 10 步 5 m。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q5-2　为什么移动要乘 deltaTime？设 velocity 也要乘吗？</div>
+    <p><b>L2</b>　直接改 position 时，每帧位移 = 速度 × 这一帧经过的时间，不乘就变成“每帧固定位移”，帧率翻倍速度翻倍。设 velocity 不用乘——velocity 本来就是“每秒”的量，由物理按时间积分；反而乘了才是错的。AddForce 在 FixedUpdate 里调用是“每步一次”，放在 Update 里会随帧率变化（ForceMode.Impulse 的一次性冲量例外）。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q5-3 → Q5-4　计时器怎么写才帧率无关？</div>
+    <p><b>L2</b>　周期性的计时器用累加：<code>timer -= dt; while (timer &lt;= 0) { timer += period; Fire(); }</code>，保留超出的余量，一帧里该触发几次就触发几次；只关心“过没过”的一次性计时器，到点触发即可，但要接受最多一帧的量化。</p>
+    <p><b>L3 · 项目</b>　点燃用的是“到点重置”，30 fps 下周期从 0.3 变成 0.333，2 秒少跳一次；旋转剑冷却配成 0 时命中次数等于帧数，240 fps 玩家的伤害是 30 fps 的 8 倍。这类伤害应该放到固定逻辑帧里统一结算。</p>
+    <p><b>L4 · 攻击</b>　“累加写法在卡顿时会一口气触发很多次，不是更糟吗？”→ 对伤害来说“总量正确”比“平滑”更重要；如果担心一帧里触发太多，可以给 while 设上限，把剩余的丢弃或延后，这是有意识的取舍，而不是漂移。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q5-5　固定步长的游戏循环怎么写？</div>
+    <p><b>L2</b>　累加器模式：<code>acc += frameDt; while (acc &gt;= step) { Simulate(step); acc -= step; } Render(lerp(prev, curr, acc / step));</code>。逻辑永远以固定步推进，渲染用两个逻辑状态之间的插值，代价是显示比逻辑晚最多一步。还要给 frameDt 设上限防止“死亡螺旋”（Unity 的 Maximum Allowed Timestep 就是这个）。</p>
+    <p><b>L3</b>　帧同步游戏把这个循环推到极致：逻辑帧率固定（如 15 Hz），只用定点数，渲染层插值和预表现；这样不同设备、不同帧率得到逐位相同的结果。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q5-6　轨迹预测怎么和物理对上？</div>
+    <p><b>L2</b>　连续抛物线和物理引擎的离散积分不一样：Box2D 是半隐式欧拉，位置比连续解多一项 ½·g·s·Δt·t。没有阻尼和碰撞时，用离散闭式解按物理步数画点就能逐位一致；有碰撞、阻尼、反弹时，在隐藏的物理场景里用 <code>PhysicsScene2D.Simulate</code> 预演若干步。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“在 Update 里改 rb.velocity 是错的，所有物理操作都必须放 FixedUpdate。”</p>
+    <p><b>问题</b>：设速度在 Update 里是安全的；真正有问题的是“在 Update 里施加持续力”和“用 Update 计时决定物理持续时长”。</p>
+    <p><b>更好的回答</b>：“输入在 Update 读、意图存下来；持续的力和需要严格时长的推进放在 FixedUpdate；一次性的速度变化放哪都行。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“乘了 deltaTime 就帧率无关了。”</p>
+    <p><b>问题</b>：乘 deltaTime 只解决“速率”，不解决“离散事件的次数”和“持续时长的量化”——点燃少跳一次、冲刺少走半米，都发生在乘了 deltaTime 的代码里。</p>
+  </div>
+
+  <h2>5.7 发散场景题</h2>
+  <div class="scene"><div class="q">场景 5-1　120 Hz 手机和 60 Hz 手机的玩家，跑图速度、冲刺距离、DPS 一样吗？</div>
+    <p class="why">为什么会问：移动端高刷普及，帧率差异是真实的公平性问题。</p>
+    <p>跑图速度一样（类别 ②）；冲刺距离在 120 Hz 下有一部分情况短 0.5 m（类别 ③）；点燃、旋转剑这类周期伤害取决于计时写法（类别 ④），冷却为 0 的技能 DPS 直接翻倍。排查方法：把所有“Update 里计时 + 结果有数值意义”的代码列出来，逐个改成累加或固定步。PVP 游戏还要求逻辑帧完全与渲染帧解耦。</p>
+  </div>
+  <div class="scene"><div class="q">场景 5-2　加入“子弹时间”（Time.timeScale = 0.3），哪些系统会出问题？</div>
+    <p class="why">为什么会问：考察 scaled / unscaled 时间的边界。</p>
+    <p>deltaTime、WaitForSeconds、Invoke、FixedUpdate 的步长（fixedDeltaTime 也随 timeScale 缩放，但物理步的间隔不变 → 每秒物理步数减少）都会变慢，这是想要的；需要不受影响的是 UI 动画、输入缓冲窗口（否则预输入时间变长 3 倍）、相机震动等，要改用 unscaledDeltaTime / WaitForSecondsRealtime。Animator 的 Update Mode 要决定是 Normal 还是 Unscaled Time。注意项目里的 <code>Time.time</code> 比较（连招窗口、攻击冷却）是缩放时间，子弹时间里连招窗口会“变长”。</p>
+  </div>
+  <div class="scene"><div class="q">场景 5-3　低帧率时玩家冲刺穿墙，你怎么解释和修复？</div>
+    <p class="why">为什么会问：隧穿是物理 + 帧率的综合题。</p>
+    <p>玩家刚体已经是 Continuous，单纯的物理隧穿不太会发生；但卡顿时冲刺多走的那 1~2 m（E10）可能让角色越过平台边缘；而飞剑是 Discrete，每步 0.7 m，薄墙可能被穿过。修复：飞剑改 Continuous；冲刺改成固定步计数；冲刺前用 <code>Rigidbody2D.Cast</code> 预测最远可达位置。</p>
+  </div>
+  <div class="scene"><div class="q">场景 5-4　要做“录像回放”，回放时结果和实战不一致，可能是哪些原因？</div>
+    <p class="why">为什么会问：回放是确定性的试金石，自然引向帧同步。</p>
+    <p>本项目里至少有四个不确定源：① 逻辑依赖帧率（冲刺、点燃、旋转剑）；② <code>UnityEngine.Random</code> 没有固定种子且被很多地方共用（暴击、闪避、掉落、分身攻击编号）；③ 动画事件的触发帧依赖渲染；④ 物理引擎在不同帧时序下结果不同。要做输入回放，必须先把逻辑放进固定步、随机数按系统分流并记录种子、命中改成逻辑时间轴；否则只能录“状态”（位置、血量）而不是录“输入”。</p>
+  </div>
+
+  <div class="co tip"><span class="h">方法论延伸</span><p>跳跃曲线（可变跳高、下落加重、顶点悬停）与输入延迟链路的分析见第 20 章。</p></div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>两条时间线：<b>Update 设速度 → 下一个物理步才位移</b>；输入在 Update 读。</li>
+    <li>三类问题代码：<b>Update 计时决定时长（量化）</b>、<b>到点重置的周期计时（漂移）</b>、<b>连续公式预测离散物理（偏差）</b>。</li>
+    <li>E10：120 / 144 fps 冲刺有时只有 4.5 m，卡 250 ms 冲 [[e10.hitch.250.max|.1f]] m；点燃 30 fps 少跳一次；冷却 0 的旋转剑命中数 = 帧数。</li>
+    <li>E9：剑比虚线低 <b>½·g·s·Δt·t</b>，1.68 s 时 [[e9.45_168.ady|.2f]] m；用离散闭式解可逐位对齐。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：跳跃高度会随帧率变化吗？</summary>基本不会：跳跃只在 Enter 时设一次 vy = 20，之后由物理积分（理论高度 v²/(2gs) = 400/98.1 ≈ 4.08 m）。</details>
+  <details class="quiz"><summary>自测 2：为什么 60 fps 冲刺稳定 5.00 m，而 120 fps 不稳定？</summary>两者都是“0.2 恰好是帧间隔的整数倍”，float 累减后余量落在 0 的哪一侧决定多一帧还是少一帧；60 fps 落在“多一帧”一侧（13 帧），120 fps 落在“少一帧”一侧（24 帧），少的那一帧让部分相位只覆盖 9 个物理步。</details>
+  <details class="quiz"><summary>自测 3：分身的淡出写法为什么与帧率无关？</summary><code>alpha -= dt · speed</code> 是连续量按时间缩放，总耗时 ≈ 1/speed 秒，误差只在最后一帧。</details>
+</section>

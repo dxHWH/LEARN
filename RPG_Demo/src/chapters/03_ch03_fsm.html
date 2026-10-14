@@ -1,0 +1,307 @@
+<div class="part-head" data-toc="PART II · 动作手感"><div class="no">PART II</div><h1>动作手感：状态机、动画、时间与判定</h1><p>动作游戏的“手感”由四件事共同决定：状态怎么切（第 3 章）、动画事件什么时候触发（第 4 章）、计时与物理是否帧率无关（第 5 章）、命中与弹反怎么判（第 6 章）。这一部分的每个结论都有逐帧回放的实测。</p></div>
+
+<section class="chapter" id="ch3">
+  <div class="ch-head">
+    <div class="no">CHAPTER 03</div>
+    <h1>玩家状态机：13 个状态、三个切换入口与缺失的守卫</h1>
+    <p class="lead">“状态机怎么设计”几乎是动作游戏客户端的必问题。这个项目的状态机结构清晰，但切换入口分散在三处、没有统一的守卫——于是出现了一帧两次转移、墙到头还在滑、死亡后冲刺“复活”。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出 13 个状态的转移图，说清 Grounded / Air 两个父类的作用</li>
+    <li>理解 <code>if (currentState != this) return;</code> 这句惯用法在防什么，用 E1 回放看缺了它会怎样</li>
+    <li>找到全部三个切换入口（状态自身 / 全局输入 / 外部强制），说明“死亡不是吸收态”的根因</li>
+    <li>给出转移守卫、优先级、输入缓冲的设计，并能在面试中画出分层状态机</li>
+  </ul></div>
+
+  <h2>3.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>每个状态是一个继承 <code>PlayerState</code> 的普通类，Enter 时把同名 Animator bool 置真、Exit 时置假，Update 里读输入并决定是否切换；地面通用的输入（攻击、反击、瞄准、跳、掉落）放在父类 <code>PlayerGroundedState</code>。问题在于切换入口有三处：状态自己的 Update、<code>Player.Update</code> 里全局的冲刺检测、以及外部直接调用的 <code>Die</code> / <code>CatchTheSword</code>，它们都不检查“当前状态允不允许被打断”。逐帧回放发现：落地贴墙会一帧切两次、墙到头仍在墙滑、死亡后按冲刺或飞剑飞回都能“复活”。改法是给状态加打断优先级和标签，所有切换走同一个带守卫的入口，并把输入抽成带缓冲的快照。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "玩家状态机", "rows": [["切换入口", "三处：状态自身、Player.Update 全局冲刺、外部强切（Die / CatchTheSword），都不检查当前状态", "P0 死亡后按冲刺 / 接剑即“复活”（E1-S3/S4，#3）", "唯一的 Request(下一状态, 等级) 入口，按可打断等级守卫；Death 只接受 Revive", "死亡成为吸收态，“复活”不再可能", "设计方案 · E1 已复现现状问题"], ["每帧切换次数", "不限制：ChangeState 之后，旧状态的 Update 继续往下执行", "P1 切换后继续执行旧状态代码：一帧两次转移，新状态 Enter 的初始化被覆盖（E1-S1，#15）", "请求-提交：本帧只登记请求，帧末统一切换一次", "Enter 的初始化不会被旧状态覆盖；代价是新状态晚半帧开始 Tick", ""], ["出口完整性", "WallSlide 的出口只有：着地、蹬墙、按离墙方向", "P1 墙在半空结束后对着空气慢落（E1-S2，#14）", "每个状态的出口覆盖“进入条件不再成立”，状态机每帧先检查 StillValid", "新增状态时不会漏出口", ""], ["父状态", "Grounded / Air 只是代码复用，子类要手动判 <code>currentState != this</code>", "局限 父状态不是状态，子类漏判 <code>currentState != this</code> 就出错（#15 的成因）；“边跑边瞄准”只能再造组合状态", "真正的分层状态机：父状态也是状态；移动层与动作层并行", "边跑边瞄准、空中攻击不需要组合新状态", ""], ["输入", "12 处 <code>Input.*</code> 直接在状态里读", "局限 无法重绑定、无法缓冲 / 回放 / AI 托管、无法单测；落地前按的跳直接丢失（F3）", "输入采样成意图快照 + 带时间戳的预输入缓冲（第 20 章）", "可重绑定、可回放、可 AI 托管、可单测", ""], ["可观测性", "没有切换日志", "局限 “动作偶尔抽一下”无法复现定位；E1 这类问题只有逐帧回放才看得到", "最近 64 次切换的环形缓冲 + 屏幕 HUD", "“动作偶尔抽一下”可以定位", ""]]} -->
+
+
+  <h2>3.2 状态与转移全图</h2>
+<!--graph {"h":500,"w":900,
+"rects":[{"x":30,"y":44,"w":380,"h":124,"c":"b","dash":"5 4"},{"x":452,"y":44,"w":436,"h":270,"c":"g","dash":"5 4"}],
+"nodes":[
+ {"id":"idle","x":115,"y":106,"t":"Idle","c":"b"},{"id":"move","x":325,"y":106,"t":"Move","c":"b"},
+ {"id":"g","k":"act","x":220,"y":205,"c":"b","lab":"Grounded.Update","lp":"r","lcls":"xs b","lfill":"#2F5BD3"},
+ {"id":"atk","x":95,"y":320,"t":"Attack","s":"三段","c":"o","lab":"结束 → Idle","lp":"b"},
+ {"id":"ctr","x":220,"y":320,"t":"Counter","s":"1 s","c":"o","lab":"超时 → Idle","lp":"b"},
+ {"id":"aim","x":345,"y":320,"t":"Aim","s":"瞄准","c":"o","lab":"松键 → Idle","lp":"b"},
+ {"id":"jump","x":540,"y":110,"t":"Jump","c":"g"},{"id":"fall","x":540,"y":250,"t":"Fall","c":"g"},
+ {"id":"wj","x":800,"y":110,"t":"WallJump","ts":11,"c":"g"},{"id":"ws","x":800,"y":250,"t":"WallSlide","ts":11,"c":"g"},
+ {"id":"catch","x":520,"y":430,"t":"Catch","s":"接剑","c":"p","lab":"结束 → Idle","lp":"b"},
+ {"id":"death","x":665,"y":430,"t":"Death","c":"r","term":true,"hl":true},
+ {"id":"dash","x":800,"y":430,"t":"Dash","s":"0.2 s","c":"p","lab":"0.2 s → Idle","lp":"b"}],
+"edges":[
+ {"f":"idle","t":"move","l":"x≠0 且不忙","bend":-24,"dy":-6},{"f":"move","t":"idle","l":"x = 0","bend":-24,"dy":10},
+ {"f":"g","t":"atk","l":"左键","dx":-14},{"f":"g","t":"ctr","l":"Q","dx":8},{"f":"g","t":"aim","l":"右键·无剑","dx":22},
+ {"f":"g","t":"jump","l":"空格","bend":-20,"lt":0.55,"dy":-6},{"f":"g","t":"fall","l":"离地","lt":0.6,"dy":-8},
+ {"f":"jump","t":"fall","l":"vy<0","dx":20},{"f":"fall","t":"ws","l":"贴墙","dy":-8},{"f":"ws","t":"wj","l":"空格","dx":22},{"f":"wj","t":"fall","l":"vy<0","dy":-8,"lt":0.4},
+ {"f":"dash","t":"ws","l":"空中贴墙","c":"p","dx":-34},
+ {"f":"death","t":"dash","l":"Shift（全局）","c":"r","dash":true,"dy":-10},
+ {"f":"death","t":"catch","l":"剑飞回","c":"r","dash":true,"dy":-10}],
+"texts":[{"x":38,"y":36,"t":"PlayerGroundedState 子类（共享输入分支）","cls":"xs b","fill":"#2F5BD3"},{"x":460,"y":36,"t":"PlayerAirState 子类 + 墙相关（各自直接继承 PlayerState）","cls":"xs b","fill":"#15803D"},
+ {"x":470,"y":300,"t":"Fall / WallSlide 着地 → Idle；WallSlide 反向输入 → Idle","cls":"xs"},
+ {"x":36,"y":410,"t":"红色虚线 = 不经状态自身判断的切换：","cls":"xs b","fill":"#B91C1C"},
+ {"x":36,"y":428,"t":"任何状态（包括 Death）都能被 Shift 冲刺、","cls":"xs","fill":"#B91C1C"},
+ {"x":36,"y":446,"t":"飞剑飞回强行切走（图中只画了从 Death 出发的两条）","cls":"xs","fill":"#B91C1C"}],
+"cap":"图 3-1　玩家状态转移全图（源码：player/*.cs）。蓝框内两个状态共享 Grounded 的输入分支（小圆点）；红色虚线是两个“全局入口”——它们从任何状态都能发生"} -->
+
+  <h2>3.3 骨架代码：模板方法 + 父类兜底输入</h2>
+<!--code:cs:PlayerState.cs:25-44 / PlayerStateMachine.cs:11-22 ‖ 局限 状态直接读 Input、共用一个 stateTimer；ChangeState 无条件切换，不检查当前状态允不允许被打断（#3 的根源）-->
+public virtual void Enter()  { player.animator.SetBool(animBoolName, true); rb = player.rb; triggerCalled = false; }
+public virtual void Update()
+{
+    stateTimer -= Time.deltaTime;                    // 每个状态共用一个倒计时
+    xInput = Input.GetAxisRaw("Horizontal");         // 状态直接读输入
+    yInput = Input.GetAxisRaw("Vertical");
+    player.animator.SetFloat("yVelocity", rb.velocity.y);
+}
+public virtual void Exit()   { player.animator.SetBool(animBoolName, false); }
+
+public void ChangeState(PlayerState _playerState)    // 没有任何检查：谁调都切
+{
+    currentState.Exit();
+    currentState = _playerState;
+    currentState.Enter();
+}
+<!--/code-->
+<!--code:cs:PlayerGroundedState.cs:21-53 + PlayerIdleState.cs:23-32 ‖ P1 父类里的 return 只退出父类函数，子类必须再判 currentState != this，漏判即一帧两次转移（#15）；HasNoSword() 是带副作用的查询（#36）-->
+public override void Update()                        // Grounded：地面通用输入，按优先级 return
+{
+    base.Update();
+    if (Input.GetKeyDown(KeyCode.Mouse1) && HasNoSword()) { stateMachine.ChangeState(player.aimSwordState); return; }
+    if (Input.GetKeyDown(KeyCode.Mouse0))                { stateMachine.ChangeState(player.primaryAttack);  return; }
+    if (Input.GetKeyDown(KeyCode.Q))                     { stateMachine.ChangeState(player.counterAttack);  return; }
+    if (Input.GetButtonDown("Jump") && player.IsGroundedDetected()) { stateMachine.ChangeState(player.jumpState); return; }
+    if (!player.IsGroundedDetected())                    { stateMachine.ChangeState(player.fallState); return; }
+}
+// Idle：父类可能已经切走了——这句守卫防的是“已经不是我了还继续执行我的逻辑”
+public override void Update()
+{
+    base.Update();
+    if (stateMachine.currentState != this) return;
+    if (xInput != 0 && !player.isBusy) stateMachine.ChangeState(player.moveState);
+}
+<!--/code-->
+  <p>这是典型的<b>模板方法</b>：父类定义 Enter / Update / Exit 的公共部分，子类 override 后先调 base。两个细节值得在面试里主动说：</p>
+  <ul>
+    <li><b>父类里的 return 只能退出父类函数</b>。Grounded.Update 切到攻击后 return，回到 Idle.Update 里还会继续往下执行——所以 Idle / Move 都要再判一次 <code>currentState != this</code>。这是“继承复用切换逻辑”的固有代价，第 9 章骷髅的 Battle 状态正是因为没意识到这一点而每帧自己切到自己。</li>
+    <li><code>HasNoSword()</code> 名字是查询，但它有副作用：剑在外面时会顺手 <code>ReturnSword()</code>。于是“右键”在有剑时变成“召回”，逻辑上没错，但读代码的人看条件判断时不会想到这里在改世界。</li>
+  </ul>
+
+  <h2>3.4 E1-S1：落地那一帧刚好贴墙，一帧切两次</h2>
+<!--code:cs:PlayerFallState.cs:16-35（三个 if 之间没有 return，也没有 currentState 守卫） ‖ P1 三个 if 之间没有 return：落地贴墙一帧切两次，Idle.Enter 清零的速度又被旧代码改回（E1-S1，#15）-->
+public override void Exit()
+{
+    base.Exit();
+    player.SetVelocity(xInput, rb.velocity.y);  // 原注释：修“落地保留水平速度”；没乘 moveSpeed
+}
+public override void Update()
+{
+    base.Update();
+    if (player.IsGroundedDetected())
+        stateMachine.ChangeState(player.idleState);
+    if (xInput != 0)                                   // ← 已经切到 Idle 了，仍然执行
+        player.SetVelocity(xInput * player.moveSpeed, rb.velocity.y);
+    if (player.IsWallDetected())                       // ← 再切一次
+        stateMachine.ChangeState(player.wallSlideState);
+}
+<!--/code-->
+  <p>脚本化输入：空中按住 → 下落，第 5 帧同时“着地 + 贴墙”（向墙根跳过去、正好落在墙脚时就是这样）。C++ 逐行移植后的回放 <span class="tag ex">实测 E1</span>：</p>
+<!--dtab {"rows":"E1.S1.rows","cols":[["帧","f"],["输入 / 传感器","in"],["进入时状态","before"],["本帧发生的转移","trans"],["结束时状态","after"],["vx","vx"],["Animator 为真的 bool","bools"]],"hlif":"'，' in trans","cap":"表 3-1　E1-S1 回放（60 fps）。第 5 帧在一次 Update 里连续两次 ChangeState，最终停在 WallSlide 且 vx = 7（Fall 里的 SetVelocity 在切到 Idle 之后仍执行）；下一帧 WallSlide 发现着地又切回 Idle"} -->
+  <p>后果有三层：① Animator 上 WallSlide 被置真一帧，因为玩家 Animator 的转移都是“无退出时间、过渡 0”，墙滑动画有机会闪现一帧 <span class="tag inf">推断</span>；② Idle.Enter 刚把速度清零，Fall 的下一行又把 vx 设回 7——<b>Enter 里做的初始化被旧状态的后续代码覆盖</b>；③ 这类问题不会报错，只会表现为“偶尔动作抽一下”，最难查。修法有两种：每个分支切换后立刻 return；或者在状态机层面<b>把切换延迟到本帧状态 Update 结束后再统一执行</b>（下一节的“请求-提交”模式）。</p>
+
+  <h2>3.5 E1-S2：墙到头了，还在墙滑</h2>
+  <p>WallSlide.Update 只有三个出口：反向输入、跳跃、着地。<b>没有“墙没了 → Fall”</b>。当墙是平台侧面、下沿悬在半空时，贴墙滑过下沿之后：</p>
+<!--dtab {"rows":"E1.S2.rows","cols":[["帧","f"],["输入 / 传感器","in"],["进入时状态","before"],["本帧发生的转移","trans"],["结束时状态","after"],["vy","vy"]],"cap":"表 3-2　E1-S2 回放：第 10 帧起已经不贴墙，但一直停在 WallSlide，每帧被强制设成 vy = −2（重力被覆盖），直到第 70 帧着地——整整 [[E1.S2.wsFrames|.0f]] 帧里有 60 帧是“对着空气墙滑”"} -->
+  <p>画面上就是角色在半空以 2 m/s 缓慢下落、播放墙滑动画。玩家的直接感受是“卡住了”。这个 bug 的教训是<b>每个状态都要问：进入条件消失时怎么办？</b>进入 WallSlide 的条件是“空中 + 贴墙”，那么“不贴墙”和“着地”都必须是出口。</p>
+
+  <h2>3.6 E1-S3 / S4：死亡不是吸收态</h2>
+  <p>正常的状态机里，Death 应该是<b>吸收态</b>（只能被“复活”这种显式事件离开）。这个项目有三个切换入口，后两个都不看当前状态：</p>
+  <div class="tbl"><table>
+    <tr><th>入口</th><th>源码</th><th>能从哪些状态触发</th></tr>
+    <tr><td>① 状态自身 Update</td><td>各状态类</td><td>只在本状态内，逻辑自洽</td></tr>
+    <tr><td>② 全局冲刺</td><td><code>Player.Update → DashInputCheck</code>（Player.cs:105-119），在 <code>currentState.Update()</code> 之前执行</td><td><b>全部 13 个</b>：包括 Death、CounterAttack、AimSword、CatchSword、WallSlide</td></tr>
+    <tr><td>③ 外部强制</td><td><code>PlayerStats.Die → player.Die()</code>、<code>SkillController_ThrowSword.Update → player.CatchTheSword()</code>、<code>Entity.DamageEffect</code></td><td>全部；CatchTheSword 只要剑飞到 1 m 内就切</td></tr>
+  </table></div>
+<!--dtab {"rows":"E1.S3.rows","cols":[["帧","f"],["输入","in"],["进入时状态","before"],["本帧发生的转移","trans"],["结束时状态","after"],["vx","vx"]],"hlif":"'Death→' in trans","cap":"表 3-3　E1-S3：第 10 帧死亡，第 40 帧按 Shift——Death→Dash 直接发生（Skill_Dash 冷却早已好了），0.2 s 后进入 Idle，第 60 帧起能正常走路。Death.Exit 把 Die 置假，Animator 也离开了死亡动画"} -->
+<!--dtab {"rows":"E1.S4.rows","cols":[["帧","f"],["输入","in"],["进入时状态","before"],["本帧发生的转移","trans"],["结束时状态","after"],["vx","vx"]],"hlif":"'Death→' in trans","cap":"表 3-4　E1-S4：死亡前掷出的飞剑在第 40 帧飞回 → CatchTheSword 把 Death 切成 CatchSword，接剑动画事件触发后回到 Idle（模型：事件时间 0.2143 s）"} -->
+  <p>为什么测试时没发现？因为骷髅 damage = 0，玩家在当前场景里根本死不了；一旦给骷髅配上伤害，这就是一个<b>必现的 P0</b>。同样的问题也出在冲刺打断反击（弹反判定中途被取消）、打断接剑（剑已销毁但接剑状态没走完）等组合上——状态数 13，任意两两组合就有 156 种转移，靠人眼检查不可能覆盖。</p>
+
+  <h2>3.7 两个小机关：isBusy 与连招计数</h2>
+  <p><b>isBusy</b>：攻击和接剑在 Exit 时 <code>player.StartCoroutine("BusyForSeconds", .1f)</code>，0.1 s 内 Idle 不允许切 Move——用来消掉“攻击刚结束角色滑一下”的手感问题。但它是<b>可重叠的协程</b>：两个 BusyForSeconds 叠在一起时，先开始的那个结束就会把 isBusy 置假，后一个的 0.1 s 被提前截断。这和第 7 章“冻结协程重叠”是同一种 bug，只是这里时间短、影响小。</p>
+  <p><b>连招计数</b>：<code>comboCounter</code> 在 Exit 里 +1，Enter 里“超过 2 或距上次攻击超过 1.5 s”就归零。<span class="tag ex">实测 E1-S5</span>：第 1 段在命中帧（0.357 s）之前被冲刺取消，Exit 照样 +1，下一次左键直接打出第 2 段（进入时计数依次为 [[E1.S5.combo.0]]、[[E1.S5.combo.1]]）。</p>
+  <div class="co deep"><span class="h">这是 bug 还是设计？</span>
+    <p>“取消后连招是否推进”没有标准答案：鬼泣系允许跳跃 / 冲刺取消后续段，有的游戏取消即重置。问题在于这里的行为<b>是 Exit 写法的副产品，不是被设计出来的</b>：第 3 段攻击位移是 3（最大），“冲刺取消第 1 段 → 直接第 2 段 → 第 3 段”可以让玩家用更短的时间打出位移最大的一段。面试时这样说最好：“我发现这个行为后先确认了它是不是想要的，再决定把推进条件改成‘命中帧之后才算完成一段’。”</p>
+  </div>
+
+  <h2>3.8 输入直接写在状态里：手感与可测试性的天花板</h2>
+  <p>玩家相关代码里有 <b>12 处</b> <code>Input.*</code> 调用，分散在 6 个文件（PlayerState 2、Grounded 4、WallSlide 1、PrimaryAttack 1、AimSword 2、Player 2），瞄准方向和松键时机在 Skill_ThrowSword 里又读了 3 次。带来的限制：</p>
+  <div class="tbl"><table>
+    <tr><th>限制</th><th>表现</th><th>动作游戏里的标准做法</th></tr>
+    <tr><td>没有<b>输入缓冲</b>（预输入）</td><td>攻击动画还剩 50 ms 时按下的跳跃被丢弃，玩家觉得“按了没反应”</td><td>按键进入带时间戳的缓冲队列，状态在“可取消窗口”里消费 100~200 ms 内的缓冲指令</td></tr>
+    <tr><td>没有 <b>Coyote Time</b></td><td>跑出平台边缘的下一帧就切 Fall，此时按跳无效</td><td>离地后 0.1 s 左右仍允许起跳</td></tr>
+    <tr><td><code>GetKeyDown</code> 只在一帧为真</td><td>两个状态在同一帧都想消费同一个按键时，先执行的抢走；状态切换那帧的按键会被新状态错过（新状态本帧不再 Update）</td><td>输入在帧首采样成快照，由状态机统一分发</td></tr>
+    <tr><td>无法重绑定 / 手柄 / 回放 / AI 托管</td><td>按键写死 Mouse0 / Q / LeftShift</td><td>Input System 的 Action 映射；状态只认“意图”（Attack、Dash），不认键位</td></tr>
+    <tr><td>无法单元测试</td><td>状态逻辑依赖全局 Input</td><td>注入输入接口；本书 E1 就是把 Input 替换成脚本化快照才得以逐帧回放</td></tr>
+  </table></div>
+<!--code:cs:【改进】输入快照 + 预输入缓冲（C#，未在 Unity 中编译）-->
+public enum Intent { None, Attack, Jump, Dash, Counter, Aim }
+public struct InputFrame { public float x, y; public Intent pressed; public bool aimHeld, aimReleased; }
+
+public class InputBuffer
+{
+    readonly Queue<(Intent intent, float time)> q = new Queue<(Intent, float)>();
+    public float window = 0.15f;                       // 预输入有效期
+    public void Push(Intent i, float now) { if (i != Intent.None) q.Enqueue((i, now)); }
+    public bool Consume(Intent want, float now)        // 状态在“可取消窗口”里调用
+    {
+        while (q.Count > 0 && now - q.Peek().time > window) q.Dequeue();   // 丢掉过期指令
+        if (q.Count > 0 && q.Peek().intent == want) { q.Dequeue(); return true; }
+        return false;
+    }
+}
+// 每帧开头：frame = sampler.Sample(); buffer.Push(frame.pressed, Time.time); 然后才 stateMachine.Tick(frame)
+<!--/code-->
+
+  <h2>3.9 改进：一个入口、带守卫、按优先级打断</h2>
+<!--flow {"h":330,"w":900,"cols":[16,250,484,700],"colw":[210,210,190,184],"rows":[30,130,230],
+"rects":[{"x":8,"y":8,"w":884,"h":306,"c":"s","t":"所有切换都走 StateMachine.Request(next, reason)，在本帧状态逻辑跑完后统一提交","fill":"#FFFFFF"}],
+"boxes":[
+ {"id":"a","cr":[0,0],"t":"状态自身","s":"Update 里 Request(下一个)","c":"b"},
+ {"id":"b","cr":[0,1],"t":"全局意图","s":"Dash / Jump 来自输入缓冲","c":"b"},
+ {"id":"c","cr":[0,2],"t":"外部事件","s":"Die / 剑飞回 / 受击 / 眩晕","c":"o"},
+ {"id":"q","cr":[1,1],"t":"Request 队列","s":"同帧多次请求只留优先级最高的","c":"p","hl":true},
+ {"id":"g","cr":[2,1],"t":"守卫 CanEnter / CanExit","s":"当前状态的可打断等级","c":"p"},
+ {"id":"o","cr":[3,0],"t":"提交：Exit → Enter","s":"每帧至多一次","c":"g"},
+ {"id":"r","cr":[3,2],"t":"拒绝并记录","s":"状态历史环形缓冲（调试 HUD）","c":"s"}],
+"arrows":[{"from":"a","to":"q","c":"b"},{"from":"b","to":"q","c":"b"},{"from":"c","to":"q","c":"o"},{"from":"q","to":"g","c":"p"},
+ {"from":"g","to":"o","c":"g","label":"允许","lx":670,"ly":110},{"from":"g","to":"r","c":"s","label":"拒绝","lx":670,"ly":214}],
+"cap":"图 3-2　改进后的切换管线：三个入口不再直接调用 ChangeState，而是提交请求；状态声明自己的“可打断等级”，Death 等级最高（只接受 Revive），攻击前摇 / 后摇可以有不同等级"} -->
+  <div class="tbl"><table>
+    <tr><th>状态</th><th>可被谁打断（等级 ≥）</th><th>标签</th></tr>
+    <tr><td>Idle / Move / Fall / Jump</td><td>任何请求</td><td>CanMove · CanDash · CanAttack</td></tr>
+    <tr><td>Attack 前摇（命中帧前）</td><td>受击硬直、死亡（Dash 是否允许由设计决定）</td><td>Committed</td></tr>
+    <tr><td>Attack 后摇（命中帧后）</td><td>Dash、Jump、下一段攻击（消费预输入）</td><td>Cancelable</td></tr>
+    <tr><td>Counter / Aim / CatchSword</td><td>受击、死亡、Dash</td><td>—</td></tr>
+    <tr><td>Death</td><td><b>只接受 Revive</b></td><td>Dead（所有“CanXxx”都为假）</td></tr>
+  </table></div>
+<!--code:cs:【改进】带守卫的状态机（C#，未在 Unity 中编译）-->
+public abstract class PlayerState
+{
+    public virtual int InterruptLevel => 0;          // 被打断所需的最低请求等级
+    public virtual bool IsDead => false;
+    // ...Enter / Tick / Exit
+}
+public class PlayerStateMachine
+{
+    public PlayerState Current { get; private set; }
+    PlayerState pending; int pendingLevel = -1;
+    public void Request(PlayerState next, int level)  // level：普通 0、受击 5、死亡 9、复活 10
+    {
+        if (next == Current || level < Current.InterruptLevel) return;   // 自转移、等级不够：拒绝
+        if (level > pendingLevel) { pending = next; pendingLevel = level; }
+    }
+    public void Tick(in InputFrame f)
+    {
+        Current.Tick(f);                              // 状态只 Request，不直接切
+        if (pending != null) { Current.Exit(); Current = pending; Current.Enter(); }
+        pending = null; pendingLevel = -1;            // 每帧至多切一次
+    }
+}
+// Death.InterruptLevel = 10：Shift 冲刺（0）、剑飞回（0）、受击（5）都进不来，只有 Revive（10）可以
+<!--/code-->
+  <p>这样改有三个直接收益：① 同一帧至多切换一次，S1 的“一帧两跳”不可能发生；② Death 成为真正的吸收态，S3 / S4 被守卫拒绝；③ 拒绝的请求可以记日志，配合“最近 64 次切换”的环形缓冲画成屏幕 HUD，手感问题第一次有了可观测性。<b>代价</b>是切换晚了“半帧”：新状态的 Enter 在本帧末尾执行，新状态的第一次 Tick 在下一帧——对 60 fps 的动作游戏通常可接受，格斗类可以让提交后立即补一次 Tick。</p>
+  <div class="co deep"><span class="h">扩展：分层状态机（HFSM）与并行状态</span>
+    <p>项目里 Grounded / Air 已经是“父状态”的雏形，但父类只用来复用代码，状态机本身是扁平的。真正的 HFSM 让父状态也是状态：Grounded 处理“离地 → Air”这类所有子状态共有的转移，子状态只关心自己；还可以拆成<b>并行的两层</b>——“移动层”（Idle / Move / Air / WallSlide）与“动作层”（None / Attack / Counter / Aim），这样“边跑边瞄准”“空中攻击”不需要再组合出新状态。Unity 的 Animator 本身就支持多层 + Avatar Mask，逻辑分层与动画分层一一对应最好维护。</p>
+  </div>
+
+  <h2>3.10 面试追问</h2>
+<!--code:text:追问树-->
+你的状态机怎么设计的？（Q3-1）
+├─ 父类里切换了状态，子类还会继续执行吗？（Q3-2 → E1-S1）
+├─ 怎么防止非法切换？死亡状态能被打断吗？（Q3-3 → E1-S3/S4）
+│   └─ 同一帧有多个切换请求（受击 + 冲刺）听谁的？（Q3-4 优先级）
+├─ 进入条件消失时怎么办？（Q3-5 → E1-S2 墙滑）
+├─ 预输入 / 取消窗口怎么做？（Q3-6 → 3.8）
+└─ 状态机和行为树怎么选？Animator 能不能直接当状态机？（Q3-7）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q3-1　你的状态机怎么设计的？</div>
+    <p><b>L1</b>　每个状态一个类，Enter / Update / Exit；状态机只持有 currentState，ChangeState 先 Exit 旧的再 Enter 新的。</p>
+    <p><b>L2</b>　状态在 Awake 里一次性创建，切换零分配；Enter / Exit 成对设置 Animator bool，Animator 用 Exit → Entry 的结构根据 bool 选片段；地面通用输入放在 Grounded 父类，按“瞄准 &gt; 攻击 &gt; 反击 &gt; 跳 &gt; 掉落”的顺序 return，相当于一个隐式的优先级。</p>
+    <p><b>L3</b>　我后来发现最大的问题不在状态本身，而在<b>切换入口</b>：冲刺在 Player.Update 里全局检测，接剑和死亡由外部直接调用，三处都不检查当前状态。所以我会把切换统一成“请求 + 守卫 + 每帧至多提交一次”。</p>
+    <p><b>L4 · 攻击</b>　“13 个状态而已，有必要搞这么复杂吗？”→ 状态少的时候确实可以靠人脑检查，但 13 个状态两两组合就有 156 种转移，我用逐帧回放就找到了死亡后冲刺复活这种组合 bug；守卫的代码量很小，换来的是“新增状态时不用回头检查所有入口”。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q3-2　父类里切换了状态，子类还会继续执行吗？</div>
+    <p><b>L2</b>　会。<code>base.Update()</code> 里的 return 只退出父类函数，子类的后续代码照常执行。所以 Idle / Move 在 base.Update 之后先判 <code>currentState != this</code>。</p>
+    <p><b>L3 · 项目</b>　Fall 没有继承 Grounded，但它自己的三个 if 之间没有 return：落地那一帧刚好贴墙，就会 Fall→Idle→WallSlide 连切两次，Idle.Enter 刚清零的速度还会被 Fall 的下一行设回 7。我用 C++ 移植逐帧回放确认过。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q3-3 → Q3-4　怎么防止非法切换？同一帧多个请求听谁的？</div>
+    <p><b>L2</b>　给状态定义可打断等级，请求带等级，低于当前状态等级的请求直接拒绝；同一帧的多个请求只保留等级最高的。死亡等级最高，只接受复活。</p>
+    <p><b>L3</b>　等级是“横切”的规则，不要写进每个状态的 if 里；标签（CanMove、CanDash、Dead）则给外部系统查询用——比如技能系统在释放前查 <code>CanCast</code>，AI 托管在死亡时停止输入。GAS 里的 Gameplay Tags + Blocked Tags 就是这个思路的通用化。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q3-5　进入条件消失时怎么办？</div>
+    <p><b>L2</b>　每个状态的出口集合至少要覆盖“进入条件的否定”。WallSlide 的进入条件是“空中且贴墙”，我漏了“不贴墙 → Fall”，于是滑过平台侧面下沿时会在半空慢速下滑一秒。</p>
+    <p><b>L3</b>　可以写成一条可检查的约定：状态声明 <code>bool StillValid()</code>，状态机每帧先检查，失效就回到父状态的默认子状态。这样任何人新增状态都不会忘。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q3-6　预输入和取消窗口怎么做？</div>
+    <p><b>L2</b>　输入在帧首采样并进入带时间戳的缓冲；动作状态声明“可取消窗口”（例如命中帧之后到动画结束），窗口内消费缓冲里 0.1~0.2 s 以内的指令。没进窗口前的按键不丢，到窗口时自动生效。</p>
+    <p><b>L3</b>　窗口最好由动画或技能时间轴标记（动画事件 / Notify State），而不是写死时间；我项目里的 <code>inertiaTime = 0.15f</code>、<code>BusyForSeconds(.1f)</code> 就是写死时间的反例，换了动画节奏就要回来改代码。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q3-7　状态机和行为树怎么选？能不能直接用 Animator 当状态机？</div>
+    <p><b>L2</b>　玩家角色的状态少、切换受输入驱动、需要精确的帧级控制，FSM / HFSM 最合适；AI 的决策多、需要优先级和组合，行为树更合适（第 9 章）。Animator 可以用 StateMachineBehaviour 承载逻辑，但它的转移在动画更新阶段发生、受过渡时间和退出时间影响，逻辑时序不可控，还和美术资源绑死——所以通常“逻辑状态机驱动 Animator 参数”，而不是反过来。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“状态之间切换由 Animator 的转移控制。”</p>
+    <p><b>问题</b>：本项目恰恰相反——逻辑状态机在 Update 里切换，Animator 只是被动地读 bool；混淆两者会被追问“那动画事件触发时逻辑在哪个状态？”问倒。</p>
+    <p><b>更好的回答</b>：“逻辑状态机是权威，Animator 跟随；关键时刻由动画事件回调到逻辑，所以两者在时间上需要对齐（第 4 章）。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“我的状态机没有问题，每个状态都测过。”</p>
+    <p><b>问题</b>：单个状态都对，组合起来不对——S1（两状态在同一帧）和 S3（外部入口 × 死亡）都不是单状态测试能发现的。</p>
+    <p><b>更好的回答</b>：“单状态行为我手测过；组合问题我用脚本化输入逐帧回放找过，发现了一帧双转移和死亡可打断，改成了统一入口加守卫。”</p>
+  </div>
+
+  <h2>3.11 发散场景题</h2>
+  <div class="scene"><div class="q">场景 3-1　策划说“攻击后摇太长，想在后摇里按跳跃能直接跳”，你怎么做？</div>
+    <p class="why">为什么会问：取消窗口是动作手感的核心，考察你会不会写死时间。</p>
+    <p>① 在攻击动画上标一段“可取消窗口”（动画事件 Begin / End，或 Animation Curve），而不是写 <code>stateTimer &lt; x</code>；② 窗口内 Attack 状态向输入缓冲查询 Jump / Dash / 下一段攻击，命中就 Request；③ 窗口外的按键留在缓冲里 0.15 s，进窗口自动生效；④ 给策划一个调试开关，在角色头顶显示当前是否处于取消窗口。注意不同指令可以有不同窗口（冲刺可以更早取消，跳跃晚一点）。</p>
+  </div>
+  <div class="scene"><div class="q">场景 3-2　加入“受击硬直”和“霸体”，怎么和现有状态共存？</div>
+    <p class="why">为什么会问：现在受击只有闪白 + 击退协程，不改变状态。</p>
+    <p>新增 Hurt 状态（等级 5），受击时 Request(Hurt, 5)；霸体不是一个状态，而是一个<b>标签 / 修正器</b>（SuperArmor），存在时受击请求的等级降到 0（只扣血不打断）。攻击前摇可以在动画里临时挂霸体。这样霸体、无敌、格挡都能用同一套“标签 + 等级”表达，不会出现 13 × N 的组合状态。</p>
+  </div>
+  <div class="scene"><div class="q">场景 3-3　要加“爬梯子”，需要改哪些地方？</div>
+    <p class="why">为什么会问：考察扩展点是否集中。</p>
+    <p>现状要改：新建 LadderState；在 Grounded 和 Fall 里加进入条件（贴梯子 + 上下输入）；冲刺的全局检测要排除梯子状态；接剑强切要排除；WallSlide 的墙检测要排除梯子层。改进后：LadderState 声明自己的等级和标签（CanDash = false），进入条件注册到“移动层”的转移表里，其他状态一行不改。</p>
+  </div>
+  <div class="scene"><div class="q">场景 3-4　玩家反馈“偶尔动作会抽一下”，你怎么查？</div>
+    <p class="why">为什么会问：考察调试方法论，而不是背知识点。</p>
+    <p>① 先加可观测性：状态机记录每次切换（帧号、旧 → 新、原因、请求来源），保存最近 64 条，屏幕 HUD 显示；② 复现时看是否出现“同一帧两次切换”或“极短的状态停留”（S1 就是停留 1 帧的 WallSlide）；③ 把输入录下来回放（这要求输入已经抽成快照），用二分法缩小到具体帧；④ 修完后把这段输入存成回归用例。</p>
+  </div>
+  <div class="scene"><div class="q">场景 3-5　把玩家改成可由 AI 托管（掉线托管、自动战斗），状态机要怎么改？</div>
+    <p class="why">为什么会问：考察输入抽象。</p>
+    <p>状态机只消费 InputFrame，玩家输入采样器和 AI 决策器都输出 InputFrame（意图 + 轴向）；AI 不需要“模拟按键”，直接产出意图。这也是联网时把输入发给服务器 / 其他客户端的基础（第 14 章）。</p>
+  </div>
+
+  <div class="co tip"><span class="h">方法论延伸</span><p>状态判定（着地 / 贴墙）应如何从状态里拆出来做成感知层，见第 17 章；滑墙状态的完整设计见第 18 章；预输入、土狼时间等输入宽容的量化与设计见第 20 章。</p></div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>结构：<b>状态类 + 模板方法 + Grounded/Air 父类</b>；Enter/Exit 成对设 Animator bool。</li>
+    <li>父类里的 return 只退出父类；子类要判 <code>currentState != this</code>。Fall 没有守卫 → <b>落地贴墙一帧切两次</b>（E1-S1）。</li>
+    <li>WallSlide 没有“墙没了”出口 → <b>半空慢滑 60 帧</b>（E1-S2）。</li>
+    <li>三个切换入口都不检查当前状态 → <b>死亡后冲刺 / 接剑复活</b>（E1-S3/S4）。</li>
+    <li>改进：<b>Request + 等级守卫 + 每帧至多一次 + 切换历史</b>；输入抽成快照 + 预输入缓冲。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：Grounded.Update 的 if 顺序隐含了什么规则？</summary>优先级：瞄准 > 攻击 > 反击 > 跳跃 > 掉落。同一帧同时按左键和空格，只会攻击。</details>
+  <details class="quiz"><summary>自测 2：为什么 S3 在当前场景里没人发现？</summary>骷髅 damage = 0、魔法伤害调用被注释，玩家死不了；数值一改就会必现。</details>
+  <details class="quiz"><summary>自测 3：“请求-提交”模式的代价是什么？</summary>新状态的第一次 Tick 推迟到下一帧（半帧延迟）；需要时可在提交后立即补一次 Tick。</details>
+</section>

@@ -1,0 +1,168 @@
+<section class="chapter" id="appA">
+  <div class="ch-head">
+    <div class="no">APPENDIX · A</div>
+    <h1>问题总表（36 条）</h1>
+    <p class="lead">按严重度排序。P0 = 无法构建 / 功能完全失效 / 状态机核心约束被破坏；P1 = 明显错误的玩法结果；P2 = 边界、体验、隐患；P3 = 代码质量与工程规范。行号对应 822270c。</p>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>#</th><th>级</th><th>模块</th><th>位置</th><th>问题</th><th>修复方向</th><th>章</th></tr>
+    <tr><td>1</td><td><span class="sev p0">P0</span></td><td>构建</td><td>Inventory.cs:4 · Enemy_SkeletonBattleState.cs:3</td><td>运行时脚本 using UnityEditor 命名空间 → 打包编译失败</td><td>删除；asmdef 分离；CI 真打包</td><td>2 · 12</td></tr>
+    <tr><td>2</td><td><span class="sev p0">P0</span></td><td>技能</td><td>SkillController_Clone.cs:52, 66</td><td>分身用 GetComponentInParent 找玩家，独立生成的分身上为 null → 有敌人时空引用，分身攻击从未生效</td><td>创建时注入攻击者属性（快照）</td><td>8</td></tr>
+    <tr><td>3</td><td><span class="sev p0">P0</span></td><td>状态机</td><td>player.cs:105-119, 138-142</td><td>全局冲刺与接剑强切不检查当前状态 → 死亡后冲刺 / 接剑即“复活”（E1-S3/S4）</td><td>统一 Request + 打断等级；Death 只接受 Revive</td><td>3</td></tr>
+    <tr><td>4</td><td><span class="sev p0">P0</span></td><td>生命周期</td><td>PlayerManager.cs:10-16 · SkillManager.cs:21-31</td><td>单例写反：已有实例时销毁旧的、不登记新的（推断：冲刺只能用一次）</td><td>后来者自毁；只读属性；OnDestroy 只清自己</td><td>2</td></tr>
+    <tr><td>5</td><td><span class="sev p1">P1</span></td><td>战斗</td><td>PlayerAnimationTriggers.cs:21-22 · Enemy_SkeletonAnimationTrigger.cs:22-23</td><td>表现（DamageEffect）与结算（DoDamage）分离 → 闪避也闪白击退、弹反成功仍掉血</td><td>DamageInfo → Receive → HitResult</td><td>6</td></tr>
+    <tr><td>6</td><td><span class="sev p1">P1</span></td><td>物品</td><td>Inventory.cs:214-217</td><td>合成每种材料只扣 1 份（E6：10 皮 10 铁做 [[e6.10_10.bc]] 件，应 [[e6.10_10.fc]]）</td><td>TryRemove(def, count)；事务</td><td>10</td></tr>
+    <tr><td>7</td><td><span class="sev p1">P1</span></td><td>数值</td><td>CharacterStats.cs:115-121 · EnemyStats.cs:50-56</td><td>TakeDamage 无死亡保护 → 弹跳剑 / 雷击让尸体重复 Die、重复掉落</td><td>isDead 守卫；死亡事件注销目标</td><td>7</td></tr>
+    <tr><td>8</td><td><span class="sev p1">P1</span></td><td>AI</td><td>Enemy_SkeletonGroundState.cs:17, 28-33</td><td>Battle 继承 GroundState → 看见玩家每帧自转移 + GameObject.Find（E7：10 s [[E7.A.self]] 次）</td><td>拒绝自转移；注入玩家引用</td><td>9</td></tr>
+    <tr><td>9</td><td><span class="sev p1">P1</span></td><td>AI</td><td>Enemy_SkeletonBattleState.cs:32, 56 · Enemy.cs:114</td><td>战斗计时每帧重置永不超时；追击无边缘检测；射线只检测 Player 层（穿墙）→ 平台下抽搐（E7-C）</td><td>只在看见时续命；遮挡射线；可达性</td><td>9</td></tr>
+    <tr><td>10</td><td><span class="sev p1">P1</span></td><td>数值</td><td>CharacterStats.cs:145</td><td>冰冻破甲判断攻击者的 isChilled（E3）</td><td><code>_targetStats.isChilled</code></td><td>7</td></tr>
+    <tr><td>11</td><td><span class="sev p1">P1</span></td><td>数值</td><td>Enemy.cs:58-80, 126-139 · SkillController_ThrowSword.cs:219</td><td>冻结 / 减速 / 死亡都直接写 moveSpeed、animator.speed；重叠冻结只冻住 [[e8r.min|.0f]]%~[[e8r.max|.0f]]%（E8）</td><td>修正器栈；截止时间取最大</td><td>7</td></tr>
+    <tr><td>12</td><td><span class="sev p1">P1</span></td><td>动画 / 表现</td><td>Enemy_SkeletonStunState.cs:17, 24</td><td>InvokeRepeating 调用不存在的 RedColorBlink；CancelInvoke() 误伤异常状态变色</td><td>nameof / 直接调用；只取消自己的计时</td><td>4</td></tr>
+    <tr><td>13</td><td><span class="sev p1">P1</span></td><td>UI</td><td>UI_EquipmentSlot.cs:16 · UI_ItemSlot.cs:11, 41</td><td>点击空装备格空引用；序列化器给格子造默认 InventoryItem → 开局点空背包格空引用</td><td>判空 <code>item?.data</code>；字段 NonSerialized</td><td>10</td></tr>
+    <tr><td>14</td><td><span class="sev p1">P1</span></td><td>状态机</td><td>PlayerWallSlideState.cs:21-44</td><td>没有“墙没了 → Fall”出口 → 半空慢落（E1-S2）</td><td>出口覆盖进入条件的否定</td><td>3</td></tr>
+    <tr><td>15</td><td><span class="sev p1">P1</span></td><td>状态机</td><td>PlayerFallState.cs:22-35 · Eenmy_SkeletonIdleState / MoveState</td><td>切换后继续执行旧状态代码 → 一帧两次转移、Enter 的初始化被覆盖（E1-S1）</td><td>切换后 return；请求-提交模式</td><td>3 · 9</td></tr>
+    <tr><td>16</td><td><span class="sev p2">P2</span></td><td>数值</td><td>CharacterStats.cs:136</td><td>暴击 <code>&lt;=</code> → 实际 (c+1)%（E3）</td><td>统一 Chance.Roll</td><td>7</td></tr>
+    <tr><td>17</td><td><span class="sev p2">P2</span></td><td>物品</td><td>ItemDrop.cs:21, 46</td><td>掉落 <code>&lt;=</code> +1%、小数无效、0 也掉；“最多 3 件”改变概率；int 随机使掉落偏左（E5）</td><td>Random.value；权重表；float 版 Range</td><td>10</td></tr>
+    <tr><td>18</td><td><span class="sev p2">P2</span></td><td>数值</td><td>EnemyStats.cs:35-43</td><td>每级 +25% 当前值 → 复利（E4）</td><td>曲线表驱动</td><td>7</td></tr>
+    <tr><td>19</td><td><span class="sev p2">P2</span></td><td>数值</td><td>CharacterStats.cs:110, 226 · Controller_ThunderStrike.cs:29, 63</td><td>DoMagicalDamage 无调用方；平局分支用 damages[0] 判感电；雷击伤害写死 1；目标销毁后雷击悬停不销毁</td><td>接线 + 修索引 + 用 damage 字段</td><td>7</td></tr>
+    <tr><td>20</td><td><span class="sev p2">P2</span></td><td>时间</td><td>PlayerDashState.cs:16-45</td><td>Update 计时决定位移时长 → 距离随帧率 / 卡顿变化（E10）</td><td>按物理步计数</td><td>5</td></tr>
+    <tr><td>21</td><td><span class="sev p2">P2</span></td><td>时间</td><td>CharacterStats.cs:79 · SkillController_ThrowSword.cs:144-147</td><td>到点重置的周期计时漂移；场景 hitCoolDown = 0 → 命中数 = 帧数（E10）</td><td>累加计时；固定逻辑帧</td><td>5</td></tr>
+    <tr><td>22</td><td><span class="sev p2">P2</span></td><td>时间 / 物理</td><td>Skill_ThrowSword.cs:145-151 · Sword.prefab</td><td>瞄准虚线用连续抛物线，与 Box2D 差 ½·g·s·Δt·t（E9）；飞剑 Discrete 碰撞、无插值</td><td>离散闭式解；Continuous；Interpolate</td><td>5</td></tr>
+    <tr><td>23</td><td><span class="sev p2">P2</span></td><td>技能</td><td>SkillController_Clone.cs:33-49, 72-96</td><td>朝向判断写进 foreach（E11）；分身不继承玩家朝向</td><td>循环外判断一次；拷贝 rotation</td><td>8</td></tr>
+    <tr><td>24</td><td><span class="sev p2">P2</span></td><td>技能</td><td>Skill_ThrowSword.cs:57-89, 91-115</td><td>Update 未调 base（冷却不减）；SetupGravity 覆盖序列化字段；Setup 调用顺序依赖；7 个 bool 标志</td><td>行为组合 + 配置资源</td><td>8</td></tr>
+    <tr><td>25</td><td><span class="sev p2">P2</span></td><td>动画</td><td>PlayerAimSwordState.cs:18-21 · Animator_Player</td><td>瞄准被打断仍播掷剑并掷出、方向陈旧；瞄准点不收起（推断）</td><td>显式 Throw 触发；所有退出路径收起</td><td>4</td></tr>
+    <tr><td>26</td><td><span class="sev p2">P2</span></td><td>战斗</td><td>Entity.cs:66-73</td><td>击退方向用受击者朝向；玩家 knockBack (0,0) 导致受击清零速度（推断）</td><td>方向来自 DamageInfo.origin</td><td>6</td></tr>
+    <tr><td>27</td><td><span class="sev p2">P2</span></td><td>战斗 / 性能</td><td>9 处 OverlapCircleAll</td><td>无 LayerMask、每次分配、按碰撞体不去重</td><td>ContactFilter2D + 复用缓冲 + HashSet</td><td>6 · 12</td></tr>
+    <tr><td>28</td><td><span class="sev p2">P2</span></td><td>UI</td><td>UI_HealthBar.cs:23-40 · Entity.cs:21 · CharacterStats.cs:49</td><td>Start 订阅 / OnDisable 退订不对称；回调是 public Action 字段</td><td>OnEnable / OnDisable 成对；event</td><td>11</td></tr>
+    <tr><td>29</td><td><span class="sev p2">P2</span></td><td>表现</td><td>EntityFX.cs:26, 36-59</td><td>sr.material 克隆材质；颜色三写者（推断残留异常色）</td><td>MPB + SpriteStatusFX；由效果推导</td><td>11</td></tr>
+    <tr><td>30</td><td><span class="sev p2">P2</span></td><td>数值 / UI</td><td>CharacterStats.cs:55, 331-341</td><td>当前血量不随上限（装备）变化；血条上限不刷新</td><td>上限变化规则 + 通知</td><td>7</td></tr>
+    <tr><td>31</td><td><span class="sev p2">P2</span></td><td>生命周期</td><td>CharacterStats.cs.meta / ItemData.cs.meta / ItemDrop.cs.meta</td><td>执行顺序配在父类（对子类无效）、SO 和无事件函数的脚本上</td><td>[DefaultExecutionOrder] 或显式初始化</td><td>2</td></tr>
+    <tr><td>32</td><td><span class="sev p2">P2</span></td><td>AI</td><td>Enemy_SkeletonDeathState.cs:13-36</td><td>尸体不销毁不回收，穿地坠落后 Update 照跑</td><td>死亡动画后回收入池</td><td>9</td></tr>
+    <tr><td>33</td><td><span class="sev p3">P3</span></td><td>质量</td><td>StartCoroutine("…") 5 · Invoke 10 · InvokeRepeating 4</td><td>字符串反射调用，改名不报错</td><td>直接调用 / nameof / 计时器</td><td>4 · 12</td></tr>
+    <tr><td>34</td><td><span class="sev p3">P3</span></td><td>性能</td><td>GameObject.Find 2 · GetComponentInParent 属性 3 · Debug.Log 8</td><td>热路径查找与日志</td><td>注入 / 缓存 / 条件编译日志</td><td>12</td></tr>
+    <tr><td>35</td><td><span class="sev p3">P3</span></td><td>工程</td><td>.gitignore</td><td><code>/[Logs]/</code> 等字符集写法；Logs / UserSettings 12 个文件入库；美术资源无 LFS</td><td><code>/[Ll]ogs/</code>；git rm --cached；LFS</td><td>12</td></tr>
+    <tr><td>36</td><td><span class="sev p3">P3</span></td><td>质量</td><td>多处</td><td>拼写（facinDir、Eenmy_、CreatClone、attaclMovement、Iventory）；字段隐藏（PlayerDeathState.player、Battle.playerTransform）；Can / Has 函数有副作用；未使用代码（FindClosestEnemy、SpriteStatusFX.shader、ItemDrop.item、Skill_Dash 空实现）</td><td>重命名、CQS、清理</td><td>8 · 12</td></tr>
+  </table></div>
+</section>
+
+<section class="chapter" id="appB">
+  <div class="ch-head">
+    <div class="no">APPENDIX · B</div>
+    <h1>Play Mode 验证清单</h1>
+    <p class="lead">书中标 <span class="tag inf">推断</span> 的结论，以及依赖引擎运行时、无法用 C++ 移植验证的结论，在 Unity 里各用 1~3 分钟即可确认。面试前把结果补到自己的笔记里，就可以把“推断”改成“我验证过”。</p>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>编号</th><th>结论（章节）</th><th>验证步骤</th><th>预期现象</th></tr>
+    <tr><td>B1</td><td>单例写反 → 冲刺只能用一次（图 2-2）</td><td>复制场景里的 SkillManager 物体 → Play → 按两次 Shift（间隔 &gt; 1 s）</td><td>开局第一个 SkillManager 从 Hierarchy 消失；第二次起 Console 打印 “Skill [Dash] is on CoolDown” 且再也冲不出去</td></tr>
+    <tr><td>B2</td><td>瞄准被冲刺打断仍掷剑（图 4-2）</td><td>按住右键瞄准 → 不松键直接按 Shift</td><td>播放掷剑动画并生成飞剑；首次时飞剑速度为 0 直接下落，之后方向为上一次松键时的方向</td></tr>
+    <tr><td>B3</td><td>落地贴墙闪现墙滑（表 3-1）</td><td>Animator 窗口 + 暂停逐帧（Ctrl+Alt+P），斜跳到墙脚落地</td><td>某一帧 WallSlide 为 true、Idle 与 Air 为 false，下一帧回到 Idle</td></tr>
+    <tr><td>B4</td><td>墙到头慢落（表 3-2）</td><td>摆一个悬空平台，贴着其侧面下滑并按住朝墙方向</td><td>越过平台下沿后仍播墙滑动画，以 2 m/s 下落直到着地</td></tr>
+    <tr><td>B5</td><td>死亡后复活（表 3-3）</td><td>把骷髅 EnemyStats.damage 改为 2000 → 被打死后按 Shift，再按方向键</td><td>离开死亡动画并可正常移动</td></tr>
+    <tr><td>B6</td><td>分身攻击空引用（Ch8.3）</td><td>贴近骷髅冲刺</td><td>Console：NullReferenceException at SkillController_Clone.AttackTrigger；骷髅不掉血</td></tr>
+    <tr><td>B7</td><td>开局点空格空引用（Ch10.3）</td><td>开局不拾取任何物品，点击背包空格；再点装备栏空格</td><td>两次都报 NullReferenceException（前者只在首次 UpdateSlotUI 之前出现）</td></tr>
+    <tr><td>B8</td><td>受击清零速度（Ch6.3）</td><td>跳跃上升途中被骷髅命中（或在 Inspector 里调用 DamageEffect）</td><td>竖直速度瞬间归零，“顿一下再掉”</td></tr>
+    <tr><td>B9</td><td>颜色残留（图 11-2）</td><td>临时解开 DoDamage 里 DoMagicalDamage 的注释并给玩家 fireDamage；点燃骷髅后在第 1.9 s 左右再命中一次</td><td>点燃结束后骷髅仍保持点燃颜色</td></tr>
+    <tr><td>B10</td><td>执行顺序对子类无效（Ch2.5）</td><td>Project Settings → Script Execution Order 查看列表；在 PlayerStats、EnemyStats 的 Start 打印日志</td><td>列表中只有 CharacterStats（300），子类按默认顺序执行</td></tr>
+    <tr><td>B11</td><td>打包失败（Ch2.6）</td><td>File → Build Settings → Build（任意平台）</td><td>编译错误：找不到 UnityEditor 命名空间（CS0234 / CS0246）</td></tr>
+    <tr><td>B12</td><td>骷髅每帧自转移（E7）</td><td>在 Enemy_SkeletonBattleState.Enter 里打印 Time.frameCount</td><td>玩家站在攻击距离内时几乎每帧一条</td></tr>
+    <tr><td>B13</td><td>插值位置导致落地判定晚一个物理步（第 17 章坑 ④）</td><td>从高处下落，在 Update 里同时打印 transform.position.y、rb.position.y 和地面射线结果</td><td>下落时 transform 比 rb.position 高出约“速度 × 0.02 s”；着地后的第一帧射线可能仍未命中</td></tr>
+    <tr><td>B14</td><td>单墙攀爬取决于手速（F5）</td><td>在 7 m 立柱左侧起跳并一直按住 →，分别“滑墙一出现就按跳”和“稍等约 0.1 s 再按跳”</td><td>前者能翻上立柱；后者在墙顶下方约 1.3 m 处反复滑落</td></tr>
+    <tr><td>B15</td><td>跳跃缓冲缺失（F3）</td><td>下落中提前约 50 ms 按跳</td><td>落地后不起跳</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">复现本书的 C++ 实测</span>
+<!--code:bash:在 Git Bash 中（需要 VS2022 的 MSVC 与 Windows SDK）-->
+$ source ../Network_TCP_UDP/demos/build_env.sh        # 设置 INCLUDE / LIB / PATH
+$ cd RPG_Demo/demos
+$ MSYS2_ARG_CONV_EXCL='*' cl.exe /nologo /std:c++latest /EHsc /O2 /utf-8 /D_CRT_SECURE_NO_WARNINGS rpg_verify.cpp
+$ ./rpg_verify.exe > run_output.txt                    # 全部实验，写 figdata.json
+$ ./rpg_verify.exe E5 E9                               # 只跑指定实验，写 figdata_partial.json
+<!--/code-->
+  </div>
+</section>
+
+<section class="chapter" id="appC">
+  <div class="ch-head">
+    <div class="no">APPENDIX · C</div>
+    <h1>源码索引</h1>
+    <p class="lead">从文件找章节：面试官指着某个文件问时，知道去哪一章找答案。</p>
+  </div>
+  <div class="tbl"><table>
+    <tr><th>文件</th><th>主要内容</th><th>章</th></tr>
+    <tr><td>Entity.cs · EntityFX.cs</td><td>组件缓存、检测、翻转、击退；闪白与异常色</td><td>1 · 2 · 6 · 11</td></tr>
+    <tr><td>player/player.cs · PlayerStateMachine.cs · PlayerState.cs</td><td>状态创建、全局冲刺、接剑、死亡、减速</td><td>3 · 5</td></tr>
+    <tr><td>player/PlayerGroundedState.cs · Idle · Move</td><td>地面输入分支、currentState 守卫、HasNoSword 副作用</td><td>3</td></tr>
+    <tr><td>player/PlayerFallState.cs · Jump · Air · WallSlide · WallJump</td><td>一帧两次转移、墙滑出口</td><td>3</td></tr>
+    <tr><td>player/PlayerDashState.cs</td><td>冲刺计时与帧率</td><td>5</td></tr>
+    <tr><td>player/PlayerPrimaryAttackState.cs</td><td>连招计数、攻击位移、isBusy</td><td>3 · 4</td></tr>
+    <tr><td>player/PlayerCounterAttackState.cs</td><td>弹反判定（受击时）与注释掉的原写法</td><td>6</td></tr>
+    <tr><td>player/PlayerAimSwordState.cs · CatchSword · Death · PlayerAnimationTriggers.cs</td><td>瞄准、接剑、死亡、动画事件转发与命中</td><td>3 · 4 · 6</td></tr>
+    <tr><td>Enemy/Enemy.cs · EnemyState.cs · EnemyStateMachine.cs</td><td>弹反窗口、冻结、减速、感知射线</td><td>6 · 7 · 9</td></tr>
+    <tr><td>Enemy/Enemy_Skeleton/*.cs</td><td>6 个状态、自转移、永不超时、死亡</td><td>9</td></tr>
+    <tr><td>Skill/Skill.cs · SkillManager.cs · PlayerManager.cs</td><td>冷却、两个单例</td><td>2 · 8</td></tr>
+    <tr><td>Skill/Skill_Clone.cs · SkillController_Clone.cs</td><td>分身、空引用、朝向</td><td>8</td></tr>
+    <tr><td>Skill/Skill_ThrowSword.cs · SkillController_ThrowSword.cs</td><td>瞄准虚线、四种模式、召回、冻结</td><td>5 · 7 · 8</td></tr>
+    <tr><td>Stats/Stat.cs · CharacterStats.cs · PlayerStats.cs · EnemyStats.cs</td><td>属性、伤害、异常状态、等级成长、死亡</td><td>7</td></tr>
+    <tr><td>Controller_ThunderStrike.cs</td><td>感电连锁雷击</td><td>7</td></tr>
+    <tr><td>Items and Iventory/*.cs</td><td>背包、装备、合成、掉落、拾取</td><td>10</td></tr>
+    <tr><td>UI/*.cs</td><td>格子、装备格、合成格、血条</td><td>10 · 11</td></tr>
+    <tr><td>ParalleBackGround.cs · SpriteStatusFX.shader</td><td>视差背景；未使用的状态 Shader</td><td>11</td></tr>
+    <tr><td>Animation/Controller/*.controller · *.anim</td><td>Animator 结构与全部动画事件</td><td>4 · 6</td></tr>
+    <tr><td>Scenes/SampleScene.unity · Prefabs/*.prefab · ProjectSettings</td><td>所有序列化数值、物理与时间设置、执行顺序</td><td>0 · 1 · 2 · 5</td></tr>
+    <tr><td>Scenes/SampleScene.unity（Grid / Ground / BackGround）· Graphics/…/Tiles</td><td>瓦片地图、复合碰撞、瓦片资源与贴图导入设置</td><td>19</td></tr>
+    <tr><td>Material/forPlayer.physicsMaterial2D</td><td>玩家零摩擦材质（避免挂墙）</td><td>17</td></tr>
+  </table></div>
+</section>
+
+<section class="chapter" id="appD">
+  <div class="ch-head">
+    <div class="no">APPENDIX · D</div>
+    <h1>现状 vs 理想：全书总表</h1>
+    <p class="lead">把各章 x.1 的对照表收拢到一处：每个模块现在在哪一档、理想要到哪一档、哪些理想做法有实验支撑、什么情况下不必上理想方案、从现状走到理想按什么顺序。</p>
+  </div>
+
+  <h2>D.1 成熟度阶梯：Demo 在哪，理想在哪</h2>
+  <p>每个模块从左到右四档。<span class="tag now">现状</span> 是 Demo 822270c 的真实位置；<b>修正 + 重构</b>两档是“重做这个 Demo 就该做到”的<span class="tag ideal">理想</span>；<b>上线级</b>只在规模化或联网时才值得做，用来回答“上线 / 联网怎么办”的追问，不要在介绍 Demo 时把它当成目标。</p>
+<!--ladder {"cols":[["现状 · Demo 822270c","o"],["修正 · 只修错","a"],["重构 · 改结构","g"],["上线级 · 规模化 / 联网","b"]],
+"groups":[[0,0,"o","Demo 在这里（现状 · 主要问题）"],[1,2,"g","重做这个 Demo 就该做到（理想）"],[3,3,"b","追问时再展开（扩展）"]],
+"rows":[
+ ["状态机 · 3","三处入口 · 不检查当前状态","死亡拒绝切换 · 补“墙没了”出口","Request + 守卫 + 帧末提交","分层状态机 · 输入回放"],
+ ["状态判定 · 17","单射线 · 各状态自己查","射线加长 · 加脚部射线","感知层 · 形状投射 + 法线","单向 / 移动平台 · 滞回"],
+ ["时间与帧率 · 5","Update 计时 · 到点重置","累加计时 · 单帧 dt 上限","固定逻辑步计数","确定性 · 可回放"],
+ ["战斗判定 · 6","表现与结算分两次调用","弹反成功不再结算伤害","DamageInfo → 唯一裁决","Hitbox 时间轴 · 服务器裁决"],
+ ["属性与数值 · 7","<= 多 1% · 冰冻判错对象","统一 Roll · 判目标 · 死亡守卫","修正器栈（带来源）","属性集 + 标签 · 曲线表"],
+ ["技能 · 8","参数在组件 · 检查即扣冷却","分身注入来源 · 修冷却","定义 + 实例 + 激活管线","技能编辑器 · 时间轴"],
+ ["敌人 AI · 9","每帧自转移 · 永不脱战","拒绝自转移 · 计时修正","感知 → 黑板 → 决策","行为树 · 攻击令牌 · LOD"],
+ ["物品 · 10 / 21","SO 作键 · 合成少扣料","合成按数量扣 · 判空","定义 + 实例 + 事务","存档迁移 · 服务器执行"],
+ ["UI 与表现 · 11","全量刷新 · 多方写颜色","订阅成对 · 共享材质","增量刷新 · 反馈导演","虚拟列表 · 屏幕空间血条"],
+ ["手感 · 20","无缓冲 · 固定跳高","（不是 bug，没有修正档）","缓冲 + 土狼 + 可变跳高","输入回放 · 成功率回归"],
+ ["关卡 · 19","先画后定 · 无图集","补图集 · 清重复瓦片","度量表 + 分层 + Rule Tile","关卡模块 · 加载器生成"],
+ ["工程 · 2 / 12","Editor 引用 · 字符串反射","asmdef · nameof · 判空","对象池 · 复用缓冲 · 单测","CI 真打包 · 性能预算"]],
+"cap":"图 D-1　成熟度阶梯：12 个模块 × 4 档（模块名后是章号）。橙列是 Demo 的真实位置；“修正”只在现有结构里改错（C++ 实验里的“修正版”多在这一档）；“重构”是各章对照表“理想重构方案”列的主体；“上线级”只在追问时展开。灰格表示这一档不存在：手感问题不是 bug，没有“只修错”的版本，只能按需求补机制"} -->
+
+  <h2>D.2 各章对照表索引</h2>
+  <p>下表由构建脚本扫描全书 [[cmpsum.tables]] 张对照表自动统计：共 [[cmpsum.total]] 个维度。<b>现状一侧</b>：缺陷 [[cmpsum.defect]] 个（P0 [[cmpsum.sev.p0]]、P1 [[cmpsum.sev.p1]]、P2 [[cmpsum.sev.p2]]、P3 [[cmpsum.sev.p3]]），隐患 [[cmpsum.sev.hz]] 个，局限 [[cmpsum.sev.lim]] 个，做法正确 [[cmpsum.sev.ok]] 个（按对照表维度计数：同一个缺陷会在相关的几章各出现一次，例如“死亡后冲刺复活”同时出现在状态机、技能、系统设计三章；去重后的 36 条见附录 A）——缺陷之外的一半多是“现在能用、规模上来才成问题”的局限，讲的时候不要把它们说成 bug。<b>理想一侧</b>：理想做法有 C++ 模型支撑的 [[cmpsum.g]] 个、现状已正确只需保持的 [[cmpsum.b]] 个、参数来自公开资料的 [[cmpsum.p]] 个，其余 [[cmpsum.s]] 个是<b>纯设计方案</b>。也就是说，<b>理想列的大部分内容没有任何代码实现</b>——讲的时候一律用条件句，只有“模型验证”那几项可以报对比数字。</p>
+<!--cmpsum {} -->
+
+  <h2>D.3 什么时候不必上理想方案</h2>
+  <p>理想方案都有代价。下面这些情况成立时，<b>保持现状本身就是正确的工程判断</b>；面试时能说出“为什么这里我不会上行为树”，和说出“行为树怎么做”一样加分。</p>
+  <div class="tbl"><table>
+    <tr><th>理想做法</th><th>可以不做（现状够用）</th><th>必须做</th><th>章</th></tr>
+    <tr><td>逻辑时间轴取代动画事件命中</td><td>单机、动作少、动画和逻辑由同一个人维护</td><td>联网、回放、严格判定（格斗、精确弹反）</td><td>4</td></tr>
+    <tr><td>固定逻辑步驱动计时</td><td>只影响表现的计时（闪白、UI 动画）</td><td>影响结果的计时（冲刺距离、伤害跳数、冷却）</td><td>5</td></tr>
+    <tr><td>行为树 / 黑板取代状态机</td><td>怪物种类少、行为简单（巡逻 → 追击 → 攻击）</td><td>怪物种类多、要复用行为片段、策划要配 AI</td><td>9</td></tr>
+    <tr><td>物品实例（uid）</td><td>物品没有个体差异（材料、消耗品）</td><td>有耐久 / 词条 / 强化，要存档或交易</td><td>10 · 21</td></tr>
+    <tr><td>屏幕空间统一绘制血条</td><td>同屏角色很少（Demo 只有两个）</td><td>同屏几十个以上</td><td>11</td></tr>
+    <tr><td>对象池</td><td>生成频率低（掉落物）</td><td>每秒多次生成（飞剑、分身、子弹、特效）</td><td>12</td></tr>
+    <tr><td>复合碰撞改为手动生成</td><td>地形不在运行时改</td><td>可破坏地形、运行时放置平台</td><td>19</td></tr>
+    <tr><td>服务器裁决</td><td>单机</td><td>联网，或有经济系统（掉落、合成、交易）</td><td>6 · 10 · 21</td></tr>
+    <tr><td>技能编辑器 / 时间轴</td><td>技能少、程序自己配</td><td>技能多、策划要配、需要预览</td><td>8 · 21</td></tr>
+  </table></div>
+
+  <h2>D.4 从现状走到理想：顺序比方案更重要</h2>
+  <p>第 12 章图 12-2 给出了两周路线：前 5 天只修错（能打包 → 状态正确 → 数值正确 → 帧率无关），后 5 天才改结构（输入层 → 伤害管线 → 修正器与 Buff → 物品实例与对象池）。背后是三条原则：</p>
+  <ul>
+    <li><b>先修错，再改结构</b>：结构重构会同时动很多文件，错误没修完就分不清新问题是重构引入的还是原来就有的。</li>
+    <li><b>有实验的先做</b>：E1~E11、F1~F5 已经给出“现状 vs 修正”的对拍结果，改完立刻能用同一组用例回归（第 12 章：把实验写成 EditMode 测试）。</li>
+    <li><b>理想不是待办清单</b>：D.3 里“可以不做”的条件成立时就不做；阶梯图最右一列只在面试官追问规模化 / 联网时才展开。</li>
+  </ul>
+</section>

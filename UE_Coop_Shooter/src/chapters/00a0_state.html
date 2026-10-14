@@ -1,0 +1,205 @@
+<div class="part-head" data-toc="第零部分 · 口径篇">
+  <div class="no">PART ZERO</div>
+  <h1>第零部分　口径篇：面试官看不到你的 Demo</h1>
+  <p>面试官手里没有你的工程，也不会去打开 GitHub。他对这个项目的全部印象，来自你嘴里的几分钟和白板上的一张图。这一部分先用 K0 分清书里哪些是<strong>当前做法</strong>（原 Demo 真实的实现）、哪些是<strong>理想方案</strong>（重构设计）；再用 K1 定下“怎么讲”：项目怎么描述、哪些话按什么时态说、数字和术语怎么统一；最后用 K2 按功能场景，把原版踩过的坑当作“这类需求最容易踩的坑”，讲清楚怎么避免、正确的实现方法是什么——只讲方法，不讲蓝图节点、不贴代码。后面四个部分是这些说法背后的证据和细节。</p>
+</div>
+
+<section class="chapter" id="k0">
+  <div class="ch-head">
+    <div class="no">BRIEFING · K0</div>
+    <h1>先分清：当前做法 vs 理想方案</h1>
+    <p class="lead">这本书里同时有两套“开火、换弹、伤害”的流程：一套是原 Demo 实际怎么做的，另一套是重构后应该怎么做。两者混在一起读，最容易出现的误会是把理想方案当成了 Demo 的现状——比如以为 Demo 里用的是射线检测，实际上它是在服务器生成子弹 Actor 并复制。本章先把两套流程逐项对齐，并说明全书怎么标记它们。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>认得全书的四种标记：<span class="tag cur">当前做法</span> <span class="tag min">最小修复</span> <span class="tag ideal">理想方案</span>，以及跟在每处当前做法后面的 <span class="tag prob">存在的问题</span>。</li>
+    <li>按功能逐项说出：原 Demo 现在是怎么做的、只改错误可以怎么修、理想方案是什么。</li>
+    <li>把最容易说错的一项讲清楚：<strong>原 Demo 没有射线检测，命中由服务器生成并复制的子弹 Actor 自己撞出来</strong>。</li>
+    <li>说出当前做法存在的问题：23 条按后果分成五类，每类能举一个玩家看得见的现象和一个数字。</li>
+    <li>知道每一章讲的是哪一套，读的时候不混。</li>
+  </ul></div>
+
+  <div class="ans">
+    <div class="q">30 秒版：书里的两套流程</div>
+    <p><span class="tag cur">当前做法</span>原 Demo（仓库快照 d7e5c75）真实的实现：本机按住开火时每 0.12 秒发一条 Server_Fire；服务器先组播开火动画，再检查弹药，然后<strong>生成一颗复制的子弹 Actor</strong>（ProjectileMovement，200 m/s，寿命 1 秒），<strong>没有任何射线检测</strong>；子弹在服务器和客户端各飞一份，撞到僵尸后在碰撞事件里调用 Apply Damage。换弹是“先清零 → 等待 → 计算”的一段脚本，冲刺只在服务器生效，开局、计时、胜负写在关卡蓝图和 UI 里。</p>
+    <p><span class="tag ideal">理想方案</span>本书第三部分的重构设计：步枪改为<strong>命中扫描</strong>——本机立刻播表现并做射线，把“这一发打中了谁”发给服务器；服务器校验后结算伤害；弹药只复制给持枪者并按序号对账；其他人靠开火计数播第三人称表现。换弹是服务器状态机，冲刺进移动预测，整局流程由 GameMode / GameState 管。</p>
+    <p><span class="tag prob">存在的问题</span>当前做法联机下有 23 个问题（P0 7 条、P1 9 条、P2 6 条、P3 1 条），玩家能直接感受到的是：按下开火约 {{v:E1[s=0,rtt=200].own:.0f}} ms 才看到自己开枪、远端子弹凭空出现在约 {{v:E1[s=0,rtt=200].pop:.1f}} m 外、冲刺每秒被拉回约 {{v:E6[c=0,rtt=100].cps:.1f}} 次、换弹在备弹不够时吞掉整个弹匣、客户端多出只有自己看得到的僵尸、一人阵亡两人一起失败、点“重开”就断开联机。按后果分五类见第 4 节。</p>
+    <p>面试时先用一句话交代当前做法，再讲理想方案和为什么要换——这样面试官既知道你做过什么，也知道你现在懂了什么。</p>
+  </div>
+
+  <h2>1. 怎么在书里分辨</h2>
+<!--tree {"cols":["内容","是什么","在书里怎么标"],"x":[12,250,600],"root":{"n":"本书的内容","col":"s","d":"四种性质，读的时候先分清是哪一种","w":"标签 / 横幅 / 类名 / 图注","c":[
+ {"n":"当前做法","col":"o","d":"原 Demo 真实的实现（做过的）：从 .uasset 逐节点读出","w":"橙色标签；原类名 BP_Player、BP_Weapon、BP_Bullet…","c":[]},
+ {"n":"最小修复","col":"a","d":"保留原结构、只改错误的修法（一天能改完）","w":"琥珀色标签；K0 总表与 K2 场景卡","c":[]},
+ {"n":"理想方案","col":"g","d":"重构设计（设计的）：第 7~13 章的类、复制表、事件图表","w":"绿色标签；新类名 BP_CoopCharacter、BP_WeaponBase…","c":[]},
+ {"n":"引擎规则","col":"b","d":"与 Demo 无关的 UE 机制：复制、RPC、Owner 链、生命周期","w":"不加标签（第 2、7 章）","c":[]}
+]},"cap":"<b>图 K0-1</b>　全书内容的四种性质。第 9~13 章的每一张事件图表、网络规格面板的图注都带有“理想方案”标签；原 Demo 的流程只出现在第 1 章、各章“原实现对照”小节和本章"} -->
+  <div class="tbl"><table>
+    <tr><th>标记</th><th>出现在哪</th><th>示例</th></tr>
+    <tr><td><span class="tag cur">当前做法</span> 标签 / 横幅</td><td>正文段落、章首对照表左列、K2 场景卡“当前做法（坑）”一行</td><td>“当前做法：服务器生成复制的子弹 Actor”</td></tr>
+    <tr><td><span class="tag ideal">理想方案</span> 标签 / 横幅</td><td>第三部分每章开头、所有重构图表的图注、K2 场景卡“理想实现”一行</td><td>图注“图 11-1 理想方案 BP_WeaponBase · 开火”</td></tr>
+    <tr><td><span class="tag prob">存在的问题</span> 横幅 / ⚠ 行 / 红色列</td><td>每处“当前做法”之后；表 K0-2 每行当前做法下方；各章开头对照表的“存在的问题”列；K2 场景卡“存在的问题”一行</td><td>“⚠ 问题：按下后约 237 ms 才看到自己开枪（A#9 P1，E1）”——A# 是附录 A 的问题编号</td></tr>
+    <tr><td><span class="tag min">最小修复</span> 标签</td><td>本章总表、K2 场景卡“最小修复”一行</td><td>“伤害节点前加 Switch Has Authority，填上 Instigator”</td></tr>
+    <tr><td>类名</td><td>全书</td><td>原 Demo 的类保留原名（BP_Player / BP_Weapon / GM_MyGame …），重构的类都带 Coop 或新名字（表 K0-1）</td></tr>
+  </table></div>
+  <p class="tcap">表 K0-0　三种标记。看到一个类名就能判断说的是哪一套：<code>BP_Weapon</code> 是当前，<code>BP_WeaponBase</code> 是理想</p>
+
+  <h3>类名对照：原 Demo 的类 → 理想方案的类</h3>
+  <div class="tbl cmp"><table>
+    <tr><th class="cur">原 Demo（当前做法）</th><th class="cur">它现在负责</th><th class="ideal">理想方案</th><th class="prob">当前的主要问题</th></tr>
+    <tr><td>关卡蓝图 CoffeeShopA_P</td><td>主菜单、按任意键准备、开局流程、BGM、切镜头（每一端各跑一份）</td><td>BP_CoopGameInstance + L_Menu；开局交给 GM_Coop / GS_Coop；关卡蓝图只做场景演出</td><td>上帝对象，每一端各跑一份；客户端调用的 Server_SetStart 被丢弃；开局依赖绑在本地角色上的委托（A#15、A#16）</td></tr>
+    <tr><td>GM_MyGame（GameModeBase）</td><td>收集准备的玩家，人齐后对每个角色调 Multicast_StartGame</td><td>GM_Coop</td><td>只收集准备；胜负、计时、刷怪不在这里，规则散落在关卡蓝图、UI 和组播里（A#6、A#7）</td></tr>
+    <tr><td>BP_MyGameState</td><td>ReadyPlayersList（复制 PC 引用，客户端为空）；“游戏是否开始”（不复制）</td><td>GS_Coop：Phase、MatchEndServerTime、AliveZombies</td><td>PC 引用复制到客户端为空（A#18）；“游戏是否开始”不复制，晚加入永远 false（A#15）</td></tr>
+    <tr><td>（无，引擎默认）</td><td>—</td><td>PS_Coop（bReady、Kills、bIsAlive）、PC_Coop（UI 与请求）</td><td>准备、击杀这类跟人走的数据无处放；没有统一的请求出口，界面由关卡蓝图和角色各自创建</td></tr>
+    <tr><td>BP_Player</td><td>只有第一人称手臂；HP 复制；BeginPlay 里生成武器、用 0 号控制器加输入；冲刺 Server RPC；死亡组播</td><td>BP_CoopCharacter + AC_Health（+ 可选 C++ 移动组件）</td><td>对方看到漂浮手臂（A#17）；0 号控制器作用到主机，客户端玩家死后仍能操作（A#4）；冲刺被拉回（A#5）；一人阵亡全员失败（A#7）</td></tr>
+    <tr><td>BP_Weapon</td><td>5 个无条件复制的弹药变量；Server_Fire / Server_SpawnBullet / Server_Change；两个组播</td><td>BP_WeaponBase + DA_Weapon</td><td>表现等组播、打空也播（A#9、A#10）；换弹吞弹匣（A#1）；弹药广播给所有人（A#20）；后坐力只对主机（A#13）</td></tr>
+    <tr><td><strong>BP_Bullet</strong></td><td><strong>服务器生成的复制子弹 Actor，碰撞事件里结算伤害</strong></td><td><strong>删除</strong>（步枪改命中扫描）；慢速抛射物另见第 3 节路线 B</td><td>远端突现、每发一个 Actor 通道（A#12）；伤害写在每端都触发的碰撞里、来源为空（A#2、A#19）</td></tr>
+    <tr><td>BP_Zombie</td><td>计时器 AI、复制血量、3 个组播（攻击 / 受击 / 死亡）</td><td>BP_Zombie + AC_Health + AIC_Zombie + BT_Zombie + DA_Zombie</td><td>外观 / 动作各端不一致（A#21、A#22）；死后计时器还在跑（A#14）；死亡组播里补刷（A#3）</td></tr>
+    <tr><td>BP_ZombieSpawn</td><td>开局刷 10 只；“重新生成”被死亡组播调用</td><td>BP_SpawnPoint（只做标记）+ GM_Coop 刷怪</td><td>“重新生成”绕过权限判断，被组播调用后每端都刷，客户端出现幽灵僵尸（A#3）</td></tr>
+    <tr><td>UWB_MainMenu / InGame / Pause / WinOrFail</td><td>属性绑定每帧取 0 号玩家；UI 自算倒计时；SetGamePaused；OpenLevel 重开</td><td>WBP_MainMenu / Lobby / HUD / Pause / Result</td><td>每帧 Cast、可能访问空引用（A#16）；倒计时两端不一致（A#6）；本地暂停 / 重开破坏联机（A#8）</td></tr>
+    <tr><td>AnimeBP_Player / Weapon / Zomebie</td><td>本机的瞄准标志、动画变体</td><td>ABP_Coop1P / ABP_Coop3P</td><td>开镜标志只在本机，服务器散布按腰射算（A#13）；僵尸变体客户端用默认值（A#21）</td></tr>
+  </table></div>
+  <p class="tcap">表 K0-1　类名对照与每个类当前的主要问题（A# 为附录 A 的问题编号）。原 Demo 的类名只在描述“当前做法”时出现</p>
+
+  <h2>2. 总对照：每个功能的当前做法、最小修复、理想方案</h2>
+  <p>“最小修复”一列回答的是面试官常问的另一种问题：“如果不重构、只给你一天，你先改什么？”——它保留原来的结构，只把会出错的地方改对，手感和带宽问题大多还在。</p>
+  <div class="tbl cmp"><table>
+    <tr><th>功能</th><th class="cur">当前做法（原 Demo 实际）</th><th class="min">最小修复（保留结构）</th><th class="ideal">理想方案（重构设计）</th></tr>
+    <tr><td>联机入口</td><td>没有会话节点，只在编辑器里以 Listen Server 跑过；主菜单是关卡蓝图里的一个界面<div class="pb">⚠ 问题：只能在编辑器里联机，打包后无法主持 / 加入；断线后没有提示，停在对局地图（附录 A 未单列）</div></td><td>GameInstance 里加主持 / 加入两个按钮的会话节点</td><td>GameInstance 管会话与断线，菜单与对局分两张地图（场景 01）</td></tr>
+    <tr><td>准备与开局</td><td>按任意键 → 角色 Server_ReportReady → GameState 里存 PC 引用数组 → 人齐后对每个角色调一次 Multicast_StartGame → 各端关卡蓝图执行开局<div class="pb">⚠ 问题：开局靠“关卡 BeginPlay 时本地角色已存在并绑好委托”，客户端角色晚到就不开局（A#16 P1）；客户端写“游戏是否开始”被丢弃、晚加入永远“未开始”（A#15 P1）；PC 引用数组在客户端为空（A#18 P2）</div></td><td>开局改由服务器一次组播或复制标志触发，不依赖本地角色上的委托；准备列表改存 PlayerState</td><td>PlayerState.bReady + GameState.Phase（RepNotify），各端在 OnRep 里开局（场景 02）</td></tr>
+    <tr><td>角色模型</td><td>只有第一人称手臂，别人看到漂浮的手臂<div class="pb">⚠ 问题：对方看到一双漂浮的手臂；胶囊随俯仰旋转（A#17 P2）</div></td><td>加一个只对别人可见的第三人称网格</td><td>1P / 3P 两套网格与动画蓝图（场景 03）</td></tr>
+    <tr><td>武器绑定</td><td>角色 BeginPlay 在服务器 SpawnActor（Owner 为空），之后补 SetOwner + for_server；WeaponRef 复制，OnRep 挂到手臂<div class="pb">⚠ 问题：武器 BeginPlay 早于 SetOwner，初始化拿不到持有者，只能靠 for_server 补丁（A#23 P3）；Instigator 为空</div></td><td>生成节点的 Owner / Instigator 引脚直接填角色</td><td>Possessed 时生成并带上 Owner，CurrentWeapon 的 OnRep 挂 1P / 3P（场景 03）</td></tr>
+    <tr><td>输入映射</td><td>BeginPlay 里通过 0 号控制器添加<div class="pb">⚠ 问题：每个角色副本（包括别人的）都往本机 0 号控制器加一次映射，能用只因为只有一个本地玩家；重生、换角色、分屏就错（A#16 P1）</div></td><td>先判断 Is Locally Controlled，再用自己的 Controller</td><td>控制器变化且为本地控制时添加（场景 03）</td></tr>
+    <tr><td>开火请求</td><td>本地 0.12 秒循环计时器，每发一条 Reliable 的 Server_Fire（不带任何参数）；本地用复制下来的弹数判断能不能打<div class="pb">⚠ 问题：本机按晚一个往返的复制弹数判断能不能打，打空后还会多发一次（A#10 P1）；逐发 Reliable，RTT 200 / 丢包 10% 时 P99 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms（A#11 P1，E2）</div></td><td>不变</td><td>本地预测弹药，每发带序号、起点、方向、命中目标发 Server_FireShot（场景 04）</td></tr>
+    <tr><td>开火表现</td><td>本机不播，全部在服务器的 Multicast_Fire 里，且排在弹药检查之前<div class="pb">⚠ 问题：按下后约 {{v:E1[s=0,rtt=200].own:.0f}} ms 才看到自己开枪（A#9 P1，E1）；打空也播动画，还会打断换弹蒙太奇（A#10 P1）</div></td><td>本机先播；组播挪到检查通过之后，组播里跳过开火者自己</td><td>本机立即播 1P；别人靠 Skip Owner 的开火计数播 3P（场景 04 / 05）</td></tr>
+    <tr><td><strong>命中方式</strong></td><td><strong>没有射线检测</strong>：服务器生成复制的 BP_Bullet（ProjectileMovement 200 m/s、寿命 1 秒、复制移动），子弹在服务器和每个客户端各飞一份，靠碰撞事件判断打中<div class="pb">⚠ 问题：远端看到子弹凭空出现在约 {{v:E1[s=0,rtt=200].pop:.1f}} m 外；每发一个 Actor 通道，约 {{v:E7.0.4}} vs {{v:E7.1.4}} B/s（A#12 P1，E1 / E7）；两份子弹各撞各的；没有延迟补偿，横移僵尸命中率 {{v:E3[v=480,rtt=200].none:.1f}}%（E3）</div></td><td>保留子弹；客户端上的子弹副本只播弹孔血花，不参与结算</td><td><strong>命中扫描</strong>：本机射线 → 服务器校验（射速、弹药、起点、方向、包围盒容差、视线）；慢速武器才用抛射物（第 3 节、第 5B 章）</td></tr>
+    <tr><td>伤害结算</td><td>子弹碰撞事件（每一端都触发）→ Apply Damage（身体 40 / 爆头 100），没有权限判断，伤害来源为空；客户端那次被引擎的 Authority Only 拦下，所以伤害<strong>实际上只在服务器生效</strong><div class="pb">⚠ 问题：正确性靠引擎兜底：换成直接改血量、或打非 Pawn 的目标就会每端各算一份；Instigator / Causer 为空，击杀统计、仇恨做不了（A#2、A#19 P2）</div></td><td>伤害节点前加 Switch Has Authority，填上 Instigator（开火者 Controller）和 Causer（武器）</td><td>服务器校验通过后 Apply Point Damage；血量组件只在服务器扣（场景 04 / 08）</td></tr>
+    <tr><td>弹药</td><td>5 个弹药变量无条件复制给所有人，只在服务器扣，UI 晚一个往返才变<div class="pb">⚠ 问题：UI 晚一个往返才变；别人的弹药白占带宽、能被外挂读到（A#20 P2）</div></td><td>弹药变量改为 Owner Only</td><td>一个 Owner Only 结构，带已处理序号对账（场景 06）</td></tr>
+    <tr><td>换弹</td><td>服务器：先把当前弹量存起来并清零 → 组播换弹动画 → Delay → “剩余子弹计算”（备弹不够的分支漏连返回节点，返回 0，吞弹匣）<div class="pb">⚠ 问题：弹匣 3 / 备弹 7 换完变 0 / 0，一局打空只能打出 {{v:E4.session.0.2}} / 40 发（A#1 P0，E4）；Delay 不可取消，中途死亡已清零的子弹丢失；动画等组播</div></td><td>补上返回节点，改成一次性 take = min(空位, 备弹)</td><td>服务器可取消计时器状态机 + 本机预测动画（场景 07）</td></tr>
+    <tr><td>后坐力 / 散布</td><td>服务器上播后坐力曲线并加镜头输入（只对主机有效）；散布读服务器动画蓝图的“是否瞄准”（服务器上永远是否）<div class="pb">⚠ 问题：客户端玩家没有后坐力；开镜不减散布（A#13 P1）</div></td><td>后坐力挪到本机</td><td>后坐力本地加；散布用序号做种子，服务器可复现（场景 11）</td></tr>
+    <tr><td>冲刺 / 开镜</td><td>冲刺标志只在服务器（Server RPC 设置、不复制），开镜标志只在本机；两端每帧各自算最大速度<div class="pb">⚠ 问题：冲刺时每秒被纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次、平均拉回 {{v:E6[c=0,rtt=100].avg:.1f}} cm（RTT 100 ms，A#5 P0，E6）</div></td><td>按键时本机和服务器同时切换，两端同一函数算速度</td><td>标志进 CharacterMovement 的移动预测（场景 10）</td></tr>
+    <tr><td>僵尸 AI</td><td>服务器计时器：0.5 秒找最近玩家（含已死亡的）+ 简单寻路，0.1 秒检测攻击范围<div class="pb">⚠ 问题：会追着已阵亡的玩家转；逻辑散在计时器里，调试时看不到当前在做什么（附录 A 未单列）</div></td><td>找目标时跳过已死亡的玩家</td><td>AIController + 行为树，过滤 PlayerState 里已阵亡的玩家（场景 12）</td></tr>
+    <tr><td>僵尸外观与动作</td><td>速度、动画变体只在服务器随机（客户端用默认）；攻击 / 受击动作在组播里各端各自随机<div class="pb">⚠ 问题：主机上是冲刺僵尸、客户端上是普通跑姿（A#21 P1）；同一次攻击两端挥的不是同一只手（A#22 P2）</div></td><td>服务器随机后把结果复制出去</td><td>VariantSeed（Initial Only）+ AttackInfo / LastHit 计数（场景 12）</td></tr>
+    <tr><td>僵尸死亡与补刷</td><td>服务器调用 Multicast_Death：布娃娃、5 秒后销毁、清了一个名字写错的计时器、调用刷怪器“重新生成”——补刷因此在每一端都执行<div class="pb">⚠ 问题：客户端多出只有自己看得到的僵尸（A#3 P0）；倒地后 5 秒内仍在寻路和攻击检测（A#14 P1）</div></td><td>补刷和清计时器挪出组播，只在服务器执行</td><td>bIsDead RepNotify；服务器停 AI、GameMode 补刷；惨叫用不可靠组播（场景 08）</td></tr>
+    <tr><td>玩家死亡</td><td>服务器扣 HP；死亡时 DisableInput(0 号控制器)、2D 惨叫（在主机响）；Multi_Death 让每一端弹失败并暂停<div class="pb">⚠ 问题：客户端玩家死后仍能移动和开火，惨叫在主机那边响（A#4 P0）；任一人阵亡两人一起失败（A#7 P0）</div></td><td>死亡只广播给死者本人；失败改由服务器判断“全部阵亡”</td><td>AC_Health + GameMode 判全灭，死者观战（场景 09）</td></tr>
+    <tr><td>计时与胜利</td><td>每一端的 HUD 各自每秒减一，3 分钟到时本地暂停并弹胜利<div class="pb">⚠ 问题：两端倒计时可能差一两秒、各自判胜，结局可能不同（A#6 P0）</div></td><td>服务器计时，到点组播一次结算</td><td>GameState 复制结束时刻，GameMode 判定（场景 09 / 13）</td></tr>
+    <tr><td>暂停 / 重开 / 退出</td><td>SetGamePaused（客户端无效、主机冻结全员）；OpenLevel 重开（断开联机）；QuitGame<div class="pb">⚠ 问题：客户端按暂停无效、主机按暂停冻结所有人；任一方点重开就断开联机（A#8 P0）</div></td><td>暂停只开菜单；重开改 servertravel</td><td>本地菜单；服务器 ServerTravel；GameInstance 离开会话（场景 13）</td></tr>
+    <tr><td>HUD</td><td>属性绑定函数每帧 Cast 0 号玩家角色，再读武器的复制变量<div class="pb">⚠ 问题：每帧 Cast 白白消耗；武器还没复制到时访问空引用（A#16 P1）</div></td><td>Construct 时缓存一次引用，空引用判断</td><td>本地 PC 创建、订阅事件、只在变化时刷新（场景 14）</td></tr>
+  </table></div>
+  <p class="tcap">表 K0-2　当前做法（含 ⚠ 存在的问题）vs 最小修复 vs 理想方案。每一行的详细讲法见对应的 K2 场景卡；理想方案的蓝图级细节见第 9~13 章</p>
+
+  <h2>3. 最容易说错的一项：子弹</h2>
+  <div class="state cur"><span class="sl">当前做法</span><div>原 Demo <strong>没有用射线检测</strong>。按下开火后，服务器在枪口生成一颗复制的子弹 Actor（BP_Bullet：开启复制和移动复制，ProjectileMovement 初速 20000 cm/s，寿命 1 秒），子弹自己飞、自己撞，碰撞事件里播弹孔、血花，并调用 Apply Damage。</div></div>
+  <p>下图按时间顺序画出原 Demo 里一发子弹实际的路径（以客户端玩家开火为例）。和第 1 章的伪代码一一对应，节点编号可以在 <code>audit/BP_Weapon.txt</code>、<code>audit/BP_Bullet.txt</code> 里查到。</p>
+<!--seq {"state":"cur","p":["开火者本机\n（客户端玩家）","服务器\n（主机进程）","其他端\n（双人局里即主机画面）"],"pc":["s","b","o"],"s":[
+ ["—","① 本机：不播任何表现，只发请求"],
+ [0,0,"按住开火：本地 0.12 秒循环计时器","s"],
+ [0,0,"用复制下来的“当前子弹数量”判断还能不能打（晚一个往返）","s"],
+ [0,1,"Server_Fire · Reliable（每发一条，不带参数）","net"],
+ ["—","② 服务器：先演，再判"],
+ [1,1,"Multicast_Fire：先组播开火动画（还没查弹药）","a"],
+ [1,0,"组播到达：开火者这时才看到自己开枪（≈ RTT + 网络帧）","net"],
+ [1,2,"组播：其他端播开火动画","net"],
+ [1,1,"Server_SpawnBullet → CheckCanFire（弹数 > 0）","b"],
+ [1,1,"SpawnActor BP_Bullet（Owner / Instigator 为空）","b"],
+ [1,1,"弹数 − 1；后坐力（只对主机生效）","b"],
+ ["—","③ 子弹：服务器和客户端各飞一份"],
+ [1,0,"子弹 Actor 复制到客户端：出现时已飞出约 {{v:E1[s=0,rtt=200].pop:.1f}} m","rep"],
+ [1,1,"服务器的子弹撞到僵尸 → ReceiveHit：弹孔、音效","r"],
+ [1,1,"→ Apply Damage（身体 40 / 爆头 100）","r"],
+ [0,0,"客户端的子弹副本按自己的轨迹也撞上 → 弹孔、血花；Apply Damage 被 Authority Only 跳过","s"],
+ ["—","④ 结果：伤害只在服务器生效（靠引擎拦截），表现靠组播"],
+ [1,1,"僵尸 AnyDamage（只在服务器）：血量 −= 伤害","r"],
+ [1,0,"弹药、血量变量无条件复制 → 开火者的弹药 UI 晚一个往返才变","rep"],
+ [1,0,"Multicast_HitReact / Death：各端各自随机受击动作，死亡时各端都执行补刷","net"]
+],"cap":"<b>图 K0-2</b>　原 Demo 里一发子弹实际怎么走。命中由服务器生成的复制子弹自己撞出来，表现全部等服务器组播，伤害写在每一端都会触发的碰撞里。理想方案的对应流程见图 K1-3、图 4-2（RTT 200 ms 下的子弹突现距离来自 E1 模型实验）"} -->
+
+  <div class="co deep"><span class="h">勘误：客户端那次 Apply Damage 其实没有扣血</span>
+    <p>本书早先的版本写的是“子弹在每一端都扣僵尸血”，这条是根据连线推断的，不准确。复制子弹的碰撞事件确实在服务器和每个客户端都会触发，每一端也都会走到 Apply Damage 节点；但 <strong>Apply Damage 和 Event AnyDamage 在引擎里都标记为 Authority Only</strong>（蓝图节点上能看到这个标注），客户端上的子弹副本不是权威端，这次调用不会执行；就算执行到了，Pawn 的 TakeDamage 也会先检查自己是不是权威端。所以原 Demo 的僵尸<strong>只在服务器扣血</strong>，客户端不会本地“打死”僵尸。</p>
+    <p>这是<strong>被引擎拦住了，不是设计正确</strong>：① 写法依赖引擎的保护，一旦改成直接修改血量变量、或者打的是非 Pawn 的可破坏物，就会真的在每一端各算一份；② 伤害来源为空，击杀统计、仇恨都做不了；③ 客户端子弹副本的轨迹和服务器不完全一样，客户端可能看到血花、服务器却判定没打中（或者反过来）。真正“在每一端都执行”的是死亡组播里的补刷——客户端会多出只有自己能看到的僵尸。验证方法：PIE 里在僵尸的 AnyDamage 后加 Print String，输出只会带 “Server:” 前缀。</p>
+  </div>
+
+  <h3>当前做法的问题，按玩家能感受到的排</h3>
+  <div class="tbl"><table>
+    <tr><th>现象</th><th>原因（当前做法）</th><th>数据</th></tr>
+    <tr><td>按下开火要等一会儿才看到枪口火焰</td><td>本机不播表现，等服务器组播回来</td><td>RTT 200 ms 时约 {{v:E1[s=0,rtt=200].own:.0f}} ms（E1）</td></tr>
+    <tr><td>子弹凭空出现在枪口前几米</td><td>子弹是服务器生成后复制下来的，到达时已经飞了一段</td><td>约 {{v:E1[s=0,rtt=200].pop:.1f}} m（E1）</td></tr>
+    <tr><td>打空了还播一次开火动画</td><td>组播排在弹药检查之前</td><td>RTT ≥ 100 ms 时每次打空多 1 次（E1）</td></tr>
+    <tr><td>血花和扣血偶尔对不上</td><td>客户端的子弹副本按自己的轨迹碰撞，伤害按服务器那颗算</td><td>推断（附录 A 给出 PIE 验证方法）</td></tr>
+    <tr><td>网络消息多</td><td>每发一个复制 Actor（生成、移动、销毁都要同步）</td><td>约 {{v:E7.0.4}} B/s，命中扫描约 {{v:E7.1.4}} B/s（E7，量级估算）</td></tr>
+    <tr><td>击杀统计、仇恨做不了</td><td>Apply Damage 的 Instigator / Causer 为空</td><td>源码事实（#24 / #25）</td></tr>
+  </table></div>
+
+  <h3>理想方案：两条路线</h3>
+  <p>“不用射线”本身不是错误——抛射物和命中扫描是两种都成立的设计。问题在于当前做法把抛射物做成了“表现等服务器、伤害写在每一端”。理想方案按武器类型二选一：</p>
+  <div class="tbl cmp"><table>
+    <tr><th></th><th class="cur">当前做法：复制抛射物</th><th class="ideal">路线 A：命中扫描（本书步枪采用）</th><th class="ideal">路线 B：做对的抛射物</th></tr>
+    <tr><td>命中怎么判</td><td>服务器的子弹撞到什么算什么；客户端副本也在撞</td><td>本机射线得到目标和部位，服务器按包围盒 + 容差 + 视线校验（PvP 改服务器回溯）</td><td>只有服务器那颗权威子弹的碰撞算数</td></tr>
+    <tr><td>伤害在哪算</td><td>每一端都调用，客户端被引擎拦下</td><td>服务器校验后结算</td><td>服务器子弹命中时结算，碰撞事件里先判断权限</td></tr>
+    <tr><td>开火者看到</td><td>等一个往返才看到动画和子弹</td><td>立即：本地动画、枪口火焰、曳光、命中特效</td><td>立即：本机生成一颗<strong>不复制</strong>的假子弹，只做表现</td></tr>
+    <tr><td>别人看到</td><td>组播动画 + 突然出现的子弹</td><td>开火计数（Skip Owner）→ 本地播 3P 动画和曳光</td><td>服务器子弹复制下来（对开火者隐藏，生成时按延迟向前快进）；或只复制开火计数、各端本地生成表现弹</td></tr>
+    <tr><td>网络开销</td><td>每发一个 Actor 通道</td><td>每发几个字节</td><td>每发一个 Actor 通道（或只同步计数）</td></tr>
+    <tr><td>适合</td><td>—</td><td>步枪、手枪：飞行时间只有几帧</td><td>火箭筒、榴弹、弓箭：飞行时间长、需要躲避</td></tr>
+  </table></div>
+  <p class="tcap">表 K0-3　子弹的三种做法。路线 B 也是当前做法的“正确版本”：结构不变，改的是谁先演、谁算结果、谁需要看到</p>
+  <div class="co tip"><span class="h">为什么步枪选路线 A</span>
+    <p>原 Demo 的子弹 200 m/s，咖啡店地图里的交战距离大约 10~30 m，飞行时间只有 0.05~0.15 秒，60 帧下 3~9 帧，玩家几乎分辨不出它和命中扫描的区别；却要为每一发付出一个复制 Actor 的代价，还要处理“远端子弹突现”和“两份子弹各撞各的”。所以重构方案对步枪用命中扫描、本地画曳光；如果以后加火箭筒，再用路线 B。“硬要用实体子弹”的完整做法（预测抛射物、数据化弹道、快进与回溯的区别、E8~E10 实测）见第 5B 章。</p>
+  </div>
+  <div class="co warn"><span class="h">面试注意：被问“子弹是怎么同步的”时</span>
+    <p>不要直接背理想方案的三段式，面试官接着问“你 Demo 里是射线吗？”就答不上来了。先交代当前做法，再说为什么换、换成什么：</p>
+    <p>“我 Demo 里的子弹是服务器生成的复制 Actor，带 ProjectileMovement，没有用射线。这样做的问题是开火者要等一个往返才看到表现、远端看到子弹凭空出现、每发一个 Actor 通道很浪费，而且伤害写在每一端都会触发的碰撞里——客户端那次是被引擎的 Authority Only 拦下来的，不是我设计对的。重构时步枪改成命中扫描：本机先播并做射线，服务器校验后结算伤害，别人靠开火计数播表现。如果是火箭筒这种慢速弹，我会保留抛射物，但伤害只在服务器那颗子弹上结算，开火者本地放一颗不复制的假子弹。”</p>
+  </div>
+
+  <h2>4. 当前做法存在的问题：23 条按后果分五类</h2>
+  <p>附录 A 按蓝图节点列出了全部 23 条问题；这里按<strong>玩家或面试官会感受到的后果</strong>重新归类。回答“你的 Demo 有什么问题”时，先说类别，再各举一个现象和一个数字，比逐条背节点有说服力。</p>
+<!--bars {"state":"cur","title":"当前做法的 23 个问题，按后果分类（条）","unit":"条","fmt":"g","labw":250,"max":6,"items":[
+ ["① 结果或规则出错（联机下必错）",6,"r","6 条 · 全部 P0"],
+ ["② 手感差，弱网下被放大",5,"o","5 条 · P0×1 P1×4"],
+ ["③ 各端不一致 / 依赖时序",5,"a","5 条 · P1×4 P2×1"],
+ ["④ 带宽与性能浪费",2,"b","2 条 · P1×1 P2×1"],
+ ["⑤ 结构与可维护性",5,"s","5 条 · P2×4 P3×1"]
+],"cap":"<b>图 K0-3</b>　23 个问题按后果的分布。级别定义：P0 联机下功能必错；P1 弱网或特定时序下出错；P2 设计不合理或浪费；P3 代码质量"} -->
+  <div class="tbl cmp"><table>
+    <tr><th>类别</th><th class="prob">包含的问题（附录 A 编号 · 级别）</th><th>玩家 / 面试官会看到</th><th>根因（K2 图 K2-1）</th></tr>
+    <tr><td>① 结果或规则出错</td><td>#1 换弹吞弹匣、#3 补刷在每端执行、#4 死者仍能操作、#6 倒计时各端自算、#7 一人阵亡全员失败、#8 本地暂停 / 重开（全部 P0）</td><td>子弹凭空少了；客户端多出幽灵僵尸；两人看到的结局可能不同；点“重开”就断开联机</td><td>A 结果在客户端算 · D 本地当全局 · E 把状态当事件发</td></tr>
+    <tr><td>② 手感差</td><td>#5 冲刺 / 开镜两端不一致（P0）；#9 开火表现等组播、#10 空放与打断换弹、#11 逐发 Reliable、#13 后坐力只对主机（P1）</td><td>按下开火约 {{v:E1[s=0,rtt=200].own:.0f}} ms 才有反应；冲刺每秒被拉回约 {{v:E6[c=0,rtt=100].cps:.1f}} 次；丢包时伤害最晚 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms 才生效（P99）</td><td>B 表现等服务器 · C 两端各算各的</td></tr>
+    <tr><td>③ 各端不一致 / 依赖时序</td><td>#14 死后计时器还在跑、#15 开局标志不复制、#16 依赖初始化时序、#21 外观只在服务器随机（P1）；#22 动作各端各自随机（P2）</td><td>两端看到的僵尸外观和动作不同；晚加入停在“未开始”；偶发不开局</td><td>C · E · F 把时序当成必然</td></tr>
+    <tr><td>④ 带宽与性能浪费</td><td>#12 每发一个复制子弹 Actor（P1）；#20 弹药广播给所有人（P2）</td><td>约 {{v:E7.0.4}} B/s，推荐方案约 {{v:E7.1.4}} B/s（E7）；远端子弹突现约 {{v:E1[s=0,rtt=200].pop:.1f}} m（E1）</td><td>A</td></tr>
+    <tr><td>⑤ 结构与可维护性</td><td>#2 伤害写在每端都触发的碰撞里、靠引擎兜底，#17 只有 1P 手臂，#18 复制 PC 引用，#19 伤害来源为空（P2）；#23 补丁、空 OnRep、断开的节点（P3）</td><td>对方看到漂浮的手臂；击杀统计、仇恨做不了；关卡蓝图是上帝对象，改一处牵连一片</td><td>A · D · F</td></tr>
+  </table></div>
+  <p class="tcap">表 K0-4　当前做法的问题按后果分类。每条的蓝图节点证据、修复与 PIE 验证方法见附录 A；按功能看见表 K0-2 每行的 ⚠；各章开头的“存在的问题”横幅是本章相关的子集</p>
+  <div class="co warn"><span class="h">面试注意：被问“你这个 Demo 有什么问题”时，30 秒这样答</span>
+    <p>“当前版本主要有五类问题。第一类是结果和规则出错，比如换弹在备弹不够时会吞掉整个弹匣、僵尸死亡组播里的补刷在每一端都执行、一个人阵亡两个人一起失败；第二类是手感，表现全等服务器组播，RTT 200 ms 时按下开火要两百多毫秒才有反应，冲刺只在服务器生效会被持续拉回；第三类是各端不一致，比如僵尸外观只在服务器随机；第四类是浪费，每发子弹一个复制 Actor；第五类是结构，开局、计时、胜负写在关卡蓝图和 UI 里。根因都是单机思维——代码在错误的一端执行。”然后停下来，等面试官挑一类往下问。</p>
+  </div>
+
+  <h2>5. 读书地图：每一部分讲的是哪一套</h2>
+  <div class="tbl"><table>
+    <tr><th>部分 / 章节</th><th>讲的是</th><th>怎么读</th></tr>
+    <tr><td>第零部分 K0~K2</td><td>两者对照</td><td>K0 总表；K1 讲法与口径；K2 每张场景卡同时有“当前做法（坑）”“最小修复”“理想实现”</td></tr>
+    <tr><td>第 0 章 四问速答</td><td>两者</td><td>每题先一句当前做法，再给理想方案的 30 秒答案</td></tr>
+    <tr><td>第 1 章 原 Demo 审计</td><td><span class="tag cur">当前做法</span></td><td>全部是原 Demo 的源码事实与推断</td></tr>
+    <tr><td>第 2 章 网络基础</td><td>引擎规则</td><td>与 Demo 无关的机制</td></tr>
+    <tr><td>第 3~6 章 面试四问</td><td>两者</td><td>章首“当前 vs 理想”对照表；“原实现对照”小节是当前做法，其余以理想方案为主</td></tr>
+    <tr><td>第 5B 章 实体子弹</td><td>两者</td><td>章首当前做法 + 问题；正文是“硬用实体子弹”的理想做法（预测抛射物、数据化弹道），章末“原 Demo 怎么改”四列表</td></tr>
+    <tr><td>第 7 章 Gameplay 框架</td><td>引擎规则 + <span class="tag ideal">理想方案</span></td><td>框架知识是通用的，类结构是重构后的</td></tr>
+    <tr><td>第 8~13 章 重做</td><td><span class="tag ideal">理想方案</span></td><td>全部是设计；每章开头列出对应的当前实现</td></tr>
+    <tr><td>第 14 章 测试与演示</td><td><span class="tag ideal">理想方案</span></td><td>验证重构的清单；README 模板分“当前状态”和“重构完成后”两版</td></tr>
+    <tr><td>第 15~16 章 面试防守</td><td>两者</td><td>回答都先交代当前做法，再讲理想方案</td></tr>
+    <tr><td>附录 A</td><td>两者</td><td>“问题”列是当前做法，“修复”列是最小修复或理想方案</td></tr>
+  </table></div>
+  <p class="tcap">表 K0-5　读书地图</p>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>三种标记：<strong>当前做法</strong>（原 Demo 实际）、<strong>最小修复</strong>（保留结构只改错）、<strong>理想方案</strong>（重构设计）；类名也能区分（BP_Weapon 是当前，BP_WeaponBase 是理想）。</li>
+    <li>原 Demo <strong>没有射线检测</strong>：服务器生成复制的子弹 Actor，子弹在每一端各飞一份、各自碰撞。</li>
+    <li>客户端那次 Apply Damage 被引擎的 Authority Only 拦下，伤害实际只在服务器——是“碰巧没错”，不是设计正确；真正在每一端执行的是死亡组播里的补刷。</li>
+    <li>当前做法的 23 个问题按后果分五类：<strong>结果或规则出错、手感差、各端不一致、浪费、结构</strong>；P0 的 7 条全部是“联机下必错”。</li>
+    <li>理想方案：步枪用命中扫描（路线 A），慢速武器用“服务器权威子弹 + 本机假子弹”（路线 B）。</li>
+    <li>回答任何“你怎么做的”问题：先一句当前做法，再讲理想方案和为什么换。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测：面试官问“你的 Demo 里子弹是射线还是实体？”</summary>
+    实体：服务器生成的复制子弹 Actor，带 ProjectileMovement，200 m/s。然后主动补两句：它的问题（开火者等一个往返、远端子弹突现、每发一个 Actor 通道、伤害写在每一端都会触发的碰撞里）；以及重构的选择（步枪改命中扫描，慢速武器保留抛射物但只在服务器结算、本机放假子弹）。
+  </details>
+  <details class="quiz"><summary>自测：原 Demo 的僵尸会不会在客户端被“本地打死”？</summary>
+    不会。客户端子弹副本的碰撞事件会走到 Apply Damage，但 Apply Damage 与 Event AnyDamage 都是 Authority Only，客户端不执行，Pawn 的 TakeDamage 也要求权威端；僵尸只在服务器扣血，死亡由服务器组播到各端。但死亡组播里调用了补刷，补刷在客户端也执行，所以客户端会多出只有自己能看到的僵尸。
+  </details>
+</section>

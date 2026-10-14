@@ -15,6 +15,8 @@
     <li>按严重程度列出问题，每条都能指到具体蓝图节点。</li>
     <li>记住单机改联机最常见的四类错误：<strong>本地当全局、表现等服务器、结果在客户端算、两端各算各的</strong>。</li>
   </ul></div>
+  <div class="state cur"><span class="sl">当前做法</span><div>本章全部讲原 Demo 真实的实现（仓库快照 d7e5c75），没有任何重构内容。最容易被误解的一点：原 Demo <strong>没有射线检测</strong>，命中由服务器生成的复制子弹 Actor（BP_Bullet）自己撞出来。重构后的理想方案从第 3 章开始，第三部分是完整设计；两者逐项对照见 K0。</div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div>本章逐条列出当前做法的问题：共 23 条（P0 联机下必错 7 条、P1 9 条、P2 6 条、P3 1 条），这里列面试最常被追问的 12 条，全部见附录 A；按后果分成五类的总览见 K0 第 4 节。</div></div>
 
   <h2>Fact Sheet：工程到底有什么</h2>
   <div class="tbl"><table>
@@ -23,7 +25,7 @@
     <tr><td>联机方式</td><td>只在 PIE 里以 Listen Server 跑过；没有创建 / 查找会话的节点</td><td>全工程搜不到 Session 节点；<code>GM_MyGame</code> 里有两个 <code>servertravel CoffeeShopA_P</code> 节点，但都没有连到任何事件</td></tr>
     <tr><td>默认地图 / GameMode</td><td><code>CoffeeShopA_P</code>，WorldSettings 覆盖为 <code>GM_MyGame</code>（GameModeBase）</td><td>DefaultPawn = <code>BP_Player</code>，GameState = <code>BP_MyGameState</code>；没有自定义 PlayerController / PlayerState</td></tr>
     <tr><td>角色</td><td><code>BP_Player</code>（Character），唯一的网格是第一人称手臂 <code>SK_Custom_Arms</code></td><td>CDO：<code>bUseControllerRotationPitch = True</code>，相机挂在手臂上的 SpringArm（臂长 0）</td></tr>
-    <tr><td>武器 / 子弹</td><td><code>BP_Weapon</code>（Actor，bReplicates）每人一把；<code>BP_Bullet</code>（Actor，bReplicates + bReplicateMovement，ProjectileMovement 20000 cm/s，寿命 1 s）</td><td>弹匣 10、备弹 30、射速 0.12 s（循环计时器）</td></tr>
+    <tr><td>武器 / 子弹</td><td><code>BP_Weapon</code>（Actor，bReplicates）每人一把；<code>BP_Bullet</code>（Actor，bReplicates + bReplicateMovement，ProjectileMovement 20000 cm/s，寿命 1 s）——<strong>命中靠子弹碰撞，没有射线检测</strong></td><td>弹匣 10、备弹 30、射速 0.12 s（循环计时器）</td></tr>
     <tr><td>僵尸</td><td><code>BP_Zombie</code>（Character，AutoPossessAI），血量 100；爆头 100、身体 40</td><td>开局在 4 个 TargetPoint 附近刷 10 只，死一只补一只</td></tr>
     <tr><td>RPC</td><td>19 个：BP_Player 7、BP_Weapon 6、BP_Zombie 3、GameMode 1、关卡蓝图 2</td><td>CustomEvent 的 FunctionFlags（<code>audit/*.txt</code> “Custom events / RPC” 段）</td></tr>
     <tr><td>复制变量</td><td>11 个：玩家 HP / WeaponRef / MouseY；武器 5 个弹药相关；僵尸 血量 / 正在攻击；GameState ReadyPlayersList</td><td>除 <code>OnRep_WeaponRef</code> 外，所有 OnRep 函数都是空的</td></tr>
@@ -58,8 +60,8 @@
     <rect x="28" y="304" width="214" height="90" rx="8" fill="#FDEEEE" stroke="#B91C1C"/>
     <text x="135" y="326" text-anchor="middle" class="b sm" style="fill:#B91C1C">BP_Bullet.ReceiveHit（每一端）</text>
     <text x="135" y="344" text-anchor="middle" class="xs">弹孔 / 音效 / 粒子：没问题</text>
-    <text x="135" y="360" text-anchor="middle" class="xs" style="fill:#B91C1C">ApplyDamage：客户端也扣僵尸血</text>
-    <text x="135" y="376" text-anchor="middle" class="xs" style="fill:#B91C1C">→ 本地触发 Multicast_Death</text>
+    <text x="135" y="360" text-anchor="middle" class="xs" style="fill:#B45309">ApplyDamage：客户端被引擎拦下</text>
+    <text x="135" y="376" text-anchor="middle" class="xs" style="fill:#B45309">（Authority Only，伤害只在服务器）</text>
 
     <rect x="318" y="48" width="234" height="64" rx="8" fill="#fff" stroke="#2F5BD3"/>
     <text x="435" y="70" text-anchor="middle" class="b sm">GM_MyGame.AddReadyPlayer</text>
@@ -92,7 +94,7 @@
     <rect x="628" y="304" width="204" height="90" rx="8" fill="#fff" stroke="#6B7280"/>
     <text x="730" y="326" text-anchor="middle" class="b sm">僵尸副本</text>
     <text x="730" y="344" text-anchor="middle" class="xs">血量复制；动画靠多播</text>
-    <text x="730" y="360" text-anchor="middle" class="xs" style="fill:#B91C1C">客户端调用多播 = 只在本地执行</text>
+    <text x="730" y="360" text-anchor="middle" class="xs" style="fill:#B91C1C">死亡组播里的补刷每端都执行</text>
     <text x="730" y="376" text-anchor="middle" class="xs" style="fill:#B91C1C">重新生成 → 本地“幽灵僵尸”（推断）</text>
 
     <g fill="none" stroke="#4B5563" stroke-width="1.4">
@@ -104,7 +106,7 @@
     </g>
     <text x="278" y="70" text-anchor="middle" class="xs">Server_</text><text x="278" y="98" text-anchor="middle" class="xs">ReportReady</text>
   </svg>
-  <figcaption><b>图 1-1</b>　原 Demo 的实际运行结构（红色 = 联机下会出错的地方）。左列每台机器各执行一份，中列只有服务器执行，右列是复制到客户端后的副本</figcaption>
+  <figcaption><b>图 1-1</b>　<span class="tag cur">当前做法</span>原 Demo 的实际运行结构（红色 = 联机下会出错的地方，琥珀色 = 写法有隐患但被引擎拦住）。左列每台机器各执行一份，中列只有服务器执行，右列是复制到客户端后的副本</figcaption>
   </figure>
 
   <h2>三段关键蓝图，读成伪代码</h2>
@@ -159,7 +161,7 @@ Function 剩余子弹计算() -> 子弹保存
   <div class="tbl"><table>
     <tr><th>#</th><th>级别</th><th>问题</th><th>证据</th><th>后果</th></tr>
     <tr><td>1</td><td><span class="tag p0">P0</span></td><td>换弹在“备弹不够补满”时清空弹匣</td><td><span class="tag src">源码事实</span>剩余子弹计算 false 分支无 Return（#185~#186）</td><td><span class="tag ex">实测 E4</span>3/7 换完变 0/0；整局打空再换只能打出 {{v:E4.session.0.2}}/40 发</td></tr>
-    <tr><td>2</td><td><span class="tag p0">P0</span></td><td>伤害在每一端都算</td><td><span class="tag src">源码事实</span>BP_Bullet.ReceiveHit → ApplyDamage 无权限判断（#24/#25）</td><td><span class="tag inf">推断</span>客户端本地扣僵尸血、本地播受击 / 死亡，和服务器不一致</td></tr>
+    <tr><td>2</td><td><span class="tag p2">P2</span></td><td>伤害写在每一端都会触发的子弹碰撞里</td><td><span class="tag src">源码事实</span>BP_Bullet.ReceiveHit → ApplyDamage 无权限判断，Instigator / Causer 为空（#24/#25）</td><td><span class="tag inf">勘误</span>客户端那次 ApplyDamage 被 Authority Only 跳过，僵尸只在服务器扣血（原版本书误判为 P0）；隐患：写法依赖引擎保护、击杀统计做不了、客户端子弹副本的血花与服务器判定可能对不上</td></tr>
     <tr><td>3</td><td><span class="tag p0">P0</span></td><td>僵尸死亡时每一端都“补刷一只”</td><td><span class="tag src">源码事实</span>Multicast_Death → 重新生成；重新生成直接跳进 SwitchHasAuthority 之后的 Array_Random（#15 → #9）</td><td><span class="tag inf">推断</span>客户端本地生成只有自己看得见的僵尸</td></tr>
     <tr><td>4</td><td><span class="tag p0">P0</span></td><td>玩家死亡逻辑用 GetPlayerController(0)</td><td><span class="tag src">源码事实</span>BP_Player.ReceiveAnyDamage（只在服务器触发）→ DisableInput(GetPlayerController(0))（#118）</td><td><span class="tag inf">推断</span>客户端玩家死后：目标是自己的 Pawn、传入的是主机 PC，APawn::DisableInput 只打错误日志、不生效；服务器上关输入本来也管不到客户端——死者仍能移动、开火；惨叫在主机响</td></tr>
     <tr><td>5</td><td><span class="tag p0">P0</span></td><td>冲刺 / 瞄准状态两端不一致</td><td><span class="tag src">源码事实</span>IsRunning 只由 Server RPC 设置且不复制；是否瞄准 只在本机 AnimBP 设置；Tick 里两端各自算 MaxWalkSpeed（速度计算 #233）</td><td><span class="tag ex">实测 E6</span>冲刺时每秒纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次，平均回拉 {{v:E6[c=0,rtt=100].avg:.1f}} cm</td></tr>
@@ -192,14 +194,15 @@ Function 剩余子弹计算() -> 子弹保存
 
   <div class="recap"><div class="t">本章速记</div><ul>
     <li>原 Demo：纯蓝图、PIE Listen Server、19 个 RPC、11 个复制变量，只有 1 个 OnRep 有内容。</li>
-    <li>最致命的 3 条：<strong>子弹 ReceiveHit 在每端都 ApplyDamage</strong>、<strong>换弹函数漏连 Return 吞子弹</strong>、<strong>冲刺 / 瞄准两端不一致导致拉回</strong>。</li>
+    <li>最致命的 3 条：<strong>换弹函数漏连 Return 吞子弹</strong>、<strong>冲刺 / 瞄准两端不一致导致拉回</strong>、<strong>整局流程在本地做（一人死全员失败、本地暂停 / 重开、补刷每端执行）</strong>。</li>
+    <li>子弹：服务器生成的复制 Actor，<strong>没有射线检测</strong>；伤害写在每一端都触发的碰撞里，客户端那次被 Authority Only 拦下——“碰巧没错”不等于设计正确。</li>
     <li>四类根因：本地当全局、表现等服务器、结果在客户端算、两端各算各的。</li>
     <li>回答“你的 Demo 有什么问题”时：先分类，再各举一个节点级的例子，最后说改法。</li>
   </ul></div>
   <details class="quiz"><summary>自测：复制子弹的 ReceiveHit 为什么会在客户端触发？客户端上 K2_DestroyActor 又为什么没效果？</summary>
-    复制的 Actor 在每个客户端都有一份副本，ProjectileMovement 在副本上也会继续模拟、做碰撞，于是 Hit 事件在每一端都会触发。客户端对自己没有权限的复制 Actor 调用 Destroy，<code>UWorld::DestroyActor</code> 会因为角色不是 Authority 直接返回（除非是 bNetTemporary 等特殊情况），真正的销毁由服务器复制过来。所以只有表现（弹孔、音效）可以放在 Hit 里各端各做，伤害必须加 <code>HasAuthority()</code>。
+    复制的 Actor 在每个客户端都有一份副本，ProjectileMovement 在副本上也会继续模拟、做碰撞，于是 Hit 事件在每一端都会触发。客户端对自己没有权限的复制 Actor 调用 Destroy，<code>UWorld::DestroyActor</code> 会因为角色不是 Authority 直接返回（除非是 bNetTemporary 等特殊情况），真正的销毁由服务器复制过来。那客户端上的 ApplyDamage 呢？它和僵尸的 Event AnyDamage 都是 Authority Only，客户端上的子弹副本不是权威端，这次调用不会执行（Pawn 的 TakeDamage 也会再检查一次），所以原 Demo 的僵尸只在服务器扣血。但这是被引擎拦住，不是写对了：表现（弹孔、音效）可以放在 Hit 里各端各做，结算伤害之前应该显式加 <code>Switch Has Authority</code>，并填上 Instigator。
   </details>
   <details class="quiz"><summary>自测：在客户端调用一个 Multicast 事件会发生什么？</summary>
-    只在调用它的那台客户端本地执行，不会发给服务器，也不会发给其他客户端。原 Demo 里客户端因为本地扣血触发了 <code>Multicast_Death</code>，结果只有自己这边的僵尸倒地。
+    只在调用它的那台客户端本地执行，不会发给服务器，也不会发给其他客户端。原 Demo 的 8 个组播其实都是在服务器上调用的（这一点没错），问题出在“组播里做了什么”：<code>Multicast_Death</code> 里调用了补刷，于是每一端都刷出一只僵尸。反过来，如果把伤害写成在客户端直接修改血量、再由客户端判死调用组播，就会出现“只有自己这边的僵尸倒地”。
   </details>
 </section>

@@ -9,6 +9,16 @@
     <li>用“服务器决定种子、各端算结果”的方式同步随机外观；用计数器同步攻击动作。</li>
     <li>写出攻击判定（服务器时间窗口）和死亡（服务器规则 + 各端表现）。</li>
   </ul></div>
+  <div class="state ideal"><span class="sl">理想方案</span><div>本章是重构后的僵尸、AIController 与行为树。原 Demo 的 BP_Zombie / BP_ZombieSpawn 是这样做的：</div></div>
+  <div class="tbl cmp"><table>
+    <tr><th>方面</th><th class="cur">当前做法（原 Demo）</th><th class="prob">存在的问题</th><th class="ideal">理想方案（本章）</th></tr>
+    <tr><td>AI</td><td>服务器计时器：0.5 秒找最近玩家（包括已死亡的）+ SimpleMoveToActor；0.1 秒检测攻击范围</td><td class="pbc">追着已阵亡的玩家；逻辑散在计时器里，看不到当前状态</td><td>AIC_Zombie + BT_Zombie；服务节点过滤已阵亡玩家</td></tr>
+    <tr><td>外观</td><td>速度和动画变体只在服务器随机，客户端用默认值</td><td class="pbc"><span class="tag p1">P1</span>客户端用默认跑姿，和主机不一致（A#21）</td><td>VariantSeed（Initial Only），各端同一随机流</td></tr>
+    <tr><td>攻击 / 受击动作</td><td>Multicast_PlayAttackAnim / Multicast_HitReact，组播里各端各自随机；On Completed 各端都写复制变量“正在攻击”</td><td class="pbc"><span class="tag p2">P2</span>两端动作不同（A#22）；客户端写复制变量只改本地</td><td>AttackInfo / LastHit 计数 + 服务器选好的动作编号</td></tr>
+    <tr><td>受伤</td><td>AnyDamage 里扣复制变量“血量”（只在服务器触发）</td><td class="pbc">扣血只在服务器（对）；伤害来源为空（A#19）</td><td>AC_Health.HandleDamage（只在服务器）</td></tr>
+    <tr><td>死亡</td><td>服务器调 Multicast_Death：布娃娃、清了一个名字写错的计时器、调用“重新生成”（于是每一端都补刷）</td><td class="pbc"><span class="tag p0">P0</span>补刷每端执行，客户端出现幽灵僵尸（A#3）；<span class="tag p1">P1</span>倒地后仍在寻路和攻击检测（A#14）</td><td>bIsDead RepNotify；服务器停 AI、清全部计时器、通知 GameMode；Multicast_DeathCry 只放惨叫</td></tr>
+    <tr><td>刷怪</td><td>BP_ZombieSpawn：开局在 TargetPoint 附近刷 10 只</td><td class="pbc">“重新生成”直接跳到权限判断之后的节点，绕过了 Switch Has Authority</td><td>GM_Coop.SpawnZombie + BP_SpawnPoint</td></tr>
+  </table></div>
 
   <h2>1. 类卡片</h2>
   <div class="tbl kv"><table>
@@ -20,7 +30,7 @@
     <tr><td>复制变量</td><td>VariantSeed（Initial Only，RepNotify）· AttackInfo {Counter, Index}（RepNotify）</td><td>—</td></tr>
     <tr><td>仅服务器变量</td><td>bAttacking · Data（DA_Zombie：速度档位、攻击力、攻击距离、动作表）</td><td>—</td></tr>
   </table></div>
-<!--bpnet {"cls":"BP_Zombie","parent":"Character","where":"所有端（客户端是 SimulatedProxy；没有任何客户端拥有它）","defaults":[["Replicates","✓"],["Replicate Movement","✓"],["Net Update Frequency","20"],["Auto Possess AI","Placed in World or Spawned"]],
+<!--bpnet {"state":"ideal","cls":"BP_Zombie","parent":"Character","where":"所有端（客户端是 SimulatedProxy；没有任何客户端拥有它）","defaults":[["Replicates","✓"],["Replicate Movement","✓"],["Net Update Frequency","20"],["Auto Possess AI","Placed in World or Spawned"]],
 "vars":[["VariantSeed","Integer","RepNotify","Initial Only","服务器（BeginPlay）","各端用同一个种子算速度档位、动画集"],
 ["AttackInfo","S_AttackInfo","RepNotify","None","服务器（StartAttack）","{Counter, Index}：各端播同一个攻击动作"],
 ["bAttacking","Boolean","None","—","服务器","攻击状态只给规则用，不复制"],
@@ -34,13 +44,13 @@
 ["Multicast_DeathCry","自定义事件","Multicast","✗","M","HandleDeath（服务器）"],
 ["Multicast_Growl","自定义事件","Multicast","✗","M","BTS_FindTarget 换目标时（服务器）"]],
 "cap":"<b>图 12-0a</b>　BP_Zombie 的网络规格。全书仅有的两个组播都在这里，而且都是 Unreliable 的一次性音效；状态（外观、攻击、血量、死亡）全部是 RepNotify"} -->
-<!--bpnet {"cls":"AIC_Zombie","parent":"AIController","where":"仅服务器","defaults":[["Replicates","✗ AIController 默认不复制"],["客户端上存在","✗ 客户端上僵尸的 Get Controller = None"]],
+<!--bpnet {"state":"ideal","cls":"AIC_Zombie","parent":"AIController","where":"仅服务器","defaults":[["Replicates","✗ AIController 默认不复制"],["客户端上存在","✗ 客户端上僵尸的 Get Controller = None"]],
 "vars":[["黑板键 TargetActor、bInRange","Blackboard","None","—","服务器（BTS_FindTarget）","黑板、行为树、感知都只在服务器；客户端想显示“僵尸盯着谁”只能另加复制变量"]],
 "events":[["Event On Possess","引擎事件","引擎事件","—","S","僵尸生成后自动 Possess"]],
 "cap":"<b>图 12-0b</b>　AIC_Zombie 的网络规格：整个“灵魂”只在服务器，客户端只看到身体的移动和复制下来的状态"} -->
 
   <h2>2. BeginPlay 与外观变体：服务器只决定一个种子</h2>
-<!--bpgraph {"cols":4,"rg":56,"title":"BP_Zombie · BeginPlay 与外观变体","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"BP_Zombie · BeginPlay 与外观变体","nodes":[
  {"id":"b0","k":"event","x":0,"y":0,"t":"Event BeginPlay","net":"A"},
  {"id":"b1","k":"func","x":1,"y":0,"t":"Bind OnHit / OnDeadVisual","s":"Target ← AC_Health（各端）","i":["Event ← PlayHitReact / PlayDeath"]},
  {"id":"b2","k":"flow","x":2,"y":0,"t":"Switch Has Authority","ex":["Authority","Remote"]},
@@ -59,7 +69,7 @@
   </div>
 
   <h2>3. 攻击：服务器时间窗口判定，各端播同一个动作</h2>
-<!--bpgraph {"cols":4,"rg":56,"title":"BP_Zombie · 攻击","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"BP_Zombie · 攻击","nodes":[
  {"id":"a0","k":"cevent","x":0,"y":0,"t":"StartAttack","s":"由 BTT_Attack 调用","net":"S"},
  {"id":"a1","k":"set","x":1,"y":0,"t":"Set bAttacking","i":["← true"],"rep":"L:仅服务器"},
  {"id":"a2","k":"set","x":2,"y":0,"t":"Set AttackInfo（整体）","s":"Make S_AttackInfo","i":["Counter + 1 · Index ← Random(0, 3)"],"rep":"RN:→ 各端 OnRep_AttackInfo"},
@@ -83,7 +93,7 @@
   </div>
 
   <h2>4. 死亡：规则在服务器，表现在各端</h2>
-<!--bpgraph {"cols":4,"rg":56,"title":"BP_Zombie · 死亡","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"BP_Zombie · 死亡","nodes":[
  {"id":"d0","k":"cevent","x":0,"y":0,"t":"HandleDeath","s":"AC_Health.OnDeath","net":"S","o":["Killer"]},
  {"id":"d1","k":"func","x":1,"y":0,"t":"Stop Logic","s":"Target ← AIC.BrainComponent","i":["Reason ← Dead"]},
  {"id":"d2","k":"func","x":2,"y":0,"t":"Clear All Timers","s":"for Object ← self"},
@@ -102,7 +112,7 @@
 "cap":"<b>图 12-3</b>　死亡与受击。原 Demo 的 Multicast_Death 里清的是一个不存在的计时器“追逐玩家”，找目标和攻击检测的计时器都还在跑；补刷调用直接跳过了 SwitchHasAuthority，在客户端生成只有自己看得到的僵尸"} -->
 
   <h2>4.5 全书仅有的两个组播：一次性世界音效</h2>
-<!--bpgraph {"cols":4,"rg":46,"title":"BP_Zombie · Multicast 事件","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":46,"title":"BP_Zombie · Multicast 事件","nodes":[
  {"id":"m0","k":"cevent","x":0,"y":0,"t":"Multicast_DeathCry","s":"Multicast · 不勾 Reliable","net":"MU"},
  {"id":"m1","k":"flow","x":1,"y":0,"t":"Branch","s":"专用服务器上不播声音","i":["NOT Is Dedicated Server"],"ex":["True","False"]},
  {"id":"m2","k":"func","x":2,"y":0,"t":"Play Sound at Location","i":["Sound ← Data.DeathCry","Location ← Get Actor Location"],"ex":[]},
@@ -124,11 +134,11 @@
   </div>
 
   <h2>5. AIController 与行为树</h2>
-<!--bpgraph {"cols":4,"rg":46,"title":"AIC_Zombie · 事件图表","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":46,"title":"AIC_Zombie · 事件图表","nodes":[
  {"id":"o0","k":"event","x":0,"y":0,"t":"Event On Possess","net":"S","o":["Possessed Pawn"]},
  {"id":"o1","k":"func","x":1,"y":0,"t":"Run Behavior Tree","i":["BT Asset ← BT_Zombie"],"ex":[]}
 ],"l":[["o0","o1"]],"cap":"<b>图 12-4</b>　AIC_Zombie 只做一件事：被 Possess 时启动行为树。AIController 只在服务器存在，所以整棵树天然只在服务器运行"} -->
-<!--tree {"cols":["BT_Zombie 节点","作用","备注"],"x":[12,330,640],"root":{"n":"Root","col":"s","d":"黑板：BB_Zombie（TargetActor、bInRange）","w":"—","c":[
+<!--tree {"state":"ideal","cols":["BT_Zombie 节点","作用","备注"],"x":[12,330,640],"root":{"n":"Root","col":"s","d":"黑板：BB_Zombie（TargetActor、bInRange）","w":"—","c":[
  {"n":"Selector","col":"b","d":"从上到下执行第一个条件满足的分支","w":"Service：BTS_FindTarget，0.5 s","c":[
    {"n":"Sequence：攻击","col":"r","d":"装饰器：TargetActor 已设置 且 bInRange","w":"Observer Aborts：Lower Priority","c":[
      {"n":"Rotate to face BB entry","col":"o","d":"朝向目标","w":"引擎自带任务"},
@@ -137,7 +147,7 @@
      {"n":"Move To","col":"g","d":"目标 TargetActor，可接受半径 100","w":"目标移动时持续追踪"}]},
    {"n":"Wait","col":"s","d":"没有目标：原地待机 1 s","w":"—"}]}
 ]},"cap":"<b>图 12-5</b>　BT_Zombie。原 Demo 用每 0.5 s 一次的计时器 + SimpleMoveToActor + 每 0.1 s 一次的攻击范围检测，逻辑等价但散落在蓝图里；行为树把“选目标 / 追 / 打”分开，并能在调试器里直接看到当前分支"} -->
-<!--bpgraph {"cols":4,"rg":56,"title":"BTS_FindTarget（Service）与 BTT_Attack（Task）","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"BTS_FindTarget（Service）与 BTT_Attack（Task）","nodes":[
  {"id":"f0","k":"event","x":0,"y":0,"t":"Receive Tick AI","s":"Service 每 0.5 s","net":"S","o":["Owner Controller","Controlled Pawn"]},
  {"id":"f1","k":"flow","x":1,"y":0,"t":"For Each Loop","i":["Array ← GS.PlayerArray"],"ex":["Loop Body","Completed"],"o":["Element"]},
  {"id":"f2","k":"flow","x":2,"y":0,"t":"Branch","i":["PS.bIsAlive AND IsValid(GetPawn)"],"ex":["True","False"]},

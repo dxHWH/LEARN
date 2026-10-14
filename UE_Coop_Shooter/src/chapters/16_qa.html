@@ -1,8 +1,8 @@
 <section class="chapter" id="ch16">
   <div class="ch-head">
     <div class="no">CHAPTER 16</div>
-    <h1>56 道面试追问与速记卡</h1>
-    <p class="lead">按“基础 → 绑定 → 开火命中 → 弹药换弹 → 弱网 → 项目本身 → Gameplay 框架与蓝图实现 → 执行端与复制标注”排列。每题先给能直接说出口的答案，括号里是本书对应位置。</p>
+    <h1>62 道面试追问与速记卡</h1>
+    <p class="lead">按“基础 → 绑定 → 开火命中 → 弹药换弹 → 弱网 → 项目本身 → Gameplay 框架与蓝图实现 → 执行端与复制标注 → 当前做法与理想方案 → 实体子弹”排列。每题先给能直接说出口的答案，括号里是本书对应位置。</p>
   </div>
 
   <h2>一、网络基础（1~9）</h2>
@@ -25,11 +25,11 @@
   <details class="quiz"><summary>15. 在服务器上调用 GetPlayerController(0) 拿到的是什么？</summary>服务器这台机器的第一个本地玩家（Listen Server 的主机玩家），不是“当前 Pawn 的控制器”。原 Demo 用它在服务器上禁用死亡玩家的输入：客户端玩家死时传入的是主机 PC，Pawn 的 DisableInput 只接受自己的 Controller，于是只打错误日志、不生效；而且服务器上关输入本就管不到客户端。服务器只改状态 + 校验，关输入放到拥有者客户端的 OnRep 里。（第 3、10 章）</details>
 
   <h2>三、开火到命中（16~23）</h2>
-  <details class="quiz"><summary>16. 从按下开火到僵尸扣血，完整说一遍。</summary>本机：检查预测弹药 → 扣一发、Seq+1 → 立即播 1P 表现和后坐力 → 本地射线播命中特效 → ServerFireShot(Seq, 起点, 方向, 时间)。服务器：校验 → 扣弹、推进 AckSeq、BurstCounter+1 → 判定命中（PvE 容差校验 / PvP 回溯）→ ApplyPointDamage(Instigator, Causer)。僵尸 TakeDamage 只在服务器改 Health，死亡设 bIsDead。各端：OnRep 播开火、受击、死亡。（第 4 章）</details>
+  <details class="quiz"><summary>16. 从按下开火到僵尸扣血，完整说一遍。</summary><span class="tag ideal">理想方案</span>（原 Demo 的实际流程是“服务器生成复制子弹、表现等组播”，见第 57 题与 K0 图 K0-2）本机：检查预测弹药 → 扣一发、Seq+1 → 立即播 1P 表现和后坐力 → 本地射线播命中特效 → Server_FireShot(Seq, 起点, 方向, 时间, 命中目标)。服务器：校验 → 扣弹、推进 AckSeq、BurstCounter+1 → 判定命中（PvE 容差校验 / PvP 回溯）→ ApplyPointDamage(Instigator, Causer)。僵尸 TakeDamage 只在服务器改 Health，死亡设 bIsDead。各端：OnRep 播开火、受击、死亡。（第 4 章）</details>
   <details class="quiz"><summary>17. 为什么开火表现要本机先播？只用 Multicast 有什么问题？</summary>只用 Multicast 时开火者要等一个往返（E1：RTT 200 ms 时 {{v:E1[s=0,rtt=200].own:.0f}} ms）。本机先播，Multicast / BurstCounter 只给别人；开火者跳过（SkipOwner），避免播两次。（第 4 章）</details>
   <details class="quiz"><summary>18. 服务器需要校验客户端开火的哪些内容？</summary>开火者存活、不在换弹、射速（令牌桶：允许短时突发、长期平均不超过射速；不能比较到达间隔，丢包重传后请求会扎堆到达）、弹药 &gt; 0、起点离服务器上的眼睛位置不太远、方向与服务器视角夹角不太大；若客户端上报了命中，再校验目标包围盒 + 容差、视线是否被墙挡。（第 4 章代码）</details>
   <details class="quiz"><summary>19. 命中扫描和抛射物各适合什么？抛射物怎么做到本机不延迟？</summary>飞行时间很短的武器（步枪、手枪）用命中扫描；慢速武器（火箭、榴弹）用抛射物：服务器生成权威抛射物负责伤害，开火者本地先生成一个不复制的假抛射物，别人看到的是服务器复制下来的（可按 RTT/2 向前外推）。原 Demo 20000 cm/s 的子弹本质是命中扫描。（第 4 章表）</details>
-  <details class="quiz"><summary>20. 原 Demo 的伤害为什么会在客户端也算一次？</summary>子弹是复制 Actor，ProjectileMovement 在每个客户端副本上也模拟、也碰撞，ReceiveHit 在每端触发，里面直接 ApplyDamage 没有权限判断。客户端本地扣了僵尸血、本地触发了 Multicast_Death（客户端调用多播只在本地执行）。（第 1 章）</details>
+  <details class="quiz"><summary>20. 原 Demo 的子弹伤害会不会在客户端也算一次？</summary><span class="tag cur">当前做法</span>子弹是复制 Actor，ProjectileMovement 在客户端副本上也模拟、也碰撞，ReceiveHit 在每端触发，每端都会走到 ApplyDamage。但 Apply Damage 和 Event AnyDamage 都是 Authority Only，客户端上的子弹副本不是权威端，这次调用不执行（Pawn 的 TakeDamage 也会再查一次权限），所以僵尸<strong>只在服务器扣血</strong>。这是被引擎拦住，不是写对了：写法依赖引擎保护、Instigator 为空、客户端子弹副本的血花可能和服务器判定对不上。真正在每端执行的是死亡组播里的补刷。（第 1 章、K0；本书早先版本把这条误判为“客户端也扣血”，已勘误）</details>
   <details class="quiz"><summary>21. 僵尸的死亡应该怎么同步？</summary>服务器 TakeDamage 判定死亡 → bIsDead = true（复制），OnRep 里关碰撞、开布娃娃；同时停 AI、清所有计时器、给击杀者 PlayerState 加分、通知 GameMode 补刷、SetLifeSpan 交给服务器销毁。也可以 TearOff 让各端接管尸体。不要只发一次 Multicast（晚加入的人看不到）。（第 4 章）</details>
   <details class="quiz"><summary>22. Dedicated Server 上爆头判定可能出什么问题？</summary>服务器不渲染，默认不刷新不可见网格的骨骼，骨骼碰撞体停在旧姿势。需要把网格的 VisibilityBasedAnimTickOption 设为 AlwaysTickPoseAndRefreshBones，或用简化碰撞体判定。（第 4 章）</details>
   <details class="quiz"><summary>23. Listen Server 主机看客户端开火，SkipOwner 的 BurstCounter 有什么坑？</summary>OnRep 只在客户端触发，服务器（主机）不会收到自己的复制，所以服务器在接受客户端那发时要自己播远端开火表现（NM_ListenServer 且开火者非本地控制时）。（第 4 章代码）</details>
@@ -37,7 +37,7 @@
   <h2>四、弹药与换弹（24~29）</h2>
   <details class="quiz"><summary>24. 弹药应该怎么复制？</summary>服务器权威，一个结构体 {InClip, Reserve, AckSeq}，COND_OwnerOnly。本机预测扣弹，显示 = InClip − (LocalSeq − AckSeq)。（第 5 章）</details>
   <details class="quiz"><summary>25. 预测扣弹后 OnRep 直接覆盖本地值，会出现什么？怎么解决？</summary>服务器值反映的是“处理完某一发时”的弹数，本机此时已经多打了几发，覆盖会让 UI 往回跳（E5：每次连射回跳 {{v:E5.1.rb:.0f}} 次）。用序号对账：服务器回传已处理的最后序号，本机减去尚未确认的发数。（第 5 章）</details>
-  <details class="quiz"><summary>26. 换弹的流程？期间开火、切枪、死亡怎么处理？</summary>本机预测播动画 → ServerStartReload（Reliable）→ 服务器校验后 bPendingReload=true（SkipOwner）、启动计时器 → 到点 take = min(空位, 备弹) 一次性转移 → 复位。期间开火本地挡住、服务器 ProcessShot 也拒绝；切枪 / 死亡调用 CancelReload：ClearTimer、弹药不变。（第 5 章状态机）</details>
+  <details class="quiz"><summary>26. 换弹的流程？期间开火、切枪、死亡怎么处理？</summary>本机预测播动画 → Server_StartReload（Reliable）→ 服务器校验后 bPendingReload=true（SkipOwner）、启动计时器 → 到点 take = min(空位, 备弹) 一次性转移 → 复位。期间开火本地挡住、服务器 ProcessShot 也拒绝；切枪 / 死亡调用 CancelReload：ClearTimer、弹药不变。（第 5 章状态机）</details>
   <details class="quiz"><summary>27. 原 Demo 的换弹 bug 是什么？怎么发现的？</summary>“剩余子弹计算”在备弹不够补满时走 false 分支，该分支没有连 Return 节点，函数返回默认值 0，弹匣被清零（3/7 → 0/0）。把蓝图逐节点移植成 C++ 跑表驱动测试（E4）发现；整局打空再换只能打出 {{v:E4.session.0.2}}/40 发。（第 5 章）</details>
   <details class="quiz"><summary>28. 换弹加子弹应该挂在蒙太奇的 AnimNotify 上吗？</summary>不推荐在服务器依赖动画通知：Dedicated Server 动画可能不更新，蒙太奇被打断时通知不来。服务器用数据配置的时长计时，动画按同一时长播放，只负责表现。（第 5 章）</details>
   <details class="quiz"><summary>29. 另一端怎么看到“他在开枪”？为什么不用复制的 bIsFiring？</summary>BurstCounter（只增不减，SkipOwner），OnRep 里按增量播。bIsFiring 在连射时一直为 true，只会触发一次 OnRep，一个网络帧内的多发也无法区分。（第 5 章）</details>
@@ -53,7 +53,7 @@
   <details class="quiz"><summary>37. 为什么即使 RTT 为 0，原 Demo 的开火反馈也有约 20 ms？</summary>属性和多播要等服务器下一个网络帧（默认 30 Hz，平均等半帧左右）才发出；RTT 0 时 E1 测得 {{v:E1[s=0,rtt=0].own:.0f}} ms。这也说明“本机表现等服务器”在局域网里同样有延迟。（第 2、4 章）</details>
 
   <h2>六、关于这个项目本身（38~40）</h2>
-  <details class="quiz"><summary>38. 这个 Demo 最大的问题是什么？你会先改哪三处？</summary>根因是单机思维：代码在错误的一端执行。先改：① BP_Bullet 的伤害加权限判断（否则客户端也在算伤害、触发死亡与补刷）；② 换弹函数补上 Return，改成一次性 take 计算；③ 开火本机预测 + 服务器校验，冲刺进移动预测。（第 1 章）</details>
+  <details class="quiz"><summary>38. 这个 Demo 最大的问题是什么？你会先改哪三处？</summary>根因是单机思维：代码在错误的一端执行。先改（最小修复）：① 换弹函数补上 Return，改成到点一次性 take 计算；② 把补刷、清计时器从死亡组播里挪出来，只在服务器执行，失败改由服务器判断“全部阵亡”；③ 开火时本机先播表现、组播挪到弹药检查之后，子弹伤害显式加权限判断并填 Instigator。再往后才是理想方案：命中扫描、序号对账、冲刺进移动预测。（第 1 章、K0 表 K0-2）</details>
   <details class="quiz"><summary>39. 你是怎么验证这些问题的？</summary>先静态审计：把 .uasset 解析成节点和连线（导出伪代码），逐张图确认每段逻辑在哪一端执行；再把关键逻辑（换弹、开火时序、移动纠正、命中判定）移植成离散事件模拟，在不同 RTT / 丢包下对比方案；最后在 PIE 用网络模拟、Dedicated Server 模式、晚加入复测。（附录 A）</details>
   <details class="quiz"><summary>40. 如果做成正式项目，你会怎么组织网络代码？</summary>C++ 打底：Character + 自定义 MovementComponent（预测状态）、Weapon（预测开火 / 换弹）、GameMode / GameState / PlayerState 分工；或直接用 GAS（技能预测键、GameplayEffect 伤害、GameplayCue 表现），参考 Lyra。从第一天起就在 Bad 网络和 Dedicated Server 模式下测试。（第 8、14 章）</details>
 
@@ -75,7 +75,17 @@
   <details class="quiz"><summary>53. Owner Only、Skip Owner、Initial Only 分别发给谁？本 Demo 哪些变量用了？</summary>Owner Only 只发拥有者连接：Ammo（只有持枪者需要对账）；Skip Owner 发给除拥有者外的所有人：BurstCounter、bPendingReload、bIsAiming（拥有者已本地预测）；Initial Only 只在 Actor 首次复制给某个连接时发：VariantSeed（生成后不变，晚加入者加入时也会收到）。引擎的 ReplicatedMovement 用的是 SimulatedOrPhysics，拥有者靠移动预测，不收。（第 8 章 4.1）</details>
   <details class="quiz"><summary>54. 什么时候用组播，什么时候用 RepNotify？原 Demo 的 8 个组播你怎么处理的？</summary>持续状态（阶段、死亡、换弹中、外观）用 RepNotify：晚加入能看到、丢包会被下一次更新纠正。组播只用于同时满足四条的：由服务器调用、一瞬间、晚加入不需要、丢了无所谓——本 Demo 只剩僵尸惨叫和低吼两个 Unreliable 组播。原来的 8 个：开局 → GS.Phase；开火 → BurstCounter（Skip Owner）；换弹 → bPendingReload；受击 → LastHit；攻击 → AttackInfo；玩家 / 僵尸死亡 → bIsDead + GameMode 判定；关卡蓝图里那个直接删除。（第 8 章表 8-5、第 12 章 4.5）</details>
   <details class="quiz"><summary>55. 在蓝图里让一个变量复制要勾哪几处？为什么有人勾了 RepNotify 却在客户端收不到？</summary>三层：Actor 的 Replicates；变量所在组件的 Component Replicates；变量自己的 Replication（Replicated / RepNotify）和 Condition。常见漏法：变量放在 ActorComponent 里却没勾 Component Replicates；Actor 是运行时在客户端本地 Spawn 的（不是服务器生成的复制 Actor）；在客户端 Set 了变量（只改本地，不会发出去，下次复制还会被覆盖）。（第 8 章 4、第 10 章 AC_Health）</details>
-  <details class="quiz"><summary>56. 客户端调用 Multicast 会怎样？客户端在不属于自己的 Actor 上调用 Server RPC 会怎样？</summary>客户端调用的 Multicast 只在这台客户端本地执行，不会发给服务器和别人——原 Demo 客户端本地扣血后触发 Multicast_Death，结果只有自己这边的僵尸倒地。在没有拥有者连接的 Actor（关卡蓝图、僵尸、别人的角色）上调 Server RPC 会被丢弃，日志里是 No owning connection——原 Demo 关卡蓝图的 Server_SetStart 就是这样失效的。请求一律从自己的 PC 或自己 Possess 的 Pawn / 武器发出。（第 1、2 章、第 8 章表 8-5）</details>
+  <details class="quiz"><summary>56. 客户端调用 Multicast 会怎样？客户端在不属于自己的 Actor 上调用 Server RPC 会怎样？</summary>客户端调用的 Multicast 只在这台客户端本地执行，不会发给服务器和别人。原 Demo 的 8 个组播其实都在服务器上调用（这点没错），它的问题是组播里做了补刷这类规则、用组播表达持续状态。在没有拥有者连接的 Actor（关卡蓝图、僵尸、别人的角色）上调 Server RPC 会被丢弃，日志里是 No owning connection——原 Demo 关卡蓝图的 Server_SetStart 就是这样失效的。请求一律从自己的 PC 或自己 Possess 的 Pawn / 武器发出。（第 1、2 章、第 8 章表 8-5）</details>
+
+  <h2>九、当前做法 vs 理想方案（57~60）</h2>
+  <details class="quiz"><summary>57. 你的 Demo 里命中是射线还是子弹实体？为什么重构要换？</summary><span class="tag cur">当前做法</span>实体：服务器生成的复制子弹 Actor（ProjectileMovement，200 m/s，寿命 1 秒），没有射线检测，靠子弹碰撞判断打中。问题：开火者要等一个往返才看到表现、远端看到子弹凭空出现在几米外、每发一个 Actor 通道、服务器和客户端两份子弹各撞各的、伤害写在每一端都会触发的碰撞里。<span class="tag ideal">理想方案</span>步枪改命中扫描：子弹飞行时间只有几帧，和射线几乎没区别；本机先播并做射线，服务器校验后结算，别人靠开火计数播表现、本地画曳光。（K0 第 3 节、第 4 章）</details>
+  <details class="quiz"><summary>58. 如果一定要保留抛射物（比如火箭筒），正确的联机做法是什么？</summary>服务器生成权威子弹，伤害只在它的碰撞里结算，并先判断权限、填 Instigator；开火者按下时本机立刻生成一颗<strong>不复制</strong>的假子弹做表现；服务器子弹对开火者隐藏，其他端收到它时按网络延迟向前快进一段，避免“突然出现”；射速高时不要每发一个复制 Actor，改为只复制开火计数、各端本地生成表现弹。（K0 表 K0-3、第 5B 章）</details>
+  <details class="quiz"><summary>59. 不重构、只给你一天，你会怎么改原 Demo？</summary><span class="tag min">最小修复</span>只改会出错的地方，不动结构：换弹补 Return 并改成到点一次性计算；补刷和清计时器挪出死亡组播；一人阵亡不再全员失败，改由服务器判全灭；Multicast_Fire 挪到弹药检查之后、本机先播开火动画；伤害节点前加权限判断、填 Instigator；暂停只开菜单、重开用 servertravel；冲刺按键时本机和服务器同时切换。手感和带宽问题（等组播、子弹突现、逐发 Actor）这一步解决不了，要靠重构。（K0 表 K0-2 的“最小修复”列）</details>
+  <details class="quiz"><summary>60. 面试官问“你说的这些是 Demo 里做了的，还是你设计的？”怎么答？</summary>按三种时态如实分开：原版（复制子弹、组播同步、单机式整局流程）是做过的；把蓝图逐节点读出来定位问题、用网络模型实验对比方案是验证过的；命中扫描、序号对账、换弹状态机、移动预测、GameMode / GameState 分工是设计的——已经在引擎里实现的部分才说“做了”，并给出录屏或 stat net 数据。说清楚这一点，后面的追问才不会把你逼到前后矛盾。（K1 第 4 节）</details>
+
+  <h2>十、实体子弹（61~62）</h2>
+  <details class="quiz"><summary>61. 实体子弹的“快进”（catch-up）是什么？做了快进还要延迟补偿吗？</summary>服务器收到开火请求时，射手的假弹已经飞了约半个 RTT，服务器就把真弹沿弹道往前推这么一段再生成（蓝图里先对快进段做一次射线，再在快进点生成），让真弹和假弹对齐。它只追回“子弹出发晚”；射手瞄准时看到的目标本身就是过去的，这部分要靠服务器按射手看到的时刻回溯目标（PvP），或客户端上报命中、服务器容差校验（PvE）。模型实验：200 m/s 子弹、RTT 200 ms，只做快进命中率 {{v:E9[vp=200,rtt=200].s2:.0f}}%（和不做一样），加回溯 {{v:E9[vp=200,rtt=200].s3:.0f}}%。快进还要设上限（50~150 ms），否则高 ping 玩家的子弹在别人屏幕上瞬移，被瞄准的人来不及躲。（第 5B 章）</details>
+  <details class="quiz"><summary>62. 射速很高、又要子弹下坠，为什么不建议每发生成一个复制的子弹 Actor？</summary>每发都要开关一条 Actor 通道、生成和销毁 Actor，带宽和 CPU 开销随射速线性增长（E10：两人步枪连射，复制 Actor 加复制移动约 {{v:E10[w=rifle].b0}} B/s，只发首包也要约 {{v:E10[w=rifle].b1}} B/s，数据化弹道约 {{v:E10[w=rifle].b3}} B/s）；而且步枪弹太快，远端前推后会出现在目标后面，显示真弹没有意义。改成数据化弹道：服务器把子弹当数据逐帧分段射线，各端按开火计数和种子本地生成不复制的表现弹（可以用对象池）。（第 5B 章）</details>
 
   <h2>速记卡</h2>
   <div class="cards">
@@ -94,6 +104,10 @@
     <div class="card"><div class="t">五种关系</div><p>Outer 管内存、Owner 管网络、AttachParent 管变换、Instigator 管责任、Possess 管控制。</p></div>
     <div class="card"><div class="t">蓝图三坑</div><p>OnRep 无旧值；结构体整体赋值；需要取消的等待用计时器不用 Delay。</p></div>
     <div class="card"><div class="t">测试</div><p>Dedicated Server 模式、独立进程、Bad 网络、晚加入、谁先死、同时击杀。</p></div>
+    <div class="card"><div class="t">实体子弹</div><p>本机假弹 + 服务器真弹快进（设上限）+ 射手隐藏真弹 + 命中只认服务器、ImpactInfo 复制、延迟销毁；快进追子弹，回溯追目标；高射速用数据化弹道。</p></div>
+    <div class="card"><div class="t">当前 vs 理想</div><p>当前：复制子弹 Actor、没有射线、表现等组播；理想：命中扫描、本机先演、服务器裁决、状态复制。先说当前，再说为什么换。</p></div>
+    <div class="card"><div class="t">讲 Demo</div><p>是什么 → 难在哪 → 踩了什么坑 → 怎么改、怎么证明；做过 / 验证过 / 设计的分开说；模型实验不说成引擎实测。</p></div>
+    <div class="card"><div class="t">六类根因</div><p>结果在客户端算、表现等服务器、两端各算各的、本地当全局、把状态当事件发、把时序当成必然。</p></div>
     <div class="card"><div class="t">执行端</div><p>RPC 看类型；普通事件跟调用者；OnRep = 服务器（蓝图 Set 时）+ 收到的客户端；GameMode / AI 只在服务器，Widget 只在本机。</p></div>
     <div class="card"><div class="t">复制三层 + 三条件</div><p>Actor Replicates → Component Replicates → 变量 Replicated / RepNotify。OwnerOnly 只给自己，SkipOwner 给别人，InitialOnly 只发一次。</p></div>
     <div class="card"><div class="t">组播四条件</div><p>服务器调用、一瞬间、晚加入不需要、丢了无所谓 → Unreliable 组播；否则用 RepNotify。原 8 个：7 个换 RepNotify、1 个删。</p></div>

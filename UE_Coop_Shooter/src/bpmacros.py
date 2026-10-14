@@ -149,6 +149,17 @@ NETB = {
 HR = 16
 
 
+STATE_LAB = {"cur": ("当前做法", "#9A3412"), "ideal": ("理想方案", "#166534"), "min": ("最小修复", "#92400E")}
+
+
+def state_chip(o, x, y, st):
+    if not st:
+        return
+    lab, c = STATE_LAB[st]; bw = tw(lab, 10, True) + 12
+    o.append(f'<rect x="{x:.1f}" y="{y - 12}" width="{bw:.1f}" height="16" rx="5" fill="{c}"/>')
+    o.append(f'<text x="{x + bw / 2:.1f}" y="{y}" text-anchor="middle" class="b wt" style="font-size:10px">{lab}</text>')
+
+
 def bp_norm(nd):
     k = nd.get("k", "func")
     ex = nd.get("ex")
@@ -205,6 +216,7 @@ def bpgraph(d):
     title = d.get("title", "")
     if title:
         o_bg.append(f'<text x="{PADX}" y="20" class="b" style="font-size:13px">{esc(title)}</text>')
+        state_chip(o_bg, PADX + tw(title, 13, True) + 10, 20, d.get("state"))
     used_net = []
     used_rep = set()
     # ---- 注释框
@@ -657,6 +669,10 @@ def bpnet(d):
     o.append(f'<rect x="6" y="{y}" width="{W - 12}" height="34" rx="8" fill="#1F2937"/>')
     o.append(f'<text x="18" y="{y + 22}" class="b wt" style="font-size:14px">{esc(d["cls"])}</text>')
     o.append(f'<text x="{34 + tw(d["cls"], 14, True)}" y="{y + 22}" class="wt" style="font-size:11px;fill:#D1D5DB">父类 {esc(d.get("parent", ""))}　·　存在于：{esc(d.get("where", ""))}</text>')
+    if d.get("state"):
+        lab = STATE_LAB[d["state"]][0]; bw = tw(lab, 10.5, True) + 14
+        o.append(f'<rect x="{W - 14 - bw:.1f}" y="{y + 9}" width="{bw:.1f}" height="17" rx="5" fill="{STATE_LAB[d["state"]][1]}" stroke="#FFFFFF" stroke-width="0.8"/>')
+        o.append(f'<text x="{W - 14 - bw / 2:.1f}" y="{y + 21.5}" text-anchor="middle" class="b wt" style="font-size:10.5px">{lab}</text>')
     y += 52
     if d.get("defaults"):
         o.append(f'<text x="14" y="{y}" class="b" style="font-size:11px;fill:#374151">Class Defaults → Replication</text>')

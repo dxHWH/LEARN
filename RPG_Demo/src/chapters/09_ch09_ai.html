@@ -1,0 +1,183 @@
+<section class="chapter" id="ch9">
+  <div class="ch-head">
+    <div class="no">CHAPTER 09</div>
+    <h1>敌人 AI：骷髅的 6 个状态与“自己切到自己”</h1>
+    <p class="lead">骷髅 AI 只有 6 个状态，却集中暴露了“用继承复用转移逻辑”的副作用：战斗状态继承了地面状态的“发现玩家 → 进入战斗”，于是看见玩家的每一帧都在自己切换到自己，顺带执行一次 GameObject.Find；战斗计时器每帧被重置，永远不会超时。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>画出骷髅状态图，说清感知（射线 + 2 m 圆）、追击、攻击冷却、眩晕、死亡的规则</li>
+    <li>用 E7 讲清自转移的成因与代价：10 s 内自转移 [[E7.A.self]] 次、Find [[E7.A.finds]] 次</li>
+    <li>理解“战斗永不超时 + 无边缘检测 + 射线不被墙挡”组合出的“平台下抽搐”</li>
+    <li>能设计可扩展到百只怪物的 AI：行为树 / 感知系统 / AI LOD / 攻击令牌</li>
+  </ul></div>
+
+  <h2>9.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>骷髅在 Idle 和 Move 之间巡逻（撞墙或到边缘就转身），从前方 5 m 射线或 2 m 范围发现玩家后进入 Battle：追击、进入 1.75 m 攻击距离且冷却好了就攻击，攻击动画里开关弹反窗口，被弹反则眩晕，血量归零进入死亡。问题出在 Battle 继承了 GroundState：父类的“发现玩家就切到 Battle”在 Battle 自己身上也生效，于是每帧 Exit + Enter 一次（Enter 里还有 GameObject.Find），实测 10 s 自转移 [[E7.A.self]] 次；Battle 的超时计时器每帧被重置，玩家跳到高处后骷髅会在他脚下永远来回抽搐，10 s 转身 [[E7.C.flips]] 次。修法：Battle 不继承 GroundState、计时器只在看见玩家时续命；更进一步用行为树和感知组件。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "敌人 AI", "rows": [["状态复用", "Battle 继承 GroundState 的“看见玩家 → 切到 Battle”；Enter 里 GameObject.Find 找玩家", "P1 看见玩家时每秒约 [[E7.A.fps|.0f]] 次无意义的 Exit / Enter + 全场景 Find（E7，#8）", "状态机拒绝自转移 / Battle 不继承该转移；玩家引用注入", "Find 从 [[E7.A.fps|.0f]] 次/秒降到 [[E7.Af.fps|.1f]] 次/秒", "模型验证：E7 理想版自转移 0"], ["脱战", "battle 计时每帧被重置", "P1 玩家跳上平台后骷髅永不放弃，10 s 在平台下转身 [[E7.C.flips]] 次（E7-C，#9）", "只在看见玩家时续命，Enter 初始化计时", "失去目标后会放弃", "模型验证：E7 理想版第 [[E7.Cf.giveUp|.1f]] s 脱战"], ["感知", "前方 5 m 射线只检测 Player 层（穿墙）+ 2 m 全向圆", "P1 隔墙也能发现玩家；背后 2 m 内一律被发现（#9）", "视野 + 遮挡射线 + 最后看见位置，写入黑板，降频分帧", "不再隔墙发现；能做搜索行为", ""], ["追击", "没有边缘检测，会追下平台", "P1 会追下平台 / 悬崖（#9）", "追击前判断可达性；移动层带边缘检测", "不追下悬崖", ""], ["决策结构", "6 状态 FSM，状态类与具体怪物强绑定", "局限 状态类绑死骷髅：第二种怪物要复制整套状态；做不了“谁先上”的群体协调与 AI LOD", "感知 → 黑板 → 行为树 → 动作（复用技能系统）+ 攻击令牌 + AI LOD", "弓箭手、Boss 复用节点；百怪可控", ""], ["死亡", "尸体穿地坠落，不销毁、不回收", "P2 尸体穿地坠落后 Update 照跑，刷怪场景会不断累积（#32）", "死亡动画后回收入池", "刷怪场景不累积“幽灵”", ""]]} -->
+
+
+  <h2>9.2 状态图与感知规则</h2>
+<!--graph {"h":380,"w":900,
+"nodes":[
+ {"id":"idle","x":100,"y":90,"t":"Idle","s":"1 s","c":"b"},{"id":"move","x":100,"y":300,"t":"Move","s":"巡逻","c":"b"},
+ {"id":"battle","x":400,"y":200,"t":"Battle","s":"追击 3 m/s","c":"o","r":34,"hl":true},
+ {"id":"attack","x":660,"y":90,"t":"Attack","s":"1.333 s","c":"r"},
+ {"id":"stun","x":660,"y":300,"t":"Stun","s":"1 s","c":"p","lab":"1 s 后 → Idle","lp":"r"},
+ {"id":"death","x":840,"y":200,"t":"Death","c":"s","term":true,"lab":"任何状态（血量 ≤ 0）","lp":"b"}],
+"edges":[
+ {"f":"idle","t":"move","l":"计时到","bend":40,"dx":-30},{"f":"move","t":"idle","l":"撞墙 / 到边缘 + 转身","bend":40,"dx":72},
+ {"f":"idle","t":"battle","l":"看见 或 < 2 m","lt":0.62,"dy":14},{"f":"move","t":"battle","l":"看见 或 < 2 m","dy":16},
+ {"f":"battle","t":"battle","l":"看见 或 < 2 m（每帧自转移！）","c":"r","loop":"top","dash":true},
+ {"f":"battle","t":"attack","l":"≤ 1.75 m 且冷却好","bend":-25,"dy":-12},{"f":"attack","t":"battle","l":"动画结束","bend":-25,"dy":16},
+ {"f":"battle","t":"idle","l":"距离 > 10 m（超时永不发生）","bend":80,"c":"s","dy":-6},
+ {"f":"attack","t":"stun","l":"被弹反","c":"p","dx":30}],
+"texts":[{"x":20,"y":372,"t":"看见 = 从根节点沿朝向 5 m 射线、只检测 Player 层（不被墙遮挡）；< 2 m = 全向距离，同样无视墙","cls":"xs","fill":"#4B5563"}],
+"cap":"图 9-1　骷髅状态图（Enemy_Skeleton*.cs）。红色虚线自环是本章的主角：Battle 继承了 GroundState 的转移，看见玩家的每一帧都会 Exit + Enter 自己"} -->
+  <div class="tbl"><table>
+    <tr><th>规则</th><th>源码</th><th>备注</th></tr>
+    <tr><td>视觉</td><td><code>Raycast(wallCheck.position, right * facinDir, 5, whatIsPlayer)</code>；wallCheck 就是骷髅根节点</td><td>LayerMask 只含 Player 层，<b>射线穿墙</b>；只看前方</td></tr>
+    <tr><td>近身感知</td><td><code>Vector2.Distance(...) &lt; 2</code></td><td>全向、穿墙</td></tr>
+    <tr><td>追击</td><td>速度 moveSpeed × 1.5 = 3 m/s，朝玩家 x 方向</td><td><b>没有边缘 / 墙检测</b>：会追下平台（Move 状态有边缘检测）</td></tr>
+    <tr><td>攻击</td><td>射线命中距离 ≤ 1.75 且 <code>Time.time ≥ lastAttackTime + 1</code></td><td>lastAttackTime 在 Attack.Exit 写入；冷却从动画结束算起</td></tr>
+    <tr><td>退出战斗</td><td>没看见时：<code>stateTimer &lt; 0</code> 或 距离 &gt; 10</td><td>stateTimer 在同一函数开头被设为 battleTime → 第一个条件永远为假</td></tr>
+    <tr><td>死亡</td><td>Death.Enter：播 Idle + 上一个动画 bool、animator.speed = 0、关碰撞体，0.1 s 内向上 10 m/s</td><td>之后以重力倍率 12 穿过地面一直掉，<b>从不销毁</b>，Update 照跑（#32）</td></tr>
+  </table></div>
+
+  <h2>9.3 E7：自转移与 Find</h2>
+<!--code:cs:Enemy_SkeletonGroundState.cs:14-34 · Enemy_SkeletonBattleState.cs:15-57（精简） ‖ P1 Battle 继承了“看见玩家 → 切到 Battle”：每帧自己切到自己，Enter 里还要 GameObject.Find（E7，#8）；战斗计时每帧被重置，永不脱战（#9）-->
+public class Enemy_SkeletonGroundState : EnemyState
+{
+    public override void Enter() { base.Enter(); playerTransform = GameObject.Find("player").transform; }
+    public override void Update()
+    {
+        base.Update();
+        if (enemy.IsPlayerDetected() || Vector2.Distance(enemy.transform.position, playerTransform.position) < 2)
+        { stateMachine.ChangeState(enemy.battleState); return; }      // ← 当前就是 battleState 时：自己切到自己
+    }
+}
+public class Enemy_SkeletonBattleState : Enemy_SkeletonGroundState   // ← 继承了上面的转移
+{
+    public override void Enter() { base.Enter(); playerTransform = PlayerManager.Instance.player.transform; }  // Find 先执行一次
+    public override void Update()
+    {
+        base.Update();                                  // 可能刚刚 Exit + Enter 了自己；return 只退出父类
+        stateTimer = enemy.battleTime;                  // ← 每帧重置，下面的 stateTimer < 0 永远不成立
+        if (enemy.IsPlayerDetected())
+        {
+            if (enemy.IsPlayerDetected().distance <= enemy.attackRange) { ...; if (CanAttack()) ChangeState(attackState); return; }
+        }
+        else if (stateTimer < 0 || Vector2.Distance(playerTransform.position, enemy.transform.position) > enemy.battleDistance)
+        { stateMachine.ChangeState(enemy.idleState); return; }
+        // 追击：没有边缘检测
+        enemy.SetVelocity(enemy.moveSpeed * moveDir * 1.5f, rb.velocity.y);
+    }
+}
+<!--/code-->
+<!--seq {"p":["EnemyStateMachine","BattleState","GroundState\n（父类代码）","Animator","场景"],"pc":["s","o","o","a","s"],
+"s":[["—","骷髅在 Battle，玩家站在攻击距离内，攻击冷却未好（每帧都这样）"],
+[0,1,"currentState.Update()","call"],[1,2,"base.Update()","call"],
+[2,2,"IsPlayerDetected() == true","o"],
+[2,0,"ChangeState(battleState)","call"],
+[0,1,"Exit()：SetBool(Move,false)、lastAnimBool = Move","call"],
+[0,1,"Enter()：SetBool(Move,true)","call"],[1,4,"GameObject.Find(\"player\")（遍历场景）","call"],
+[1,1,"回到 BattleState.Update：stateTimer = 5；再做两次射线","o"],
+[1,1,"距离 ≤ 1.75 → CanAttack()? 否 → return","o"]],
+"cap":"图 9-2　看见玩家时 Battle 的一帧：一次无意义的 Exit / Enter、一次 GameObject.Find、三次 Raycast。Animator 的 Move 在同一帧被置假又置真，不会触发转移，所以画面上看不出来"} -->
+  <p>用 C++ 逐行移植 4 个状态类，在 1D 平台上跑三个场景（60 fps，遭遇发生在开局 5 s 后）<span class="tag ex">实测 E7</span> <span class="tag mdl">模型</span>：</p>
+<!--dtab {"rows":"e7t","cols":[["场景","scen"],["版本","ver"],["时长 / s","secs",".0f"],["Battle.Enter 次数","battleEnter"],["其中自转移","self"],["GameObject.Find","finds"],["Find / 秒","fps",".1f"],["出手次数","attacks"],["一帧两次转移","multi"]],"hlif":"ver.startswith('现状')","cap":"表 9-1　E7 汇总。理想（修正版）= Battle 不继承自转移 + Enter 初始化计时器 + 只在看见玩家时续命。出手次数两版相同——自转移不改变行为，只浪费 CPU，所以测不出来；“一帧两次转移”发生在冷却到点那一帧（自转移 + 进入攻击）"} -->
+  <p>每秒 [[E7.A.fps|.0f]] 次 GameObject.Find 对一只骷髅不算什么，但它的成本与场景对象数成正比、与怪物数成正比：100 只骷髅同时进入战斗、场景里有几千个对象时，这就是每帧几百次全场景遍历。更关键的是它说明了一个结构性问题：<b>“用继承复用转移规则”会让规则作用到你没想到的状态上</b>，而且因为行为不变，任何功能测试都发现不了。</p>
+
+  <h2>9.4 平台下的抽搐：三个小问题叠出的大 bug</h2>
+  <p>场景 C：前 3 s 玩家在骷髅前方地面上，骷髅进入战斗并出手；随后玩家跳上骷髅头顶 4 m 高的平台（水平偏移 0.5 m）。此时：射线是水平的，看不见玩家；直线距离约 4 m，不满足 &lt; 2 m 的近身感知，也不满足 &gt; 10 m 的脱战条件；超时条件永远为假。于是：</p>
+<!--dtab {"rows":"e7c","cols":[["版本","ver"],["跳上平台后仍在追击 / s","chase",".1f"],["结局","give"],["这段时间转身次数","flips"],["相对玩家的 x 范围 / m","=f'{xmin:.2f} ~ {xmax:.2f}'"]],"hlif":"ver.startswith('现状')","cap":"表 9-2　E7 场景 C：源码版在玩家脚下 0.5 m 范围内每帧转身（追击速度 3 m/s，一帧 5 cm，越过玩家 x 就掉头），10 s 转身 [[E7.C.flips]] 次；修正版 5 s 后脱战回到巡逻"} -->
+  <p>真实游戏里还会叠加一条：Battle 没有边缘检测，如果平台下方是悬崖，骷髅会直接追下去。三个问题单看都很小——计时器写错一行、追击少一个检测、射线只看水平——组合起来就是玩家截图发论坛的那种 bug。</p>
+
+  <h2>9.5 其余细节</h2>
+  <ul>
+    <li><b>两种拿玩家的方式</b>：GroundState 用 <code>GameObject.Find("player")</code>（依赖对象名，改名即空引用），BattleState 用 <code>PlayerManager.Instance</code>；BattleState 又声明了一个同名私有字段 <code>playerTransform</code> 隐藏了父类字段。同一个类层次里三份 <code>enemy</code> 字段（基类 enemyBase、Ground 的 enemy、Idle / Death / Stun 各自又声明一次）。</li>
+    <li><b>Idle / Move 同样有“切走后继续执行”</b>：Idle.Update 在 base.Update 切到 Battle 之后仍会检查自己的计时器并可能切到 Move；Move 切走后仍 SetVelocity 并检查边缘（第 3 章同一个模式）。</li>
+    <li><b>眩晕在对方的回调里发生</b>：弹反成功时，骷髅的状态是在<b>它自己的 AttackTrigger 动画事件</b>执行过程中被切到 Stun 的；回调返回后，同一时刻的 CloseCounterAttackWindow 仍会执行。目前无害，但“在回调里改变调用者的状态”是重入问题的温床。</li>
+    <li><b>死亡不回收</b>：尸体关掉碰撞体后穿地坠落，GameObject、EnemyStats.Update、血条都还在；刷怪时就是线性增长的“幽灵”。</li>
+  </ul>
+
+  <h2>9.6 改进：从 FSM 到可扩展的 AI</h2>
+<!--flow {"h":300,"w":900,"cols":[14,234,454,674],"colw":[206,206,206,212],"rows":[24,118,212],"bh":58,
+"boxes":[
+ {"id":"p","cr":[0,0],"t":"感知组件","s":"视野锥 + 遮挡射线 + 听觉","s2":"每 0.2 s 更新一次","c":"t"},
+ {"id":"bb","cr":[1,0],"t":"黑板","s":"目标、最后看见位置","s2":"仇恨表、是否可达","c":"a"},
+ {"id":"bt","cr":[2,0],"t":"行为树 / 状态机","s":"决策：追击 / 攻击 / 搜索","s2":"只读黑板，不直接查场景","c":"o","hl":true},
+ {"id":"act","cr":[3,0],"t":"动作层","s":"移动（含边缘 / 跳跃）","s2":"攻击 = 技能系统","c":"b"},
+ {"id":"tok","cr":[1,1],"t":"攻击令牌","s":"同时最多 2 只出手","c":"p"},
+ {"id":"lod","cr":[2,1],"t":"AI LOD","s":"屏外 / 远处降频","s2":"不在视野内不跑动画","c":"g"},
+ {"id":"pool","cr":[3,1],"t":"生成 / 回收","s":"对象池 · OnSpawn 重置","c":"s"},
+ {"id":"dbg","x":14,"y":212,"w":872,"h":60,"t":"调试：每只怪头顶显示当前节点 / 状态、感知范围 Gizmos、最近 32 次决策日志","s":"AI 问题 90% 靠“看见它在想什么”来查","c":"s"}],
+"chains":[[["p","bb","bt","act"],{"c":"s"}]],
+"arrows":[{"from":"tok","to":"bt","c":"p"},{"from":"lod","to":"bt","c":"g"},{"from":"pool","to":"act","c":"s"}],
+"cap":"图 9-3　可扩展的 AI 分层：感知写黑板、决策读黑板、动作复用技能系统；令牌和 LOD 控制“同时有多少只在认真思考 / 出手”"} -->
+
+  <h2>9.7 面试追问</h2>
+<!--code:text:追问树-->
+怪物 AI 怎么写的？（Q9-1）
+├─ 状态之间怎么复用代码？有没有副作用？（Q9-2 → E7）
+├─ 怪物怎么发现玩家？隔着墙能看见吗？（Q9-3）
+├─ 追不到玩家时怎么办？（Q9-4 → 场景 C）
+├─ 为什么用状态机不用行为树？（Q9-5）
+└─ 100 只怪同屏怎么保证性能？（场景 9-1）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q9-1 → Q9-2　怪物 AI 怎么写？状态复用有没有副作用？</div>
+    <p><b>L2</b>　和玩家一样是状态类：Idle / Move 巡逻，GroundState 父类负责“发现玩家进入战斗”，Battle 追击并在距离与冷却满足时攻击。</p>
+    <p><b>L3 · 项目</b>　我把 Battle 也继承了 GroundState，结果父类的“发现玩家 → 切到 Battle”对 Battle 自己也生效，每帧 Exit + Enter 一次，Enter 里还有 GameObject.Find。行为完全正常，所以功能测试测不出来；我是用 C++ 移植逐帧计数才发现的：10 s 自转移 [[E7.A.self]] 次。修法是让状态机拒绝自转移（或 Battle 不继承），并把 Find 换成注入。</p>
+    <p><b>L4 · 攻击</b>　“状态机拒绝自转移会不会影响需要重入的状态？”→ 需要“重新开始”的状态（比如连续两次受击硬直）应该显式调用 Restart，而不是靠 ChangeState(this)；把这两种语义分开，比依赖隐式行为安全。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q9-3　怪物怎么发现玩家？隔着墙能看见吗？</div>
+    <p><b>L2</b>　前方 5 m 的射线（只检测 Player 层）加 2 m 的全向距离。因为射线的 LayerMask 只有 Player，墙不会挡住射线；距离判断也无视墙，所以能隔墙发现。</p>
+    <p><b>L3</b>　正确的视线检测是两步：先用 LayerMask = Player 找候选（或者距离 + 视野角），再从眼睛到目标打一条 LayerMask = 地形 的射线，命中地形就说明被遮挡。感知结果写进黑板并记录“最后看见的位置”，丢失目标后去那里搜索，而不是立刻放弃或永远追。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q9-4　追不到玩家时怎么办？</div>
+    <p><b>L2</b>　设计上 Battle 有两个出口：超时（battleTime 5 s 没看见）和距离（&gt; 10 m）。源码每帧重置计时器，超时永不发生；玩家跳到头顶平台时，骷髅在他脚下来回转身，10 s [[E7.C.flips]] 次。</p>
+    <p><b>L3</b>　修复后 5 s 脱战。更完整的做法：追击前判断可达性（2D 平台游戏常用“平台图”：哪些平台之间可以走 / 跳过去），不可达时切到“守望”或“远程攻击”；同时给追击加边缘检测，避免追下悬崖。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q9-5　为什么用状态机不用行为树？</div>
+    <p><b>L2</b>　6 个状态、规则简单时 FSM 最直接，调试也容易。当出现“优先级 + 条件组合”（低血量逃跑、有队友时包抄、玩家远程时找掩体）时，FSM 的转移数量会平方增长，行为树用 Selector / Sequence 的优先级结构表达更自然，也更容易让策划配置。</p>
+    <p><b>L3</b>　行为树不是银弹：每帧从根节点重新评估有开销，需要“事件驱动 + 装饰器中断”优化；决策特别依赖打分时用 Utility AI，需要规划多步行动时用 GOAP。很多项目是“行为树做决策、FSM 做动作”（行为树叶子节点驱动一个小状态机）。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“怪物 AI 很简单，就是状态机，没有什么问题。”</p>
+    <p><b>问题</b>：面试官会追问“状态之间怎么复用”“丢失目标怎么办”“隔墙能不能看见”，每个问题在这个项目里都有一个具体的 bug。</p>
+    <p><b>更好的回答</b>：“状态机本身很简单，我复盘时发现了三类问题：继承复用导致的每帧自转移、计时器写错导致的永不脱战、感知不考虑遮挡。修法分别是……”</p>
+  </div>
+
+  <h2>9.8 发散场景题</h2>
+  <div class="scene"><div class="q">场景 9-1　同屏 100 只骷髅，帧率掉到 30，你怎么优化？</div>
+    <p class="why">为什么会问：AI 性能是动作 / 割草游戏的必考题。</p>
+    <p>先用 Profiler 定位（Update 本身、Physics2D 查询、Animator、GC）。AI 侧：① 去掉每帧 Find 和重复射线（E7 每帧 3 次射线 + 1 次 Find）；② 感知降频（每 0.1~0.3 s，分帧错开）；③ AI LOD：屏幕外 / 远处的怪只跑简化逻辑或不跑；④ 统一由 AIManager 批量 Tick，替代 100 个 MonoBehaviour.Update（减少引擎回调开销）。动画侧：屏外 Animator 设为 Cull Update Transforms 或 Cull Completely（注意它会停止动画事件，第 4 章）；GPU 动画 / 合批。物理侧：查询加 LayerMask、NonAlloc；骷髅之间关闭碰撞。再往上是 DOTS / Job System 批量计算移动与感知。</p>
+  </div>
+  <div class="scene"><div class="q">场景 9-2　十只骷髅围住玩家时挤成一团、同时出手，怎么办？</div>
+    <p class="why">为什么会问：群体 AI 的表现与公平性。</p>
+    <p>攻击令牌：全局（或以玩家为中心）只发 2 个令牌，拿到令牌的怪才能进入攻击，其他怪在攻击距离外“踱步”；站位：以玩家为中心分配环形槽位，避免重叠；节奏：出手后令牌回收并加个人冷却。这既是性能优化（大多数怪在做便宜的事），也是体验优化（玩家能读清攻击）。</p>
+  </div>
+  <div class="scene"><div class="q">场景 9-3　加一个远程弓箭手，用行为树怎么搭？</div>
+    <p class="why">为什么会问：考察行为树的实际搭建能力。</p>
+    <p>Selector：① [Sequence] 低血量 → 逃离；② [Sequence] 目标可见 且 距离 &lt; 3 m → 后撤步；③ [Sequence] 目标可见 且 距离在射程内 且 拿到攻击令牌 → 转向 → 拉弓（技能）；④ [Sequence] 有最后看见位置 → 移动过去搜索；⑤ 巡逻。感知组件负责“可见”，技能系统负责“拉弓”的时间轴与投射物，行为树只做选择。</p>
+  </div>
+  <div class="scene"><div class="q">场景 9-4　怪物需要“仇恨”：谁打它就追谁，但坦克可以嘲讽，怎么做？</div>
+    <p class="why">为什么会问：多目标选择是联机 / 召唤物出现后的必然需求。</p>
+    <p>仇恨表：受击者在 Receive 里给攻击者加仇恨（伤害 × 系数），治疗者获得“治疗仇恨”，嘲讽直接把仇恨设为当前最高 + 一个余量并锁定 N 秒；仇恨随时间衰减、目标离开太远时移除。决策时取仇恨最高且可达的目标。这要求先完成第 6 章的 DamageInfo（知道“谁打的”），以及第 1 章说的“敌人不再只认 Player 组件”。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>Battle 继承 GroundState → <b>看见玩家就每帧自转移 + Find</b>（E7：10 s [[E7.A.self]] 次自转移、[[E7.A.finds]] 次 Find；行为不变，测不出来）。</li>
+    <li>stateTimer 每帧重置 → <b>永不超时</b>；叠加“射线只看水平、追击无边缘检测” → 平台下抽搐 10 s 转身 [[E7.C.flips]] 次。</li>
+    <li>感知：射线 LayerMask 只有 Player → <b>穿墙可见</b>；正确做法是候选 + 遮挡射线 + 最后看见位置。</li>
+    <li>扩展：<b>感知 → 黑板 → 行为树 → 动作（技能）</b>，加攻击令牌、AI LOD、对象池。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么自转移在画面上看不出来？</summary>Exit 把 Move 置假、Enter 立刻置真，同一帧内 Animator 只看到最终值 true，不触发转移；追击和攻击逻辑在自转移之后照常执行。</details>
+  <details class="quiz"><summary>自测 2：修正版为什么必须在 Enter 里初始化计时器？</summary>Battle.Enter 原本不设 stateTimer；去掉“每帧重置”后，若进入时计时器是上次留下的负数，第一帧没看见玩家就会立刻脱战，形成 Idle ↔ Battle 抖动。</details>
+  <details class="quiz"><summary>自测 3：骷髅死亡后为什么还在消耗性能？</summary>Death 状态只关碰撞体、停动画，GameObject 不销毁也不回收，EnemyStats.Update、状态机 Update、血条都还在运行。</details>
+</section>

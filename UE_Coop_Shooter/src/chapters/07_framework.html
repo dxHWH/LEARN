@@ -1,7 +1,7 @@
 <div class="part-head" data-toc="第三部分 · 重做：一个合格的联机 Demo">
   <div class="no">PART THREE</div>
   <h1>第三部分　重做：一个合格的联机 Demo</h1>
-  <p>先用 OOP 的眼光把 UE Gameplay 框架重新梳理一遍（谁是谁、谁包含谁、谁活多久、谁在哪端），再定义“合格”的标准，然后逐个类画出蓝图事件图表，最后是测试与演示。</p>
+  <p>先用 OOP 的眼光把 UE Gameplay 框架重新梳理一遍（谁是谁、谁包含谁、谁活多久、谁在哪端），再定义“合格”的标准，然后逐个类画出蓝图事件图表，最后是测试与演示。<strong>这一部分全部是理想方案（重构设计）</strong>：类名、复制表、RPC 表和事件图表都不是原 Demo 的现状，每张图注都带“理想方案”标签；原 Demo 的实现见第 1 章、K0 和每章开头的对照表。</p>
 </div>
 
 <section class="chapter" id="ch7">
@@ -16,6 +16,9 @@
     <li>说出每个框架类的生命周期、存在于哪一端、客户端上“拿”它会得到什么。</li>
     <li>按时间顺序讲清主机开局、客户端加入时框架类被创建与调用的顺序。</li>
   </ul></div>
+  <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 只用到了 GM_MyGame（GameModeBase）、BP_MyGameState、BP_Player 三个框架相关的类，PlayerController、PlayerState、GameInstance 都是引擎默认，开局逻辑在关卡蓝图里。</div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li><span class="tag p1">P1</span>关卡蓝图承担了主菜单、准备、开局、BGM、切镜头，是每一端各跑一份的上帝对象；它调用的 Server RPC 在客户端被丢弃（A#15、A#16）。</li><li><span class="tag p2">P2</span>没有 PlayerState：准备、击杀这类跟人走的数据无处放，只好把 PC 引用塞进 GameState，复制到客户端为空（A#18）。</li><li>没有 PlayerController 子类：界面由关卡蓝图和角色各自创建，请求从角色发，没有统一出口。</li><li><span class="tag p0">P0</span>GameMode 只收集准备：计时和胜利写在 UI 里（A#6），失败写在角色的组播里（A#7），规则不在“规则类”里。</li></ol></div></div>
+  <div class="state ideal"><span class="sl">理想方案</span><div>本章的框架知识是通用的引擎规则；其中出现的 GM_Coop、GS_Coop、PS_Coop、PC_Coop、BP_CoopCharacter 等是重构方案的类。</div></div>
 
   <div class="ans">
     <div class="q">30 秒版：UE 的 Gameplay 框架是什么</div>
@@ -94,7 +97,7 @@
   </div>
 
   <h2>2. 继承树（is-a）：每个类站在哪一层</h2>
-<!--tree {"cols":["类（红 = 本 Demo 新建的子类）","一句话职责","存在于（Listen Server）"],"x":[12,330,640],"root":{"n":"UObject","col":"s","d":"反射、垃圾回收、序列化的基类","w":"—","c":[
+<!--tree {"state":"ideal","cols":["类（红 = 本 Demo 新建的子类）","一句话职责","存在于（Listen Server）"],"x":[12,330,640],"root":{"n":"UObject","col":"s","d":"反射、垃圾回收、序列化的基类","w":"—","c":[
  {"n":"UGameInstance","col":"b","d":"进程级：会话、跨地图本地数据","w":"每个进程各一份，不复制","c":[{"n":"BP_CoopGameInstance","col":"r","d":"主持 / 加入 / 离开、网络错误处理","w":"每个进程各一份"}]},
  {"n":"UPlayer","col":"s","d":"“一个玩家”的抽象","w":"—","c":[{"n":"ULocalPlayer","col":"g","d":"本机玩家：视口、输入子系统","w":"各进程本地"},{"n":"UNetConnection","col":"b","d":"远端玩家 = 一条网络连接","w":"服务器上每个远端一条"}]},
  {"n":"UActorComponent","col":"p","d":"挂到 Actor 上的功能块（组合）","w":"随所属 Actor","c":[
@@ -147,7 +150,7 @@
   </table></div>
 
   <h2>5. 谁活多久：生命周期</h2>
-<!--spans {"ph":["启动进程","主菜单","主持 / 加入","大厅准备","对局中","死亡 → 观战","结算","重开\n(ServerTravel)"],"labw":150,"rows":[
+<!--spans {"state":"ideal","ph":["启动进程","主菜单","主持 / 加入","大厅准备","对局中","死亡 → 观战","结算","重开\n(ServerTravel)"],"labw":150,"rows":[
  ["GameInstance",[[0,7,"b","整个进程一份，切地图不销毁"]]],
  ["LocalPlayer",[[0,7,"g","本机玩家，进程内常驻"]]],
  ["UWorld",[[1,1,"s","菜单地图"],[2,6,"o","L_CoffeeShop"],[7,7,"o","重建"]]],

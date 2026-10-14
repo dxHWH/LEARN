@@ -4,6 +4,9 @@
     <h1>验收：测试清单、调试工具与演示方式</h1>
     <p class="lead">“合格”最后要落在可复现的测试上。本章给出每次改网络代码都要跑的清单、按症状查问题的工具表，以及面试前怎么把这个 Demo 录成一段有说服力的演示。</p>
   </div>
+  <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 只在编辑器里以 Listen Server、零延迟、两个窗口跑过；没有 Dedicated Server、独立进程、网络模拟、晚加入、死亡顺序这些测试，也没有录屏和数据。</div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li>大部分问题在“PIE + 零延迟 + 盯着主机窗口”时根本看不出来：开火延迟、冲刺拉回只在有延迟时出现；幽灵僵尸、默认跑姿只在客户端窗口出现；初始化时序问题在独立进程里才偶发。</li><li>没有任何可复现的测试和数据，面试时只能说“能跑”，说不出“在什么条件下验证过”。</li></ol></div></div>
+  <div class="state ideal"><span class="sl">理想方案</span><div>本章的测试清单与演示脚本针对<strong>重构后的版本</strong>。重构还没在引擎里完成时，测试清单可以先拿来验证原 Demo（预期结果大多是“✗”，正好用来录前后对比）；README 用第 4 节的“当前状态版”。</div></div>
 
   <h2>1. 四种运行模式，各测什么</h2>
   <div class="tbl"><table>
@@ -55,7 +58,7 @@
     <tr><td>4. 边界</td><td>30 s</td><td>客户端先死 → 观战；晚加入</td><td>“死亡和阶段都是复制状态，晚加入也看得到”</td></tr>
     <tr><td>5. 前后对比</td><td>30 s</td><td>原 Demo 同条件录屏 + E1 / E6 图</td><td>“原来开火要等 {{v:E1[s=0,rtt=200].own:.0f}} ms、冲刺每秒被纠正 {{v:E6[c=0,rtt=200].cps:.1f}} 次，现在都是 0”（数字来自本书的模拟；录屏时用自己测到的值）</td></tr>
   </table></div>
-<!--code:text:README 模板（放在仓库首页）-->
+<!--code:text:README 模板 A：重构完成后（放在仓库首页）-->
 # Coop Zombie Shooter（UE 5.5 · Listen Server · 2 人合作）
 ## 我做了什么
 - 服务器权威：伤害 / 死亡 / 弹药 / 比赛阶段 / 刷怪只在服务器；客户端只发请求、只播表现
@@ -73,6 +76,22 @@ Listen Server / Dedicated Server / 独立进程 / 网络模拟 Bad / 晚加入 /
 - 只支持 2 人、局域网会话；未做主机迁移
 - PvP 需改为服务器回溯；GAS 化
 <!--/code-->
+<!--code:text:README 模板 B：当前状态（重构尚未在引擎里完成时）-->
+# Coop Zombie Shooter（UE 5.5 · 纯蓝图 · Listen Server · 2 人合作）
+## 现状（当前做法）
+- 单机 FPS 改造的双人合作：两人在咖啡店地图抵御僵尸，坚持 3 分钟获胜
+- 命中：服务器生成复制的子弹 Actor（ProjectileMovement），没有射线检测
+- 表现：开火 / 换弹 / 受击 / 死亡靠服务器组播；冲刺通过 Server RPC 切换
+## 复盘（Docs/Audit.md）
+- 从 .uasset 读出全部 28 个蓝图，定位 23 个问题（7 个联机下必错）：换弹吞弹匣、冲刺被拉回、一人阵亡全员失败、补刷每端执行……
+- 网络模型实验 E1~E7：开火反馈延迟、弹药回跳、移动纠正、命中补偿、Reliable 排队、带宽（Docs/NetModel.md）
+## 重构方案（Docs/Redesign.md，理想方案）
+- 服务器权威 + 本机预测 + 状态复制；步枪改命中扫描；换弹服务器状态机；冲刺进移动预测
+- 14 个类 / 16 个复制变量 / 8 个 RPC + 2 个 Unreliable 组播
+## 进度
+- [ ] 开火与弹药  [ ] 换弹  [ ] 移动预测  [ ] 整局流程  [ ] UI
+<!--/code-->
+  <p>两份 README 的区别就是 K1 的三种时态：B 里“现状”是做过的、“复盘”是验证过的、“重构方案”是设计的；做完一项就把它从“进度”挪到 A 的“我做了什么”。</p>
 
   <div class="recap"><div class="t">本章速记</div><ul>
     <li>四种模式：Listen Server（主机特殊性）、Dedicated Server（无主机玩家、无渲染）、独立进程、Standalone 双开（会话）。</li>

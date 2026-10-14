@@ -6,10 +6,11 @@
   </div>
 
   <h2>A.1 问题全清单（23 条）</h2>
+  <div class="state cur"><span class="sl">当前做法</span><div>“位置”“问题”两列是原 Demo 的当前做法；“修复”列给的是最小修复或理想方案中的对应做法（逐项对照见 K0 表 K0-2）。级别统计：P0 7 条、P1 9 条、P2 6 条、P3 1 条；按后果分成五类的总览见 K0 第 4 节（图 K0-3、表 K0-4），全书其他地方用 “A#编号” 引用本表。</div></div>
   <div class="tbl"><table>
     <tr><th>#</th><th>级别</th><th>位置</th><th>问题</th><th>修复</th><th>如何验证</th></tr>
     <tr><td>1</td><td><span class="tag p0">P0</span></td><td>BP_Weapon.剩余子弹计算</td><td>false 分支未连 Return，返回 0，换弹吞弹匣</td><td>一次性 take = min(空位, 备弹)</td><td><span class="tag ex">E4</span>；PIE 备弹 7 时换弹</td></tr>
-    <tr><td>2</td><td><span class="tag p0">P0</span></td><td>BP_Bullet.ReceiveHit / 给丧尸伤害</td><td>每端都 ApplyDamage</td><td>伤害前 Switch Has Authority；改命中扫描</td><td>客户端打僵尸，对比两端 血量（Print）</td></tr>
+    <tr><td>2</td><td><span class="tag p2">P2</span></td><td>BP_Bullet.ReceiveHit / 给丧尸伤害</td><td>每端都走到 ApplyDamage，没有权限判断，Instigator / Causer 为空；客户端那次被 Authority Only 跳过，僵尸实际只在服务器扣血（勘误：早先版本标为 P0）</td><td>伤害前 Switch Has Authority、填 Instigator；理想方案改命中扫描</td><td>僵尸 AnyDamage 后 Print String，只会出现 “Server:” 前缀</td></tr>
     <tr><td>3</td><td><span class="tag p0">P0</span></td><td>BP_Zombie.Multicast_Death → BP_ZombieSpawn.重新生成</td><td>补刷在每端执行，且跳过了 SwitchHasAuthority</td><td>服务器通知 GameMode 补刷</td><td>客户端打死一只后，在客户端世界大纲里数 BP_Zombie</td></tr>
     <tr><td>4</td><td><span class="tag p0">P0</span></td><td>BP_Player.ReceiveAnyDamage</td><td>在服务器上 DisableInput(GetPlayerController(0)) / PlaySound2D：客户端玩家死时 DisableInput 只报 LogPawn 错误不生效，死者仍能操作；惨叫在主机响</td><td>服务器只改 bIsDead + 校验请求；拥有者客户端在 OnRep 里关输入、播音效</td><td>让客户端玩家先死，看它能否继续移动 / 开火，日志里搜 LogPawn</td></tr>
     <tr><td>5</td><td><span class="tag p0">P0</span></td><td>BP_Player.冲刺 / 瞄准 / 速度计算</td><td>IsRunning 仅服务器、是否瞄准 仅本机；Tick 里各自写 MaxWalkSpeed</td><td>标志进 SavedMove，GetMaxSpeed 统一</td><td><span class="tag ex">E6</span>；p.NetShowCorrections 1</td></tr>
@@ -53,7 +54,7 @@ $ python tools/bpdump.py repo/Content/Blueprints/Weapon/BP_Weapon.uasset audit/B
     <p>能确定“节点怎么连、在哪个事件里、标了什么 RPC”，不能确定运行时的时序（例如 BeginPlay 时 GameState 是否已到达）。所以书里把“UE 运行规则 + 连线”推出的结论标为<span class="tag inf">推断</span>，并在 A.1 给出在 PIE 里验证的方法；需要定量的结论用 <code>demos/coop_net_demo.cpp</code> 模拟。</p>
   </div>
 
-  <h2>A.3 实测总表（demos/run_output.txt）</h2>
+  <h2>A.3 实测总表（demos/run_output.txt、demos/run_output_proj.txt）</h2>
   <div class="tbl"><table>
     <tr><th>实验</th><th>内容</th><th>关键数字</th><th>用在</th></tr>
     <tr><td>E1</td><td>开火链路时序：原方案 / 预测 + 覆盖 / 预测 + 对账，RTT 0~200</td><td>RTT 200：本机反馈 {{v:E1[s=0,rtt=200].own:.0f}} → 0 ms；另一端 {{v:E1[s=2,rtt=200].rem:.0f}} ms 不变；子弹突现 {{v:E1[s=0,rtt=200].pop:.1f}} m</td><td>第 4 章</td></tr>
@@ -63,6 +64,9 @@ $ python tools/bpdump.py repo/Content/Blueprints/Weapon/BP_Weapon.uasset audit/B
     <tr><td>E5</td><td>弹药 UI 的三种显示方式</td><td>直接覆盖回跳 {{v:E5.1.rb:.2f}} 次 / 连射，对账 {{v:E5.2.rb:.2f}} 次</td><td>第 5 章</td></tr>
     <tr><td>E6</td><td>CMC 纠正：MaxWalkSpeed 两端不一致</td><td>冲刺只在服务器：{{v:E6[c=0,rtt=100].cps:.1f}} 次/秒、平均 {{v:E6[c=0,rtt=100].avg:.1f}} cm；半修复 10% 丢包 {{v:E6[c=2,rtt=200,loss=0.1].cps:.2f}} 次/秒；正确 0</td><td>第 6 章</td></tr>
     <tr><td>E7</td><td>每秒消息量估算</td><td>{{v:E7.0.4}} vs {{v:E7.1.4}} B/s（量级）</td><td>第 6 章</td></tr>
+    <tr><td>E8</td><td>实体子弹视觉时序（demos/projectile_demo.cpp）</td><td>RTT 200：射手看到自己子弹 {{v:E8[vp=200,rtt=200].own:.0f}} ms；不隐藏真弹的双子弹间距 {{v:E8[vp=200,rtt=200].gap0:.0f}} m；慢速弹完全快进后被瞄准者反应时间 {{v:E8[vp=40,rtt=200].re0:.0f}} → {{v:E8[vp=40,rtt=200].re2:.0f}} ms</td><td>第 5B 章</td></tr>
+    <tr><td>E9</td><td>实体子弹命中一致性：当前 / 快进 / 快进 + 回溯 / 客户端判定 + 容差</td><td>200 m/s、RTT 200：服务器命中 {{v:E9[vp=200,rtt=200].s0:.1f}}% / {{v:E9[vp=200,rtt=200].s2:.1f}}% / {{v:E9[vp=200,rtt=200].s3:.1f}}% / {{v:E9[vp=200,rtt=200].s4:.1f}}%（本机看到 {{v:E9[vp=200,rtt=200].local:.1f}}%）</td><td>第 5B 章</td></tr>
+    <tr><td>E10</td><td>实体子弹带宽估算</td><td>步枪 {{v:E10[w=rifle].b0}} / {{v:E10[w=rifle].b1}} / {{v:E10[w=rifle].b2}} / {{v:E10[w=rifle].b3}} B/s；火箭 {{v:E10[w=rocket].b0}} / {{v:E10[w=rocket].b1}} / {{v:E10[w=rocket].b2}} / {{v:E10[w=rocket].b3}} B/s</td><td>第 5B 章</td></tr>
   </table></div>
   <div class="co ver"><span class="h">模拟的假设</span>
     <p>服务器网络 Tick 30 Hz，属性与 Unreliable 多播在下一个网络帧发出；Reliable 有序，丢包后约 1 RTT + 1 帧重传；客户端 60 Hz；纠正阈值 √3 cm、最小间隔 0.1 s（大误差 0.05 s）；E1 / E5 的抖动为 20 / 30 ms 均匀分布，乱序到达的旧属性包丢弃；E3 的模拟代理按“最新快照 + 速度 × 收到后经过的时间”外推，服务器回溯在相邻两个网络帧之间线性插值，上限 200 ms。E6 把原蓝图的 FInterpTo 速度渐变简化为直接切换。所有实验固定随机种子，带参数运行（如 <code>coop_net_demo.exe E3</code>）只跑指定实验。</p>

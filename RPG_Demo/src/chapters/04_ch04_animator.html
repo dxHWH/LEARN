@@ -1,0 +1,178 @@
+<section class="chapter" id="ch4">
+  <div class="ch-head">
+    <div class="no">CHAPTER 04</div>
+    <h1>Animator 与动画事件：谁驱动谁、何时触发、何时失灵</h1>
+    <p class="lead">项目里命中、攻击结束、掷剑、弹反开窗都由动画事件触发——逻辑的关键时刻交给了美术时间轴。这一章把 5 个 AnimatorController 和 23 个片段里的事件全部列出来，再讲动画事件在“速度为 0、被打断、同一时刻、字符串改名”四种情况下怎样失灵。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清项目 Animator 的“Exit → Entry + bool”结构，以及它和逻辑状态机的主从关系</li>
+    <li>掌握事件清单：每个事件在片段第几秒、回调到哪个组件、驱动哪段逻辑</li>
+    <li>能举出动画事件不可靠的四种情形，并在项目里各找到一个例子</li>
+    <li>比较“动画驱动逻辑”和“逻辑时间轴驱动动画”两种流派，知道帧同步游戏为什么选后者</li>
+  </ul></div>
+
+  <h2>4.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>逻辑状态机是主，Animator 是从：状态 Enter / Exit 设同名 bool，Animator 每个状态都只有“bool 为假 → Exit”一条出边，回到 Entry 后按顺序检查各个 bool 进入新片段，过渡时间全是 0。关键帧用动画事件回调：攻击片段上的 AttackTrigger 做命中、AnimationTrigger 通知状态“动画结束”，骷髅攻击片段上还有弹反开窗 / 关窗。好处是手感和美术对齐；风险是逻辑依赖动画播放——速度为 0 就不触发、被打断就跳过、同一时刻的事件依赖排列顺序、方法名是字符串。项目里就有一个调用了不存在方法的 Invoke（眩晕闪烁从未生效），以及“瞄准被冲刺打断仍会掷剑”的推断问题。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "Animator 与动画事件", "rows": [["主从关系", "逻辑状态机设 bool，Animator 只读 bool；过渡时间全为 0", "无 方向正确；唯一例外是掷剑靠 bool 变假触发（见“打断”行）", "保持；只把一次性事件（掷剑）改为显式命令 / Trigger", "", "保持 · 方向正确"], ["关键帧来源", "命中、结束、掷剑、弹反开关窗都在动画事件里", "局限 命中时机受播放速度、冻结（animator.speed = 0）与剔除影响；联网、回放无法复现", "单机：动画事件可保留，但一个事件携带完整语义；联网 / 严格判定：逻辑时间轴，动画事件只做表现", "不受帧率、播放速度、剔除影响", ""], ["同时刻事件", "弹反成功依赖 0.4167 s 处 AttackTrigger 排在 CloseCounterAttackWindow 之前", "隐患 弹反成功依赖同一时刻两个事件的排序；美术把事件挪动一点就会悄悄失效", "命中事件内部先判弹反再关窗，或改用区间窗口（Notify State）由逻辑查询", "美术挪动事件不会悄悄破坏弹反", ""], ["打断", "AimSword 变假即自动播掷剑并掷出（推断，图 4-2）", "P2 瞄准被冲刺打断仍掷出一把方向陈旧的剑，瞄准点不收起（推断，#25）", "由退出原因决定是否掷剑；所有退出路径都收起瞄准点", "“选择冲刺”不会掷出一把方向错误的剑", ""], ["方法引用", "按字符串 InvokeRepeating 调用；退出时用不带参数的 <code>CancelInvoke()</code>", "P1 眩晕闪红从未生效；<code>CancelInvoke()</code> 把点燃 / 冰冻的变色一起取消（#12）", "直接调用 / <code>nameof</code>；只取消自己的计时", "改名编译期报错", ""], ["保底", "攻击只能靠动画结束事件退出", "隐患 动画事件没触发（Animator 被禁用、片段被替换）时角色永远卡在攻击状态", "逻辑时间保底超时（与动画时间同源，冻结时同步暂停）", "Animator 被禁用时角色不会卡死", ""]]} -->
+
+
+  <h2>4.2 Animator 结构：Exit → Entry + bool</h2>
+<!--flow {"h":316,"w":900,"cols":[16,190,364,538,712],"colw":[160,160,160,160,172],"rows":[24,104,184],
+"rects":[{"x":8,"y":8,"w":884,"h":300,"c":"s","t":"Animator_Player（Base Layer，单层）","fill":"#FFFFFF"}],
+"boxes":[
+ {"id":"en","x":20,"y":120,"w":110,"h":56,"t":"Entry","s":"按顺序检查","c":"a"},
+ {"id":"mv","x":180,"y":30,"w":130,"h":44,"t":"move","s":"Move","c":"b"},
+ {"id":"air","x":180,"y":84,"w":130,"h":44,"t":"Jump/Fall","s":"Air · 混合树(yVelocity)","ss":10,"c":"b"},
+ {"id":"da","x":180,"y":138,"w":130,"h":44,"t":"dash","s":"Dash","c":"b"},
+ {"id":"wsl","x":180,"y":192,"w":130,"h":44,"t":"WallSlide","s":"WallSlide","c":"b"},
+ {"id":"atk","x":340,"y":30,"w":150,"h":44,"t":"Empty → Attack1/2/3","s":"Attack + ComboAttack","ss":10,"c":"o"},
+ {"id":"ctr","x":340,"y":84,"w":150,"h":44,"t":"CounterAttack","s":"→ Successful（bool）","ss":10,"c":"o"},
+ {"id":"aim","x":340,"y":138,"w":150,"h":44,"t":"AimSword","s":"AimSword","c":"o"},
+ {"id":"cs","x":340,"y":192,"w":150,"h":44,"t":"CatchSword","s":"CatchSword","c":"o"},
+ {"id":"th","x":530,"y":138,"w":150,"h":44,"t":"ThrowSword","s":"!AimSword 后自动播放","ss":10,"c":"r","hl":true},
+ {"id":"die","x":530,"y":192,"w":150,"h":44,"t":"playerDie","s":"Die","c":"r"},
+ {"id":"idle","x":530,"y":30,"w":150,"h":44,"t":"playerIdle（默认）","s":"Idle","c":"g"},
+ {"id":"ex","x":730,"y":110,"w":140,"h":70,"t":"Exit","s":"每个状态：bool 为假","s2":"无退出时间 · 过渡 0","c":"a"}],
+"arrows":[{"from":"en","to":"mv","c":"a"},{"from":"en","to":"wsl","c":"a"},{"from":"aim","to":"th","c":"r"},{"from":"th","to":"ex","c":"r","label":"播完（退出时间 1）","lx":560,"ly":132},
+ {"p":[[680,52],[730,128]],"c":"a"},{"p":[[680,215],[730,165]],"c":"a"}],
+"texts":[{"x":24,"y":262,"t":"Entry 依次检查：Move → Air → Dash → WallSlide → Attack → Counter → Aim → Catch → Die；都不满足 → 默认 Idle","cls":"xs b"},{"x":24,"y":284,"t":"玩家的 Animator 只有一层；所有转移均无退出时间、过渡 0（ThrowSword 退出时间 1、playerDie 退出时间 0.73 + 过渡 0.25 除外）","cls":"xs"}],
+"cap":"图 4-1　Animator_Player 的结构（由 tools/scan_anim.py 解析 .controller 得到）。逻辑负责设 bool，Animator 只做“读 bool 选片段”；唯一的例外是红框：AimSword 一旦变假就自动播放 ThrowSword，不管逻辑上是“松开右键”还是“被打断”"} -->
+  <div class="tbl"><table>
+    <tr><th>做法</th><th>本项目</th><th>优点</th><th>代价</th></tr>
+    <tr><td>Exit → Entry + 每状态一个 bool</td><td>✔</td><td>Animator 图极简，逻辑完全掌控；新增状态只加一个 bool 和两条线</td><td>多个 bool 同时为真时，Entry 的检查顺序成了隐式优先级（E1-S1 那一帧就同时为真过）；每次切换都经过 Exit / Entry</td></tr>
+    <tr><td>Any State + Trigger</td><td></td><td>“从任何状态进入”表达直接</td><td>Trigger 会被消费 / 残留，容易出现“下一次才生效”；Any State 线多了难维护</td></tr>
+    <tr><td>代码直接 <code>animator.Play / CrossFade</code></td><td></td><td>完全由代码控制，适合动作游戏</td><td>Animator 图里看不到转移关系，美术调过渡要找程序</td></tr>
+  </table></div>
+
+  <h2>4.3 事件清单：逻辑的关键时刻都在这里</h2>
+  <div class="tbl"><table>
+    <tr><th>片段（长度 / 循环）</th><th>事件 @ 时刻</th><th>接收组件 → 逻辑</th></tr>
+    <tr><td>playerAttack1（0.714 s）</td><td>AttackTrigger @0.357 · AnimationTrigger @0.714</td><td rowspan="3">PlayerAnimationTriggers → OverlapCircleAll 命中；→ <code>triggerCalled</code> 结束攻击状态</td></tr>
+    <tr><td>playerAttack2（0.333 s）</td><td>AttackTrigger @0.083 · AnimationTrigger @0.333</td></tr>
+    <tr><td>playerAttack3（0.700 s）</td><td>AttackTrigger @0.200 · AnimationTrigger @0.700</td></tr>
+    <tr><td>playerThrowSword（0.286 s）</td><td>ThrowSwordTrigger @0.143</td><td>→ <code>SkillManager.Instance.throwSword.SpawnSword()</code></td></tr>
+    <tr><td>PlayerCatchSword（0.286 s）</td><td>AnimationTrigger @0.214</td><td>→ 结束接剑状态</td></tr>
+    <tr><td>playeSuccessfulCounterAttack（0.3 s，<b>循环</b>）</td><td>AnimationTrigger @0.2</td><td>→ 结束反击状态（弹反成功时 stateTimer 被设成 10，只能靠这个事件退出）</td></tr>
+    <tr><td>Skeleton_Attack（1.333 s，<b>循环</b>）</td><td>OpenCounterAttackWindow @0.083 · <b>AttackTrigger @0.417 · CloseCounterAttackWindow @0.417</b> · AnimationTrigger @1.25</td><td>Enemy_SkeletonAnimationTrigger → 开窗 / 命中玩家 / 关窗 / 结束攻击</td></tr>
+    <tr><td>分身（复用 playerAttack1~3）</td><td>同上</td><td>SkillController_Clone 的同名方法（第 8 章：这里的 AttackTrigger 会空引用）</td></tr>
+  </table></div>
+  <p>动画事件按<b>方法名</b>派发给 Animator 所在 GameObject 上的所有组件（类似 SendMessage），所以接收方法可以是 private。这也是为什么玩家需要一个专门的 <code>PlayerAnimationTriggers</code> 挂在子物体 Animator 上，再 <code>GetComponentInParent&lt;Player&gt;()</code> 转发——Animator 和 Player 不在同一个 GameObject 上。</p>
+
+  <h2>4.4 动画事件失灵的四种情形</h2>
+  <h3>① 播放速度为 0：事件不会来</h3>
+  <p>骷髅被飞剑冻结时 <code>animator.speed = 0</code>（Enemy.cs:58-71）；死亡状态也 <code>animator.speed = 0</code>。如果冻结发生在攻击前摇，AttackTrigger 和 AnimationTrigger 都会推迟到解冻之后——攻击状态会一直停着，这正是“冻结”想要的效果。但反过来，<b>任何依赖“动画会播完”的逻辑都会被冻结卡住</b>：如果某天给攻击状态加一个“超时保底”，它必须用不受 animator.speed 影响的时间，否则冻结时会误触发。</p>
+  <h3>② 被打断：事件被跳过，或者不该触发的事件被触发</h3>
+  <p>攻击在 0.357 s 前被冲刺取消，命中帧就不会来——这是正确的。真正的问题在图 4-1 的红框：<code>AimSword → ThrowSword</code> 的条件是“AimSword 为假”，<b>它不知道 AimSword 为什么变假</b>。</p>
+<!--seq {"p":["玩家输入","AimSword\n状态","Player\n.Update","Animator","Skill_ThrowSword"],"pc":["s","o","b","a","p"],
+"s":[["—","右键按住瞄准中，第 k 帧按下 Shift（右键仍按着）"],
+[0,2,"GetKeyDown(LeftShift)","call"],[2,1,"DashInputCheck → ChangeState(Dash)","call"],
+[1,1,"AimSword.Exit：AimSword = false（没有 DotsActive(false)）","o"],
+[3,3,"AimSword 为假 → 播放 playerThrowSword","r"],
+["—","0.143 s 后（冲刺 0.2 s 还没结束）"],
+[3,4,"ThrowSwordTrigger → SpawnSword()","call"],
+[4,4,"finalDir 只在松开右键那帧更新：仍是上一次的方向（首次为 0）","r"],
+[4,4,"DotsActive(false)：瞄准点到这时才收起","p"]],
+"cap":"图 4-2　瞄准中被冲刺打断：Animator 仍会播放掷剑片段并触发掷剑事件【推断，由 .controller 与源码推出，附录 B 给验证步骤】。逻辑上玩家选择了冲刺，表现与结果却是“掷出了一把方向错误的剑”"} -->
+  <p>修法有两层：表现层把“掷剑”从“AimSword 变假”改成一个显式参数（逻辑在松开右键时设 <code>Throw</code> trigger）；逻辑层让 AimSword.Exit 根据退出原因决定是否掷剑，并在任何退出路径上收起瞄准点。原则是 <b>Animator 里不要藏逻辑决策</b>。</p>
+  <h3>③ 同一时刻的多个事件：依赖排列顺序</h3>
+  <p>骷髅攻击片段在 0.4167 s 同时有 AttackTrigger 和 CloseCounterAttackWindow。弹反判定发生在 AttackTrigger 里（玩家受击 → 检查 <code>canBeStunned</code>），<b>只有当 AttackTrigger 排在 Close 之前时弹反才可能成功</b>。当前 .anim 文件里的顺序恰好是 AttackTrigger 在前——这是一个没人写在任何地方的契约：美术在 Animation 窗口里挪一下事件，或者有人把 Close 提前 1 帧“修正判定”，弹反就再也不会成功，而且不报任何错。第 6 章会把这个窗口完整量化。</p>
+  <h3>④ 方法名是字符串：改名即失效</h3>
+<!--code:cs:Enemy_SkeletonStunState.cs:13-25 ‖ P1 按名字调用不存在的 RedColorBlink，眩晕闪红从未生效；CancelInvoke() 把异常状态的变色一起取消（#12）-->
+public override void Enter()
+{
+    base.Enter();
+    stateTimer = enemy.stunDuration;
+    enemy.fx.InvokeRepeating("RedColorBlink", 0, 0.1f);   // EntityFX 里根本没有这个方法
+    rb.velocity = new Vector2(-enemy.facinDir * enemy.stunVector.x, enemy.stunVector.y);
+}
+public override void Exit()
+{
+    base.Exit();
+    enemy.fx.Invoke("CancelColorChange", 0);               // CancelInvoke() 会取消 fx 上所有 Invoke
+}
+<!--/code-->
+  <p><span class="tag bug">问题</span> <span class="sev p1">P1</span> 教程原版的 EntityFX 有 <code>RedColorBlink</code>，这个项目重写 EntityFX 时删掉了它，但眩晕状态还在按名字调用：编译通过，运行时 Unity 打印“Trying to Invoke method: EntityFX.RedColorBlink couldn't be called.”，眩晕时没有红色闪烁。更隐蔽的是 Exit：<code>CancelColorChange</code> 里的 <code>CancelInvoke()</code> 不带参数，会把点燃 / 冰冻 / 感电的变色 InvokeRepeating 一起取消，并把颜色强制设回白色——骷髅在燃烧时被弹反眩晕，眩晕结束后燃烧的颜色效果就没了（伤害计时在 CharacterStats 里，不受影响）。</p>
+  <p>动画事件、<code>Invoke</code>、<code>InvokeRepeating</code>、<code>StartCoroutine(string)</code>、<code>SendMessage</code> 都是同一类“按名字反射调用”，项目里共有 5 + 10 + 4 处（不含动画事件）。替代：<code>nameof(Method)</code>（改名时编译器能跟着改）、直接 <code>StartCoroutine(Method())</code>、委托 / 计时器系统。</p>
+
+  <h2>4.5 两种流派：动画驱动逻辑 vs 逻辑时间轴驱动动画</h2>
+  <div class="tbl"><table>
+    <tr><th></th><th>动画驱动（本项目、UE AnimNotify）</th><th>逻辑时间轴驱动（技能编辑器、HOK 式帧同步）</th></tr>
+    <tr><td>关键帧在哪</td><td>动画片段的事件 / Notify</td><td>技能配置的时间轴（第 N 逻辑帧做什么）</td></tr>
+    <tr><td>谁是权威</td><td>动画播放进度</td><td>逻辑帧计数；动画只是表现</td></tr>
+    <tr><td>优点</td><td>美术调节奏立刻生效；手感与画面天然对齐</td><td>与帧率、动画速度、表现剔除无关；可确定性回放；服务器可以不跑动画</td></tr>
+    <tr><td>缺点</td><td>受播放速度 / 打断 / 剔除 / 帧率影响；服务器要跑动画才能判定</td><td>需要工具链（编辑器、预览）；动画改了要同步改时间轴</td></tr>
+    <tr><td>适合</td><td>单机动作、表现驱动的玩法</td><td>联网（尤其帧同步）、需要严格判定的竞技游戏</td></tr>
+  </table></div>
+  <div class="co net"><span class="h">为什么帧同步游戏不能让动画驱动逻辑</span>
+    <p>帧同步要求每个客户端用相同输入算出完全相同的结果。动画事件的触发帧取决于渲染帧率、Animator 的更新方式、是否被剔除——各端都不一样。所以逻辑层用定点数的“第几逻辑帧”决定命中，表现层的动画只负责“看起来在那一刻挥刀”。即便是状态同步，服务器上通常也不跑完整动画（UE 的专用服务器会降低骨骼更新），命中判定同样依赖逻辑时间而不是动画回调。</p>
+  </div>
+
+  <h2>4.6 面试追问</h2>
+<!--code:text:追问树-->
+攻击命中是怎么判定的？（Q4-1）
+├─ 动画事件什么时候触发？帧率低的时候会怎样？（Q4-2）
+├─ 动画被打断 / 速度为 0 时逻辑怎么办？（Q4-3 → 4.4 ①②）
+├─ 同一时刻两个事件的顺序可靠吗？（Q4-4 → 4.4 ③、第 6 章）
+├─ 为什么 Animator 用 bool 不用 Trigger？（Q4-5）
+└─ 如果要联网 / 帧同步，命中还能放在动画事件里吗？（Q4-6 → 4.5）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q4-1 → Q4-2　命中怎么判定？动画事件什么时候触发？</div>
+    <p><b>L2</b>　攻击片段上在挥刀到位的那一帧放 AttackTrigger 事件，回调里以攻击点为圆心做 OverlapCircleAll，对检测到的敌人播受击表现并结算伤害。事件在 Animator 更新阶段触发——Update 之后、LateUpdate 之前——在“片段时间越过事件时刻”的那一帧触发。</p>
+    <p><b>L3</b>　所以命中时刻会被量化到帧：30 fps 下最多晚 33 ms；一帧卡顿 200 ms 时，这一帧里越过的所有事件会按顺序一起触发。对单机动作游戏可以接受；对格斗或联网游戏，命中应该在固定逻辑帧上判定。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q4-3　动画被打断或速度为 0 时，逻辑怎么办？</div>
+    <p><b>L2</b>　被打断时事件被跳过，所以“结束攻击状态”不能只靠动画结束事件——项目里攻击状态的出口只有 <code>triggerCalled</code>，如果攻击动画因为某种原因没播完（比如 Animator 被禁用），角色会永远卡在攻击状态。我会加一个按逻辑时间的保底超时。</p>
+    <p><b>L3</b>　速度为 0（冻结 / 顿帧）时，保底超时也必须暂停，否则会提前结束；所以保底计时最好跟“动画时间”走同一个时间源，或者显式区分“逻辑暂停”和“逻辑继续”。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q4-4　同一时刻的两个事件，顺序可靠吗？</div>
+    <p><b>L2</b>　我的弹反依赖骷髅攻击片段里 AttackTrigger 排在 CloseCounterAttackWindow 前面——它们在同一时刻。这类隐式契约很脆弱，美术挪一下事件就失效且不报错。</p>
+    <p><b>L3</b>　更好的做法是让一个事件携带完整语义：AttackTrigger 自己先判弹反、再结算伤害、最后关窗；或者把窗口做成“区间”（Notify State），由逻辑查询“此刻是否在窗口内”，而不是靠两个点事件夹出区间。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q4-5　为什么用 bool 不用 Trigger？</div>
+    <p><b>L2</b>　bool 表达“正处于某状态”，和逻辑状态一一对应，Enter 置真 Exit 置假，不会残留；Trigger 表达“发生了一次”，如果当帧没被转移消费会一直挂着，下次条件满足时意外触发。代价是需要成对维护，而且多个 bool 同时为真时依赖 Entry 的检查顺序。</p>
+    <p><b>L3 · 项目</b>　唯一该用 Trigger 的地方恰恰用了 bool 的“副作用”：掷剑应该是一次性事件，现在却挂在“AimSword 变假”上，导致被打断也会掷剑。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q4-6　联网以后命中还能放在动画事件里吗？</div>
+    <p><b>L2</b>　帧同步不行，事件触发帧各端不同；状态同步时服务器权威判定，也不应依赖客户端动画。做法是把命中时刻写进技能数据（第几逻辑帧、判定形状、持续几帧），服务器和客户端都按逻辑帧判定，动画只做表现；动画事件保留给纯表现（音效、特效、震屏）。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“动画事件是精确的，在指定时间点准时触发。”</p>
+    <p><b>问题</b>：它只在“越过该时刻的那一帧”触发，受帧率、播放速度、打断、剔除（Culling Mode）影响。</p>
+    <p><b>更好的回答</b>：“动画事件按帧量化，适合表现和单机判定；需要精确或可复现的判定时，我用逻辑时间轴。”顺带可以说：项目里所有 Animator 的 Culling Mode 都是 Always Animate，所以屏幕外的骷髅仍会正常出手——如果为了性能改成 Cull Completely，屏幕外怪物的攻击事件就不会触发了。</p>
+  </div>
+
+  <h2>4.7 发散场景题</h2>
+  <div class="scene"><div class="q">场景 4-1　QA 反馈“攻击有时打不到贴脸的敌人”，你怎么排查？</div>
+    <p class="why">为什么会问：考察“逻辑 / 表现 / 物理”三条时间线的排查能力。</p>
+    <p>① 画出攻击点：Entity 里已经有 <code>OnDrawGizmos</code> 画 attackCheck 圆；② 确认事件是否触发（回调里打帧号）、是否被冲刺 / 受击打断；③ 确认 OverlapCircleAll 的结果：没有 LayerMask，敌人的碰撞体是否在圆内（attackCheck 在本地 x = 1.2、半径 0.9，只覆盖身前 0.3~2.1 m——<b>敌人被挤进身体 0.3 m 以内或绕到身后就打不到</b>）；④ 确认敌人碰撞体没被关（死亡状态会关）；⑤ 若敌人在移动，物理位置与渲染插值位置差了一帧，看起来贴脸其实还没到。</p>
+  </div>
+  <div class="scene"><div class="q">场景 4-2　美术把攻击动画从 0.7 s 改成 0.5 s，逻辑要改哪些地方？</div>
+    <p class="why">为什么会问：考察“数据写死在代码里”的识别。</p>
+    <p>事件随片段走，命中与结束自动跟着变；但写死在代码里的时间不会变：<code>inertiaTime = 0.15f</code>（攻击位移持续时间）、<code>comboWindow = 1.5f</code>、<code>BusyForSeconds(.1f)</code>、反击持续 <code>counterAttackDuration</code>。这些应该和片段一起配置——要么也做成事件（“位移结束”事件），要么放进技能数据。</p>
+  </div>
+  <div class="scene"><div class="q">场景 4-3　做受击顿帧（Hit Stop），用 Time.timeScale = 0 可以吗？</div>
+    <p class="why">为什么会问：顿帧是打击感的标配，实现方式会影响全局时间。</p>
+    <p>全局 timeScale 会让所有东西停下（包括 UI 动画、协程里的 WaitForSeconds），而且项目的 Animator 是 Normal 更新模式，会一起停——这对“整屏顿帧”可以接受。更常见的是<b>局部顿帧</b>：只把攻击者和受击者的 animator.speed 降到 0.05 持续 60~100 ms。但项目里已经有冻结、减速、死亡三个系统在写 animator.speed（第 7 章），再加顿帧就是第四个写者——必须先引入“速度修正器栈”，否则顿帧结束时会把冻结也一起恢复。</p>
+  </div>
+  <div class="scene"><div class="q">场景 4-4　设计一个技能编辑器的时间轴，你会放哪些轨道？</div>
+    <p class="why">为什么会问：从“动画事件”自然发散到工具链。</p>
+    <p>轨道：动画（片段 + 起止 + 速度曲线）、判定（形状 / 偏移 / 持续帧 / 命中次数上限 / 去重组）、位移（曲线或根运动开关）、状态窗口（可取消、霸体、无敌）、表现（特效 / 音效 / 震屏，可以只在客户端执行）、条件分支（命中后跳转）。运行时由逻辑帧驱动，编辑器里能逐帧预览。项目里散落在代码和片段中的 <code>inertiaTime</code>、命中事件、弹反窗口，都应该成为某条轨道上的一个区间。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>结构：<b>逻辑设 bool → Animator 读 bool</b>；所有状态 “bool 假 → Exit”，Entry 顺序即隐式优先级。</li>
+    <li>失灵四情形：<b>速度 0 不来、被打断跳过、同时刻靠顺序、字符串改名失效</b>。</li>
+    <li>项目实例：AimSword 变假即掷剑（推断）、弹反依赖同时刻事件顺序、<code>Invoke("RedColorBlink")</code> 方法不存在（#12）、<code>CancelInvoke()</code> 误伤异常状态变色。</li>
+    <li>联网 / 帧同步：<b>命中放逻辑时间轴，动画事件只做表现</b>。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么玩家需要单独的 PlayerAnimationTriggers 组件？</summary>动画事件只派发给 Animator 所在 GameObject 上的组件，而 Animator 在子物体上、Player 在父物体上，需要一个转发组件。</details>
+  <details class="quiz"><summary>自测 2：弹反成功后为什么必须靠 AnimationTrigger 才能退出反击状态？</summary>CounterAttack() 把 stateTimer 设成了 10，超时出口实际被禁用；只剩 SuccessfulCounterAttack 片段 0.2 s 处的事件让 triggerCalled 为真。</details>
+  <details class="quiz"><summary>自测 3：Jump/Fall 为什么是一个状态？</summary>它是按 yVelocity 混合的 1D 混合树（阈值 −1 → 下落片段，+1 → 起跳片段），逻辑上 Jump 和 Fall 两个状态都只设 Air 这一个 bool。</details>
+</section>

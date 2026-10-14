@@ -9,6 +9,9 @@
     <li>逐节点复现原 Demo 的换弹 bug，并给出守恒的写法（E4）。</li>
     <li>换弹状态机：本机预测、服务器计时、别人看到动画、打断与取消。</li>
   </ul></div>
+  <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 的“子弹同步”是<strong>复制子弹 Actor</strong>：每发一颗由服务器生成、开启移动复制，别人靠看到这颗子弹知道你开了枪，命中靠它碰撞，没有射线。弹药是 5 个无条件复制给所有人的变量（当前子弹数量、总子弹数、弹夹最大容量、正在换弹、子弹保存），只在服务器扣，本机读复制值判断能不能开火。换弹在服务器上：先把当前弹量存起来并清零 → Multicast_Change 播动画 → Delay → “剩余子弹计算”（漏连返回节点，备弹不够时返回 0）。</div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li><span class="tag p0">P0</span>换弹吞弹匣：备弹不够补满时“剩余子弹计算”返回 0，弹匣 3 / 备弹 7 换完变 0 / 0，一局打空只能打出 {{v:E4.session.0.2}} / 40 发（A#1，E4）。</li><li>换弹用 Delay，不能取消：中途死亡或被打断时，开头已经清零的子弹直接丢失。</li><li><span class="tag p1">P1</span>本机用晚一个往返的复制弹数判断能不能开火，打空后还会多发一次请求、多播一次空放（A#10）。</li><li><span class="tag p1">P1</span>“子弹同步”靠每发一个复制 Actor：带宽大、远端突现（A#12）。</li><li><span class="tag p2">P2</span>5 个弹药变量无条件复制给所有人：别人的弹药白占带宽，还能被外挂读到（A#20）。</li><li>换弹动画等组播：开火者要等一个往返，晚加入的人看不到对方正在换弹。</li></ol></div></div>
+  <div class="state ideal"><span class="sl">理想方案</span><div>本章正文：弹药一个 Owner Only 结构 + 序号对账；别人看开枪靠 Skip Owner 的开火计数；命中由服务器校验后的射线结果决定；换弹是服务器计时器状态机，本机预测动画。</div></div>
 
   <div class="ans">
     <div class="q">30 秒版</div>
@@ -16,6 +19,7 @@
   </div>
 
   <h2>原 Demo 的换弹：逐节点移植后跑一遍</h2>
+  <div class="state cur"><span class="sl">当前做法</span><div>下面这段是把原蓝图逐节点翻译出来的逻辑，用来复现 bug，不是推荐写法。</div></div>
   <p>把第 1 章的 <code>Server_Change</code> 与 <code>剩余子弹计算</code> 按节点一一翻译成 C++（包括“false 分支没有 Return 时返回 0”的蓝图语义），与修正版对比：</p>
 <!--code:cpp:E4：原蓝图逻辑（逐节点移植）与修正版-->
 // 原蓝图 BP_Weapon.剩余子弹计算（#120~#187）
@@ -163,21 +167,26 @@ void ACoopWeapon::CancelReload() {                        // 服务器：切枪�
     <p>很多教程用蒙太奇的“弹匣插入”通知来加子弹。在服务器上这有两个风险：Dedicated Server 默认不刷新不可见网格的动画，通知可能不触发或延迟；蒙太奇被其他动作打断时通知也不会来。更稳妥的做法是<strong>服务器用数据配置的时长计时</strong>，动画只负责表现（蒙太奇时长按同一个数据缩放播放速率）；用 GAS 的话，就是 Ability 里 <code>WaitDelay</code> 或服务器端的 <code>WaitGameplayEvent</code> 加超时。原 Demo 用 <code>Delay(GetPlayLength(蒙太奇))</code> 其实是对的思路，只是放在了 RPC 事件里，没有办法取消。</p>
   </div>
 
-  <h2>原实现 vs 正确实现</h2>
-  <div class="tbl"><table>
-    <tr><th>环节</th><th>原 Demo</th><th>正确做法</th></tr>
-    <tr><td>弹药复制</td><td>5 个 int / bool 无条件复制给所有人</td><td>一个结构体，COND_OwnerOnly，带 AckSeq</td></tr>
-    <tr><td>本机能否开火</td><td>读复制的 当前子弹数量（晚一个 RTT）</td><td>读 GetDisplayedAmmo()（预测 + 对账）</td></tr>
-    <tr><td>别人看到开枪</td><td>Unreliable Multicast，排在弹药检查前</td><td>BurstCounter（SkipOwner），服务器接受后才 +1</td></tr>
-    <tr><td>换弹计算</td><td>先清零，再调用漏连 Return 的函数</td><td>到点一次性 take = min(空位, 备弹)，守恒</td></tr>
-    <tr><td>换弹状态</td><td>正在换弹 复制给所有人，但动画靠 Multicast</td><td>bPendingReload（SkipOwner）+ OnRep 播动画；本机预测</td></tr>
-    <tr><td>打断</td><td>无法取消（Delay 在 RPC 事件里）</td><td>计时器可 ClearTimer；取消时弹药不变</td></tr>
-    <tr><td>换弹中开火</td><td>服务器多播动画打断换弹，再判断无弹</td><td>本地挡住；服务器 ProcessShot 校验 !bPendingReload</td></tr>
+  <h2>当前做法 vs 理想方案</h2>
+  <div class="tbl cmp"><table>
+    <tr><th>环节</th><th class="cur">当前做法（原 Demo）</th><th class="prob">存在的问题</th><th class="ideal">理想方案</th></tr>
+    <tr><td>子弹本身</td><td>服务器生成的复制子弹 Actor（ProjectileMovement，每发一个），没有射线</td><td class="pbc"><span class="tag p1">P1</span>远端突现约 {{v:E1[s=0,rtt=200].pop:.1f}} m、带宽大（A#12）</td><td>步枪不生成子弹 Actor：命中扫描 + 本地曳光；慢速武器才用服务器抛射物 + 本机假子弹</td></tr>
+    <tr><td>弹药复制</td><td>5 个 int / bool 无条件复制给所有人</td><td class="pbc"><span class="tag p2">P2</span>别人的弹药白占带宽（A#20）</td><td>一个结构体，COND_OwnerOnly，带 AckSeq</td></tr>
+    <tr><td>本机能否开火</td><td>读复制的 当前子弹数量（晚一个 RTT）</td><td class="pbc"><span class="tag p1">P1</span>按旧值判断，打空后多发一次（A#10）</td><td>读 GetDisplayedAmmo()（预测 + 对账）</td></tr>
+    <tr><td>别人看到开枪</td><td>Unreliable Multicast，排在弹药检查前</td><td class="pbc"><span class="tag p1">P1</span>打空也播、打断换弹（A#10）</td><td>BurstCounter（SkipOwner），服务器接受后才 +1</td></tr>
+    <tr><td>换弹计算</td><td>先清零，再调用漏连 Return 的函数</td><td class="pbc"><span class="tag p0">P0</span>吞弹匣：3 / 7 → 0 / 0（A#1，E4）</td><td>到点一次性 take = min(空位, 备弹)，守恒</td></tr>
+    <tr><td>换弹状态</td><td>正在换弹 复制给所有人，但动画靠 Multicast</td><td class="pbc">开火者等往返；晚加入看不到</td><td>bPendingReload（SkipOwner）+ OnRep 播动画；本机预测</td></tr>
+    <tr><td>打断</td><td>无法取消（Delay 在 RPC 事件里）</td><td class="pbc">中途死亡，已清零的子弹丢失</td><td>计时器可 ClearTimer；取消时弹药不变</td></tr>
+    <tr><td>换弹中开火</td><td>服务器多播动画打断换弹，再判断无弹</td><td class="pbc"><span class="tag p1">P1</span>换弹动画被开火组播打断（A#10）</td><td>本地挡住；服务器 ProcessShot 校验 !bPendingReload</td></tr>
   </table></div>
+
+  <div class="co tip"><span class="h">追问：如果不用射线，硬要实体子弹呢？</span>
+    <p>那就要回答五个问题：谁生成、时间怎么对齐、谁判命中、别人怎么看到、什么时候销毁。低射速用“本机假弹 + 服务器真弹快进 + 命中只认服务器”，高射速用“数据化弹道”——完整分析和 E8~E10 实测见下一章（第 5B 章）。</p>
+  </div>
 
   <div class="recap"><div class="t">本章速记</div><ul>
     <li>弹药：服务器权威、<strong>COND_OwnerOnly</strong>、结构体带 <strong>AckSeq</strong>；显示 = InClip − (LocalSeq − AckSeq)。</li>
-    <li>别人看到开枪：<strong>COND_SkipOwner 的 BurstCounter</strong>，OnRep 看增量；主机看客户端开火要在服务器上手动播。</li>
+    <li>别人看到开枪：<strong>COND_SkipOwner 的 BurstCounter</strong>，OnRep 看增量；主机看客户端开火：C++ 在服务器处理这一发时手动播，蓝图靠服务器赋值时执行的 RepNotify（要过滤主机自己的武器）。</li>
     <li>换弹：本机预测动画 → ServerStartReload 校验 → bPendingReload（SkipOwner）→ 计时器到点一次性转移 → 复位；取消不动弹药。</li>
     <li>E4：原蓝图在备弹不够补满时吞弹匣（3/7 → 0/0）；E5：直接覆盖会回跳，序号对账不会。</li>
   </ul></div>

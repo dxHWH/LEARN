@@ -1,0 +1,202 @@
+<section class="chapter" id="ch2">
+  <div class="ch-head">
+    <div class="no">CHAPTER 02</div>
+    <h1>Unity 生命周期、单例与对象存亡</h1>
+    <p class="lead">Awake 和 Start 各该做什么、单例怎么写才对、Destroy 之后对象“什么时候真的没了”、为什么这个项目在编辑器里能跑而打包会失败——这些都是 Unity 客户端面试的必考地基。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>按“自我初始化 / 跨对象连接 / 首帧运行”三段说清 Awake、OnEnable、Start 的分工，并指出项目里哪里放错了</li>
+    <li>看懂两个单例为什么写反、会在哪种场景切换下出事；默写正确的模板</li>
+    <li>说清 fake null、Destroy 延迟、Script Execution Order 不继承这三个“坑”</li>
+    <li>知道运行时代码里引用 <code>UnityEditor</code> 为什么会让打包失败</li>
+  </ul></div>
+
+  <h2>2.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>Awake 做“只依赖自己”的初始化（取自身组件、建内部数据），Start 做“依赖别人”的连接（拿单例、订阅事件），因为所有 Awake 都在任何 Start 之前；OnEnable / OnDisable 成对做订阅。项目里 Entity 把取组件放在 Start，导致对象在 Awake 和 Start 之间被访问会空引用；两个单例写反了——发现已有实例时销毁的是旧的、新的也不登记；脚本执行顺序配在父类 CharacterStats 上，对挂在场景里的子类无效；Inventory 和骷髅战斗状态 <code>using</code> 了 UnityEditor 命名空间，编辑器里能跑，打包会编译失败。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "生命周期与对象存亡", "rows": [["取组件", "<code>Entity</code> 在 Start 里取刚体、动画机、特效、属性", "隐患 生成后到 Start 之前被访问即空引用（例如生成当帧就被命中、被别人的 Awake 读取）", "Awake 只做“我自己”（取自身组件），Start 做“我和别人”", "运行时生成的对象在 Awake 与 Start 之间被访问不会空引用", ""], ["单例", "PlayerManager / SkillManager：发现旧实例时销毁旧的、新的也不登记；public 静态字段", "P0 多放一个管理器就连同上面的技能组件一起销毁，新的又不登记（推断：冲刺只能用一次，#4）；public 字段谁都能改", "后来者自毁 + 只读属性 + OnDestroy 只清自己；或干脆改为注入", "场景里多放一个管理器也不会毁掉旧的（图 2-2）", ""], ["初始化顺序", "执行顺序 300 配在父类 CharacterStats（对子类无效），400 配在血条（有效）", "P2 配在父类上的 300 对 PlayerStats / EnemyStats 不生效，初始化先后靠运气（#31）", "显式初始化：Bootstrap 依次调用各系统 Init；必须用执行顺序时用 <code>[DefaultExecutionOrder]</code>", "顺序是看得见的代码，而不是隐式全局配置", ""], ["编辑器依赖", "两个运行时脚本 <code>using UnityEditor</code>（IDE 自动补全带入，并未使用）", "P0 编辑器里一切正常，打包时编译失败——提测才发现（#1）", "asmdef 分离运行时 / 编辑器代码 + CI 每日真打包", "问题在编辑器里就暴露", ""], ["销毁与判空", "依赖 fake null（<code>!player.sword</code>）；持有的引用从不置空", "隐患 持有的是已销毁对象；改用 <code>?.</code> / <code>is null</code> 会绕过 fake null 判成“非空”", "持有方在回调 / OnDestroy 中置空，或用“id + 代数”句柄", "不依赖引擎重载，<code>?.</code> 也安全", ""], ["出场重置", "出场状态散在 Awake / Start（满血、关弹反窗口、初始状态）", "局限 改成对象池后，复用的对象带着上一次的血量、弹反窗口、状态", "集中到 OnSpawn / OnDespawn，与对象池配合", "池化复用后状态正确（场景 2-3）", ""]]} -->
+
+
+  <h2>2.2 Awake / Start 在项目里的分工</h2>
+<!--spans {"ph":["Awake\n（全部对象）","OnEnable","Start\n（全部对象）","第 1 帧\nUpdate","动画 / 事件","之后各帧"],"labw":170,
+"rows":[
+ ["Entity（基类）",[[0,0,"s","空函数"],[2,2,"r","取 5 个组件"]]],
+ ["Player",[[0,0,"b","new 13 个状态"],[2,2,"b","Initialize(Idle)"],[3,5,"b","读输入、跑状态"]]],
+ ["Enemy_Skeleton",[[0,0,"o","new 状态、关窗口"],[2,2,"o","Init(Idle)→Find"],[3,5,"o","AI"]]],
+ ["PlayerManager / SkillManager",[[0,0,"p","登记单例（写反）"],[2,2,"p","SM 取三个技能"]]],
+ ["Skill_*",[[2,2,"p","拿玩家、生成 25 个点"],[3,5,"p","冷却递减"]]],
+ ["CharacterStats 子类",[[2,2,"g","设暴击倍率、满血"],[3,5,"g","异常状态计时"]]],
+ ["UI_HealthBar（顺序 400）",[[2,2,"t","读血量、订阅事件"],[4,5,"t","被动刷新"]]],
+ ["Inventory",[[0,0,"a","登记单例（正确）"],[2,2,"a","建 List / Dict"]]]],
+"cap":"图 2-1　各组件在生命周期里做了什么（红 = 放错阶段）。Unity 保证：同一批加载的对象，所有 Awake（及 OnEnable）先于任何一个 Start；所有 Start 先于第一次 Update"} -->
+  <div class="tbl"><table>
+    <tr><th>位置</th><th>源码</th><th>评价</th></tr>
+    <tr><td><code>Entity.Start</code></td><td>Entity.cs:45-52 取 Rigidbody2D、Animator、EntityFX、CharacterStats、Collider</td><td><span class="tag bug">问题</span> 这些只依赖自身，应放 Awake。放在 Start 意味着：<b>运行时 Instantiate 的怪物，在 Awake 之后、Start 之前被打中，<code>fx</code> / <code>stats</code> 都是 null</b>。当前场景只有预置的一只骷髅，所以没暴露。</td></tr>
+    <tr><td><code>Player.Awake</code> → <code>Start</code></td><td>Player.cs:59-89：Awake 里 new 状态，Start 里先 <code>base.Start()</code> 再 <code>Initialize(idleState)</code></td><td><span class="tag src">源码</span> 顺序是对的：Idle.Enter 会读 <code>player.rb</code>，必须在 base.Start 取完组件之后。但这个约束只写在“调用顺序”里，换个人把两行对调就坏了。</td></tr>
+    <tr><td><code>Player.Start</code></td><td><code>skill = SkillManager.Instance</code>，而 SkillManager 在<b>它自己的 Start</b> 里才 GetComponent 三个技能</td><td>能工作是因为 Player.Start 只缓存了“管理器引用”，真正访问 <code>skill.clone</code> 发生在冲刺时（第 1 帧之后）。如果有人在 Player.Start 里写 <code>skill.dash.xxx</code>，就会随两个 Start 的先后随机空引用。</td></tr>
+    <tr><td><code>EnemyStats.Start</code></td><td>先 <code>ApplyLevelModifiers()</code> 再 <code>base.Start()</code>（EnemyStats.cs:17-23）</td><td><span class="tag src">源码</span> 刻意的顺序：先加等级修正，再按修正后的上限回满血。写成 <code>base.Start()</code> 在前就会满血少一截。</td></tr>
+    <tr><td><code>UI_HealthBar.Start</code></td><td>读 <code>GetCurrentHealth()</code> 并订阅（UI_HealthBar.cs:13-25）</td><td>依赖 CharacterStats.Start 先把 currentHealth 设满——作者用 Script Execution Order（400）保证了这一点，见 2.5。</td></tr>
+  </table></div>
+  <div class="co tip"><span class="h">一句话规则</span><p><b>Awake：我自己。Start：我和别人。OnEnable / OnDisable：我和事件。</b>对象池复用时 Awake / Start 都不会再调，所以“每次出场都要重置的状态”只能放 OnEnable 或池的 OnTakeFromPool 回调里（第 12 章）。</p></div>
+
+  <h2>2.3 单例：两个写反了，一个写对了</h2>
+<!--code:cs:PlayerManager.cs:10-16（SkillManager.cs:21-31 完全相同） ‖ P0 已有实例时销毁旧的、新的又不登记：多放一个管理器就连同技能组件一起毁掉（推断：冲刺只能用一次，#4）；public 字段谁都能改写-->
+public static PlayerManager _instance;     // public 字段：谁都能改写
+private void Awake()
+{
+    if (_instance != null)
+        Destroy(_instance.gameObject);     // ← 销毁的是“已经登记的旧实例”
+    else
+        _instance = this;                  // ← 新实例只有在没有旧实例时才登记
+}
+<!--/code-->
+<!--code:cs:Inventory.cs:27-33（这一个是对的） ‖ 无 这一处写法正确（后来者自毁、已有实例保留），可作为对照模板-->
+private void Awake()
+{
+    if (instance == null) instance = this;
+    else Destroy(gameObject);              // 销毁“后来的自己”
+}
+<!--/code-->
+  <p>写反的版本在“只有一个实例”时表现正常，所以平时测不出来。出问题的三种情形：</p>
+  <div class="tbl"><table>
+    <tr><th>情形</th><th>源码行为</th><th>正确模板的行为</th></tr>
+    <tr><td>① 场景里误放了两个 SkillManager（复制粘贴、预制体嵌套）</td><td>A.Awake 登记 A；B.Awake 发现 A，<b>销毁 A 的整个 GameObject</b>（连同上面的 Skill_Dash / Clone / ThrowSword），B 不登记 → 帧末之后 <code>Instance</code> 指向已销毁的 A</td><td>B 销毁自己，A 继续工作</td></tr>
+    <tr><td>② 给单例加了 DontDestroyOnLoad，重新加载场景</td><td>新场景里的副本把常驻的旧实例毁掉，自己又不登记 → 两边都没了</td><td>新场景的副本自毁，常驻实例保留</td></tr>
+    <tr><td>③ 叠加加载（Additive）另一个也带 PlayerManager 的场景</td><td>同 ①：主场景的管理器被毁</td><td>后加载的自毁</td></tr>
+    <tr><td>④ 单场景切换（不常驻）</td><td>旧场景卸载时 A 已销毁，<code>_instance != null</code> 因 Unity 重载的 == 返回 false → 新实例正常登记</td><td>同左</td></tr>
+  </table></div>
+<!--seq {"p":["SkillManager A","SkillManager B","Player","Skill_Dash\n（A 上的）","Unity"],"pc":["p","p","b","p","s"],
+"s":[["—","加载帧：两个 SkillManager 都在场景里"],
+[0,0,"A.Awake：_instance == null → _instance = A","p"],
+[1,0,"B.Awake：_instance != null → Destroy(A.gameObject)","call"],
+[1,1,"B 没有登记自己","r"],
+[2,0,"Player.Start：skill = SkillManager.Instance（= A）","call"],
+[4,4,"帧末：A 的 GameObject 连同三个技能组件被销毁","s"],
+["—","之后：A 不再 Update，Skill.Update 不再递减冷却"],
+[2,0,"按 Shift：SkillManager.Instance.dash.CanUseSkill()","call"],
+[3,3,"C# 字段仍可读：第一次 coolDownTimer < 0 → 设为 1","a"],
+[3,3,"之后 coolDownTimer 永远停在 1 → 冲刺只能用一次","r"]],
+"cap":"图 2-2　情形 ①：写反的单例让“冲刺只能用一次”【推断】——依据两条 Unity 规则：被销毁的组件不再收到 Update；对已销毁 MonoBehaviour 读写 C# 字段不会抛异常，只有访问引擎侧属性（transform 等）才抛 MissingReferenceException"} -->
+  <p>图 2-2 的结论标为 <span class="tag inf">推断</span>，验证方法在附录 B：复制一个 SkillManager 进场景，按两次 Shift 观察第二次是否打印 “Skill [Dash] is on CoolDown” 且之后再也冲不出去。这个推断恰好是面试的好素材——它把“单例写反”这种看似无害的笔误，和 <b>fake null</b>、<b>销毁对象不再 Update</b> 两个引擎规则串在了一起。</p>
+<!--code:cs:【改进】可复用的场景单例（C#，未在 Unity 中编译）-->
+public abstract class SceneSingleton<T> : MonoBehaviour where T : SceneSingleton<T>
+{
+    public static T Instance { get; private set; }          // 只读属性，外部不能改写
+    protected virtual void Awake()
+    {
+        if (Instance != null && Instance != this) { Destroy(gameObject); return; }  // 后来者自毁
+        Instance = (T)this;
+    }
+    protected virtual void OnDestroy()
+    {
+        if (Instance == this) Instance = null;               // 只清理“自己”
+    }
+}
+// 子类重写 Awake 时必须先 base.Awake()，并在 base 返回后检查 Instance == this 再继续初始化
+<!--/code-->
+
+  <h2>2.4 fake null 与 Destroy 延迟：项目里三处依赖它们</h2>
+  <div class="tbl"><table>
+    <tr><th>代码</th><th>依赖的规则</th><th>说明</th></tr>
+    <tr><td><code>if (!player.sword)</code>（GroundedState.cs:57）</td><td>UnityEngine.Object 重载了 bool 转换 / ==：已销毁的对象“等于 null”</td><td><span class="tag src">源码</span> 飞剑被 <code>Invoke("DestroyMe", 7)</code> 销毁后，<code>player.sword</code> 这个 C# 引用并没有清空，但判空返回 true，所以又能掷剑——<b>能工作，但靠的是引擎魔法</b>。如果写成 <code>player.sword is null</code> 或 <code>player.sword?.GetComponent…</code>，C# 层面的判空会认为它还在。</td></tr>
+    <tr><td><code>CatchTheSword()</code>：先 <code>ChangeState(catchSwordState)</code> 再 <code>Destroy(sword)</code>（Player.cs:138-142）</td><td>Destroy 在帧末才生效</td><td>CatchSword.Enter 读 <code>player.sword.transform</code> 判断朝向。即使两行对调也能工作，因为 Destroy 之后本帧对象仍然存在——但别依赖这一点。</td></tr>
+    <tr><td><code>PickupItem()</code>：<code>AddItem</code> 后 <code>Destroy(gameObject)</code>（ItemObject.cs:39-43）</td><td>同上</td><td><span class="tag inf">风险</span> 如果同一物理步里触发器收到两次进入回调（例如玩家根物体上有两个碰撞体），两次都会 AddItem——Destroy 拦不住同一帧的第二次。当前玩家根物体只有一个胶囊体（血条上那个 Trigger 在子物体上，<code>GetComponent&lt;Player&gt;()</code> 取不到），所以没触发；做法是拾取时先置 <code>picked = true</code> 并关掉碰撞体。</td></tr>
+  </table></div>
+  <div class="co deep"><span class="h">扩展：fake null 到底是什么</span>
+    <p>UnityEngine.Object 是“C# 壳 + C++ 本体”。Destroy 释放的是 C++ 本体，C# 壳要等没人引用后被 GC 回收。为了让壳在本体消失后“看起来像 null”，Unity 重载了 <code>==</code> 和 bool 转换，检查本体指针。因此：① <code>?.</code>、<code>??</code>、<code>is null</code> 不走重载，会把已销毁对象当成活的；② 编辑器里 <code>GetComponent</code> 找不到组件时返回的也是一个“假 null”壳（为了给出更友好的报错），会产生少量托管分配，打包后不会。</p>
+  </div>
+
+  <h2>2.5 Script Execution Order：配了 4 个，只有 1 个起作用</h2>
+  <div class="tbl"><table>
+    <tr><th>脚本（meta 中的 executionOrder）</th><th>场景里实际挂的组件</th><th>是否生效</th></tr>
+    <tr><td>CharacterStats　300</td><td>PlayerStats、EnemyStats（子类，各自的 MonoScript 顺序为默认 0）</td><td class="no">否：执行顺序按“具体脚本”记录，不会被子类继承（社区实测；代码里用 <code>[DefaultExecutionOrder]</code> 特性则会继承）</td></tr>
+    <tr><td>UI_HealthBar　400</td><td>UI_HealthBar ×2</td><td class="yes">是：它的 Start 晚于默认顺序的 PlayerStats / EnemyStats.Start，所以第一次读到的就是满血</td></tr>
+    <tr><td>ItemData　500</td><td>ScriptableObject</td><td class="no">否：执行顺序只对 MonoBehaviour 的事件函数有意义</td></tr>
+    <tr><td>ItemDrop　600</td><td>ItemDrop（没有 Awake / Start / Update）</td><td class="no">无可排序的函数</td></tr>
+  </table></div>
+  <p>看得出作者遇到过“血条初始显示为 0”的问题，并用执行顺序修好了——这是个值得在面试里讲的经历，但要讲到下一层：<b>执行顺序是全局配置，是“隐式契约”</b>。更稳的做法是显式初始化：血条在 OnEnable 里订阅，并在 Stats 初始化完成时由 Stats 发一次 <code>onHealthChanged</code>；或者由一个 Bootstrap 组件按顺序调用各系统的 <code>Init()</code>。</p>
+
+  <h2>2.6 打包会失败：运行时代码引用了 UnityEditor</h2>
+<!--code:cs:Inventory.cs:1-4 与 Enemy_SkeletonBattleState.cs:1-4 ‖ P0 运行时脚本引用 UnityEditor 命名空间：编辑器里正常，打包编译失败（#1）-->
+using static UnityEditor.Progress;              // Inventory.cs：IDE 自动补全带进来的
+using UnityEditor.Experimental.GraphView;       // Enemy_SkeletonBattleState.cs：同上
+<!--/code-->
+  <p><span class="tag bug">问题</span> <span class="sev p0">P0</span> 编辑器里所有程序集都能看到 <code>UnityEditor.dll</code>，所以 Play Mode 一切正常；打包时运行时程序集（Assembly-CSharp）不引用编辑器程序集，这两行会报“找不到命名空间 UnityEditor”，构建直接失败。两处都没有真正用到其中的类型，删掉即可。</p>
+  <div class="co tip"><span class="h">工程上怎么提前发现</span>
+    <p>① 用程序集定义（.asmdef）把运行时代码和编辑器代码分开，运行时 asmdef 不勾 Editor 平台，误用会在编辑器里就报错；② 必须混写时用 <code>#if UNITY_EDITOR … #endif</code> 包住；③ CI 每天跑一次真打包（哪怕只打 Windows）——“编辑器能跑 ≠ 能打包”是最常见的提测事故之一。另外几处 <code>using Unity.VisualScripting;</code>（Entity、Player、Skill、SkillManager 等）没用到任何类型，虽不致命，但会让代码隐式依赖 Visual Scripting 包。</p>
+  </div>
+
+  <h2>2.7 面试追问</h2>
+<!--code:text:追问树-->
+Awake 和 Start 的区别？（Q2-1）
+├─ 为什么取组件要放 Awake？放 Start 会出什么问题？（Q2-1 L3）
+├─ 单例怎么写？你的单例有没有问题？（Q2-2）
+│   ├─ 场景切换 / DontDestroyOnLoad / 叠加加载时怎样？（2.3 表）
+│   └─ 单例的缺点？怎么替代？（Q1-4、Q2-5）
+├─ Destroy 之后马上访问会怎样？什么时候真正销毁？（Q2-3）
+│   └─ 为什么 obj == null 是 true 但 obj?.x 还能执行？（Q2-4 fake null）
+└─ 多个脚本的初始化顺序怎么控制？（Q2-5）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q2-1　Awake 和 Start 的区别？</div>
+    <p><b>L1</b>　Awake 在对象实例化（且所在 GameObject 激活）时立刻调用，Start 在该脚本第一次 Update 之前调用；同一批加载的对象，所有 Awake 都先于任何 Start。</p>
+    <p><b>L2</b>　所以 Awake 做自我初始化，Start 做跨对象连接。脚本被禁用时 Awake 仍会执行而 Start 不会，直到它被启用。</p>
+    <p><b>L3 · 项目</b>　我的 Entity 把 GetComponent 放在了 Start，现在没出问题是因为怪物都是场景预置的；如果改成刷怪，刷出来的那一帧被飞剑打到，<code>DamageEffect</code> 里的 <code>fx</code> 就是空的。应该挪到 Awake。</p>
+    <p><b>L4 · 攻击</b>　“运行时 Instantiate 的对象，Start 什么时候调？”→ Instantiate 返回前 Awake / OnEnable 已经执行；Start 推迟到它的第一次 Update 之前——在 Update 里创建的对象，社区实测是本帧 Update 之后补调 Start、下一帧才第一次 Update。所以“生成后立刻配置参数”应该在 Instantiate 之后、Start 之前完成，Start 里不要覆盖这些参数（项目里 <code>SetupClone</code>、<code>SetupSword</code> 正是在 Instantiate 之后立刻调用的）。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q2-2　单例怎么写？</div>
+    <p><b>L2</b>　Awake 里：已有实例且不是自己 → 销毁自己并 return；否则登记自己；OnDestroy 里只在 Instance 是自己时清空；Instance 做成只读属性。需要跨场景就在登记后 DontDestroyOnLoad。</p>
+    <p><b>L3 · 项目</b>　我项目里 PlayerManager 和 SkillManager 写反了：发现旧实例时销毁的是旧实例，新的还不登记。只有一个实例时看不出来；场景里多放一个就会把旧的连同上面的技能组件一起毁掉，按我的推断冲刺会变成只能用一次——因为被毁的组件不再 Update，冷却不再递减，而 C# 字段还读得到。</p>
+    <p><b>L4</b>　“那你为什么不用 static class？”→ 管理器需要 Inspector 配置（技能预制体、数值）和 Unity 生命周期（Update 递减冷却），所以是 MonoBehaviour；纯逻辑的工具（伤害公式）才适合 static。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q2-3 → Q2-4　Destroy 什么时候生效？fake null 是什么？</div>
+    <p><b>L2</b>　Destroy 把对象标记为待销毁，当前帧的更新循环结束后才真正销毁（<code>DestroyImmediate</code> 立即销毁，只建议编辑器代码用）。所以 Destroy 后本帧内对象仍然可用，回调还会继续收到。</p>
+    <p><b>L3</b>　销毁后 C# 壳还在，Unity 重载了 == 让它等于 null；<code>?.</code> / <code>??</code> 不走重载，会把它当成活对象。我项目里 <code>if (!player.sword)</code> 能在飞剑自动销毁后正确返回“没有剑”，靠的就是这个重载。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q2-5　多个脚本的初始化顺序怎么控制？</div>
+    <p><b>L2</b>　三种手段：Script Execution Order（全局配置）、<code>[DefaultExecutionOrder]</code>（写在代码里，可被子类继承）、显式初始化（一个入口按顺序调用 Init，或依赖方在被依赖方就绪事件里再初始化）。</p>
+    <p><b>L3 · 项目</b>　我用执行顺序 400 让血条的 Start 晚于属性组件，解决了初始显示 0 的问题；但我把 300 配在了父类 CharacterStats 上，对场景里的 PlayerStats / EnemyStats 并不生效。现在我更倾向显式初始化：执行顺序是隐式契约，人一多就没人记得为什么是 400。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ①</span>
+    <p><b>错误</b>：“Start 在 Awake 之后调用，所以在 Start 里访问别的对象一定安全。”</p>
+    <p><b>问题</b>：只保证“所有 Awake 先于任何 Start”，不保证 A.Start 先于 B.Start；运行时生成的对象也不在同一批里。</p>
+    <p><b>更好的回答</b>：“Start 里访问别人在 Awake 里准备好的东西是安全的；访问别人在 Start 里才准备的东西不安全，需要执行顺序或显式初始化。”</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答 ②</span>
+    <p><b>错误</b>：“Destroy 之后对象就是 null 了。”</p>
+    <p><b>问题</b>：本帧内它还活着；之后 == null 为真，但 C# 引用并未清空，<code>?.</code> 仍会执行。</p>
+    <p><b>更好的回答</b>：“Destroy 在帧末生效；销毁后用 Unity 的 == 判空，自己持有的引用最好在 OnDestroy 或回调里手动置空。”</p>
+  </div>
+
+  <h2>2.8 发散场景题</h2>
+  <div class="scene"><div class="q">场景 2-1　主菜单 → 战斗 → 主菜单，玩家的背包和属性怎么保留？</div>
+    <p class="why">为什么会问：项目只有一个场景，Inventory 和 PlayerStats 都跟场景同生共死。</p>
+    <p>把“数据”和“表现”拆开：背包、装备、属性基础值放进一个跨场景的纯数据对象（常驻的 GameSession / 存档服务，或 ScriptableObject 运行时容器），场景里的 Inventory / PlayerStats 只是视图和行为，在 OnEnable 时从数据层加载、OnDisable 时写回。不要给整个玩家 GameObject 加 DontDestroyOnLoad——它会把相机跟随、UI 引用、场景内对象引用全部带到新场景里变成悬空引用。</p>
+  </div>
+  <div class="scene"><div class="q">场景 2-2　改成刷怪笼，刷出来的骷髅在出生那一帧被旋转剑命中，会发生什么？</div>
+    <p class="why">为什么会问：考察你能否把 Awake / Start 的区别落到具体的空引用上。</p>
+    <p>如果是在 Update 里 Instantiate，按社区实测 Start 会在本帧 Update 之后才补调；而飞剑的 SpinLogic 在 Update 里调用 <code>ThrowSwordDamage(enemy)</code> → <code>player.stats.DoDamage(enemy.stats)</code>——骷髅的 <code>stats</code> 是在 Entity.Start 里赋值的，此时可能还是 null，同帧的 <code>enemy.DamageEffect()</code> 里 <code>fx</code> 也可能为 null。修法：取组件挪到 Awake；或者刷怪后先置为“无敌 / 不可选中”一帧。</p>
+  </div>
+  <div class="scene"><div class="q">场景 2-3　加了对象池以后，复用的骷髅“满血复活”失败、弹反提示还亮着，为什么？</div>
+    <p class="why">为什么会问：对象池是第 12 章的重构方向，面试官会提前埋雷。</p>
+    <p>池化对象第二次出场不会再调 Awake / Start：<code>currentHealth = GetMaxHealth()</code> 在 Start 里、<code>CloseCounterAttackWindow()</code> 在 Awake 里，<code>stateMachine.Initialize(idleState)</code> 在 Start 里，都不会重跑；死亡状态把 <code>cd.enabled = false</code>、<code>animator.speed = 0</code> 也不会恢复。所有“出场重置”要集中到一个 <code>OnSpawn()</code>（由池在取出时调用），并且和 <code>OnDespawn()</code> 成对。</p>
+  </div>
+  <div class="scene"><div class="q">场景 2-4　为什么同一份代码在同事电脑上偶现血条显示 0？</div>
+    <p class="why">为什么会问：执行顺序未定义的经典表现。</p>
+    <p>两个默认顺序的脚本之间先后不确定（官方文档明确说不要依赖），可能随机器、构建、Unity 版本变化。我的项目恰好用执行顺序 400 消除了血条与属性的竞争；如果别人把它从列表里删掉，或者新增一个默认顺序、又依赖 currentHealth 的脚本（比如 Boss 血条），问题就会回来。根治是让“谁先初始化”显式化。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><b>Awake 我自己、Start 我和别人、OnEnable/OnDisable 我和事件</b>；池化对象只会重复 OnEnable/OnDisable。</li>
+    <li>单例：<b>后来者自毁 + 只读属性 + OnDestroy 只清自己</b>；项目里 PlayerManager / SkillManager 写反（#4）。</li>
+    <li>fake null：Destroy 后 == null 为真，<code>?.</code> 不认；Destroy 在帧末生效。</li>
+    <li>执行顺序不被子类继承（CharacterStats 300 无效）；运行时代码 <code>using UnityEditor</code> → 打包失败（#1）。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：Player.Start 里如果先 Initialize(idleState) 再 base.Start()，会怎样？</summary>Idle.Enter 执行 <code>rb = player.rb</code> 时 rb 还没取，后面 <code>rb.velocity = …</code> 空引用。</details>
+  <details class="quiz"><summary>自测 2：情形 ① 里为什么不是立刻空引用，而是“冲刺只能用一次”？</summary>Instance 指向已销毁的 A，读 C# 字段（dash、coolDownTimer）不会抛异常；但被销毁的组件不再 Update，冷却停在 1，于是第二次起永远在冷却中（推断，附录 B 验证）。</details>
+  <details class="quiz"><summary>自测 3：怎样让基类上的执行顺序对所有子类生效？</summary>在基类上加 <code>[DefaultExecutionOrder(n)]</code> 特性（社区实测会被子类继承），或在 Project Settings 里逐个添加子类。</details>
+</section>

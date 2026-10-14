@@ -1,0 +1,224 @@
+<section class="chapter" id="ch8">
+  <div class="ch-head">
+    <div class="no">CHAPTER 08</div>
+    <h1>技能系统：冷却、冲刺分身与四模式飞剑</h1>
+    <p class="lead">“技能系统怎么设计”是 Gameplay 岗的高频系统题。项目里的技能是“每个技能一个 MonoBehaviour + 一个控制器”，能跑，但能看到三类典型问题：名字叫 Can 的函数在消耗冷却、分身的攻击回调拿不到玩家、飞剑用七个 bool 拼出四种模式。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清 Skill 基类的冷却模型，以及 <code>CanUseSkill</code> 为什么违反“命令-查询分离”</li>
+    <li>找到分身攻击的空引用（P0）和朝向判断写进循环的 bug，并用 E11 量化后者</li>
+    <li>画出飞剑的生命周期，指出“bool 标志汤”的组合爆炸，给出策略模式的重构</li>
+    <li>能在白板上画一个数据驱动的技能系统，并对照 UE GAS 的五个核心概念</li>
+  </ul></div>
+
+  <h2>8.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p>SkillManager 上挂着三个继承 <code>Skill</code> 的组件（冲刺、分身、飞剑），Skill 只管冷却：<code>CanUseSkill()</code> 冷却好了就直接 UseSkill 并重置冷却。冲刺每次生成一个淡出的分身；飞剑由 <code>SkillController_ThrowSword</code> 控制，支持普通、弹跳、穿刺、旋转四种模式和召回。问题有三：<code>CanUseSkill</code> 名为查询实为命令；分身配置成可攻击，但它的攻击回调用 <code>GetComponentInParent&lt;Player&gt;()</code> 找玩家，分身不是玩家的子物体，范围内有敌人就空引用；飞剑用 7 个 bool 组合模式，任何新模式都要改控制器的每个分支。重构方向是“技能 = 配置 + 运行时实例 + 时间轴任务”，飞剑模式改成可组合的行为对象。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "技能系统", "rows": [["冷却接口", "<code>CanUseSkill</code>：检查即释放、即扣冷却", "P2 被状态守卫拒绝也扣冷却；名字叫 Can 却有副作用，读代码的人以为只是查询（#36）", "CanActivate（只读）+ Commit（扣消耗与冷却）", "被状态守卫拒绝时不会白扣冷却", ""], ["技能数据", "冲刺速度 / 时长在 Player，冷却在组件，飞剑 20 个序列化字段", "局限 参数散在三处，改一个技能要改场景里三个组件；无法热更、无法复用", "SkillConfig 资源（定义）+ SkillInstance（等级、冷却剩余、充能）", "新增技能是配置工作；可热更", ""], ["伤害来源", "分身用 GetComponentInParent 向上找玩家", "P0 分身攻击从未生效，范围内有敌人就空引用（#2）", "创建时注入攻击者属性快照（来源）", "分身攻击真正生效", ""], ["模式扩展", "枚举 + 两个 switch + 7 个 bool", "P2 加一种剑要改两个 switch 再加 bool；SetupGravity 覆盖序列化字段；Update 不调 base，冷却永不减（#24）", "行为组合（伤害 / 插住 / 弹跳 / 穿刺 / 旋转 / 追踪）+ 配置资源", "新增一种剑只加一个行为类", ""], ["释放入口", "冲刺在 Player.Update 里全局检测，绕过任何状态检查", "P0 死亡、眩晕时照样能冲刺——正是“复活”的入口（#3）", "统一激活管线 + 阻断标签（Dead / Stunned）", "死亡、眩晕时不能放技能", ""], ["对象生成", "分身、飞剑每次 Instantiate / Destroy", "局限 频繁生成 / 销毁带来分配与卡顿尖刺；销毁后的旧引用变成 fake null", "对象池 + 代数句柄（第 12 章）", "零分配、旧引用安全", ""]]} -->
+
+
+  <h2>8.2 Skill 基类：冷却与“Can”的副作用</h2>
+<!--code:cs:Skill.cs:16-43 ‖ P2 CanUseSkill 检查即释放、即扣冷却（命令与查询不分离，#36）；冷却一直往负数减；子类不调 base 时冷却永不减（#24）-->
+protected virtual void Start()  { player = PlayerManager.Instance.player; }
+protected virtual void Update() { coolDownTimer -= Time.deltaTime; }       // 一直往负数减，从不封底
+
+public virtual bool CanUseSkill()
+{
+    if (coolDownTimer < 0)
+    {
+        UseSkill();                          // ← 名字是“能不能用”，实际“已经用了”
+        coolDownTimer = coolDown;
+        return true;
+    }
+    Debug.Log("Skill [" + skillName + "] is on CoolDown");   // 每次失败都拼字符串 + 打日志
+    return false;
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>问题</th><th>源码事实</th><th>后果</th></tr>
+    <tr><td>命令-查询不分离</td><td><code>CanUseSkill</code> 调用即消耗冷却</td><td>调用方无法“先问再决定”。加了状态守卫后（第 3 章），如果冲刺请求被拒绝，冷却已经白白消耗。正确的形状是 <code>bool TryActivate()</code>（名字说明会执行）或 <code>CanActivate()</code> + <code>Commit()</code> 两步</td></tr>
+    <tr><td>子类重写 Update 没调 base</td><td><code>Skill_ThrowSword.Update</code> 完全重写（Skill_ThrowSword.cs:75-89）</td><td>飞剑的 coolDownTimer 永不递减；目前掷剑不经过冷却检查所以没暴露，一旦接入就是“永远在冷却”</td></tr>
+    <tr><td>每帧改写序列化字段</td><td><code>SetupGravity()</code> 每帧把 bounce / pierce / spin 的重力写进 <code>swordGravityScale</code>；Regular 分支什么都不做</td><td>运行中从 Pierce（重力 1）切回 Regular，重力停在 1 而不是原来的 4.5——原始值已被覆盖</td></tr>
+    <tr><td>冷却失败的日志</td><td>字符串拼接 + Debug.Log</td><td>每次按键都分配并写日志（打包后 Debug.Log 依然执行，见第 12 章）</td></tr>
+    <tr><td>未使用的代码</td><td><code>FindClosestEnemy</code> 没有调用方；分身和雷击各写了一份“找最近敌人”</td><td>同一逻辑三份实现，修 bug 要修三处（其中一份就有 E11 的 bug）</td></tr>
+  </table></div>
+
+  <h2>8.3 冲刺分身：一个 P0 和一个循环里的 bug</h2>
+<!--code:cs:SkillController_Clone.cs:33-96（精简） ‖ P0 用 GetComponentInParent 找玩家，独立生成的分身上必为 null：分身攻击从未生效、打到敌人就空引用（#2）；朝向判断写进循环（E11，#23）-->
+public void SetupClone(Transform _newTranform, float _cloneDuration, float _colorLosingSpeed, bool canAttack)
+{
+    transform.position = _newTranform.position;      // 只拷了位置，没拷朝向
+    cloneTimer = _cloneDuration;
+    if (canAttack)                                    // 场景里 Skill_Clone.canAttack = 1
+    {
+        FaceClosesttTarget();
+        animator.SetInteger("AttackNumber", Random.Range(1, 4));   // 随机播 1~3 段攻击
+    }
+}
+private Player player => GetComponentInParent<Player>();          // 分身是 Instantiate(clonePrefab) 生成的根物体
+private void AttackTrigger()                                       // 攻击片段 0.083~0.357 s 处的动画事件
+{
+    foreach (var c in Physics2D.OverlapCircleAll(attackCheck.position, attackCheckRadius))
+        if (c.GetComponent<Enemy>() is Enemy enemy)
+        {
+            player.stats.DoDamage(enemy.stats);        // ← player 为 null：NullReferenceException
+            enemy.DamageEffect();
+        }
+}
+private void FaceClosesttTarget()
+{
+    float closestDistance = Mathf.Infinity;
+    foreach (Collider2D collider in Physics2D.OverlapCircleAll(transform.position, 25))
+    {
+        Enemy enemy = collider.GetComponent<Enemy>();
+        if (enemy != null && Vector2.Distance(transform.position, enemy.transform.position) < closestDistance)
+        { closestDistance = ...; closetEnemy = enemy.transform; }
+        if (closetEnemy != null && transform.position.x > closetEnemy.position.x)
+            transform.Rotate(0, 180, 0);              // ← 写在 foreach 里：之后每遍历一个碰撞体都可能再转一次
+    }
+}
+<!--/code-->
+  <p><span class="tag bug">问题</span> <span class="sev p0">P0</span> 分身由 <code>Instantiate(clonePrefab)</code> 生成，没有父物体，Clone.prefab 上也没有 Player 组件（已查 prefab：只有 SpriteRenderer、Animator、SkillController_Clone 和一个 AttackCheck 子物体）。<code>GetComponentInParent&lt;Player&gt;()</code> 必然返回 null。因为空引用发生在 <code>if (enemy != null)</code> 里面，<b>只有分身攻击范围内有敌人时才会抛异常</b>——也就是“分身攻击从来没打出过伤害，而且每次打到敌人都报错”。教程原版在 SetupClone 里把 player 作为参数传进来，这个项目改成了属性查找。修法：Skill_Clone 在 CreatClone 时把 Player（或者攻击者的 CharacterStats）传进去。</p>
+  <p><span class="tag bug">问题</span> <span class="sev p2">P2</span> FaceClosesttTarget 把旋转写进了循环：一旦找到最近的敌人，之后每遍历一个碰撞体（地面、血条触发器、掉落物……OverlapCircleAll 半径 25 且没有过滤），只要“分身在敌人右边”就再转 180°，最终朝向取决于剩余碰撞体个数的奇偶。<span class="tag ex">实测 E11</span>（每个 n 跑 20 万次，敌人位置和碰撞体顺序随机）：</p>
+<!--plot {"x":[1,8],"y":[0,105],"h":260,"xlabel":"OverlapCircleAll 返回的碰撞体个数 n","ylabel":"朝向正确 / %","legend":"bl","xt":[1,2,3,4,5,6,7,8],
+"series":[{"n":"1 个敌人（实测）","path":"e11p.one","c":"r","dots":true},{"n":"1 个敌人（理论 50% + 50%·⌈n/2⌉/n）","path":"e11p.theo","c":"s","dash":true},{"n":"2 个敌人（实测）","path":"e11p.two","c":"a","dots":true}],
+"cap":"图 8-1　分身朝向正确率（E11）。敌人在右边时不会转，总是对的；敌人在左边时转 n − i 次（i 是敌人在数组中的位置），奇数次才对。场景里 25 m 内光地面、背景、触发器就有多个碰撞体，正确率在 50%~83% 之间跳动"} -->
+  <p>还有一个表现问题 <span class="tag inf">推断</span>：SetupClone 只拷贝了位置没拷贝朝向，分身默认朝右；玩家向左冲刺且附近没有敌人时（不进入 FaceClosesttTarget 的旋转），残影朝向与玩家相反。最后，每次冲刺都 Instantiate 一个分身、淡出后 Destroy——冲刺冷却 1 s，频率不高，但它是对象池最典型的适用场景（第 12 章）。</p>
+
+  <h2>8.4 飞剑：七个 bool 拼出四种模式</h2>
+<!--graph {"h":380,"w":900,
+"nodes":[
+ {"id":"aim","x":70,"y":190,"k":"box","w":110,"h":44,"t":"瞄准","s":"虚线 25 点","c":"o"},
+ {"id":"fly","x":240,"y":190,"t":"飞行","s":"canRotate","c":"b"},
+ {"id":"stuck","x":440,"y":60,"t":"插住","s":"Regular","c":"s","r":30},
+ {"id":"bounce","x":440,"y":160,"t":"弹跳","s":"列表轮转","c":"p","r":30},
+ {"id":"pierce","x":440,"y":250,"t":"穿刺","s":"计数","c":"t","r":30},
+ {"id":"spin","x":440,"y":335,"t":"旋转","s":"每帧伤害","c":"r","r":30},
+ {"id":"ret","x":660,"y":190,"t":"召回","s":"isReturning","c":"g","r":30},
+ {"id":"catch","x":830,"y":120,"k":"box","w":120,"h":44,"t":"玩家接剑","s":"任意状态强切","c":"r"},
+ {"id":"gone","x":830,"y":270,"k":"box","w":120,"h":44,"t":"7 s 后销毁","s":"Invoke(DestroyMe)","c":"s"}],
+"edges":[
+ {"f":"aim","t":"fly","l":"ThrowSwordTrigger"},
+ {"f":"fly","t":"stuck","l":"碰到任何东西","bend":-20,"dy":-6},{"f":"fly","t":"bounce","l":"碰到敌人","dy":-6},
+ {"f":"fly","t":"pierce","l":"穿过 N 个敌人","dy":12},{"f":"fly","t":"spin","l":"飞够 10 m / 碰撞","bend":20,"dx":-62,"dy":4},
+ {"f":"pierce","t":"stuck","l":"次数用完","c":"s","bend":120,"lt":0.66,"dx":34},
+ {"f":"stuck","t":"ret","l":"右键召回","bend":-20,"dy":-6},{"f":"bounce","t":"ret","l":"右键","dy":-6},{"f":"spin","t":"ret","l":"2 s 后自动","bend":20,"dy":14},
+ {"f":"ret","t":"catch","l":"距离 < 1 m","dy":-6},{"f":"ret","t":"gone","l":"任何时候","c":"s","dash":true,"dy":12}],
+"cap":"图 8-2　飞剑生命周期（SkillController_ThrowSword.cs）。四种模式不是四个状态，而是 isRegular / isBouncing / isPiercing / isSpinning 四个 bool，加上 isReturning / isSpinStoped / canRotate，共 7 个标志在 Update 和 OnTriggerEnter2D 里交叉判断"} -->
+  <div class="tbl"><table>
+    <tr><th>模式</th><th>关键逻辑</th><th>问题</th></tr>
+    <tr><td>Regular</td><td>OnTriggerEnter2D → 伤害 + 冻结 0.7 s → StuckInto：关碰撞、变运动学、挂到被击中物体下</td><td>挂到敌人下后，敌人翻转时剑跟着转；敌人若被销毁，剑作为子物体一起被销毁</td></tr>
+    <tr><td>Bounce</td><td>首次碰到敌人时收集 10 m 内所有敌人，按列表轮流飞过去，共 4 次</td><td>只有 1 个敌人时（<code>Count &gt; 1</code> 不成立）直接插住；列表里的敌人死亡后仍会被“弹到”（重复 Die，第 7 章）；弹完后剑悬在半空、碰撞体重新打开</td></tr>
+    <tr><td>Pierce</td><td>每碰到一个敌人伤害一次、计数减一；计数用完后插住</td><td>计数在 StuckInto 里减，伤害在 OnTriggerEnter2D 里——两个函数共同决定一个规则</td></tr>
+    <tr><td>Spin</td><td>飞出 10 m 或碰撞后停下，2 s 内每 hitCoolDown 对 1 m 内敌人伤害 + 冻结，然后自动召回</td><td>hitCoolDown 场景值 0 → 命中数 = 帧数（E10）；每次命中开一个冻结协程（E8）；停住后直接改 transform.position 而不是 rb.MovePosition</td></tr>
+    <tr><td>召回</td><td>MoveTowards 玩家，距离 &lt; 1 m 时 <code>player.CatchTheSword()</code></td><td>无视墙体穿墙飞回；CatchTheSword 从任何状态（包括死亡）强切（第 3 章）</td></tr>
+  </table></div>
+  <p>Setup 的调用顺序也是隐式契约：<code>SpawnSword</code> 必须先调 <code>SetupBounce / SetupPierce / SetupSpin</code> 再调 <code>SetupSword</code>，因为 SetupSword 里要读 <code>isPiercing</code> 决定是否播放旋转动画。7 个 bool 理论上有 128 种组合，合法的只有十来种，非法组合没有任何东西阻止（例如 isRegular 默认就是 true，只有 Setup 系列函数会把它置假）。</p>
+<!--code:cs:【改进】飞剑模式改为可组合的行为（C#，未在 Unity 中编译）-->
+public interface ISwordBehavior
+{
+    void OnLaunch(Sword s) { }
+    bool OnHit(Sword s, Collider2D other);   // 返回 true 表示“这一下消耗掉了”，继续交给下一个行为
+    void Tick(Sword s, float dt) { }
+}
+// 普通剑 = [Damage, StickInto]；穿刺剑 = [Damage, Pierce(n), StickInto]
+// 弹跳剑 = [Damage, Bounce(n, radius)]；旋转剑 = [SpinAfter(distance, duration, hitInterval)]
+// 新增“追踪剑”= [Homing(turnRate), Damage, StickInto]——只加一个类，不碰其他模式
+[CreateAssetMenu] public class SwordConfig : ScriptableObject
+{
+    public float gravity, launchSpeed, freezeTime;
+    [SerializeReference] public List<ISwordBehavior> behaviors;    // 由策划在 Inspector 里拼
+}
+<!--/code-->
+
+  <h2>8.5 数据驱动的技能系统：白板版</h2>
+<!--flow {"h":290,"w":900,"cols":[14,194,374,554,734],"colw":[166,166,166,166,152],"rows":[20,110,200],"bh":58,
+"boxes":[
+ {"id":"cfg","cr":[0,1],"t":"SkillConfig（资源）","s":"冷却、消耗、标签","s2":"时间轴、效果列表","c":"a"},
+ {"id":"ins","cr":[1,1],"t":"SkillInstance","s":"运行时：冷却、充能、等级","c":"b"},
+ {"id":"chk","cr":[1,0],"t":"CanActivate","s":"冷却 / 消耗 / 标签 / 状态","c":"b"},
+ {"id":"tl","cr":[2,1],"t":"时间轴任务","s":"前摇 · 判定 · 位移 · 后摇","s2":"可取消窗口","c":"p","hl":true},
+ {"id":"eff","cr":[3,0],"t":"Effect","s":"伤害 / Buff / 召唤","c":"g"},
+ {"id":"cue","cr":[3,2],"t":"Cue（表现）","s":"特效 / 音效 / 震屏","c":"o"},
+ {"id":"tag","cr":[2,0],"t":"标签系统","s":"Stunned 禁止施法…","c":"t"},
+ {"id":"tgt","cr":[2,2],"t":"目标选择","s":"最近敌人 / 范围 / 锁定","c":"t"},
+ {"id":"st","cr":[4,1],"t":"Stats / Buff","s":"第 7 章","c":"g"}],
+"arrows":[{"from":"cfg","to":"ins","c":"a"},{"from":"ins","to":"chk","c":"b"},{"from":"ins","to":"tl","c":"b","label":"Commit 后进入","lx":300,"ly":184},{"from":"tag","to":"chk","c":"t"},
+ {"from":"tl","to":"eff","c":"g"},{"from":"tl","to":"cue","c":"o"},{"from":"tgt","to":"tl","c":"t","s":["t","b"]},{"from":"eff","to":"st","c":"g"}],
+"cap":"图 8-3　数据驱动技能系统的五个部件。对照 UE GAS：SkillConfig/Instance ≈ GameplayAbility（CDO / 实例），Effect ≈ GameplayEffect，标签 ≈ GameplayTag，时间轴任务 ≈ AbilityTask，Cue ≈ GameplayCue"} -->
+  <div class="tbl"><table>
+    <tr><th>项目里的写法</th><th>放进这个系统后</th></tr>
+    <tr><td>Skill_Dash 的冷却 1 s 在组件字段；冲刺时长 0.2 s 在 Player 字段；冲刺速度 25 在 Player 字段</td><td>都在 DashConfig 里；时长与位移由时间轴的“位移轨道”定义（并且在固定步里执行，第 5 章）</td></tr>
+    <tr><td>Skill_Clone 由 DashState.Enter 直接调用</td><td>冲刺技能的时间轴第 0 帧挂一个“生成残影”效果，残影是否攻击是效果的参数</td></tr>
+    <tr><td>飞剑参数 20 个序列化字段 + swordType 枚举 + switch</td><td>四个 SwordConfig 资源，切换模式 = 换资源</td></tr>
+    <tr><td>“能否施放”散落在 GroundedState 的 if 和 HasNoSword 里</td><td>CanActivate 统一检查：冷却、标签（Dead、Stunned）、外部条件（剑不在手上）</td></tr>
+  </table></div>
+
+  <h2>8.6 面试追问</h2>
+<!--code:text:追问树-->
+技能系统怎么设计的？（Q8-1）
+├─ 冷却放在哪？为什么 CanUseSkill 会扣冷却？（Q8-2）
+├─ 分身怎么拿到玩家的属性？（Q8-3 → P0）
+├─ 飞剑四种模式怎么扩展？加一种追踪剑要改几处？（Q8-4）
+├─ 技能能不能被打断？打断了冷却怎么算？（Q8-5）
+└─ 和 GAS 比你的系统缺什么？（Q8-6）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q8-1 → Q8-2　技能系统怎么设计？冷却为什么在 CanUseSkill 里扣？</div>
+    <p><b>L2</b>　Skill 基类只有冷却：Update 里递减，CanUseSkill 冷却好了就执行 UseSkill 并重置冷却，返回 true。冲刺、分身、飞剑各是一个子类组件，挂在 SkillManager 上。</p>
+    <p><b>L3</b>　这个接口的问题是查询带副作用：调用方无法“先问能不能、再决定要不要”。比如冲刺被状态守卫拒绝时，冷却已经扣了。我会改成 TryActivate（名字表明会执行），或者 CanActivate + Commit 两步，Commit 才扣冷却和资源——GAS 的 CommitAbility 就是这个设计。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q8-3　分身怎么拿到玩家的属性来算伤害？</div>
+    <p><b>L2</b>　现在是 <code>GetComponentInParent&lt;Player&gt;()</code>，但分身是独立生成的根物体，找不到玩家，范围内有敌人时空引用。这是我复盘时发现的最严重的问题之一：分身的攻击动画在播，却从来没有造成过伤害。</p>
+    <p><b>L3</b>　正确的做法是创建时注入攻击者的属性（或者一个“伤害来源”对象），而且最好是<b>快照</b>：分身存在期间玩家换了装备，分身的伤害按创建时还是按当前？这是一个需要策划决定的规则，代码要能表达两种。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q8-4　加一种“追踪剑”要改几处？</div>
+    <p><b>L2</b>　现在要改：SwordType 枚举、Skill_ThrowSword 的 SetupGravity 和 SpawnSword 两个 switch、控制器加 isHoming 标志、Update 加分支、OnTriggerEnter2D 和 StuckInto 里所有“isXxx”判断都要检查是否与新模式冲突——至少 6 处，而且每处都可能破坏已有模式。</p>
+    <p><b>L3</b>　改成行为列表后，追踪剑 = [Homing, Damage, StickInto]，只新增一个 Homing 类和一个配置资源。这就是开闭原则：对扩展开放、对修改关闭。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q8-5　技能能不能被打断？打断了冷却怎么算？</div>
+    <p><b>L2</b>　现状：冲刺可以打断一切（全局检测），瞄准被打断时仍会掷剑（第 4 章）。规则应该写进技能配置：前摇阶段被打断是否返还冷却 / 资源、后摇阶段是否可被移动取消。常见做法是“Commit 发生在前摇结束、判定之前”，所以前摇被打断不扣冷却。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q8-6　和 UE GAS 比，你的系统缺什么？</div>
+    <p><b>L2</b>　缺四样：① 标签系统（技能之间的阻断、取消、需求关系）；② 效果（GameplayEffect）把“改属性”统一成数据，带持续时间、叠加、修正器；③ AbilityTask 这样的异步任务，把“等动画事件”“等输入”“等目标选择”写成可组合的步骤；④ 预测与网络复制。我的项目里这四样分别散落在状态机 if、ItemData_Equipment.AddModifiers、动画事件回调和……没有（单机）。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“我的飞剑支持四种模式，用了策略模式。”</p>
+    <p><b>问题</b>：源码是一个枚举 + 两个 switch + 七个 bool，不是策略模式；面试官只要问“新增一种模式要改哪里”就会暴露。</p>
+    <p><b>更好的回答</b>：“现在是枚举 + 标志位实现的，扩展性很差；我设计过改成行为组合的方案，新增模式只加一个类。”——把“做了什么”和“应该怎么做”分开说。</p>
+  </div>
+
+  <h2>8.7 发散场景题</h2>
+  <div class="scene"><div class="q">场景 8-1　加入“冷却缩减 30%”的装备和“可存 2 次的冲刺”，你怎么改？</div>
+    <p class="why">为什么会问：冷却模型是技能系统的基础。</p>
+    <p>冷却时长不再是常量，而是 <code>baseCooldown × (1 − CDR)</code>，CDR 来自属性系统（带上限，例如 40%）；冷却缩减变化时，正在冷却的技能是按比例缩短剩余时间还是只影响下一次，要定规则。充能：SkillInstance 存 <code>charges</code> 与 <code>rechargeTimer</code>，使用时 charges − 1，计时器在 charges &lt; max 时运行、到点 +1（累加式计时，第 5 章）。UI 显示层数和环形进度。</p>
+  </div>
+  <div class="scene"><div class="q">场景 8-2　技能 Z 的效果是“3 秒内下一次普攻附带火焰伤害”，放在哪里实现？</div>
+    <p class="why">为什么会问：考察技能与 Buff 的边界。</p>
+    <p>技能 Z 只做一件事：给自己上一个 3 秒的 Buff“火焰附魔”（带“下一次普攻”计数 1）；普攻的伤害管线在构造 DamageInfo 时询问身上的 Buff，附魔 Buff 往 DamageInfo.fire 里加数值并消耗计数。这样技能、普攻、Buff 三者互相不知道具体实现，只通过 DamageInfo 和标签交流。</p>
+  </div>
+  <div class="scene"><div class="q">场景 8-3　联机时，飞剑由谁生成？命中由谁判？</div>
+    <p class="why">为什么会问：投射物同步是联机技能的难点。</p>
+    <p>状态同步常见做法：客户端本地立刻生成一个“预测投射物”（只做表现），同时把“掷剑（方向、时间戳）”发给服务器；服务器生成权威投射物、判定命中、复制给其他客户端；本地预测物在服务器结果到达后与权威物对齐或替换。轨迹可预测的投射物（抛物线）甚至不需要逐帧复制位置，只复制发射参数，各端自己算（这时 E9 的离散 / 连续一致性就很重要）。</p>
+  </div>
+  <div class="scene"><div class="q">场景 8-4　策划想在不发版的情况下调技能数值，怎么支持？</div>
+    <p class="why">为什么会问：热更新与配置管线。</p>
+    <p>数值必须先从组件字段里拿出来（SkillConfig 资源或表格），再走热更通道：资源热更（Addressables / AssetBundle 替换配置资源）或表格热更（下载新的数据表）。逻辑代码不变，只换数据；版本号与校验保证客户端和服务器用同一份配置。项目现在的数值都在场景里，热更只能整场景替换。</p>
+  </div>
+
+  <div class="co tip"><span class="h">方法论延伸</span><p>技能与背包、装备如何统一成“配置 / 实例 / 规则 / 表现”四层，并通过属性修正、效果、标签三条通道协作，见第 21 章。</p></div>
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li><code>CanUseSkill</code> = 查询 + 命令；应为 <b>TryActivate</b> 或 <b>CanActivate + Commit</b>。Skill_ThrowSword.Update 没调 base → 冷却永不递减。</li>
+    <li>分身攻击：<code>GetComponentInParent&lt;Player&gt;()</code> 在独立生成的分身上为 null → <b>有敌人就空引用、从未造成伤害</b>（#2，P0）。</li>
+    <li>E11：旋转写进 foreach → 朝向正确率 [[e11.2.one|.0f]]%~[[e11.3.one|.0f]]%（n = 2~3 时）。</li>
+    <li>飞剑：<b>7 个 bool 的标志汤</b> → 改成行为组合 + 配置资源；数据驱动技能 ≈ GAS 的 Ability / Effect / Tag / Task / Cue。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么分身的空引用在测试时不容易发现？</summary>空引用在 <code>if (enemy != null)</code> 内部，只有分身的攻击范围内恰好有敌人时才触发；而且异常只打印到 Console，不会中断游戏。</details>
+  <details class="quiz"><summary>自测 2：弹跳剑只有一个敌人时会怎样？</summary>BounceLogic 要求 enemyTaget.Count &gt; 1，不满足就不弹；StuckInto 里 <code>isBouncing &amp;&amp; Count &gt; 1</code> 也不成立，于是像普通剑一样插在这个敌人身上。</details>
+  <details class="quiz"><summary>自测 3：SpawnSword 里 Setup 函数的调用顺序为什么重要？</summary>SetupSword 里根据 isPiercing 决定是否播放旋转动画，isPiercing 由 SetupPierce 设置，所以必须先调模式 Setup 再调 SetupSword。</details>
+</section>

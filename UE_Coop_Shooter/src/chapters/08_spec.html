@@ -11,6 +11,7 @@
     <li>说清每个复制变量在双人局里<strong>发给了谁</strong>、每个事件<strong>在哪端执行</strong>、原 Demo 的 8 个组播<strong>各自换成了什么</strong>。</li>
     <li>说清纯蓝图和“蓝图 + 少量 C++”两条路线各自能做到哪一步。</li>
   </ul></div>
+  <div class="state ideal"><span class="sl">理想方案</span><div>第 8~13 章全部是<strong>重构设计</strong>，不是原 Demo 的现状：类名都是新的（GM_Coop、BP_CoopCharacter、BP_WeaponBase…），步枪的命中方式是命中扫描，而原 Demo 是服务器生成复制子弹 Actor。每章开头有“当前做法”横幅说明原 Demo 对应的实现；完整对照见 K0 表 K0-1、K0-2。</div></div>
 
   <div class="ans">
     <div class="q">30 秒版：我心目中合格的联机 Demo</div>
@@ -20,7 +21,7 @@
   <h2>1. 验收标准（Definition of Done）</h2>
   <div class="tbl"><table>
     <tr><th>维度</th><th>#</th><th>标准</th><th>怎么验证</th><th>原 Demo</th></tr>
-    <tr><td rowspan="5"><strong>权威</strong></td><td>1</td><td>伤害、死亡、弹药变化只在服务器发生</td><td>在客户端打印僵尸血量变化来源；全工程搜 ApplyDamage 都在权限分支后</td><td class="no">✗ 子弹每端 ApplyDamage</td></tr>
+    <tr><td rowspan="5"><strong>权威</strong></td><td>1</td><td>伤害、死亡、弹药变化只在服务器发生</td><td>在客户端打印僵尸血量变化来源；全工程搜 ApplyDamage 都在权限分支后</td><td class="no">✗ 子弹每端调用 ApplyDamage（靠引擎拦截）</td></tr>
     <tr><td>2</td><td>比赛阶段、剩余时间、胜负只有一份（GameState）</td><td>网络模拟下两端同时结算；客户端 GetGameMode 为空也不影响 UI</td><td class="no">✗ UI 各算各的</td></tr>
     <tr><td>3</td><td>刷怪、AI 决策只在服务器</td><td>客户端世界大纲里僵尸数 = 服务器僵尸数</td><td class="no">✗ 补刷在每端执行</td></tr>
     <tr><td>4</td><td>没有 GetPlayerController(0) / GetPlayerCharacter(0) 出现在可能于服务器执行的逻辑里</td><td>全局搜索；只允许出现在 UI / 本地相机代码</td><td class="no">✗ 死亡逻辑里使用</td></tr>
@@ -42,7 +43,7 @@
     <tr><td>20</td><td>日志里没有 No owning connection / Accessed None / 大量纠正</td><td>LogNet、LogNetPlayerMovement、LogScript 过滤</td><td class="no">✗</td></tr>
   </table></div>
   <div class="co warn"><span class="h">面试注意：说“合格”要说可验证的东西</span>
-    <p>“我的 Demo 同步做得很好”没有信息量。要说“我在 200 ms、10% 丢包下测过：开火零延迟、弹药不回跳、冲刺不被拉回、两个人死亡顺序都测过、Dedicated Server 模式也能跑”——每一条后面都能接一个具体做法。面试官往下追问时，你就有路可走。</p>
+    <p>“我的 Demo 同步做得很好”没有信息量。做完重构并在引擎里测过之后，要说“我在 200 ms、10% 丢包下测过：开火零延迟、弹药不回跳、冲刺不被拉回、两个人死亡顺序都测过、Dedicated Server 模式也能跑”——每一条后面都能接一个具体做法；还没做完时，就说“方案在网络模型实验里……，引擎里我会按第 14 章的清单验证”（时态口径见 K1）。面试官往下追问时，你就有路可走。</p>
   </div>
 
   <h2>2. 重做后的类清单</h2>
@@ -66,7 +67,7 @@
   <p class="tcap">表 8-1　14 个类。和原 Demo 比：新增 GameInstance / PlayerState / PlayerController / AC_Health / AIController / 行为树 / 数据资产；关卡蓝图里的开局逻辑全部移走</p>
 
   <h2>3. 工程结构</h2>
-<!--tree {"cols":["Content/Coop/","内容","备注"],"x":[12,190,660],"root":{"n":"Coop","col":"s","d":"本 Demo 的全部逻辑资产","w":"与美术资源分开，方便只拉逻辑","c":[
+<!--tree {"state":"ideal","cols":["Content/Coop/","内容","备注"],"x":[12,190,660],"root":{"n":"Coop","col":"s","d":"本 Demo 的全部逻辑资产","w":"与美术资源分开，方便只拉逻辑","c":[
  {"n":"Core","col":"b","d":"BP_CoopGameInstance · GM_Coop · GS_Coop · PS_Coop · PC_Coop","w":"框架类","c":[]},
  {"n":"Characters","col":"g","d":"BP_CoopCharacter · ABP_Coop1P · ABP_Coop3P","w":"玩家","c":[]},
  {"n":"Weapons","col":"o","d":"BP_WeaponBase · BP_Rifle · DA_Rifle · S_AmmoState","w":"武器与数据","c":[]},
@@ -105,7 +106,7 @@
 
   <h3>4.1 这些变量在双人局里到底发给了谁</h3>
   <p>Replication Condition 决定“发给哪些客户端”。Listen Server 双人局只有两个进程：<strong>主机进程</strong>（它就是服务器，同时有一个本地玩家）和<strong>客户端进程</strong>。属于某个玩家的变量（武器、角色上的）两个玩家各有一份，要分开看；GameState、僵尸这类不属于任何玩家的只有一份。</p>
-<!--repmx {"rows":[
+<!--repmx {"state":"ideal","rows":[
  ["Phase","RepNotify","None",false,"大厅 / HUD / 结算切换"],
  ["MatchEndServerTime","Replicated","None",false,"倒计时"],
  ["AliveZombies","Replicated","None",false,"HUD 僵尸数"],
@@ -151,14 +152,14 @@
   <h3 id="ch8-mc">5.1 组播去哪了：原 Demo 的 8 个 Multicast 逐个替换</h3>
   <div class="tbl"><table>
     <tr><th style="width:19%">原组播（所在类）</th><th style="width:18%">原来做什么</th><th style="width:22%">出了什么问题</th><th style="width:26%">重做后用什么</th><th>为什么</th></tr>
-    <tr><td><b>Multicast_StartGame</b><br><span style="color:#6B7280;font-size:12px">BP_Player</span></td><td>人数到齐后 GM 对<strong>每个 Pawn</strong> 调一次 → 触发关卡蓝图 Start_Logic</td><td>2 个 Pawn = 每端开局逻辑跑 2 遍；晚加入收不到</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">GS_Coop.Phase · RepNotify</span> → OnRep_Phase → OnPhaseChanged</td><td>“比赛开始了”是状态</td></tr>
+    <tr><td><b>Multicast_StartGame</b><br><span style="color:#6B7280;font-size:12px">BP_Player</span></td><td>人数到齐后 GM 对<strong>每个 Pawn</strong> 调一次 → 触发关卡蓝图 Start_Logic</td><td>按 Pawn 循环发组播，开局只靠本地角色上绑的委托触发：客户端角色晚于关卡 BeginPlay 到达就绑不上；晚加入收不到</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">GS_Coop.Phase · RepNotify</span> → OnRep_Phase → OnPhaseChanged</td><td>“比赛开始了”是状态</td></tr>
     <tr><td><b>Multi_SetStrat</b><br><span style="color:#6B7280;font-size:12px">关卡蓝图</span></td><td>Server_SetStart → 组播在每端写 GameState 的“游戏是否开始”</td><td>客户端不拥有关卡蓝图，它调用的 Server_SetStart 被丢弃；“游戏是否开始”本身不复制，晚加入者永远是 false（附录 A #15）</td><td>删除；改由 GM 在服务器写 Phase</td><td>状态要放进复制变量，由服务器写一次</td></tr>
     <tr><td><b>Multi_Death</b><br><span style="color:#6B7280;font-size:12px">BP_Player</span></td><td>任一玩家死亡 → 每端弹“失败”并暂停</td><td>活着的人也被判负</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">AC_Health.bIsDead · RepNotify</span>（尸体）+ GM 判全灭 → Phase = Lost；死者收 Client_StartSpectating</td><td>死亡是状态，胜负是规则</td></tr>
     <tr><td><b>Multicast_Fire</b><br><span style="color:#6B7280;font-size:12px">BP_Weapon</span></td><td>服务器收到开火请求后，先组播开火动画</td><td>开火者等一个 RTT；排在弹药检查前，打空也播</td><td>本机预测 + <span class="tag" style="background:#F1ECFE;color:#6D28D9">BurstCounter · RepNotify · Skip Owner</span></td><td>高频；拥有者已预测，不该再收</td></tr>
     <tr><td><b>Multicast_Change</b><br><span style="color:#6B7280;font-size:12px">BP_Weapon</span></td><td>换弹动画</td><td>开火者等 RTT；晚加入看不到；打断后无法撤销</td><td>本机预测 + <span class="tag" style="background:#F1ECFE;color:#6D28D9">bPendingReload · RepNotify · Skip Owner</span> + Client_CancelReload</td><td>“正在换弹”是持续状态</td></tr>
     <tr><td><b>Multicast_PlayAttackAnim</b><br><span style="color:#6B7280;font-size:12px">BP_Zombie</span></td><td>各端随机选攻击蒙太奇；On Completed 里写“正在攻击”</td><td>各端动作不同；客户端写复制变量</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">AttackInfo{Counter, Index} · RepNotify</span>；bAttacking 只在服务器</td><td>随机结果由服务器决定一次</td></tr>
     <tr><td><b>Multicast_HitReact</b><br><span style="color:#6B7280;font-size:12px">BP_Zombie</span></td><td>受击动画（各端随机）</td><td>同上</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">AC_Health.LastHit{Counter, Point, bHead} · RepNotify</span></td><td>Counter 保证连续两次相同命中也触发 OnRep</td></tr>
-    <tr><td><b>Multicast_Death</b><br><span style="color:#6B7280;font-size:12px">BP_Zombie</span></td><td>倒地 + 补刷一只</td><td>客户端本地扣血后调用 → 只在本地执行；补刷在每端执行</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">bIsDead · RepNotify</span>（布娃娃）+ GM 在服务器补刷 + <span class="tag" style="background:#FFF1E6;color:#C2410C">Multicast_DeathCry</span>（惨叫）</td><td>尸体是状态，惨叫是事件</td></tr>
+    <tr><td><b>Multicast_Death</b><br><span style="color:#6B7280;font-size:12px">BP_Zombie</span></td><td>倒地 + 补刷一只</td><td>由服务器调用（这点没错），但补刷写在组播里，于是每一端都刷出一只；清错了计时器名</td><td><span class="tag" style="background:#F1ECFE;color:#6D28D9">bIsDead · RepNotify</span>（布娃娃）+ GM 在服务器补刷 + <span class="tag" style="background:#FFF1E6;color:#C2410C">Multicast_DeathCry</span>（惨叫）</td><td>尸体是状态，惨叫是事件</td></tr>
   </table></div>
   <p class="tcap">表 8-5　8 个组播的去向：7 个换成 RepNotify，1 个直接删除；新加的 2 个组播只负责一次性音效</p>
   <div class="co warn"><span class="h">面试注意：组播四条件，全满足才用</span>

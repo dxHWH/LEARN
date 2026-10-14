@@ -9,6 +9,9 @@
     <li>讲清 CharacterMovement 的预测与纠正，以及为什么冲刺必须进 SavedMove（E6）。</li>
     <li>讲清延迟补偿的两种做法和代价（E3），Reliable 的队头阻塞（E2），带宽优化手段（E7）。</li>
   </ul></div>
+  <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 没有做任何弱网处理：开火、换弹的表现都等服务器组播；冲刺标志只在服务器（Server RPC）、开镜标志只在本机，两端每帧各算一个最大速度，客户端持续被纠正；每发子弹一条 Reliable RPC 加一个复制 Actor；没有延迟补偿——服务器的子弹沿客户端的瞄准方向飞，而客户端瞄的是晚到的僵尸画面（E3 “不补偿”一列）。</div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li><span class="tag p0">P0</span>冲刺只在服务器生效、开镜只在本机：RTT 100 ms 时冲刺每秒被纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次、平均拉回 {{v:E6[c=0,rtt=100].avg:.1f}} cm（A#5，E6）。</li><li><span class="tag p1">P1</span>开火反馈 ≈ RTT + 网络帧：RTT 200 ms 时约 {{v:E1[s=0,rtt=200].own:.0f}} ms（A#9，E1）。</li><li><span class="tag p1">P1</span>逐发 Reliable 排队：丢包 10% 时 P99 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms（A#11，E2）。</li><li><span class="tag p1">P1</span>每发一个复制 Actor：约 {{v:E7.0.4}} B/s（A#12，E7）。</li><li>没有延迟补偿：横移僵尸命中率 {{v:E3[v=480,rtt=200].none:.1f}}%（E3）。</li><li>从没在网络模拟下测过：上面这些在 PIE 零延迟、主机视角下全都看不出来。</li></ol></div></div>
+  <div class="state ideal"><span class="sl">理想方案</span><div>本章正文：先分类定位，再分别用本机预测 + 对账、移动预测、延迟补偿（PvE 客户端判定 + 容差 / PvP 回溯）、消息与带宽优化处理。</div></div>
 
   <div class="ans">
     <div class="q">30 秒版</div>

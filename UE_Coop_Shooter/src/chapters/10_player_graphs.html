@@ -10,6 +10,17 @@
     <li>写出 AC_Health 组件：只在服务器处理伤害，各端通过 OnRep 收到广播。</li>
     <li>说清“冲刺 / 瞄准”在本机、服务器、别人眼里分别由什么驱动。</li>
   </ul></div>
+  <div class="state ideal"><span class="sl">理想方案</span><div>本章是重构后的玩家角色（BP_CoopCharacter）、血量组件和动画蓝图。原 Demo 的 BP_Player 是这样做的：</div></div>
+  <div class="tbl cmp"><table>
+    <tr><th>方面</th><th class="cur">当前做法（原 Demo）</th><th class="prob">存在的问题</th><th class="ideal">理想方案（本章）</th></tr>
+    <tr><td>角色类</td><td>BP_Player</td><td class="pbc">一个类同时管输入、武器、血量、死亡、界面，职责混在一起</td><td>BP_CoopCharacter + AC_Health</td></tr>
+    <tr><td>模型</td><td>只有第一人称手臂（胶囊随俯仰旋转），别人看到漂浮的手臂</td><td class="pbc"><span class="tag p2">P2</span>对方看到漂浮手臂（A#17）</td><td>1P 手臂（只有自己可见）+ 3P 全身（别人可见）</td></tr>
+    <tr><td>武器</td><td>BeginPlay 里服务器生成（Owner 为空）→ 补 SetOwner → for_server</td><td class="pbc"><span class="tag p3">P3</span>BeginPlay 早于 SetOwner，靠补丁（A#23）</td><td>Event Possessed 生成，Owner / Instigator 在生成参数里</td></tr>
+    <tr><td>输入</td><td>BeginPlay 里通过 0 号控制器加映射</td><td class="pbc"><span class="tag p1">P1</span>每个角色副本都往 0 号控制器加映射（A#16）</td><td>Receive Controller Changed 且本地控制时添加</td></tr>
+    <tr><td>冲刺 / 开镜</td><td>冲刺 Server RPC 只改服务器的标志，开镜只改本机动画蓝图</td><td class="pbc"><span class="tag p0">P0</span>冲刺每秒被纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次（A#5，E6）；开镜不影响服务器散布（A#13）</td><td>进移动预测；bIsAiming（Skip Owner）给别人看</td></tr>
+    <tr><td>血量与死亡</td><td>HP 变量复制，AnyDamage 里扣血；死亡时 DisableInput(0 号控制器)、2D 惨叫、Multi_Death 让每端弹失败</td><td class="pbc"><span class="tag p0">P0</span>死者仍能操作、惨叫在主机响（A#4）；一人阵亡全员失败（A#7）</td><td>AC_Health 只在服务器扣；HandleDeath 通知 GameMode；拥有者在 OnRep 里关输入</td></tr>
+    <tr><td>受击反馈</td><td>Client_PlayHitFX 只发给被打的人 ✓</td><td class="pbc">无（这是原版做对的地方）</td><td>保留（Client_ShowDamageFeedback）</td></tr>
+  </table></div>
 
   <h2>1. 类卡片与组件结构</h2>
   <div class="tbl kv"><table>
@@ -21,7 +32,7 @@
     <tr><td>事件分发器</td><td>OnWeaponChanged（各端）——HUD 据此重新订阅弹药</td></tr>
     <tr><td>不再负责</td><td>血量（→ AC_Health）、UI 创建（→ PC_Coop）、开局（→ GM_Coop）、相机抖动 / 受击音效（→ PC 的 Client RPC 或 AC_Health.OnHit）</td></tr>
   </table></div>
-<!--bpnet {"cls":"BP_CoopCharacter","parent":"ACoopCharacterBase ← Character","where":"所有端（拥有者：AutonomousProxy；其他端：SimulatedProxy）","defaults":[["Replicates","✓"],["Replicate Movement","✓ Character 默认，由 CMC 负责"],["Net Update Frequency","100（默认）"]],
+<!--bpnet {"state":"ideal","cls":"BP_CoopCharacter","parent":"ACoopCharacterBase ← Character","where":"所有端（拥有者：AutonomousProxy；其他端：SimulatedProxy）","defaults":[["Replicates","✓"],["Replicate Movement","✓ Character 默认，由 CMC 负责"],["Net Update Frequency","100（默认）"]],
 "vars":[["CurrentWeapon","Weapon 引用","RepNotify","None","服务器（Event Possessed）","OnRep_CurrentWeapon：各端把 3P / 1P 枪模挂到手上"],
 ["bIsAiming","Boolean","Replicated","Skip Owner","服务器（移动组件解出瞄准标志后写）","别人的 3P 开镜姿势；拥有者自己用本地预测值"],
 ["DefaultWeaponClass","Class","None","—","配置","Possessed 时生成"],
@@ -29,7 +40,7 @@
 ["RemoteViewPitch（引擎）","uint8","Replicated","Skip Owner","服务器","别人的俯仰（GetBaseAimRotation 读它）"]],
 "events":[["Event Possessed","引擎事件","引擎事件","—","S","服务器 Possess 时"],["HandleDeath","自定义事件","Not Replicated","—","S","AC_Health.OnDeath（只在服务器绑定）"],["Event BeginPlay","引擎事件","引擎事件","—","A","每个副本各一次"],["ReceiveControllerChanged","引擎事件","引擎事件","—","SO","Possess / Controller 复制到达"],["OnRep_CurrentWeapon","RepNotify 函数","RepNotify 函数","—","R","CurrentWeapon 变化"],["IA_Move / Look / Sprint / Aim / Fire / Reload","输入事件","引擎事件","—","L","本地玩家输入"],["PlayDeathVisual","自定义事件","Not Replicated","—","R","AC_Health.OnDeadVisual（在 OnRep 里广播）"]],
 "cap":"<b>图 10-1a</b>　BP_CoopCharacter 的网络规格。重做后角色上<b>没有任何 RPC、也没有组播</b>：冲刺 / 瞄准随移动包上行，开火 / 换弹的 RPC 在武器上，UI 请求在 PC 上；它只复制两个自己的变量"} -->
-<!--tree {"cols":["组件（层级 = 挂接关系）","关键设置","为什么"],"x":[12,300,600],"root":{"n":"CapsuleComponent（根）","col":"g","d":"Pawn 通道 Block；Weapon 通道 Ignore","w":"移动与碰撞的根；合作模式无友伤","c":[
+<!--tree {"state":"ideal","cols":["组件（层级 = 挂接关系）","关键设置","为什么"],"x":[12,300,600],"root":{"n":"CapsuleComponent（根）","col":"g","d":"Pawn 通道 Block；Weapon 通道 Ignore","w":"移动与碰撞的根；合作模式无友伤","c":[
  {"n":"Mesh（3P 全身，继承）","col":"o","d":"Owner No See = true；ABP_Coop3P","w":"别人看到的你；自己看不到自己的身体","c":[{"n":"Weapon.Mesh3P","col":"o","d":"运行时挂到 hand_r 插槽","w":"别人看到你手里的枪","c":[]}]},
  {"n":"FirstPersonCamera","col":"b","d":"Use Pawn Control Rotation = true","w":"挂在胶囊眼高，跟随控制旋转","c":[{"n":"Mesh1P（手臂）","col":"t","d":"Only Owner See；Cast Shadow = false","w":"只有自己看得到的贴脸手臂","c":[{"n":"Weapon.Mesh1P","col":"t","d":"运行时挂到 GripPoint 插槽","w":"自己看到的枪","c":[]}]}]},
  {"n":"CharMoveComp","col":"p","d":"类型 = UCoopMovementComponent（C++）","w":"冲刺 / 瞄准随移动包预测","c":[]},
@@ -37,7 +48,7 @@
 ]},"cap":"<b>图 10-1</b>　BP_CoopCharacter 的组件结构。可见性规则：自己看 1P、别人看 3P；两把枪模由同一个武器 Actor 持有，分别挂到两套网格上"} -->
 
   <h2>2. 服务器初始化：生成武器、订阅死亡</h2>
-<!--bpgraph {"cols":4,"rg":56,"title":"BP_CoopCharacter · 服务器初始化","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"BP_CoopCharacter · 服务器初始化","nodes":[
  {"id":"a0","k":"event","x":0,"y":0,"t":"Event Possessed","net":"S","o":["New Controller"]},
  {"id":"a1","k":"flow","x":1,"y":0,"t":"Branch","i":["IsValid(CurrentWeapon)"],"ex":["True","False"]},
  {"id":"a2","k":"func","x":2,"y":0,"t":"SpawnActor from Class","i":["Class ← DefaultWeaponClass","Owner ← self","Instigator ← self"],"o":["Return Value"]},
@@ -56,7 +67,7 @@
 "cap":"<b>图 10-2</b>　服务器初始化。a1 的 True 分支不接线：重生或重复 Possess 时武器已存在，不重复生成。原 Demo 先 SpawnActor(Owner=∅) 再 SetOwner，导致武器 BeginPlay 拿不到 Owner，又补了 for_server 函数"} -->
 
   <h2>3. 本地初始化：输入映射、HUD、武器挂接</h2>
-<!--bpgraph {"cols":3,"rg":56,"title":"BP_CoopCharacter · 本地初始化与武器挂接","nodes":[
+<!--bpgraph {"state":"ideal","cols":3,"rg":56,"title":"BP_CoopCharacter · 本地初始化与武器挂接","nodes":[
  {"id":"d0","k":"event","x":0,"y":0,"t":"ReceiveControllerChanged","s":"Event","net":"SO","o":["Old Controller","New Controller"]},
  {"id":"d1","k":"flow","x":1,"y":0,"t":"Branch","i":["Is Locally Controlled"],"ex":["True","False"]},
  {"id":"d2","k":"func","x":2,"y":0,"t":"Add Mapping Context","s":"EnhancedInputLocalPlayerSubsystem","i":["Mapping Context ← IMC_Default","Priority ← 0"]},
@@ -73,7 +84,7 @@
   </div>
 
   <h2>4. 输入：全部在本地，一个 RPC 都不发</h2>
-<!--bpgraph {"cols":4,"rg":46,"title":"BP_CoopCharacter · 输入事件（Enhanced Input）","nodes":[
+<!--bpgraph {"state":"ideal","cols":4,"rg":46,"title":"BP_CoopCharacter · 输入事件（Enhanced Input）","nodes":[
  {"id":"i0","k":"event","x":0,"y":0,"t":"IA_Move (Triggered)","net":"L","o":["Action Value"]},
  {"id":"i1","k":"func","x":1,"y":0,"t":"Add Movement Input","s":"CMC 负责预测与上行","i":["前后 / 左右 ← Action Value"],"ex":[]},
  {"id":"l0","k":"event","x":2,"y":0,"t":"IA_Look (Triggered)","net":"L","o":["Action Value"]},
@@ -121,7 +132,7 @@ void UCoopMovementComponent::UpdateFromCompressedFlags(uint8 Flags) {   // 服�
 <!--/code-->
 
   <h2>5. 死亡表现：各端执行，只有本机关输入</h2>
-<!--bpgraph {"cols":3,"rg":56,"title":"BP_CoopCharacter · PlayDeathVisual（AC_Health.OnDeadVisual 广播）","nodes":[
+<!--bpgraph {"state":"ideal","cols":3,"rg":56,"title":"BP_CoopCharacter · PlayDeathVisual（AC_Health.OnDeadVisual 广播）","nodes":[
  {"id":"w0","k":"cevent","x":0,"y":0,"t":"PlayDeathVisual","s":"由 OnRep_bIsDead 广播","net":"R","netl":"随 OnRep · 各端"},
  {"id":"w1","k":"func","x":1,"y":0,"t":"Set Collision Enabled","i":["Capsule ← No Collision"]},
  {"id":"w2","k":"func","x":2,"y":0,"t":"Ragdoll","s":"Mesh 物理模拟 + Disable Movement"},

@@ -1,0 +1,113 @@
+==================== Animator_Clone.controller
+params: [('AttackNumber', 'Int')]
+[playerIdle]  clip=playerIdle len=0.500s loop=1 events=[]
+      -> Empty [AttackNumber Greater 0] exitTime=N(0.5) dur=0
+[playerAttack2]  clip=playerAttack2 len=0.333s loop=0 events=[(0.0833, 'AttackTrigger'), (0.3333, 'AnimationTrigger')]
+[playerAttack1]  clip=playerAttack1 len=0.714s loop=0 events=[(0.3571, 'AttackTrigger'), (0.7143, 'AnimationTrigger')]
+[Empty]  clip=None
+      -> playerAttack2 [AttackNumber Equals 2] exitTime=N(0.75) dur=0
+      -> playerAttack3 [AttackNumber Equals 3] exitTime=N(0.75) dur=0
+      -> playerAttack1 [AttackNumber Equals 1] exitTime=N(0.75) dur=0
+[playerAttack3]  clip=playerAttack3 len=0.700s loop=0 events=[(0.2, 'AttackTrigger'), (0.7, 'AnimationTrigger')]
+  [Default] playerIdle
+==================== Animator_Player.controller
+params: [('Die', 'Bool'), ('CatchSword', 'Bool'), ('AimSword', 'Bool'), ('CounterAttack', 'Bool'), ('SuccessfulCounterAttack', 'Bool'), ('Attack', 'Bool'), ('ComboAttack', 'Int'), ('WallSlide', 'Bool'), ('Air', 'Bool'), ('Dash', 'Bool'), ('Move', 'Bool'), ('Idle', 'Bool'), ('isMoving', 'Bool'), ('yVelocity', 'Float')]
+[playeSuccessfulCounterAttack]  clip=playeSuccessfulCounterAttack len=0.300s loop=1 events=[(0.2, 'AnimationTrigger')]
+      -> EXIT [!SuccessfulCounterAttack] exitTime=N(0.16666669) dur=0
+[playerAttack1]  clip=playerAttack1 len=0.714s loop=0 events=[(0.3571, 'AttackTrigger'), (0.7143, 'AnimationTrigger')]
+      -> EXIT [!Attack] exitTime=N(0.6666666) dur=0
+[playerIdle]  clip=playerIdle len=0.500s loop=1 events=[]
+      -> EXIT [!Idle] exitTime=N(0.5) dur=0
+[playeCounterAttack]  clip=playeCounterAttack len=0.100s loop=1 events=[]
+      -> EXIT [!CounterAttack] exitTime=N(0) dur=0
+      -> playeSuccessfulCounterAttack [SuccessfulCounterAttack] exitTime=N(0) dur=0
+[playerAimSword]  clip=playerAimSword len=0.214s loop=0 events=[]
+      -> playerThrowSword [!AimSword] exitTime=N(0) dur=0
+[dash]  clip=PlayerDash len=0.250s loop=1 events=[]
+      -> EXIT [!Dash] exitTime=N(0) dur=0
+[playerAttack3]  clip=playerAttack3 len=0.700s loop=0 events=[(0.2, 'AttackTrigger'), (0.7, 'AnimationTrigger')]
+[PlayerCatchSword]  clip=PlayerCatchSword len=0.286s loop=0 events=[(0.2143, 'AnimationTrigger')]
+      -> EXIT [!CatchSword] exitTime=N(0.12500006) dur=0
+[playerAttack3]  clip=playerAttack3 len=0.700s loop=0 events=[(0.2, 'AttackTrigger'), (0.7, 'AnimationTrigger')]
+      -> EXIT [!Attack] exitTime=N(0.57142854) dur=0
+[PlayerWallSlide]  clip=None
+      -> EXIT [!WallSlide] exitTime=N(0) dur=0
+[playerThrowSword]  clip=playerThrowSword len=0.286s loop=0 events=[(0.1429, 'ThrowSwordTrigger')]
+      -> EXIT [无条件] exitTime=Y(1) dur=0
+[playerAttack2]  clip=playerAttack2 len=0.333s loop=0 events=[(0.0833, 'AttackTrigger'), (0.3333, 'AnimationTrigger')]
+[playerDie]  clip=playerDie len=0.917s loop=0 events=[]
+      -> EXIT [!Die] exitTime=Y(0.72727275) dur=0.25
+[move]  clip=move len=0.800s loop=1 events=[]
+      -> EXIT [!Move] exitTime=N(0.6875) dur=0
+[playerAttack2]  clip=playerAttack2 len=0.333s loop=0 events=[(0.0833, 'AttackTrigger'), (0.3333, 'AnimationTrigger')]
+      -> EXIT [!Attack] exitTime=N(0.25) dur=0
+[Empty]  clip=None
+      -> playerAttack1 [ComboAttack Equals 0] exitTime=N(0.75) dur=0
+      -> playerAttack2 [ComboAttack Equals 1] exitTime=N(0.75) dur=0
+      -> playerAttack3 [ComboAttack Equals 2] exitTime=N(0.75) dur=0
+[jump]  clip=playerJump len=0.333s loop=1 events=[]
+[fall]  clip=PlayerFall len=0.250s loop=1 events=[]
+[Jump/Fall]  clip=None
+      -> EXIT [!Air] exitTime=N(0.25) dur=0
+  [Default] playerIdle
+  [Entry] -> move [('1', 'Move', '0')]
+  [Entry] -> Jump/Fall [('1', 'Air', '0')]
+  [Entry] -> dash [('1', 'Dash', '0')]
+  [Entry] -> PlayerWallSlide [('1', 'WallSlide', '0')]
+  [Entry] -> Empty [('1', 'Attack', '0')]
+  [Entry] -> playeCounterAttack [('1', 'CounterAttack', '0')]
+  [Entry] -> playerAimSword [('1', 'AimSword', '0')]
+  [Entry] -> PlayerCatchSword [('1', 'CatchSword', '0')]
+  [Entry] -> playerDie [('1', 'Die', '0')]
+  [Default] Empty
+==================== Animator_Skeleton.controller
+params: [('Stun', 'Bool'), ('Attack', 'Bool'), ('Move', 'Bool'), ('Idle', 'Bool')]
+[Skeleton_Idle]  clip=Skeleton_Idle len=0.800s loop=1 events=[]
+      -> EXIT [!Idle] exitTime=N(0.6875) dur=0
+[Skeleton_Walk]  clip=Skeleton_Walk len=1.300s loop=1 events=[]
+      -> EXIT [!Move] exitTime=N(0) dur=0
+[Skeleton_Attack]  clip=Skeleton_Attack len=1.333s loop=1 events=[(0.0833, 'OpenCounterAttackWindow'), (0.4167, 'AttackTrigger'), (0.4167, 'CloseCounterAttackWindow'), (1.25, 'AnimationTrigger')]
+      -> EXIT [!Attack] exitTime=N(0.765625) dur=0
+[Skeleton_Stuned]  clip=Skeleton_Stuned len=0.100s loop=1 events=[]
+      -> EXIT [!Stun] exitTime=N(0) dur=0
+  [Default] Skeleton_Idle
+  [Entry] -> Skeleton_Walk [('1', 'Move', '0')]
+  [Entry] -> Skeleton_Attack [('1', 'Attack', '0')]
+  [Entry] -> Skeleton_Stuned [('1', 'Stun', '0')]
+==================== Animator_Sword.controller
+params: [('Rotation', 'Bool')]
+[swordIdle]  clip=swordIdle len=0.017s loop=1 events=[]
+      -> swordFlip [Rotation] exitTime=N(0) dur=0
+[swordFlip]  clip=swordFlip len=0.267s loop=1 events=[]
+      -> swordIdle [!Rotation] exitTime=N(0) dur=0
+  [Default] swordFlip
+==================== Animator_ThunderStrike.controller
+params: [('Hit', 'Trigger')]
+[thunderStrikeHit]  clip=thunderStrikeHit len=0.571s loop=0 events=[]
+[thunderStrikeIdle]  clip=thunderStrikeIdle len=0.067s loop=1 events=[]
+      -> thunderStrikeHit [Hit] exitTime=N(0) dur=0
+  [Default] thunderStrikeIdle
+
+==== 所有 clip
+PlayerCatchSword               len=0.2857143 loop=0 rate=14.0 events=[(0.2143, 'AnimationTrigger')]
+PlayerDash                     len=0.25 loop=1 rate=16.0 events=[]
+PlayerFall                     len=0.25 loop=1 rate=12.0 events=[]
+Skeleton_Attack                len=1.3333334 loop=1 rate=12.0 events=[(0.0833, 'OpenCounterAttackWindow'), (0.4167, 'AttackTrigger'), (0.4167, 'CloseCounterAttackWindow'), (1.25, 'AnimationTrigger')]
+Skeleton_Idle                  len=0.8 loop=1 rate=10.0 events=[]
+Skeleton_Stuned                len=0.1 loop=1 rate=10.0 events=[]
+Skeleton_Walk                  len=1.3000001 loop=1 rate=10.0 events=[]
+move                           len=0.8 loop=1 rate=10.0 events=[]
+playeCounterAttack             len=0.1 loop=1 rate=10.0 events=[]
+playeSuccessfulCounterAttack   len=0.3 loop=1 rate=10.0 events=[(0.2, 'AnimationTrigger')]
+playerAimSword                 len=0.21428573 loop=0 rate=14.0 events=[]
+playerAttack1                  len=0.71428573 loop=0 rate=14.0 events=[(0.3571, 'AttackTrigger'), (0.7143, 'AnimationTrigger')]
+playerAttack2                  len=0.33333334 loop=0 rate=12.0 events=[(0.0833, 'AttackTrigger'), (0.3333, 'AnimationTrigger')]
+playerAttack3                  len=0.70000005 loop=0 rate=10.0 events=[(0.2, 'AttackTrigger'), (0.7, 'AnimationTrigger')]
+playerDie                      len=0.9166667 loop=0 rate=12.0 events=[]
+playerIdle                     len=0.5 loop=1 rate=12.0 events=[]
+playerJump                     len=0.33333334 loop=1 rate=12.0 events=[]
+playerThrowSword               len=0.2857143 loop=0 rate=14.0 events=[(0.1429, 'ThrowSwordTrigger')]
+swordFlip                      len=0.26666668 loop=1 rate=15.0 events=[]
+swordIdle                      len=0.016666668 loop=1 rate=60.0 events=[]
+thunderStrikeHit               len=0.5714286 loop=0 rate=14.0 events=[]
+thunderStrikeIdle              len=0.06666667 loop=1 rate=15.0 events=[]

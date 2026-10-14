@@ -2,17 +2,21 @@
   <div class="ch-head">
     <div class="no">CHAPTER 04</div>
     <h1>问 ①：从开火到击中僵尸，发生了什么</h1>
-    <p class="lead">把一发子弹拆成“本机表现、服务器裁决、各端表现”三段：本机不等服务器，结果只认服务器，别人看到的是服务器复制的结果。</p>
+    <p class="lead">原 Demo 的做法是“服务器生成复制子弹、表现等组播”，没有射线检测；理想方案把一发子弹拆成“本机表现、服务器裁决、各端表现”三段：本机不等服务器，结果只认服务器，别人看到的是服务器复制的结果。</p>
   </div>
   <div class="goals"><div class="t">本章目标</div><ul>
     <li>按时间顺序讲清一发子弹在三台“视角”（本机 / 服务器 / 另一端）上各发生了什么。</li>
     <li>对比原 Demo 的时序：反馈延迟、空放、子弹突现从哪来（E1）。</li>
     <li>写出服务器校验、伤害、僵尸受击与死亡的正确实现。</li>
+    <li>分清当前做法（复制子弹 Actor）与理想方案（命中扫描），以及保留抛射物时的正确做法。</li>
   </ul></div>
+  <div class="state cur"><span class="sl">当前做法</span><div>原 Demo <strong>没有射线检测</strong>。本机按住开火时每 0.12 秒发一条 Reliable 的 Server_Fire；服务器先 Multicast_Fire 组播开火动画，再在 Server_SpawnBullet 里检查弹药、<strong>生成一颗复制的子弹 Actor</strong>（BP_Bullet，ProjectileMovement 200 m/s）；子弹在服务器和客户端各飞一份，碰撞事件里播弹孔、调用 Apply Damage（客户端那次被 Authority Only 拦下，伤害实际只在服务器）；僵尸在服务器扣血后，用组播播受击 / 死亡。完整时序见图 K0-2。</div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li><span class="tag p1">P1</span>自己开枪要等约 {{v:E1[s=0,rtt=200].own:.0f}} ms：本机不播任何表现，全部等服务器组播（A#9，E1）。</li><li><span class="tag p1">P1</span>组播排在弹药检查之前：打空也播开火动画，还会打断换弹蒙太奇（A#10）。</li><li><span class="tag p1">P1</span>每发一个复制子弹 Actor：远端看到子弹凭空出现在约 {{v:E1[s=0,rtt=200].pop:.1f}} m 外，消息量约 {{v:E7.0.4}} vs {{v:E7.1.4}} B/s（A#12，E1 / E7）。</li><li><span class="tag p1">P1</span>逐发 Reliable：RTT 200 ms、丢包 10% 时 P99 处理延迟 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms（A#11，E2）。</li><li><span class="tag p1">P1</span>后坐力在服务器上对控制器加输入，只对主机生效（A#13）。</li><li><span class="tag p2">P2</span>伤害写在每一端都会触发的碰撞里、没有权限判断、Instigator 为空：客户端没扣血只是被引擎的 Authority Only 拦下（A#2、A#19）。</li><li>没有延迟补偿：僵尸横移 4.8 m/s、RTT 200 ms 时命中率只有 {{v:E3[v=480,rtt=200].none:.1f}}%（E3）。</li></ol></div></div>
+  <div class="state ideal"><span class="sl">理想方案</span><div>本章正文的“三段式”：本机立刻播表现并做射线（命中扫描），把序号、起点、方向、命中目标发给服务器；服务器校验后扣弹、结算伤害；各端从复制状态播表现。章末对比命中扫描与抛射物。</div></div>
 
   <h2>原 Demo 的一次连射，在时间轴上长什么样</h2>
-  <p>下面是 E1 的一次模拟：RTT 200 ms、按住开火 1.5 s、弹匣 10 发。按原蓝图的逻辑：本机计时器每 0.12 s 发一条 <code>Server_Fire</code>，服务器先多播开火动画，再检查弹药、生成复制子弹；弹药变量在下一个网络帧复制回来。</p>
-<!--lanes {"scheme":0,"t1":1.5,"title":"原蓝图方案（RTT 200 ms）","cap":"<b>图 4-1</b>　原 Demo 的开火时序（E1，RTT 200 ms）。本机按下（蓝三角）后要等约一个 RTT 才看到自己的开火动画（橙点）；本机的弹药显示（菱形）也晚一个 RTT，于是打空后还多发了一次请求，服务器照样多播了一次“空放”（红叉）"} -->
+  <p><span class="tag cur">当前做法</span>下面是 E1 的一次模拟：RTT 200 ms、按住开火 1.5 s、弹匣 10 发。按原蓝图的逻辑：本机计时器每 0.12 s 发一条 <code>Server_Fire</code>，服务器先多播开火动画，再检查弹药、生成复制子弹；弹药变量在下一个网络帧复制回来。</p>
+<!--lanes {"state":"cur","scheme":0,"t1":1.5,"title":"原蓝图方案（RTT 200 ms）","cap":"<b>图 4-1</b>　原 Demo 的开火时序（E1，RTT 200 ms）。本机按下（蓝三角）后要等约一个 RTT 才看到自己的开火动画（橙点）；本机的弹药显示（菱形）也晚一个 RTT，于是打空后还多发了一次请求，服务器照样多播了一次“空放”（红叉）"} -->
   <p>三个现象都能从这张图读出来：</p>
   <ul>
     <li><strong>反馈延迟</strong>：本机看到自己开火的时间 = 上行半个 RTT + 等服务器网络帧 + 下行半个 RTT。RTT 200 ms 时平均 {{v:E1[s=0,rtt=200].own:.0f}} ms；就算 RTT 为 0，也有约 {{v:E1[s=0,rtt=0].own:.0f}} ms（等 30 Hz 网络帧）。</li>
@@ -21,7 +25,7 @@
   </ul>
 <!--dtab {"src":"E1","cols":[["方案","scheme"],["RTT ms","rtt","g"],["本机看到自己开火 ms","own",".1f"],["另一端看到 ms","rem",".1f"],["本机空放次数","gown",".1f"],["另一端空放","grem",".1f"],["子弹突现距离 m","pop",".2f"]],"cap":"表 4-1　E1：一次按住 1.5 s 的连射（弹匣 10 发、0.12 s/发，抖动 20 ms，5 个随机种子平均）。“预测”两行的另一端延迟和原方案相同——<b>预测只能消除自己的延迟，消除不了别人看到你的延迟</b>"} -->
 
-  <h2>正确的流程：三段式</h2>
+  <h2>理想方案的流程：三段式</h2>
   <figure>
   <svg viewBox="0 0 860 470" xmlns="http://www.w3.org/2000/svg">
     <rect x="10" y="10" width="270" height="450" rx="12" fill="#F9FAFB" stroke="#D1D5DB"/>
@@ -66,7 +70,7 @@
     <text x="276" y="150" text-anchor="middle" class="xs" style="fill:#2F5BD3">上行</text><text x="300" y="440" text-anchor="middle" class="xs" style="fill:#15803D">复制</text>
     <text x="572" y="186" text-anchor="middle" class="xs">复制</text>
   </svg>
-  <figcaption><b>图 4-2</b>　推荐的开火流程。橙色是表现（各端本地播放），红色是结果（只在服务器发生）；虚线是属性复制，在服务器下一个网络帧发出</figcaption>
+  <figcaption><b>图 4-2</b>　<span class="tag ideal">理想方案</span>推荐的开火流程（命中扫描；原 Demo 的实际流程见图 K0-2）。橙色是表现（各端本地播放），红色是结果（只在服务器发生）；虚线是属性复制，在服务器下一个网络帧发出</figcaption>
   </figure>
 
   <h3>第一段：本机（只做表现和预测）</h3>
@@ -119,7 +123,7 @@ void ACoopWeapon::ProcessShot(const FShotRequest& R) {
     --Ammo.InClip;
     ++BurstCounter;                                   // COND_SkipOwner：另一端据此播开火表现
     if (!Shooter->IsLocallyControlled() && GetNetMode() == NM_ListenServer)
-        PlayFireCosmetics(/*bFirstPerson*/ false);    // 主机看客户端开火：SkipOwner 的 OnRep 不会在服务器上触发
+        PlayFireCosmetics(/*bFirstPerson*/ false);    // 主机看客户端开火：C++ 的 OnRep 不在服务器执行，这里手动播
 
     FHitResult Hit;
     if (ResolveHit(R, Hit))                           // PvE：校验 R.HitActor（包围盒 + 容差 + 视线）；PvP：回溯后重新射线（第 6 章）
@@ -138,7 +142,7 @@ UPROPERTY(ReplicatedUsing = OnRep_LastHit) FZombieHitInfo LastHit;   // {uint8 C
 UPROPERTY(ReplicatedUsing = OnRep_IsDead) bool bIsDead = false;
 
 float ACoopZombie::TakeDamage(float Damage, const FDamageEvent& Ev, AController* InstigatorPC, AActor* Causer) {
-    if (!HasAuthority() || bIsDead) return 0.f;                      // 原 Demo 缺的就是这一行
+    if (!HasAuthority() || bIsDead) return 0.f;                      // 显式写出权限判断（原 Demo 依赖 Apply Damage 的 Authority Only 才没出错）
     bool bHead = false;
     if (Ev.IsOfType(FPointDamageEvent::ClassID)) {
         const auto& PE = static_cast<const FPointDamageEvent&>(Ev);
@@ -178,25 +182,26 @@ void ACoopZombie::OnRep_IsDead() {
   </div>
 
   <h2>改完之后的时间轴</h2>
-<!--lanes {"scheme":2,"t1":1.5,"title":"预测 + 序号对账（RTT 200 ms）","cap":"<b>图 4-3</b>　改造后的开火时序（E1，RTT 200 ms）。本机按下即播表现（橙点与蓝三角重合），服务器接受 10 发、没有空放；另一端靠 BurstCounter 播开火，仍然晚约一个 RTT——这部分延迟只能靠第 6 章的手段缓解，不能消除"} -->
+<!--lanes {"state":"ideal","scheme":2,"t1":1.5,"title":"预测 + 序号对账（RTT 200 ms）","cap":"<b>图 4-3</b>　改造后的开火时序（E1，RTT 200 ms）。本机按下即播表现（橙点与蓝三角重合），服务器接受 10 发、没有空放；另一端靠 BurstCounter 播开火，仍然晚约一个 RTT——这部分延迟只能靠第 6 章的手段缓解，不能消除"} -->
   <div class="lab nlab firelab" id="lab-fire"></div><!--/lab-->
 
   <h2>命中扫描还是抛射物？</h2>
-  <div class="tbl"><table>
-    <tr><th></th><th>命中扫描（Hitscan）</th><th>服务器抛射物 + 本机假子弹</th><th>原 Demo：复制抛射物</th></tr>
+  <div class="tbl cmp"><table>
+    <tr><th></th><th class="ideal">理想 A：命中扫描（Hitscan）</th><th class="ideal">理想 B：服务器抛射物 + 本机假子弹</th><th class="cur">当前做法：复制抛射物</th></tr>
     <tr><td>适合</td><td>步枪、手枪（子弹飞行时间 &lt; 一帧到几帧）</td><td>火箭筒、榴弹、慢速弓箭</td><td>—</td></tr>
     <tr><td>本机手感</td><td>立即</td><td>立即（假子弹不复制，只在本机）</td><td>晚一个 RTT 才看到子弹</td></tr>
     <tr><td>别人看到</td><td>BurstCounter + 本地曳光</td><td>服务器抛射物复制下来（可按 RTT/2 向前外推）</td><td>突然出现在几米外</td></tr>
     <tr><td>网络开销</td><td>每发几个字节</td><td>每发一个 Actor 通道</td><td>每发一个 Actor 通道（E7）</td></tr>
-    <tr><td>伤害在哪算</td><td>服务器</td><td>服务器抛射物的命中</td><td>每一端都算（错误）</td></tr>
+    <tr><td>伤害在哪算</td><td>服务器</td><td>服务器抛射物的命中</td><td>每一端都调用 Apply Damage，客户端那次被 Authority Only 拦下，实际只在服务器</td></tr>
   </table></div>
-  <p>原 Demo 的子弹 20000 cm/s，打 20 m 外的僵尸只要 0.1 s，本质上就是命中扫描，没必要做成复制 Actor。如果一定要保留“看得见的子弹”，就在每一端本地生成不复制的曳光弹，伤害由服务器射线决定。</p>
+  <p><span class="tag cur">当前做法</span>原 Demo 用的是最右一列：子弹 20000 cm/s，打 20 m 外的僵尸只要 0.1 s，本质上就是命中扫描，却为每一发付出了一个复制 Actor，还要处理远端子弹突现、两份子弹各撞各的。</p>
+  <p><span class="tag ideal">理想方案</span>重构方案对步枪走路线 A：伤害由服务器校验后的射线结果决定，“看得见的子弹”由各端本地画不复制的曳光。以后加火箭筒这类慢速弹再走路线 B：服务器生成权威子弹，伤害只在它的碰撞里结算（先判断权限）；开火者本机立刻生成一颗不复制的假子弹；服务器子弹对开火者隐藏，其他端看到它时按延迟向前快进一段。为什么快进还不够、什么时候要目标回溯、高射速怎么办，见第 5B 章。</p>
 
   <div class="co warn"><span class="h">面试注意：这道题的高频坑</span>
     <ul>
       <li>说“客户端做射线，打中了就调 Server RPC 扣血”——要补上<strong>服务器校验</strong>，否则外挂可以随便上报命中。PvE 合作游戏可以放宽，但射速、弹药、起点、方向这些必须校验。</li>
       <li>说“服务器多播开火，所有人一起播动画”——开火者自己会晚一个 RTT。开火者本机预测播，别人用 SkipOwner 的计数器或多播。</li>
-      <li>忘了 <strong>Listen Server 主机</strong>：服务器上看客户端开火时，SkipOwner 属性的 OnRep 不会在服务器触发，主机需要在 ProcessShot 里自己播远端表现。</li>
+      <li>忘了 <strong>Listen Server 主机</strong>：C++ 的 OnRep 只在收到复制的客户端执行、服务器上永远不执行（与 SkipOwner 无关），所以主机要看到客户端开火，需要在 ProcessShot 里自己播远端表现；蓝图的 RepNotify 在服务器赋值时会执行一次，蓝图版反而要在 OnRep 里过滤掉主机自己的武器（第 11 章图 11-4）。</li>
       <li>伤害不填 Instigator：后续的击杀统计、友伤规则、仇恨（僵尸追击打它的人）都做不了。</li>
     </ul>
   </div>

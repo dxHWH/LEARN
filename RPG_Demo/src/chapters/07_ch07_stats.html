@@ -1,0 +1,236 @@
+<div class="part-head" data-toc="PART III · 数值、技能与 AI"><div class="no">PART III</div><h1>数值、技能与 AI</h1><p>数值系统决定“打多疼”，技能系统决定“怎么打”，AI 决定“谁来挨打”。这三章的共同主题是：<b>多个系统同时写同一份数据</b>，以及<b>名字像查询的函数在偷偷改世界</b>。</p></div>
+
+<section class="chapter" id="ch7">
+  <div class="ch-head">
+    <div class="no">CHAPTER 07</div>
+    <h1>属性、伤害公式与异常状态</h1>
+    <p class="lead">伤害公式、Buff、属性修正器是 RPG 方向必问的三件套。项目的 Stat / CharacterStats 结构清楚，但实测出四个数值问题：暴击率凭空多 1%、冰冻判定看错了对象、等级成长是复利、多个冻结效果互相抵消；元素伤害整条链路写好了却没有接线。</p>
+  </div>
+  <div class="goals"><div class="t">本章目标</div><ul>
+    <li>说清 14 项属性怎么派生出闪避率、暴击率、暴击倍率、最终伤害</li>
+    <li>用 E3 / E4 的数字讲清 off-by-one、写错判定对象、复利成长三个数值 bug</li>
+    <li>讲清“多个系统写同一字段”的危害，并用 E8 量化重叠冻结的失效比例</li>
+    <li>设计 Modifier（Flat / PercentAdd / PercentMult）与 Buff（叠层、刷新、来源、到期）系统</li>
+  </ul></div>
+
+  <h2>7.1 30 秒面试版 · 现状 vs 理想</h2>
+  <div class="ans30"><span class="h">30 秒回答</span>
+    <p><code>Stat</code> 是“基础值 + 整数修正列表”，装备穿上加修正、卸下按值移除；<code>CharacterStats</code> 的物理伤害按“闪避 → 暴击 → 减护甲 → TakeDamage”结算，元素伤害取最高元素施加点燃 / 冰冻 / 感电。实测有四个问题：暴击用 <code>&lt;=</code> 比较 0~99 的整数，暴击率 0 也有 1% 暴击；冰冻破甲判断的是攻击者而不是目标；敌人每级 +25% 是在“当前值”上加，10 级是 [[e4.10.mul|.2f]] 倍而不是 [[e4.10.lmul|.2f]] 倍；冻结、减速、死亡三个系统都直接写 moveSpeed 和 animator.speed，多段冻结时实际只冻住 [[e8r.min|.0f]]%~[[e8r.max|.0f]]% 的时间。另外受伤没有死亡保护，死后再受伤会重复掉落；元素伤害函数 <code>DoMagicalDamage</code> 没有任何调用方。改进是 Modifier 栈 + 脏标记缓存，异常状态做成统一的 Buff。</p>
+  </div>
+  <!--cmp {"v": 2, "t": "属性、伤害与异常状态", "rows": [["概率判定", "暴击用 <code>&lt;=</code>、闪避用 <code>&lt;</code> 与 0~99 的整数比较，两种写法", "P2 暴击率配 0 仍有 1% 暴击，配 c 实际 (c+1)%（E3，#16）", "统一 Chance.Roll（<code>Random.value × 100 &lt; 概率</code>）", "配置 0 = 绝不发生", "模型验证：E3 闪避的 &lt; 写法蒙特卡洛等于设计值"], ["冰冻破甲", "判断的是攻击者的 isChilled", "P1 被冰冻的目标不破甲，反而是被冰冻的攻击者打人时破甲（E3，#10）", "判断目标的 isChilled", "符合设计意图", "模型验证：E3 修正后结果"], ["等级成长", "循环里每级按“当前值”的 25% 叠加", "P2 10 级是 1 级的 [[e4.10.mul|.2f]] 倍（线性应为 [[e4.10.lmul|.2f]] 倍），与“每级 +25%”的命名不符（E4，#18）", "等级曲线表驱动，复利与否显式决定", "策划直接看到每一级的绝对值", ""], ["死亡", "TakeDamage 无守卫，尸体可重复 Die / 掉落", "P1 弹跳剑 / 雷击让尸体重复 Die、重复掉落——物品可以刷（#7）", "isDead 守卫 + 死亡事件让所有目标列表注销", "掉落不可被刷", ""], ["多写者", "冻结、减速、死亡直接给 moveSpeed / animator.speed 赋绝对值，结束时再赋回", "P1 重叠冻结只冻住 [[e8r.min|.0f]]%~[[e8r.max|.0f]]% 的时间；一个效果的恢复会解除另一个效果（E8，#11）", "速度修正器栈：效果只登记修正，最终值推导；冻结取最晚截止时间", "效果互不覆盖", "模型验证：E8 理想版 100% 冻结"], ["修正器", "只有整数加法、按值删除、没有来源", "局限 做不了百分比加成，无法按来源撤销或预览“换上之后是多少”", "Flat / PercentAdd / PercentMult，带来源，脏标记缓存", "能做百分比加成、按来源撤销、属性预览", ""], ["异常状态", "三套 bool + timer；DoMagicalDamage 没有调用方", "P2 魔法伤害没有入口，点燃 / 冰冻 / 感电在游戏里触发不了；新增异常要复制一套 bool + timer（#19）", "统一 Buff：叠层 / 刷新 / 互斥标签 / 固定逻辑帧 tick", "新增异常不用复制代码", ""]]} -->
+
+
+  <h2>7.2 属性派生关系</h2>
+<!--code:cs:Stat.cs:5-37（精简） ‖ 局限 修正只有整数加法、按值删除、不记来源：做不了百分比加成，也无法按来源撤销或预览；每次 GetValue 都重新求和-->
+[System.Serializable]
+public class Stat
+{
+    [SerializeField] private int baseValue;
+    public List<int> modifiers = new List<int>();
+    public int GetValue() { int v = baseValue; foreach (int m in modifiers) v += m; return v; }   // 每次都重新求和
+    public void SetDefaultValue(int _value) => baseValue = _value;
+    public void AddModifier(int m)    => modifiers.Add(m);
+    public void RemoveModifier(int m) => modifiers.Remove(m);   // 按“值”删第一个相等的
+}
+<!--/code-->
+  <div class="tbl"><table>
+    <tr><th>派生量</th><th>公式（源码）</th><th>场景值（玩家 / 骷髅）</th></tr>
+    <tr><td>最大生命</td><td>maxHealth + vitality × 5（GetMaxHealth）</td><td>1000 / 100</td></tr>
+    <tr><td>闪避率</td><td>(evasion + agility)%，判定 <code>Random.Range(0,100) &lt; 值</code></td><td>0 / 0</td></tr>
+    <tr><td>暴击率</td><td>(critRate + agility)%，判定 <code>Random.Range(0,100) <b>&lt;=</b> 值</code></td><td>0 / 0（实际 1%）</td></tr>
+    <tr><td>暴击倍率</td><td>(critPower + strength) × 1%，critPower 在 Start 里被 <code>SetDefaultValue(150)</code> <b>覆盖</b></td><td>150%</td></tr>
+    <tr><td>物理伤害</td><td>damage + strength，减去目标 armor（冰冻时 ×0.85），下限 0</td><td>1000 − 0 / 0 − 10 → 0</td></tr>
+    <tr><td>魔法伤害</td><td>fire + ice + lightning + intelligence，减去目标 magicResistance + intelligence × 3</td><td>10 / 20（但从未被调用）</td></tr>
+  </table></div>
+  <p>两个容易被追问的细节：① critPower 的基础值在 Inspector 里配多少都没用，Start 会改成 150——<b>“代码默认值”应该放在字段初始化器或 Reset() 里</b>，而不是在运行时覆盖序列化数据；② <code>RemoveModifier</code> 按值删除，装备 A 和 B 都给 +5 力量时卸下 A 也只会删掉“某一个 5”，结果数值上正确，但没有“来源”就做不到“移除某个 Buff 的全部效果”或“UI 显示加成来源”。</p>
+
+  <h2>7.3 物理伤害：E3 量化三个细节</h2>
+<!--flow {"h":134,"w":900,"cols":[12,192,372,552,732],"colw":[164,164,164,164,156],"rows":[24],"bh":62,
+"boxes":[
+ {"id":"a","cr":[0,0],"t":"① 闪避","s":"Range(0,100) < 闪避","s2":"✔ 概率正确","c":"g"},
+ {"id":"b","cr":[1,0],"t":"② 基础伤害","s":"damage + strength","c":"b"},
+ {"id":"c","cr":[2,0],"t":"③ 暴击","s":"Range(0,100) <= 暴击率","s2":"✘ 多 1%","c":"r","hl":true},
+ {"id":"d","cr":[3,0],"t":"④ 护甲","s":"if (isChilled) ×0.85","s2":"✘ 判的是攻击者","c":"r","hl":true},
+ {"id":"e","cr":[4,0],"t":"⑤ TakeDamage","s":"≤ 0 → Die()","s2":"✘ 无死亡保护","c":"r","hl":true}],
+"chains":[[["a","b","c","d","e"],{"c":"s"}]],
+"texts":[{"x":12,"y":118,"t":"DoDamage(target) 的五步（CharacterStats.cs:97-121）。闪避发生时直接 return——但调用方在此之前已经播放了受击表现（第 6 章）","cls":"xs"}],
+"cap":"图 7-1　物理伤害结算顺序：红框是 E3 / 源码确认的三个问题"} -->
+  <h3>暴击率 off-by-one</h3>
+  <p><code>Random.Range(int, int)</code> 返回 [0, 100) 的整数，即 0~99 共 100 个值。闪避用 <code>&lt; e</code>，命中 e 个值，概率 e%；暴击用 <code>&lt;= c</code>，命中 c + 1 个值，概率 (c + 1)%。<span class="tag ex">实测 E3</span>（各 200 万次）：</p>
+<!--dtab {"rows":"E3.crit","cols":[["暴击率 + 敏捷 c","c"],["设计概率 / %","design"],["实际 (c+1)/100 / %","exact",".1f"],["蒙特卡洛 / %","mc",".2f"]],"hlif":"c == 0","cap":"表 7-1　暴击概率：暴击率为 0 时仍有 1% 暴击；c = 99 时已是必暴。闪避的蒙特卡洛结果与设计一致（10 → [[E3.eva.1.mc|.2f]]%，30 → [[E3.eva.2.mc|.2f]]%）"} -->
+  <p>1% 看起来很小，但“暴击率 0 也会暴击”会让策划配置的“必不暴击”的单位（训练木桩、Boss 的护盾阶段）出现意外；更重要的是两处用了不同的比较符，说明<b>概率判定没有统一的函数</b>。应该写一个 <code>Chance.Roll(float percent)</code>，内部用 <code>Random.value * 100f &lt; percent</code>，全项目只用它。</p>
+  <h3>冰冻破甲判断错了对象</h3>
+<!--code:cs:CharacterStats.cs:143-152 ‖ P1 判断的是攻击者（this）是否被冰冻而不是目标：设计意图的“冰冻破甲”完全反了（E3，#10）-->
+private int CheckTargetArmor(CharacterStats _targetStats, int totalDamage)
+{
+    if (isChilled)    // ← this（攻击者）是否被冰冻；应为 _targetStats.isChilled
+        totalDamage -= Mathf.RoundToInt(_targetStats.armor.GetValue() * 0.85f);
+    else
+        totalDamage -= _targetStats.armor.GetValue();
+    return Mathf.Max(totalDamage, 0);
+}
+<!--/code-->
+<!--dtab {"rows":"E3.chill","cols":[["情形（伤害 30、目标护甲 10）","who"],["现状（源码）","bug"],["理想（修正后）","fix"]],"cap":"表 7-2　设计意图是“目标被冰冻时护甲打 85 折”；源码判断的是攻击者自己，于是变成“被冰冻的攻击者打人更疼”。注意 RoundToInt(8.5) = 8：Mathf.RoundToInt 是银行家舍入（.5 取偶）"} -->
+  <h3>暴击倍率</h3>
+<!--dtab {"rows":"E3.cp","cols":[["strength","str"],["普通伤害（damage 20 + strength）","base"],["暴击伤害","crit"],["实际倍率","mul",".2f"]],"cap":"表 7-3　力量同时加伤害和暴击倍率（各 1 点 / 1%），倍率随力量线性上升；50 力量时暴击翻倍。这是有意的“属性耦合”，但要在数值表里写清楚"} -->
+
+  <h2>7.4 死亡结算：没有保护，掉落会重复</h2>
+<!--code:cs:CharacterStats.cs:115-121 · EnemyStats.cs:50-56 ‖ P1 没有死亡守卫：弹跳剑 / 雷击能让尸体重复 Die、重复掉落（#7）-->
+public virtual void TakeDamage(int _damage)
+{
+    DecreaseHealthBy(_damage);
+    if (currentHealth <= 0) Die();       // 已经死了还会再 Die
+}
+protected override void Die()            // EnemyStats
+{
+    base.Die();
+    enemy.Die();                         // → ChangeState(deathState)：Exit + Enter 再来一遍
+    myDropSystem.GenerateDrop();         // → 再掉一次
+}
+<!--/code-->
+  <p><span class="tag bug">问题</span> <span class="sev p1">P1</span> 近战打不到死掉的骷髅（死亡状态关了碰撞体），所以平时不会触发。但两条路径能绕过碰撞体：① <b>弹跳剑</b>在第一次接触时把半径 10 m 内的敌人 Transform 存进列表，之后按列表依次飞过去造成伤害——目标中途死亡也会被继续“弹”到，每次都重新 Die + 掉落；② 雷击 <code>Controller_ThunderStrike</code> 持有目标引用，飞行途中目标死亡，到达时照样 TakeDamage。修法：<code>if (isDead) return;</code> 放在 TakeDamage 最前面，Die 只执行一次；死亡时从所有“目标列表”里注销（发 OnDeath 事件）。</p>
+  <p>同一段代码里还有一个“上限变了血量不变”的问题：装备 Nice_Armor（+10 health）后 GetMaxHealth 变成 1010，currentHealth 还是 1000，血条也只在下一次受伤时才刷新上限 <span class="tag bug">问题</span> <span class="sev p2">P2</span>。常见规则是“上限增加时当前值按比例 / 按差值增加，上限减少时截断”，并立刻通知 UI。</p>
+
+  <h2>7.5 E4：每级 +25% 是复利</h2>
+<!--code:cs:EnemyStats.cs:35-43 ‖ P2 GetValue 包含前几轮加上的修正 → 隐式复利，10 级 [[e4.10.mul|.2f]] 倍（E4，#18）；当前场景 level = 0，尚未生效-->
+private void Modify(Stat _stat)
+{
+    for (int i = 1; i < level; i++)
+    {
+        float modifier = _stat.GetValue() * percantageModifier;   // GetValue 包含了前几轮加上去的修正
+        _stat.AddModifier(Mathf.RoundToInt(modifier));
+    }
+}
+<!--/code-->
+<!--plot {"x":[1,10],"y":[0,8],"h":270,"xlabel":"敌人等级","ylabel":"相对 1 级的倍率","legend":"tl","xt":[1,2,3,4,5,6,7,8,9,10],
+"series":[{"n":"源码：每级加当前值的 25%（maxHealth 100 起）","path":"e4p.comp","c":"r","dots":true},{"n":"直觉中的线性：1 + 0.25 × (L−1)","path":"e4p.lin","c":"b","dash":true,"dots":true}],
+"cap":"图 7-2　敌人等级成长（E4）：10 级时生命是 1 级的 [[e4.10.mul|.2f]] 倍，线性只有 [[e4.10.lmul|.2f]] 倍；伤害 10 起步时 10 级为 [[e4.10.dmg]]（线性 [[e4.10.ldmg|.1f]]）"} -->
+  <p>复利本身不是错——很多游戏的怪物成长就是指数的——问题是<b>它没有被当作设计决定写下来</b>：变量名 <code>percantageModifier</code>、注释“将基础属性实现等级修正”都暗示“每级加基础值的 25%”。数值成长应该由曲线表驱动（等级 → 系数），代码只查表，策划能直接看到第 10 级是多少。当前场景的骷髅 level = 0、percantageModifier = 0，这段代码还没有生效。</p>
+
+  <h2>7.6 元素伤害与异常状态：写好了，没接线</h2>
+  <p><code>DoMagicalDamage</code> 的唯一调用是 DoDamage 里被注释掉的一行（“测试用”），所以点燃、冰冻、感电、连锁雷击在当前版本里都触发不了。代码本身值得读，因为它有几个设计点和几个 bug：</p>
+  <div class="tbl"><table>
+    <tr><th>环节</th><th>源码行为</th><th>评价</th></tr>
+    <tr><td>选元素</td><td>三种元素伤害放进 List 按值降序排序；唯一最大者施加对应异常；并列时 50% 概率从非零项里随机选一个</td><td>可扩展的写法；但每次调用都 new 一个 List（并列时 FindAll 再分配一个），并列分支里判断感电用的是 <code>damages[0]</code> 而不是随机选中的那一项（CharacterStats.cs:226）——<code>List.Sort</code> 不稳定，并列时 damages[0] 是谁不确定</td></tr>
+    <tr><td>互斥规则</td><td>点燃 / 冰冻：身上没有任何异常时才能上；感电：没有点燃和冰冻时可上</td><td>“同一时间只有一种异常”是清晰的规则；感电可以叠加到感电上，用于触发连锁</td></tr>
+    <tr><td>点燃伤害</td><td>每 0.3 s 扣 fire × 10%（取整）</td><td>首跳在第一帧；周期受帧率影响（第 5 章 E10）</td></tr>
+    <tr><td>冰冻</td><td>减速 20%，持续 2 s</td><td>通过 SlowEntityBy 直接改 moveSpeed（见 7.7）</td></tr>
+    <tr><td>感电连锁</td><td>已感电再被感电：25 m 内找最近的<b>其他</b>敌人召唤雷击；找不到就劈自己</td><td><code>Controller_ThunderStrike</code> 到达后调用 <code>TakeDamage(1)</code>——<b>传进来的 shockDamage 完全没用</b>；目标在飞行途中被销毁时 <code>if (!targetStats) return;</code> 让雷击永远停在半空不销毁</td></tr>
+  </table></div>
+
+  <h2>7.7 多个系统写同一个字段：E8 量化</h2>
+<!--flow {"h":250,"w":900,"cols":[16,250,498,700],"colw":[200,214,180,184],"rows":[20,96,172],
+"boxes":[
+ {"id":"s1","cr":[0,0],"t":"冰冻 SlowEntityBy","s":"×0.8，Invoke 2 s 后恢复","c":"b"},
+ {"id":"s2","cr":[0,1],"t":"飞剑 FreezeTimeFor","s":"=0，协程 0.7 s 后 =默认","c":"p"},
+ {"id":"s3","cr":[0,2],"t":"死亡状态 Enter","s":"animator.speed = 0","c":"r"},
+ {"id":"f1","cr":[1,0],"t":"moveSpeed","s":"Enemy / Player 字段","c":"a","hl":true},
+ {"id":"f2","cr":[1,2],"t":"animator.speed","s":"Animator 属性","c":"a","hl":true},
+ {"id":"r1","cr":[2,1],"t":"ReturnDefaultSpeed","s":"moveSpeed = 默认；speed = 1","c":"o"},
+ {"id":"x","cr":[3,0],"t":"冻结中减速到期","s":"→ 立刻解冻","c":"r"},
+ {"id":"y","cr":[3,1],"t":"多段冻结","s":"最早的协程结束即解冻","c":"r"},
+ {"id":"z","cr":[3,2],"t":"死亡时减速到期","s":"→ 尸体恢复播放【推断】","c":"r"}],
+"arrows":[{"from":"s1","to":"f1","c":"b"},{"from":"s2","to":"f1","c":"p"},{"from":"s3","to":"f2","c":"r"},{"from":"s1","to":"f2","c":"b","s":["r","l"],"p":[[216,44],[232,44],[232,196],[250,196]]},{"from":"s2","to":"f2","c":"p","s":["r","l"],"p":[[216,120],[240,120],[240,190],[250,190]]},
+ {"from":"r1","to":"f1","c":"o"},{"from":"r1","to":"f2","c":"o"},{"from":"f1","to":"x","c":"r"},{"from":"r1","to":"y","c":"r"},{"from":"f2","to":"z","c":"r"}],
+"cap":"图 7-3　moveSpeed 与 animator.speed 各有 3~4 个写者，每个写者都用“赋绝对值”的方式恢复，谁最后写谁赢"} -->
+  <p>最容易被观察到的是飞剑冻结：每次命中都 <code>StartCoroutine("FreezeTimeFor", 0.7f)</code>，协程开头冻结、0.7 s 后解冻。多段命中时，<b>第一个协程到点就把敌人解冻了</b>，后面命中的“冻结 0.7 s”被截断；协程又在 Update 之后才恢复（R1），如果某一帧既有新命中又有旧协程到期，解冻会覆盖冻结。用旋转剑的命中节奏（持续 2 s）跑一遍 <span class="tag ex">实测 E8</span> <span class="tag mdl">模型 R1</span>：</p>
+<!--gbars {"groups":{"path":"e8g.groups"},"series":[{"n":"现状 · 60 fps：实际冻结 %","v":{"path":"e8g.f60"},"c":"r"},{"n":"现状 · 144 fps","v":{"path":"e8g.f144"},"c":"a"},{"n":"理想：取最晚截止时间","v":{"path":"e8g.fix"},"c":"g"}],"fmt":".0f","h":280,"ymax":118,"gname":"命中间隔","cap":"图 7-4　“应当全程冻结”的时间里实际冻住了多少（E8）。hitCoolDown = 0（场景配置）时只有约 [[e8.60_0.pct|.0f]]%；同一配置在 60 / 144 fps 下差异很大（0.35 s 时 [[e8.60_35.pct|.0f]]% vs [[e8.144_35.pct|.0f]]%），因为截断发生在哪一帧取决于帧量化"} -->
+<!--code:cs:【改进】用“截止时间取最大值”替代重叠协程；速度用修正器栈（C#，未在 Unity 中编译）-->
+float frozenUntil;                                   // 冻结：不开协程，只维护截止时间
+public void Freeze(float seconds) => frozenUntil = Mathf.Max(frozenUntil, Time.time + seconds);
+bool IsFrozen => Time.time < frozenUntil;
+
+readonly List<(object source, float mul, float until)> speedMods = new();
+public void AddSpeedMod(object src, float mul, float sec) => speedMods.Add((src, mul, Time.time + sec));
+float SpeedMultiplier()                              // 每帧求一次：过期的删掉，其余相乘
+{
+    speedMods.RemoveAll(m => Time.time >= m.until);
+    float k = IsFrozen || isDead ? 0f : 1f;          // 冻结 / 死亡是“硬覆盖”，优先级最高
+    foreach (var m in speedMods) k *= m.mul;
+    return k;
+}
+// moveSpeed、animator.speed 都由 base × SpeedMultiplier() 推导，任何系统都不再直接赋值
+<!--/code-->
+
+  <h2>7.8 改进：Modifier 与 Buff</h2>
+  <div class="tbl"><table>
+    <tr><th>设计点</th><th>做法</th><th>解决了项目里的什么</th></tr>
+    <tr><td>修正类型</td><td>Flat（+5）、PercentAdd（+10%，同类相加）、PercentMult（×1.1，相乘），按固定顺序：(base + ΣFlat) × (1 + ΣPercentAdd) × ΠPercentMult</td><td>现在只有整数加法，做不了“+20% 伤害”</td></tr>
+    <tr><td>来源</td><td>每个修正带 source（装备实例、Buff 实例），可按来源批量移除</td><td>按值删除无法区分来源；UI 无法显示“加成来自哪里”</td></tr>
+    <tr><td>缓存</td><td>修正列表变化时置脏，GetValue 只在脏时重算</td><td>每次 DoDamage 调 7~9 次 GetValue（暴击时 9 次），每次遍历列表</td></tr>
+    <tr><td>Buff 生命周期</td><td>OnApply / OnTick（固定逻辑帧）/ OnRemove；持续时间、叠层上限、刷新策略（刷新时长 / 叠加时长 / 独立实例）</td><td>点燃 / 冰冻 / 感电三套 bool + timer 各写一遍；周期伤害随帧率漂移</td></tr>
+    <tr><td>互斥与免疫</td><td>Buff 带标签，规则表声明“A 存在时 B 不能上 / 覆盖 / 共存”</td><td>互斥规则硬编码在 ApplyAilments 的三个 bool 表达式里</td></tr>
+    <tr><td>死亡与清理</td><td>死亡时移除所有 Buff（触发 OnRemove 恢复速度等）</td><td>死亡时只把三个 bool 置假，变色 Invoke 和减速恢复仍在跑</td></tr>
+  </table></div>
+
+  <h2>7.9 面试追问</h2>
+<!--code:text:追问树-->
+伤害公式是怎么算的？（Q7-1）
+├─ 暴击率怎么判定？会不会有偏差？（Q7-2 → E3）
+├─ 护甲用减法还是百分比？（Q7-3）
+├─ 装备加属性怎么实现？卸下怎么撤销？（Q7-4）
+│   └─ 百分比加成怎么叠？顺序怎么定？（7.8）
+├─ Buff 系统怎么设计？冻结和减速同时存在怎么办？（Q7-5 → E8）
+└─ 怪物成长曲线怎么定？（Q7-6 → E4）
+<!--/code-->
+  <div class="ans">
+    <div class="q">Q7-1 → Q7-2　伤害怎么算？暴击判定有没有偏差？</div>
+    <p><b>L2</b>　闪避判定 → 基础伤害（攻击 + 力量）→ 暴击判定，暴击时乘 (150 + 力量)% → 减目标护甲（下限 0）→ 扣血，血量 ≤ 0 则死亡。</p>
+    <p><b>L3 · 项目</b>　我测出暴击判定用了 <code>&lt;=</code>，而 Random.Range(0,100) 返回 0~99，所以实际暴击率是 (c+1)%，暴击率 0 也有 1%；闪避用的是 <code>&lt;</code>，是对的。两处写法不一致说明概率判定应该收敛到一个函数里。</p>
+    <p><b>L4 · 攻击</b>　“1% 无所谓吧？”→ 对普通战斗无所谓，但它破坏了“配置 0 = 绝不发生”的约定；而且同样的 off-by-one 我在掉落里也找到了：dropChance 填 0 的物品仍有 1% 掉率（第 10 章）。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q7-3　护甲用减法还是百分比？</div>
+    <p><b>L2</b>　减法（伤害 − 护甲）直观，但低伤害攻击会被完全免疫、高伤害攻击护甲几乎无效，数值容易失控——项目里骷髅的伤害 0 减玩家护甲 10 就是 0。百分比减伤常用 <code>减伤 = armor / (armor + K)</code>（K 与等级相关），护甲收益递减、永远不会 100% 免伤，便于平衡。</p>
+    <p><b>L3</b>　也可以混合：先百分比再减一个小的固定值，让“刮痧”攻击仍有最低伤害（例如至少 1 点或 5%）。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q7-4　装备加属性怎么实现？</div>
+    <p><b>L2</b>　ItemData_Equipment 的 AddModifiers 把 14 项数值逐个加到玩家对应 Stat 的修正列表，RemoveModifiers 按值删除；EquipItem 先卸下同部位旧装备再穿新的。</p>
+    <p><b>L3</b>　两个问题：装备数据（ScriptableObject）直接通过 PlayerManager 单例去改玩家组件，依赖是隐式的；修正没有来源，只能按值删。我会让修正带上来源（装备实例），由 PlayerStats 自己订阅“装备变化”事件来应用；同时上限变化时同步调整当前血量并通知 UI。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q7-5　冻结和减速同时存在怎么办？</div>
+    <p><b>L2</b>　我原来的写法是每个效果直接给 moveSpeed、animator.speed 赋值，恢复时也赋“默认值”，于是冻结期间减速到期会直接解冻；多段冻结时第一个协程结束就解冻，我建模算过，旋转剑场景下应当全程冻结的时间里只冻住了 [[e8r.min|.0f]]%~[[e8r.max|.0f]]%。</p>
+    <p><b>L3</b>　改成修正器栈：每个效果是一个带来源和到期时间的修正，最终速度 = 基础 × 所有修正之积；冻结、死亡这种“硬覆盖”放在最高优先级；同类效果按规则合并（冻结取最晚截止时间）。这样任何效果的加入和移除都不需要知道别的效果。</p>
+  </div>
+  <div class="ans">
+    <div class="q">Q7-6　怪物成长曲线怎么定？</div>
+    <p><b>L2</b>　由曲线表驱动：等级 → 生命 / 伤害系数，策划在表里看到每一级的绝对值；代码只查表。常见是“分段线性 + 每 N 级一个台阶”，或者指数但有上限。</p>
+    <p><b>L3 · 项目</b>　我的 Modify 循环里每级取 GetValue() × 25%，GetValue 包含了前几轮的修正，于是成了复利：10 级 [[e4.10.mul|.2f]] 倍而不是线性的 [[e4.10.lmul|.2f]] 倍。复利不一定错，但必须是显式决定。</p>
+  </div>
+  <div class="co warn"><span class="h">常见错误回答</span>
+    <p><b>错误</b>：“我的 Buff 用协程实现，每个 Buff 开一个协程计时，到点恢复。”</p>
+    <p><b>问题</b>：重叠的同类 Buff 会互相截断；恢复时“赋默认值”会抹掉其他 Buff；对象死亡或禁用时协程停止，恢复代码永远不执行；协程计时还受帧率量化。</p>
+    <p><b>更好的回答</b>：“Buff 是数据：开始时间、持续时间、叠层、来源；由一个系统在固定逻辑帧统一推进和到期；属性由所有生效 Buff 推导，而不是被 Buff 改写。”</p>
+  </div>
+
+  <h2>7.10 发散场景题</h2>
+  <div class="scene"><div class="q">场景 7-1　设计一个 Buff 系统，要求支持“中毒可叠 5 层、每层独立计时”“加速只刷新时长”“净化移除所有负面效果”。</div>
+    <p class="why">为什么会问：RPG / MOBA 客户端必考的系统设计题。</p>
+    <p>数据：BuffConfig（id、标签、持续、周期、叠层上限、叠加策略：Refresh / Extend / Independent、互斥组、属性修正列表、周期效果）。运行时：BuffInstance（config、来源、层数、开始帧、下次 tick 帧）。管理器按固定逻辑帧推进：到期移除、到点 tick、层数变化时重算属性修正。中毒用 Independent（每层一个实例，或一个实例记录每层的到期帧），加速用 Refresh，净化按“负面”标签批量移除。表现（图标、特效）订阅 Buff 增删事件，不参与逻辑。</p>
+  </div>
+  <div class="scene"><div class="q">场景 7-2　玩家抱怨“暴击率 30% 却连续 10 次不暴击”，怎么办？</div>
+    <p class="why">为什么会问：真随机的体验问题，引出伪随机分布。</p>
+    <p>独立 30% 连续 10 次不暴击的概率是 0.7^10 ≈ 2.8%，玩得多了一定会遇到。可以用伪随机分布（PRD）：第 N 次未暴击时概率为 C × N，暴击后重置为 C，C 由目标期望 30% 反解（约 0.084），既保持期望又压缩连败。也可以用“抽卡式”保底：每 K 次至少一次。注意 PRD 需要每个单位独立维护计数，且必须由权威端计算。</p>
+  </div>
+  <div class="scene"><div class="q">场景 7-3　改成联网后，伤害在哪里算？客户端显示的伤害数字从哪来？</div>
+    <p class="why">为什么会问：数值的权威性与防作弊。</p>
+    <p>状态同步：服务器算伤害（随机数只在服务器），客户端收到“命中事件（攻击者、受击者、结果、数值）”后播放表现，伤害数字以服务器下发为准；为了手感可以先播命中特效，数字晚一个 RTT 出现。帧同步：每个客户端算同一份确定性逻辑，随机数用同一个种子的确定性 RNG，数值用定点数——项目里的 <code>Mathf.RoundToInt(float)</code> 和 <code>UnityEngine.Random</code> 都不能用。</p>
+  </div>
+  <div class="scene"><div class="q">场景 7-4　策划想在 Excel 里配所有数值，你怎么接？</div>
+    <p class="why">为什么会问：工具链与数据驱动。</p>
+    <p>Excel → 导出工具（校验类型、范围、外键）→ 生成 ScriptableObject 或二进制表 + 强类型访问代码；运行时只读。项目里散落在场景序列化字段的数值（玩家移速、骷髅攻击距离、技能参数）都应该进表，组件只保存“表 id”。导出时就能检查 dropChance 是否在 0~100、等级曲线是否单调，把 off-by-one 这类问题挡在运行之前。</p>
+  </div>
+
+  <div class="recap"><div class="t">本章速记</div><ul>
+    <li>E3：暴击 <code>&lt;=</code> → <b>(c+1)%</b>；闪避 <code>&lt;</code> 正确；冰冻破甲判了<b>攻击者</b>；RoundToInt 是银行家舍入。</li>
+    <li>TakeDamage 无死亡保护 → 弹跳剑 / 雷击可让尸体<b>重复 Die、重复掉落</b>（#7）。</li>
+    <li>E4：每级 +25% 当前值 = <b>复利</b>，10 级 [[e4.10.mul|.2f]]× vs 线性 [[e4.10.lmul|.2f]]×。</li>
+    <li>E8：多个写者赋绝对值 → 重叠冻结只冻住 <b>[[e8r.min|.0f]]%~[[e8r.max|.0f]]%</b>；改成截止时间取最大 + 速度修正器栈。</li>
+    <li>DoMagicalDamage <b>没有调用方</b>；雷击伤害写死 1。</li>
+  </ul></div>
+  <details class="quiz"><summary>自测 1：为什么 critPower 在 Inspector 里配了也没用？</summary>CharacterStats.Start 里 <code>critPower.SetDefaultValue(150)</code> 覆盖了序列化的基础值；默认值应放在字段初始化器或 Reset()。</details>
+  <details class="quiz"><summary>自测 2：RemoveModifier 按值删除会算错吗？</summary>只要加和删成对、且值不在中途被改，结果数值正确（多重集合语义）；但若装备的 ScriptableObject 在穿戴期间被修改（编辑器里调数），卸下时删的是新值，旧值会永久残留。</details>
+  <details class="quiz"><summary>自测 3：E8 修正版为什么能 100% 冻结？</summary>不再为每次命中开协程，只维护 frozenUntil = max(frozenUntil, now + 0.7)，冻结状态由“当前时间 &lt; 截止时间”推导，不会被早到期的旧效果截断。</details>
+</section>
