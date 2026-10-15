@@ -16,7 +16,7 @@
     <li>记住单机改联机最常见的四类错误：<strong>本地当全局、表现等服务器、结果在客户端算、两端各算各的</strong>。</li>
   </ul></div>
   <div class="state cur"><span class="sl">当前做法</span><div>本章全部讲原 Demo 真实的实现（仓库快照 d7e5c75），没有任何重构内容。最容易被误解的一点：原 Demo <strong>没有射线检测</strong>，命中由服务器生成的复制子弹 Actor（BP_Bullet）自己撞出来。重构后的理想方案从第 3 章开始，第三部分是完整设计；两者逐项对照见 K0。</div></div>
-  <div class="state prob"><span class="sl">存在的问题</span><div>本章逐条列出当前做法的问题：共 23 条（P0 联机下必错 7 条、P1 9 条、P2 6 条、P3 1 条），这里列面试最常被追问的 12 条，全部见附录 A；按后果分成五类的总览见 K0 第 4 节。</div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div>附录 A 共 23 条审计结果：<strong>19 个问题</strong>（P0 联机下必错 6 条、P1 8 条、P2 4 条、P3 1 条）+ <strong>4 条设计取舍</strong>（不算问题）。本章列面试最常被追问的 12 条；按后果分类的总览见 K0 第 4 节。</div></div>
 
   <h2>Fact Sheet：工程到底有什么</h2>
   <div class="tbl"><table>
@@ -157,7 +157,7 @@ Function 剩余子弹计算() -> 子弹保存
   </div>
 
   <h2>问题清单（按严重程度）</h2>
-  <p>P0 = 联机下功能必错；P1 = 弱网或特定时序下出错；P2 = 设计不合理 / 浪费；P3 = 代码质量。完整 23 条及修复见附录 A，这里列面试最常被追问的 12 条。</p>
+  <p>P0 = 联机下功能必错；P1 = 弱网或特定时序下出错；P2 = 设计不合理、浪费或隐患；P3 = 代码质量；<span class="tag dsn">设计取舍</span>= 玩法规则、不影响判定的表现差异或工作量妥协，不算问题。完整 23 条（19 个问题 + 4 条设计取舍）及修复见附录 A，这里列面试最常被追问的 12 条（第 12 条是设计取舍）。</p>
   <div class="tbl"><table>
     <tr><th>#</th><th>级别</th><th>问题</th><th>证据</th><th>后果</th></tr>
     <tr><td>1</td><td><span class="tag p0">P0</span></td><td>换弹在“备弹不够补满”时清空弹匣</td><td><span class="tag src">源码事实</span>剩余子弹计算 false 分支无 Return（#185~#186）</td><td><span class="tag ex">实测 E4</span>3/7 换完变 0/0；整局打空再换只能打出 {{v:E4.session.0.2}}/40 发</td></tr>
@@ -171,7 +171,7 @@ Function 剩余子弹计算() -> 子弹保存
     <tr><td>9</td><td><span class="tag p1">P1</span></td><td>逐发 Reliable RPC</td><td><span class="tag src">源码事实</span>Server_Fire 为 Reliable，射速 8.3 发/秒</td><td><span class="tag ex">实测 E2</span>RTT 200 / 丢包 10%：P99 处理延迟 {{v:E2[rtt=200,loss=0.1].p99:.0f}} ms</td></tr>
     <tr><td>10</td><td><span class="tag p1">P1</span></td><td>每发子弹一个复制 Actor</td><td><span class="tag src">源码事实</span>BP_Bullet bReplicates + bReplicateMovement</td><td><span class="tag ex">实测 E1/E7</span>远端出现时已飞出约 {{v:E1[s=0,rtt=200].pop:.1f}} m；估算约 {{v:E7.0.4}} B/s，推荐方案约 {{v:E7.1.4}} B/s</td></tr>
     <tr><td>11</td><td><span class="tag p1">P1</span></td><td>客户端玩家没有后坐力、瞄准不减散布</td><td><span class="tag src">源码事实</span>后坐力 Timeline 在服务器上调用 AddControllerYawInput；散布读服务器 AnimBP 的 是否瞄准</td><td><span class="tag inf">推断</span>AddControllerYawInput 只对本地控制器生效，客户端玩家手感与主机不同</td></tr>
-    <tr><td>12</td><td><span class="tag p2">P2</span></td><td>对方看到的是“漂浮的手臂”</td><td><span class="tag src">源码事实</span>角色唯一 Mesh 是第一人称手臂，武器挂在手臂 Socket</td><td>需要 1P / 3P 两套网格（第 3 章）</td></tr>
+    <tr><td>12</td><td><span class="tag dsn">设计取舍</span></td><td>对方看到的是“漂浮的手臂”</td><td><span class="tag src">源码事实</span>角色唯一 Mesh 是第一人称手臂，武器挂在手臂 Socket</td><td>单机改联机时的工作量妥协，不影响同步正确性；要给对方看完整角色时再做第一 / 第三人称两套网格（第 3 章，完整版）</td></tr>
   </table></div>
 
   <div class="co warn"><span class="h">面试注意：别把问题说成“UE 网络不稳定”</span>
@@ -192,9 +192,19 @@ Function 剩余子弹计算() -> 子弹保存
     <li><code>for_server</code> 函数说明作者发现了“武器 BeginPlay 早于 SetOwner”——只是修补的方式不对（第 3 章）。</li>
   </ul>
 
+  <div class="co tip"><span class="h">还有几处看起来像问题，其实是设计取舍</span>
+    <ul>
+      <li><strong>任一人阵亡即失败</strong>（A#7）：玩法规则。可以讨论“改成全灭才失败会不会更好玩”，但它不是 bug；真正值得改的是判定写在角色组播里、不在 GameMode。</li>
+      <li><strong>只有第一人称手臂</strong>（A#17）：单机 FPS 改联机时的工作量妥协。别人看到漂浮的手臂，但同步本身没错。</li>
+      <li><strong>僵尸动画变体、攻击 / 受击动作各端不一致</strong>（A#21、A#22）：速度由服务器设置、随移动复制，伤害判定只在服务器，差别只在画面。</li>
+      <li><strong>没有主持 / 加入流程</strong>：Demo 只在编辑器里自测和录屏，这是范围取舍。</li>
+    </ul>
+    <p>面试时把它们说成“有意的取舍”，并说明什么条件下才需要改——这比把它们当成 bug 一起认错更可信，也说明你分得清“没做”和“做错了”。</p>
+  </div>
+
   <div class="recap"><div class="t">本章速记</div><ul>
     <li>原 Demo：纯蓝图、PIE Listen Server、19 个 RPC、11 个复制变量，只有 1 个 OnRep 有内容。</li>
-    <li>最致命的 3 条：<strong>换弹函数漏连 Return 吞子弹</strong>、<strong>冲刺 / 瞄准两端不一致导致拉回</strong>、<strong>整局流程在本地做（一人死全员失败、本地暂停 / 重开、补刷每端执行）</strong>。</li>
+    <li>最致命的 3 条：<strong>换弹函数漏连 Return 吞子弹</strong>、<strong>冲刺 / 瞄准两端不一致导致拉回</strong>、<strong>整局流程在本地做（倒计时各端自算、本地暂停 / 重开、补刷每端执行）</strong>。</li>
     <li>子弹：服务器生成的复制 Actor，<strong>没有射线检测</strong>；伤害写在每一端都触发的碰撞里，客户端那次被 Authority Only 拦下——“碰巧没错”不等于设计正确。</li>
     <li>四类根因：本地当全局、表现等服务器、结果在客户端算、两端各算各的。</li>
     <li>回答“你的 Demo 有什么问题”时：先分类，再各举一个节点级的例子，最后说改法。</li>

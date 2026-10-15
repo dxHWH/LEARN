@@ -3,13 +3,146 @@
   <h1>UE 双人联机射击 Demo：<em>面试复盘与正确实现</em></h1>
   <p class="sub">一个从单机 FPS 改成双人合作打僵尸的 UE 5.5 蓝图 Demo：先把它的 28 个蓝图逐节点读出来，找出它真实的运行方式和问题；再按 UE 联机的正确方式，把“开火到击中僵尸”“角色、控制器、武器怎么绑定”“弱网卡顿怎么优化”“子弹同步与换弹”这几道面试题讲透，每个结论都有源码证据或实测数据。</p>
   <div class="meta">
-    <span class="pill b">原工程审计：19 个 RPC · 11 个复制变量 · 23 条问题</span>
+    <span class="pill b">原工程审计：19 个 RPC · 11 个复制变量 · 19 个问题 + 4 条设计取舍</span>
     <span class="pill o">10 组网络行为实测（MSVC /O2）</span>
     <span class="pill g">逐类蓝图事件图表 40+ 张（每张标出执行端 / 复制变量 / RPC / 组播）· 2 个交互实验</span>
-    <span class="pill p">12 条追问链 + 62 道面试题 + 速记卡</span>
+    <span class="pill p">12 条追问链 + 64 道面试题 + 速记卡</span>
     <span class="pill o">口径篇：当前做法 · 存在的问题 · 理想方案 · 项目描述与口径 · 14 个场景的坑与正确实现</span>
   </div>
 </div>
+
+<section class="chapter" id="terms">
+  <div class="ch-head">
+    <div class="no">BRIEFING · 读前须知</div>
+    <h1>术语与类名速查：书里会出现的名字先认一遍</h1>
+    <p class="lead">本书不假设你已经认识原 Demo 的类，也不假设你熟悉 UE 的联机术语。正文里出现的类名、前缀、缩写都能在这里查到：先看命名前缀，再看 UE 框架类各管什么；然后分别列出原 Demo 有哪些类、重构方案有哪些类（以及哪些只属于完整版）；最后是联机术语和本书的标记。</p>
+  </div>
+
+  <h2>1. 看名字前缀就知道是什么</h2>
+  <div class="tbl"><table>
+    <tr><th>前缀</th><th>是什么</th><th>本书例子</th></tr>
+    <tr><td>BP_</td><td>蓝图类（Blueprint）的通用前缀，通常是能放进世界的对象</td><td>BP_Player、BP_Weapon、BP_Bullet、BP_Zombie</td></tr>
+    <tr><td>GM_</td><td>GameMode：只在服务器上的“规则类”</td><td>GM_MyGame（原 Demo）、GM_Coop（重构）</td></tr>
+    <tr><td>GS_</td><td>GameState：复制给所有人的全局状态</td><td>BP_MyGameState（原 Demo 没用 GS_ 前缀）、GS_Coop</td></tr>
+    <tr><td>PS_</td><td>PlayerState：每个玩家一份、复制给所有人的个人数据</td><td>PS_Coop</td></tr>
+    <tr><td>PC_</td><td>PlayerController：玩家的“控制器”，管输入、相机、界面</td><td>PC_Coop</td></tr>
+    <tr><td>AC_</td><td>ActorComponent：挂在对象上的可复用功能块</td><td>AC_Health（血量组件）</td></tr>
+    <tr><td>AIC_ · BT_ · BB_ · BTT_ · BTS_</td><td>AIController · 行为树 · 黑板 · 行为树任务 · 行为树服务</td><td>AIC_Zombie、BT_Zombie、BB_Zombie、BTT_Attack、BTS_FindTarget</td></tr>
+    <tr><td>DA_</td><td>DataAsset：只存参数的数据资产</td><td>DA_Weapon、DA_Zombie</td></tr>
+    <tr><td>UWB_ · WBP_</td><td>界面（UMG Widget Blueprint）；原 Demo 用 UWB_，重构用 WBP_</td><td>UWB_InGame、WBP_HUD</td></tr>
+    <tr><td>AnimeBP_ · ABP_</td><td>动画蓝图（Animation Blueprint）</td><td>AnimeBP_Player、ABP_Coop3P</td></tr>
+    <tr><td>L_</td><td>地图（关卡）</td><td>L_Menu（主菜单地图）、L_CoffeeShop（对局地图，原 Demo 叫 CoffeeShopA_P）</td></tr>
+    <tr><td>IA_ · IMC_</td><td>Enhanced Input 的输入动作 · 输入映射</td><td>IA_Fire、IMC_Default</td></tr>
+    <tr><td>S_ · E_</td><td>蓝图结构体 · 枚举</td><td>S_AmmoState、E_MatchPhase</td></tr>
+    <tr><td>Server_ · Client_ · Multicast_</td><td>RPC 的命名约定：名字说明它在哪端执行</td><td>Server_FireShot、Client_CancelReload、Multicast_DeathCry</td></tr>
+    <tr><td>OnRep_</td><td>复制变量到达时自动调用的函数（RepNotify）</td><td>OnRep_Ammo、OnRep_Phase</td></tr>
+  </table></div>
+  <p class="tcap">表 T-1　命名前缀</p>
+
+  <h2>2. UE 的 Gameplay 框架类：各管什么、在哪端</h2>
+  <div class="tbl"><table>
+    <tr><th>框架类</th><th>一句话</th><th>在哪端（Listen Server 双人局）</th><th>本书里对应</th></tr>
+    <tr><td>GameInstance</td><td>整个游戏进程一份，切地图不销毁；适合放会话（主持 / 加入联机）、断线原因</td><td>每个进程各一份，不复制</td><td>原 Demo 没有自定义；完整版 BP_CoopGameInstance</td></tr>
+    <tr><td>关卡 / 关卡蓝图</td><td>一张地图；关卡蓝图（Level Blueprint）是绑在这张地图上的脚本</td><td>每一端各加载一份，关卡蓝图在每一端各跑一份</td><td>原 Demo CoffeeShopA_P；完整版 L_Menu + L_CoffeeShop</td></tr>
+    <tr><td>GameMode</td><td>规则：玩家登录、生成角色、开局、胜负、刷怪</td><td>只在服务器（客户端上取不到）</td><td>GM_MyGame / GM_Coop</td></tr>
+    <tr><td>GameState</td><td>全局状态的“广播站”：比赛阶段、剩余时间、玩家列表</td><td>所有端</td><td>BP_MyGameState / GS_Coop</td></tr>
+    <tr><td>PlayerState</td><td>“这个人”的数据：名字、分数、是否准备；角色死了它还在</td><td>所有端</td><td>原 Demo 没有自定义 / PS_Coop</td></tr>
+    <tr><td>PlayerController</td><td>玩家的“灵魂”：输入、相机、界面，替玩家向服务器发请求</td><td>服务器 + 它自己的客户端</td><td>原 Demo 没有自定义 / PC_Coop</td></tr>
+    <tr><td>Pawn / Character</td><td>被玩家或 AI 控制的“身体”；Character 自带胶囊体和移动组件</td><td>所有端</td><td>BP_Player / BP_CoopCharacter，BP_Zombie</td></tr>
+    <tr><td>Actor / Component</td><td>Actor 是能放进世界的对象；Component 是挂在 Actor 上的功能块</td><td>勾了 Replicates 才复制到客户端</td><td>BP_Weapon、BP_Bullet；AC_Health</td></tr>
+    <tr><td>CharacterMovement（CMC）</td><td>Character 的移动组件，自带联机移动预测与纠正</td><td>所有端</td><td>冲刺被拉回就发生在这里（E6）</td></tr>
+    <tr><td>ProjectileMovement</td><td>让 Actor 按速度和重力自己飞的组件</td><td>每个副本各自模拟</td><td>原 Demo 的 BP_Bullet</td></tr>
+    <tr><td>AIController + 行为树 / 黑板</td><td>AI 的大脑：行为树描述“选目标 → 追 → 打”，黑板存它的变量</td><td>只在服务器</td><td>原 Demo 用计时器；完整版 AIC_Zombie + BT_Zombie</td></tr>
+    <tr><td>DataAsset</td><td>只存参数的资产，改数值不用改逻辑</td><td>资产</td><td>完整版 DA_Weapon / DA_Zombie</td></tr>
+    <tr><td>Widget（UMG）</td><td>界面</td><td>只在本机，不复制</td><td>UWB_* / WBP_*</td></tr>
+    <tr><td>动画蓝图（AnimBP）</td><td>按速度、状态选动画</td><td>每个网格各一份</td><td>AnimeBP_* / ABP_*</td></tr>
+  </table></div>
+  <p class="tcap">表 T-2　框架类。更完整的关系（谁包含谁、谁活多久、启动顺序）见第 7 章</p>
+
+  <h2>3. 本书出现的类</h2>
+  <h3>3.1 原 Demo 的类（当前做法）</h3>
+  <div class="tbl"><table>
+    <tr><th>类</th><th>是什么</th><th>现在负责</th></tr>
+    <tr><td>CoffeeShopA_P（关卡蓝图）</td><td>对局地图的关卡脚本</td><td>主菜单、按任意键准备、开局流程、背景音乐、切镜头</td></tr>
+    <tr><td>GM_MyGame</td><td>GameMode</td><td>收集准备好的玩家，人齐后通知开局</td></tr>
+    <tr><td>BP_MyGameState</td><td>GameState</td><td>准备列表、“游戏是否开始”标志</td></tr>
+    <tr><td>BP_Player</td><td>玩家角色（Character）</td><td>移动、冲刺、开镜、生成武器、血量、死亡</td></tr>
+    <tr><td>BP_Weapon</td><td>武器（Actor）</td><td>开火、换弹、弹药、后坐力</td></tr>
+    <tr><td>BP_Bullet</td><td>子弹（开启复制的 Actor）</td><td>每发一颗，自己飞、自己碰撞、在碰撞里结算伤害</td></tr>
+    <tr><td>BP_Zombie</td><td>僵尸（Character）</td><td>服务器上的计时器 AI、攻击、受伤、死亡</td></tr>
+    <tr><td>BP_ZombieSpawn</td><td>刷怪器</td><td>开局刷 10 只、死一只补一只</td></tr>
+    <tr><td>UWB_MainMenu / InGame / Pause / WinOrFail</td><td>界面</td><td>主菜单、HUD 与倒计时、暂停、结算</td></tr>
+    <tr><td>AnimeBP_Player / Weapon / Zomebie</td><td>动画蓝图</td><td>角色、枪、僵尸的动画</td></tr>
+  </table></div>
+  <p class="tcap">表 T-3　原 Demo 的类（仓库快照 d7e5c75，共 28 个蓝图，这里列主要的）</p>
+
+  <h3>3.2 重构方案的类（理想方案）</h3>
+  <p>理想方案分两档：<span class="tag lean">精简版</span>是两人 Demo 推荐先做的，基本沿用原 Demo 的类、只把职责放对；<span class="tag full">完整版</span>是工程化拆分，第 8~13 章按它画图。详见 K0 第 1 节。</p>
+  <div class="tbl"><table>
+    <tr><th>类</th><th>是什么</th><th>负责</th><th>属于</th></tr>
+    <tr><td>GM_Coop</td><td>自定义 GameMode</td><td>开局、计时、胜负判定、刷怪、重开</td><td><span class="tag lean">精简版</span>在 GM_MyGame 上改即可</td></tr>
+    <tr><td>GS_Coop</td><td>自定义 GameState</td><td>复制“比赛阶段”（Phase）和“结束时刻”</td><td><span class="tag lean">精简版</span>在 BP_MyGameState 上改即可</td></tr>
+    <tr><td>BP_CoopCharacter</td><td>玩家角色</td><td>输入、持有武器、死亡表现</td><td><span class="tag lean">精简版</span>在 BP_Player 上改即可</td></tr>
+    <tr><td>BP_WeaponBase</td><td>武器</td><td>开火（本机先播表现）、弹药、换弹状态机</td><td><span class="tag lean">精简版</span>在 BP_Weapon 上改即可</td></tr>
+    <tr><td>BP_Zombie</td><td>僵尸</td><td>攻击、受伤、死亡表现</td><td><span class="tag lean">精简版</span>保留原类，修死亡与补刷</td></tr>
+    <tr><td>WBP_MainMenu / Lobby / HUD / Pause / Result</td><td>界面</td><td>只读显示，经控制器发请求</td><td><span class="tag lean">精简版</span>在 UWB_* 上改即可</td></tr>
+    <tr><td>BP_CoopGameInstance + L_Menu</td><td>自定义 GameInstance + 单独的主菜单地图</td><td>主持 / 查找 / 加入联机、断线提示</td><td><span class="tag full">完整版</span>要打包给别人玩时</td></tr>
+    <tr><td>PS_Coop</td><td>自定义 PlayerState</td><td>是否准备、击杀、是否存活</td><td><span class="tag full">完整版</span></td></tr>
+    <tr><td>PC_Coop</td><td>自定义 PlayerController</td><td>创建界面、发准备 / 重开请求、观战</td><td><span class="tag full">完整版</span></td></tr>
+    <tr><td>AC_Health</td><td>血量组件</td><td>玩家和僵尸共用的扣血、受击、死亡</td><td><span class="tag full">完整版</span></td></tr>
+    <tr><td>AIC_Zombie · BT_Zombie · BB_Zombie</td><td>AIController + 行为树 + 黑板</td><td>僵尸选目标、追击、攻击</td><td><span class="tag full">完整版</span>计时器 AI 在服务器运行本身没问题</td></tr>
+    <tr><td>DA_Weapon · DA_Zombie</td><td>数据资产</td><td>伤害、射速、弹匣、速度等参数</td><td><span class="tag full">完整版</span></td></tr>
+    <tr><td>BP_SpawnPoint</td><td>刷怪点标记</td><td>只标位置，刷怪由 GameMode 做</td><td><span class="tag full">完整版</span></td></tr>
+    <tr><td>ABP_Coop1P · ABP_Coop3P</td><td>第一 / 第三人称动画蓝图</td><td>手臂与全身各自的动画</td><td><span class="tag full">完整版</span>要做第三人称模型时</td></tr>
+    <tr><td>UCoopMovementComponent</td><td>C++ 移动组件子类</td><td>把冲刺 / 开镜放进移动预测</td><td><span class="tag full">完整版</span>纯蓝图做不到彻底不被拉回</td></tr>
+    <tr><td>BP_Projectile · AC_Ballistics</td><td>做对的实体子弹 · 数据化弹道组件</td><td>“硬用实体子弹”的两种做法</td><td>第 5B 章的可选方案</td></tr>
+  </table></div>
+  <p class="tcap">表 T-4　重构方案的类。精简版 6 类（全部沿用原 Demo 的类）；完整版共 14 个类（第 8 章表 8-1）</p>
+
+  <h2>4. 联机术语</h2>
+  <div class="tbl"><table>
+    <tr><th>术语</th><th>意思</th></tr>
+    <tr><td>服务器 / 客户端</td><td>服务器持有“真相”并决定结果；客户端显示画面、发请求</td></tr>
+    <tr><td>Listen Server · 主机</td><td>一名玩家的游戏进程同时当服务器（主机），另一名玩家作为客户端连进来；本 Demo 就是这种</td></tr>
+    <tr><td>Dedicated Server</td><td>专用服务器：没有本地玩家、不渲染画面</td></tr>
+    <tr><td>PIE</td><td>Play In Editor：在编辑器里开多个窗口联机测试</td></tr>
+    <tr><td>RTT · 单程延迟 · 丢包 · 抖动</td><td>一个来回的时间 · 单程时间（约 RTT 的一半）· 包丢失的比例 · 延迟的波动</td></tr>
+    <tr><td>权威（Authority）</td><td>能修改真实状态的那一端；复制的对象在服务器上是权威端，蓝图里用 Switch Has Authority 判断</td></tr>
+    <tr><td>本地控制（Locally Controlled）</td><td>这个角色由本机玩家操作；主机玩家的角色在主机上既是权威端、又是本地控制</td></tr>
+    <tr><td>Owner（拥有者）· Owner 链</td><td>网络上的归属：武器 → 角色 → PlayerController → 网络连接；决定谁能在这个对象上发 Server RPC、Owner Only 的数据发给谁</td></tr>
+    <tr><td>Possess</td><td>控制器“附身”到角色上，只在服务器发生</td></tr>
+    <tr><td>复制（Replicated）</td><td>服务器把变量的最新值自动发给客户端；单向、只发最新值</td></tr>
+    <tr><td>RepNotify · OnRep</td><td>复制变量到达时自动调用 OnRep 函数；蓝图里服务器赋值时也会调用一次（C++ 不会）</td></tr>
+    <tr><td>复制条件 Owner Only · Skip Owner · Initial Only</td><td>只发给拥有者 · 发给除拥有者以外的人 · 只在第一次复制时发</td></tr>
+    <tr><td>RPC：Run on Server · Run on owning Client · Multicast</td><td>远程调用：客户端请求服务器执行 · 服务器通知某个玩家的客户端 · 服务器通知所有端（客户端调用的 Multicast 只在本地执行）</td></tr>
+    <tr><td>Reliable · Unreliable</td><td>可靠（丢了重发、按顺序到）· 不可靠（丢了就算了）</td></tr>
+    <tr><td>晚加入（Late Join）</td><td>对局开始后才连进来；只能拿到复制变量的当前值，拿不到之前发过的 RPC</td></tr>
+    <tr><td>预测</td><td>本机先播表现、先改显示的数值，不等服务器</td></tr>
+    <tr><td>序号对账（AckSeq）</td><td>每次操作带序号，服务器回传“处理到第几号”，本机据此修正预测，数字不往回跳</td></tr>
+    <tr><td>开火计数（BurstCounter）</td><td>服务器每接受一发就 +1 的复制变量；别人在 OnRep 里看到它变了就播开火表现</td></tr>
+    <tr><td>命中扫描（Hitscan）· 射线检测</td><td>开火瞬间沿方向做一次射线判断打中谁，子弹没有飞行时间</td></tr>
+    <tr><td>实体子弹 · 抛射物</td><td>子弹是一个会飞的对象（原 Demo 的 BP_Bullet）</td></tr>
+    <tr><td>快进（catch-up）· 回溯（rewind）</td><td>服务器把晚生成的子弹往前推一段 · 服务器把目标位置倒回射手看到的时刻再判定（延迟补偿）</td></tr>
+    <tr><td>纠正 · SavedMove</td><td>移动组件发现客户端位置和服务器差太多时把客户端拉回 · 客户端保存的每帧移动输入，用来重放</td></tr>
+    <tr><td>模拟代理（Simulated Proxy）</td><td>别人的角色或僵尸在你这里的副本，只按复制数据显示</td></tr>
+  </table></div>
+  <p class="tcap">表 T-5　联机术语。机制细节见第 2 章</p>
+
+  <h2>5. 本书的标记</h2>
+  <div class="tbl"><table>
+    <tr><th>标记</th><th>意思</th></tr>
+    <tr><td><span class="tag cur">当前做法</span></td><td>原 Demo 真实的实现，从 .uasset 逐节点读出</td></tr>
+    <tr><td><span class="tag prob">存在的问题</span> · ⚠</td><td>当前做法里会出错或有隐患的地方，按 P0~P3 分级</td></tr>
+    <tr><td><span class="tag dsn">设计取舍</span> · ⚖</td><td>看起来像问题，其实是玩法规则、不影响判定的表现差异，或 Demo 阶段的工作量妥协；<strong>不计入问题</strong></td></tr>
+    <tr><td><span class="tag min">最小修复</span></td><td>保留原结构，只把会出错的地方改对</td></tr>
+    <tr><td><span class="tag ideal">理想方案</span> · <span class="tag lean">精简版</span> / <span class="tag full">完整版</span></td><td>重构设计；精简版是两人 Demo 推荐先做的，完整版是工程化拆分（第 8~13 章）</td></tr>
+    <tr><td>P0 · P1 · P2 · P3</td><td>联机下功能必错 · 弱网或特定时序下出错 · 设计不合理、浪费或隐患 · 代码质量</td></tr>
+    <tr><td>A#n</td><td>附录 A 审计清单的编号（23 条：19 个问题 + 4 条设计取舍）</td></tr>
+    <tr><td>E1~E10</td><td>模型实验编号（demos/*.cpp 的离散事件模拟，不是引擎实测）</td></tr>
+    <tr><td><span class="tag src">源码事实</span> · <span class="tag inf">推断</span> · <span class="tag ex">实测</span></td><td>蓝图里确实这么连的 · 根据 UE 规则推出的运行时后果 · 来自模型实验</td></tr>
+  </table></div>
+  <p class="tcap">表 T-6　本书的标记</p>
+</section>
 
 <section class="chapter" id="ch0">
   <div class="ch-head">
@@ -30,9 +163,10 @@
   <div class="ans">
     <div class="q">问 ②：控制的角色、控制器、武器应该怎么绑定？</div>
     <p><span class="tag cur">当前做法</span>原 Demo 在角色 BeginPlay 里由服务器生成武器（生成时 Owner 为空，之后补 SetOwner），武器引用复制后挂到第一人称手臂上；角色只有手臂模型，输入映射用 0 号控制器添加，没有自定义 PlayerController / PlayerState。</p>
-    <p><span class="tag prob">存在的问题</span>① 武器的 BeginPlay 早于 SetOwner，初始化拿不到持有者，只能靠 for_server 补丁；② 0 号控制器在服务器上永远是主机的——客户端玩家死亡时禁用输入传进去的是主机的控制器，不生效，死者仍能操作；③ 对方看到的是一双漂浮的手臂；④ 准备列表存的是 PC 引用，复制到客户端为空。</p>
+    <p><span class="tag prob">存在的问题</span>① 武器的 BeginPlay 早于 SetOwner，初始化拿不到持有者，只能靠 for_server 补丁；② 0 号控制器在服务器上永远是主机的——客户端玩家死亡时禁用输入传进去的是主机的控制器，不生效，死者仍能操作；③ 准备列表存的是 PC 引用，复制到客户端为空。</p>
+    <p><span class="tag dsn">设计取舍</span>角色只有第一人称手臂、别人看到漂浮的手臂：单机改联机时的工作量妥协，不影响同步正确性，不算问题。</p>
     <p><span class="tag ideal">理想方案</span>GameMode 在服务器为每个登录的 <code>PlayerController</code> 生成 Pawn 并 <code>Possess</code>；Possess 会把 Pawn 的 Owner 设成这个 PC。PC 只存在于服务器和它自己的客户端，所以 Owner 链“武器 → Pawn → PC → 网络连接”决定了：<strong>谁能在这个 Actor 上调用 Server RPC</strong>、<code>COND_OwnerOnly</code> 发给谁、Client RPC 去哪。</p>
-    <p>武器在<strong>服务器</strong>生成，生成参数里直接给 <code>Owner = Pawn</code>、<code>Instigator = Pawn</code>（不要先生成再 SetOwner，BeginPlay 会早于 SetOwner）；挂到第三人称模型的手部 Socket，另一份挂到只有自己看得见的第一人称手臂；<code>CurrentWeapon</code> 复制并在 OnRep 里做挂接和动画层切换。输入映射在“成为本地控制者”时添加（<code>NotifyControllerChanged</code> / <code>PawnClientRestart</code>），不要在 BeginPlay 里用 <code>GetPlayerController(0)</code>。分数、是否准备这类跟人走的数据放 <code>PlayerState</code>。</p>
+    <p>武器在<strong>服务器</strong>生成，生成参数里直接给 <code>Owner = Pawn</code>、<code>Instigator = Pawn</code>（不要先生成再 SetOwner，BeginPlay 会早于 SetOwner）；挂到角色手部的 Socket（完整版做了第一 / 第三人称两套模型时各挂一份）；<code>CurrentWeapon</code> 复制并在 OnRep 里做挂接和动画层切换。输入映射在“成为本地控制者”时添加（<code>NotifyControllerChanged</code> / <code>PawnClientRestart</code>），不要在 BeginPlay 里用 <code>GetPlayerController(0)</code>。分数、是否准备这类跟人走的数据放 <code>PlayerState</code>。</p>
   </div>
 
   <div class="ans">
@@ -69,17 +203,18 @@
 
   <h2>本书怎么读</h2>
   <div class="cards">
+    <div class="card"><div class="t">读前须知 · 术语与类名</div><p>前缀（BP_ / GM_ / GS_ / PS_ / PC_ / AC_ …）、UE 框架类各管什么、原 Demo 与重构方案各有哪些类、联机术语、本书标记——第一次看到不认识的名字就回来查。</p></div>
     <div class="card"><div class="t">第零部分 · 口径篇（先读）</div><p>K0：先分清书里哪些是<strong>当前做法</strong>（原 Demo 真实的实现，例如子弹是复制 Actor、没有射线）、哪些是<strong>理想方案</strong>（重构设计）；K1：面试官看不到 Demo，怎么讲——项目档案、10 秒 / 1 分钟 / 3 分钟讲法、三种时态、统一数字与术语、白板图；K2：14 个功能场景的“容易踩的坑 → 怎么避免 → 正确实现”，只讲方法不讲代码。</p></div>
-    <div class="card"><div class="t">第一部分 · 复盘原 Demo</div><p>第 1 章：28 个蓝图逐节点读出来后的真实运行方式与 23 条问题；第 2 章：只讲本 Demo 用得到的 UE 网络基础。</p></div>
+    <div class="card"><div class="t">第一部分 · 复盘原 Demo</div><p>第 1 章：28 个蓝图逐节点读出来后的真实运行方式、19 个问题与 4 条设计取舍；第 2 章：只讲本 Demo 用得到的 UE 网络基础。</p></div>
     <div class="card"><div class="t">第二部分 · 面试四问</div><p>第 3 章绑定；第 4 章开火到击中；第 5 章子弹同步与换弹；第 5B 章追问“不用射线、硬用实体子弹怎么做”；第 6 章弱网优化。每章：30 秒答案 → 原理 → 原实现对照 → 正确实现 → 实测 → 坑位 → 自测。</p></div>
-    <div class="card"><div class="t">第三部分 · 重做：合格的联机 Demo</div><p>第 7 章 Gameplay 框架（World / Controller / Player BP 的 OOP 关系、生命周期、启动时序）；第 8 章合格标准、类清单、复制总表与接收矩阵、RPC 与组播总表、执行端速查；第 9~13 章逐类蓝图事件图表（框架层、玩家层、武器、僵尸 AI、UI）；第 14 章测试、调试与演示。</p></div>
-    <div class="card"><div class="t">第四部分 · 面试防守</div><p>第 15 章 12 条追问链与危险说法对照；第 16 章 62 道面试题与速记卡。</p></div>
+    <div class="card"><div class="t">第三部分 · 重做：合格的联机 Demo</div><p>这一部分画的是理想方案的<strong>完整拆分版</strong>（两人 Demo 推荐先做的精简版见 K0 第 1 节）。第 7 章 Gameplay 框架（World / Controller / Player BP 的 OOP 关系、生命周期、启动时序）；第 8 章合格标准、类清单、复制总表与接收矩阵、RPC 与组播总表、执行端速查；第 9~13 章逐类蓝图事件图表（框架层、玩家层、武器、僵尸 AI、UI）；第 14 章测试、调试与演示。</p></div>
+    <div class="card"><div class="t">第四部分 · 面试防守</div><p>第 15 章 12 条追问链与危险说法对照；第 16 章 64 道面试题与速记卡。</p></div>
     <div class="card"><div class="t">附录 A · 问题全清单与审计方法</div><p>每条问题对应的蓝图节点编号、后果和修复；没有 UE 编辑器时如何把 .uasset 读成伪代码。</p></div>
   </div>
 
   <div class="co ver"><span class="h">关于证据等级与实测</span>
     <p>原工程：<code>github.com/dxHWH/-demo</code>，快照 commit <code>d7e5c75</code>，UE 5.5，纯蓝图（没有 Source 目录）。仓库里大量美术资产与逻辑无关，只拉取了 <code>Content/Blueprints</code>、<code>Content/UI</code>、主地图与 <code>Config</code>。蓝图用自写的解析脚本 <code>tools/bpdump.py</code> 从 .uasset 读出节点、引脚连线、RPC 标志和复制设置，导出在 <code>audit/*.txt</code>，书中节点编号（如 <code>#150</code>）都能在里面查到。</p>
-    <p>书中用三种标签区分<strong>说的是哪一套</strong>：<span class="tag cur">当前做法</span>原 Demo 真实的实现；<span class="tag min">最小修复</span>保留原结构只改错误；<span class="tag prob">存在的问题</span>当前做法的问题，A# 指附录 A 的问题编号；<span class="tag ideal">理想方案</span>重构设计（第三部分的全部图表）。对照总表见 K0。</p>
+    <p>书中用这几种标签区分<strong>说的是哪一套</strong>：<span class="tag cur">当前做法</span>原 Demo 真实的实现；<span class="tag min">最小修复</span>保留原结构只改错误；<span class="tag dsn">设计取舍</span>看起来像问题、其实是玩法规则 / 表现差异 / 工作量妥协，不计入问题；<span class="tag prob">存在的问题</span>当前做法的问题，A# 指附录 A 的问题编号；<span class="tag ideal">理想方案</span>重构设计（第三部分的全部图表）。对照总表见 K0。</p>
     <p>再用三种标签区分可信度：<span class="tag src">源码事实</span>蓝图里确实这么连的；<span class="tag inf">推断</span>根据 UE 运行规则推出的运行时后果（没有在编辑器里实跑，附录 A 给出验证方法）；<span class="tag ex">实测 Ex</span>来自 <code>demos/coop_net_demo.cpp</code> 的离散事件模拟——它不跑 UE，而是按 UE 的默认参数（服务器网络 Tick 30 Hz、Reliable 有序重传、<code>MAXPOSITIONERRORSQUARED=3</code> 等）复现与本 Demo 相关的网络行为，用来比较方案的<strong>相对</strong>好坏，不代表某台机器上的绝对值。</p>
   </div>
 </section>

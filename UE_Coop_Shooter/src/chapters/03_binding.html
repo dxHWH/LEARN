@@ -16,7 +16,8 @@
     <li>输入映射、UI、相机这些“只属于本地玩家”的东西应该在哪里初始化。</li>
   </ul></div>
   <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 在角色 BeginPlay 里套 Switch Has Authority，由服务器生成武器（生成时 Owner 为空，之后补 SetOwner，再用 for_server 补取持有者）；武器引用 WeaponRef 复制，OnRep 里挂到第一人称手臂的插槽；角色只有手臂模型；输入映射在 BeginPlay 里通过 0 号控制器添加；没有自定义 PlayerController / PlayerState，准备列表存在 GameState 的 PC 引用数组里。</div></div>
-  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li><span class="tag p0">P0</span>0 号控制器在服务器上永远是主机的：客户端玩家死亡时 DisableInput 传进去的是主机的 PC，不生效，死者仍能移动和开火（A#4）。</li><li><span class="tag p1">P1</span>输入映射在 BeginPlay 里加到 0 号控制器上：每个角色副本都会加一次，能用只因为只有一个本地玩家，重生、换角色、分屏就会出错（A#16）。</li><li><span class="tag p2">P2</span>只有第一人称手臂，对方看到一双漂浮的手臂；胶囊随俯仰旋转（A#17）。</li><li><span class="tag p2">P2</span>准备列表存 PlayerController 引用，复制到客户端全是空（A#18）。</li><li><span class="tag p3">P3</span>生成时不给 Owner，武器 BeginPlay 拿不到持有者，靠 for_server 补丁；Instigator 为空，伤害来源无从谈起（A#23、A#19）。</li></ol></div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li><span class="tag p0">P0</span>0 号控制器在服务器上永远是主机的：客户端玩家死亡时 DisableInput 传进去的是主机的 PC，不生效，死者仍能移动和开火（A#4）。</li><li><span class="tag p1">P1</span>输入映射在 BeginPlay 里加到 0 号控制器上：每个角色副本都会加一次，能用只因为只有一个本地玩家，重生、换角色、分屏就会出错（A#16）。</li><li><span class="tag p2">P2</span>准备列表存 PlayerController 引用，复制到客户端全是空（A#18）。</li><li><span class="tag p3">P3</span>生成时不给 Owner，武器 BeginPlay 拿不到持有者，靠 for_server 补丁；Instigator 为空，伤害来源无从谈起（A#23、A#19）。</li></ol></div></div>
+  <div class="state dsn"><span class="sl">设计取舍</span><div>角色只有第一人称手臂、别人看到漂浮的手臂（A#17）：单机 FPS 改联机时的工作量妥协，不影响同步正确性，不算问题。本章第 2 节的第一 / 第三人称两套模型属于完整版，要给对方展示完整角色时再做。</div></div>
   <div class="state ideal"><span class="sl">理想方案</span><div>本章正文：服务器 Possess 时生成武器并在生成参数里带上 Owner / Instigator；CurrentWeapon 复制，各端在 OnRep 里挂 1P / 3P；输入在成为本地控制者时添加；跟人走的数据放 PlayerState。逐项对照见章末。</div></div>
 
   <div class="ans">
@@ -133,8 +134,8 @@ void ACoopCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out) 
     DOREPLIFETIME(ACoopCharacter, CurrentWeapon);
 }
 <!--/code-->
-  <h3>2. 两套模型：自己看手臂，别人看全身</h3>
-  <p>单机 FPS 只需要一双手臂；联机后对方看到的是一个人。标准做法（ShooterGame、Lyra 都是这样）：角色有 1P 手臂（<code>OnlyOwnerSee</code>）和 3P 全身（<code>OwnerNoSee</code>）两个网格，武器也有 1P / 3P 两个网格分别挂上去；开火、换弹蒙太奇在本机播 1P，在别人那里播 3P。原 Demo 只有手臂，另一端看到的是漂浮的手臂和枪，而且因为 <code>bUseControllerRotationPitch = true</code>，整个胶囊体会随低头抬头旋转。远端角色的俯仰用 <code>GetBaseAimRotation()</code>（内部读复制的 <code>RemoteViewPitch</code>）驱动 AimOffset。</p>
+  <h3>2. 两套模型：自己看手臂，别人看全身（完整版）</h3>
+  <p>单机 FPS 只需要一双手臂；联机后对方看到的是一个人。标准做法（ShooterGame、Lyra 都是这样）：角色有 1P 手臂（<code>OnlyOwnerSee</code>）和 3P 全身（<code>OwnerNoSee</code>）两个网格，武器也有 1P / 3P 两个网格分别挂上去；开火、换弹蒙太奇在本机播 1P，在别人那里播 3P。原 Demo 只有手臂，另一端看到的是漂浮的手臂和枪，而且因为 <code>bUseControllerRotationPitch = true</code>，整个胶囊体会随低头抬头旋转。这是单机改联机时合理的工作量妥协（设计取舍，不算问题）；要给对方展示完整角色时再按上面做。远端角色的俯仰用 <code>GetBaseAimRotation()</code>（内部读复制的 <code>RemoteViewPitch</code>）驱动 AimOffset。</p>
   <h3>3. 挂接信息靠 OnRep，不靠“挂接复制”</h3>
   <p>Actor 的挂接（AttachmentReplication）只在开启 <code>bReplicateMovement</code> 时随移动一起复制。武器一般不需要复制移动，所以要像原 Demo 的 <code>OnRep_WeaponRef</code> 那样，在 <code>CurrentWeapon</code> 的 OnRep 里各端自己挂——这一点原 Demo 是对的。武器再设 <code>bNetUseOwnerRelevancy = true</code>，让它跟随持有者决定是否相关。</p>
 
@@ -163,7 +164,7 @@ void ACoopCharacter::NotifyControllerChanged() {
     <tr><th>环节</th><th class="cur">当前做法（原 Demo）</th><th class="prob">存在的问题</th><th class="ideal">理想方案</th></tr>
     <tr><td>武器生成</td><td>BeginPlay + SwitchHasAuthority，Owner=∅ 后 SetOwner，再用 for_server 补取 Owner</td><td class="pbc"><span class="tag p3">P3</span>BeginPlay 早于 SetOwner，初始化拿不到 Owner，靠补丁（A#23）</td><td>PossessedBy（服务器）里生成，SpawnParams 带 Owner / Instigator</td></tr>
     <tr><td>挂接</td><td>挂到 1P 手臂 R_GunSocket，OnRep_WeaponRef 里再挂一次 ✓</td><td class="pbc">OnRep 挂接本身是对的；但只挂了 1P，对方看不到枪在身体上</td><td>3P 枪挂全身模型，1P 枪挂手臂；OnRep_CurrentWeapon 里各端挂</td></tr>
-    <tr><td>模型</td><td>只有 1P 手臂；胶囊体随 Pitch 旋转</td><td class="pbc"><span class="tag p2">P2</span>对方看到漂浮手臂；胶囊随俯仰旋转（A#17）</td><td>1P（OnlyOwnerSee）+ 3P（OwnerNoSee）；身体只跟 Yaw，AimOffset 处理俯仰</td></tr>
+    <tr><td>模型</td><td>只有 1P 手臂；胶囊体随 Pitch 旋转</td><td class="dsc"><span class="tag dsn">设计取舍</span>工作量妥协：对方看到漂浮手臂、胶囊随俯仰旋转，不影响同步正确性（A#17）</td><td>（完整版）1P（OnlyOwnerSee）+ 3P（OwnerNoSee）；身体只跟 Yaw，AimOffset 处理俯仰</td></tr>
     <tr><td>输入映射</td><td>BeginPlay 里 GetPlayerController(0)</td><td class="pbc"><span class="tag p1">P1</span>依赖 0 号控制器和 BeginPlay 时序（A#16）</td><td>NotifyControllerChanged / PawnClientRestart，且 IsLocalController</td></tr>
     <tr><td>武器拿角色</td><td>BeginPlay Cast GetOwner 缓存 As BP Player</td><td class="pbc">缓存时机早于 Owner 设置，可能拿到空</td><td>OnEquipped(Character) 时传入；或直接 <code>GetOwner&lt;ACoopCharacter&gt;()</code></td></tr>
     <tr><td>跟人走的数据</td><td>准备列表放 GameState（存 PC 引用）</td><td class="pbc"><span class="tag p2">P2</span>PC 引用复制到客户端为空（A#18）</td><td>PlayerState：bIsReady、Score、Kills</td></tr>

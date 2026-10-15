@@ -1,7 +1,7 @@
 <div class="part-head" data-toc="第三部分 · 重做：一个合格的联机 Demo">
   <div class="no">PART THREE</div>
   <h1>第三部分　重做：一个合格的联机 Demo</h1>
-  <p>先用 OOP 的眼光把 UE Gameplay 框架重新梳理一遍（谁是谁、谁包含谁、谁活多久、谁在哪端），再定义“合格”的标准，然后逐个类画出蓝图事件图表，最后是测试与演示。<strong>这一部分全部是理想方案（重构设计）</strong>：类名、复制表、RPC 表和事件图表都不是原 Demo 的现状，每张图注都带“理想方案”标签；原 Demo 的实现见第 1 章、K0 和每章开头的对照表。</p>
+  <p>先用 OOP 的眼光把 UE Gameplay 框架重新梳理一遍（谁是谁、谁包含谁、谁活多久、谁在哪端），再定义“合格”的标准，然后逐个类画出蓝图事件图表，最后是测试与演示。<strong>这一部分全部是理想方案（重构设计）</strong>：类名、复制表、RPC 表和事件图表都不是原 Demo 的现状，每张图注都带“理想方案”标签；原 Demo 的实现见第 1 章、K0 和每章开头的对照表。还要说明一点：这里画的是<strong>完整拆分版</strong>——为了把每个框架类的职责讲透，拆到了 14 个类。两人 Demo 实际落地推荐先做<strong>精简版</strong>（K0 第 1 节）：沿用原有的 GameMode、GameState、角色、武器、僵尸、界面几个类，只把职责放对；PlayerState、PlayerController 子类、血量组件、AIController + 行为树、数据资产、第一 / 第三人称模型都按需再加。</p>
 </div>
 
 <section class="chapter" id="ch7">
@@ -17,7 +17,7 @@
     <li>按时间顺序讲清主机开局、客户端加入时框架类被创建与调用的顺序。</li>
   </ul></div>
   <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 只用到了 GM_MyGame（GameModeBase）、BP_MyGameState、BP_Player 三个框架相关的类，PlayerController、PlayerState、GameInstance 都是引擎默认，开局逻辑在关卡蓝图里。</div></div>
-  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li><span class="tag p1">P1</span>关卡蓝图承担了主菜单、准备、开局、BGM、切镜头，是每一端各跑一份的上帝对象；它调用的 Server RPC 在客户端被丢弃（A#15、A#16）。</li><li><span class="tag p2">P2</span>没有 PlayerState：准备、击杀这类跟人走的数据无处放，只好把 PC 引用塞进 GameState，复制到客户端为空（A#18）。</li><li>没有 PlayerController 子类：界面由关卡蓝图和角色各自创建，请求从角色发，没有统一出口。</li><li><span class="tag p0">P0</span>GameMode 只收集准备：计时和胜利写在 UI 里（A#6），失败写在角色的组播里（A#7），规则不在“规则类”里。</li></ol></div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li><span class="tag p1">P1</span>关卡蓝图承担了主菜单、准备、开局、BGM、切镜头，是每一端各跑一份的上帝对象；它调用的 Server RPC 在客户端被丢弃（A#15、A#16）。</li><li><span class="tag p2">P2</span>没有 PlayerState：准备、击杀这类跟人走的数据无处放，只好把 PC 引用塞进 GameState，复制到客户端为空（A#18）。</li><li>没有 PlayerController / PlayerState 子类本身不算问题（两人 Demo 可以不做）；问题在于界面和请求散落在关卡蓝图和角色里，没有统一出口。</li><li><span class="tag p0">P0</span>GameMode 只收集准备：计时和胜利写在 UI 里、两端各自判定（A#6）；失败判定写在角色的死亡组播里——“任一人阵亡即失败”这条规则本身是玩法设计，问题在于它不在“规则类”里。</li></ol></div></div>
   <div class="state ideal"><span class="sl">理想方案</span><div>本章的框架知识是通用的引擎规则；其中出现的 GM_Coop、GS_Coop、PS_Coop、PC_Coop、BP_CoopCharacter 等是重构方案的类。</div></div>
 
   <div class="ans">

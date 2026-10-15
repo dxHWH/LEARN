@@ -5,7 +5,7 @@
     <p class="lead">“合格”最后要落在可复现的测试上。本章给出每次改网络代码都要跑的清单、按症状查问题的工具表，以及面试前怎么把这个 Demo 录成一段有说服力的演示。</p>
   </div>
   <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 只在编辑器里以 Listen Server、零延迟、两个窗口跑过；没有 Dedicated Server、独立进程、网络模拟、晚加入、死亡顺序这些测试，也没有录屏和数据。</div></div>
-  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li>大部分问题在“PIE + 零延迟 + 盯着主机窗口”时根本看不出来：开火延迟、冲刺拉回只在有延迟时出现；幽灵僵尸、默认跑姿只在客户端窗口出现；初始化时序问题在独立进程里才偶发。</li><li>没有任何可复现的测试和数据，面试时只能说“能跑”，说不出“在什么条件下验证过”。</li></ol></div></div>
+  <div class="state prob"><span class="sl">存在的问题</span><div><ol><li>大部分问题在“PIE + 零延迟 + 盯着主机窗口”时根本看不出来：开火延迟、冲刺拉回只在有延迟时出现；幽灵僵尸只在客户端窗口出现；初始化时序问题在独立进程里才偶发。</li><li>没有任何可复现的测试和数据，面试时只能说“能跑”，说不出“在什么条件下验证过”。</li></ol></div></div>
   <div class="state ideal"><span class="sl">理想方案</span><div>本章的测试清单与演示脚本针对<strong>重构后的版本</strong>。重构还没在引擎里完成时，测试清单可以先拿来验证原 Demo（预期结果大多是“✗”，正好用来录前后对比）；README 用第 4 节的“当前状态版”。</div></div>
 
   <h2>1. 四种运行模式，各测什么</h2>
@@ -20,15 +20,15 @@
   <h2>2. 测试清单</h2>
   <div class="tbl"><table>
     <tr><th>#</th><th>设置</th><th>步骤</th><th>预期</th><th>原 Demo</th></tr>
-    <tr><td>1</td><td>Listen Server</td><td>两人各自开火、换弹、冲刺、开镜</td><td>两边都能看到对方的 3P 开火 / 换弹 / 开镜姿势</td><td class="mid">只能看到漂浮手臂</td></tr>
+    <tr><td>1</td><td>Listen Server</td><td>两人各自开火、换弹、冲刺、开镜</td><td>（完整版）两边都能看到对方的 3P 开火 / 换弹 / 开镜姿势</td><td class="mid">只有 1P 手臂（设计取舍）</td></tr>
     <tr><td>2</td><td>Dedicated Server + 2 客户端</td><td>打完一整局</td><td>开局、刷怪、爆头、结算全部正常</td><td class="no">开局依赖主机</td></tr>
     <tr><td>3</td><td>网络模拟 Bad（或 200 ms / 10%）</td><td>连射打空、换弹、冲刺来回切</td><td>开火零延迟；弹药单调；<code>p.NetShowCorrections 1</code> 无纠正</td><td class="no">E1 / E5 / E6</td></tr>
     <tr><td>4</td><td>同上</td><td>对横移的冲刺僵尸连射</td><td>命中率与 0 延迟时接近</td><td class="no">E3</td></tr>
     <tr><td>5</td><td>Allow Late Joining</td><td>开局 30 s 后第二人加入</td><td>直接观战；看到正确的阶段、倒计时、已死僵尸的尸体</td><td class="no">游戏是否开始 = false</td></tr>
-    <tr><td>6</td><td>Listen Server</td><td>客户端玩家先死；再测主机先死</td><td>死者不能操作、进入观战；活着的人继续；全灭才失败</td><td class="no">死者仍能操作；主机 3 s 后冻结全员</td></tr>
+    <tr><td>6</td><td>Listen Server</td><td>客户端玩家先死；再测主机先死</td><td>死者不能操作；结算由服务器判定、两端一致（规则按设计：任一人阵亡即失败，或全灭才失败 + 观战）</td><td class="no">死者仍能操作；主机 3 s 后冻结全员</td></tr>
     <tr><td>7</td><td>任意</td><td>弹匣 3 / 备弹 7 时换弹；换弹中按开火；换弹中被打死</td><td>换完 10 / 0；开火无效；死亡时弹药不变</td><td class="no">E4：0 / 0</td></tr>
     <tr><td>8</td><td>任意</td><td>两人同时打同一只僵尸的最后一滴血</td><td>只死一次、只补刷一只、击杀算给先到服务器的一发</td><td class="no">客户端本地多刷</td></tr>
-    <tr><td>9</td><td>Listen Server</td><td>两人并排看同一只僵尸</td><td>跑姿、待机、攻击动作一致</td><td class="no">各端各自随机</td></tr>
+    <tr><td>9</td><td>Listen Server</td><td>两人并排看同一只僵尸</td><td>（可选，取决于设计）跑姿、待机、攻击动作一致</td><td class="mid">各端各自随机（设计取舍）</td></tr>
     <tr><td>10</td><td>Standalone 双开</td><td>客户端按 Esc；客户端点重开；主机点重开</td><td>暂停只影响自己；客户端看不到重开按钮；主机重开带上客户端</td><td class="no">暂停无效 / OpenLevel 断线</td></tr>
     <tr><td>11</td><td>Standalone 双开</td><td>对局中关闭主机</td><td>客户端回到主菜单并提示“主机已断开”</td><td class="no">无处理</td></tr>
     <tr><td>12</td><td>任意</td><td>过滤日志 LogNet、LogNetPlayerMovement、LogPawn、LogScript</td><td>无 No owning connection、无 Accessed None、无持续纠正、无 DisableInput 错误</td><td class="no">均有</td></tr>
@@ -83,11 +83,11 @@ Listen Server / Dedicated Server / 独立进程 / 网络模拟 Bad / 晚加入 /
 - 命中：服务器生成复制的子弹 Actor（ProjectileMovement），没有射线检测
 - 表现：开火 / 换弹 / 受击 / 死亡靠服务器组播；冲刺通过 Server RPC 切换
 ## 复盘（Docs/Audit.md）
-- 从 .uasset 读出全部 28 个蓝图，定位 23 个问题（7 个联机下必错）：换弹吞弹匣、冲刺被拉回、一人阵亡全员失败、补刷每端执行……
+- 从 .uasset 读出全部 28 个蓝图，得到 23 条审计结果：19 个问题（6 个联机下必错，如换弹吞弹匣、冲刺被拉回、补刷每端执行）+ 4 条设计取舍（一人阵亡即失败、只做第一人称手臂……）
 - 网络模型实验 E1~E7：开火反馈延迟、弹药回跳、移动纠正、命中补偿、Reliable 排队、带宽（Docs/NetModel.md）
 ## 重构方案（Docs/Redesign.md，理想方案）
 - 服务器权威 + 本机预测 + 状态复制；步枪改命中扫描；换弹服务器状态机；冲刺进移动预测
-- 14 个类 / 16 个复制变量 / 8 个 RPC + 2 个 Unreliable 组播
+- 精简版沿用原有 6 个主要类；完整版 14 个类 / 16 个复制变量 / 8 个 RPC + 2 个 Unreliable 组播
 ## 进度
 - [ ] 开火与弹药  [ ] 换弹  [ ] 移动预测  [ ] 整局流程  [ ] UI
 <!--/code-->

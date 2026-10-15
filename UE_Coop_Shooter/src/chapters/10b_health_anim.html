@@ -67,7 +67,7 @@
   <h2>8. 原 Demo 对照</h2>
   <div class="tbl"><table>
     <tr><th>环节</th><th>原 Demo</th><th>问题</th><th>重做</th></tr>
-    <tr><td>网格</td><td>只有 1P 手臂；胶囊随 Pitch 旋转</td><td>对方看到漂浮的手臂，模型随低头倾斜</td><td>1P + 3P，身体只跟 Yaw，AimOffset 处理俯仰</td></tr>
+    <tr><td>网格</td><td>只有 1P 手臂；胶囊随 Pitch 旋转</td><td><span class="tag dsn">设计取舍</span>工作量妥协：对方看到漂浮的手臂、模型随低头倾斜，不影响同步（A#17）</td><td>（完整版）1P + 3P，身体只跟 Yaw，AimOffset 处理俯仰</td></tr>
     <tr><td>输入映射</td><td>BeginPlay 里 GetPlayerController(0)</td><td>每个副本都执行；客户端时序不可靠</td><td>Receive Controller Changed + IsLocallyControlled</td></tr>
     <tr><td>移动速度</td><td>Tick 里两端各自 FInterpTo 写 MaxWalkSpeed</td><td>依赖只在一端存在的标志，持续被纠正（E6）</td><td>GetMaxSpeed 读预测标志</td></tr>
     <tr><td>冲刺</td><td>Server RPC 改一个不复制的布尔</td><td>本机永远不冲刺、服务器在冲刺</td><td>SetWantsToSprint（进 SavedMove）</td></tr>

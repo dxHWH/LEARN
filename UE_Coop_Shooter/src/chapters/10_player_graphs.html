@@ -14,11 +14,11 @@
   <div class="tbl cmp"><table>
     <tr><th>方面</th><th class="cur">当前做法（原 Demo）</th><th class="prob">存在的问题</th><th class="ideal">理想方案（本章）</th></tr>
     <tr><td>角色类</td><td>BP_Player</td><td class="pbc">一个类同时管输入、武器、血量、死亡、界面，职责混在一起</td><td>BP_CoopCharacter + AC_Health</td></tr>
-    <tr><td>模型</td><td>只有第一人称手臂（胶囊随俯仰旋转），别人看到漂浮的手臂</td><td class="pbc"><span class="tag p2">P2</span>对方看到漂浮手臂（A#17）</td><td>1P 手臂（只有自己可见）+ 3P 全身（别人可见）</td></tr>
+    <tr><td>模型</td><td>只有第一人称手臂（胶囊随俯仰旋转），别人看到漂浮的手臂</td><td class="dsc"><span class="tag dsn">设计取舍</span>工作量妥协：先保证同步正确，展示完整角色时再加第三人称模型（A#17）</td><td>（完整版）1P 手臂（只有自己可见）+ 3P 全身（别人可见）</td></tr>
     <tr><td>武器</td><td>BeginPlay 里服务器生成（Owner 为空）→ 补 SetOwner → for_server</td><td class="pbc"><span class="tag p3">P3</span>BeginPlay 早于 SetOwner，靠补丁（A#23）</td><td>Event Possessed 生成，Owner / Instigator 在生成参数里</td></tr>
     <tr><td>输入</td><td>BeginPlay 里通过 0 号控制器加映射</td><td class="pbc"><span class="tag p1">P1</span>每个角色副本都往 0 号控制器加映射（A#16）</td><td>Receive Controller Changed 且本地控制时添加</td></tr>
     <tr><td>冲刺 / 开镜</td><td>冲刺 Server RPC 只改服务器的标志，开镜只改本机动画蓝图</td><td class="pbc"><span class="tag p0">P0</span>冲刺每秒被纠正 {{v:E6[c=0,rtt=100].cps:.1f}} 次（A#5，E6）；开镜不影响服务器散布（A#13）</td><td>进移动预测；bIsAiming（Skip Owner）给别人看</td></tr>
-    <tr><td>血量与死亡</td><td>HP 变量复制，AnyDamage 里扣血；死亡时 DisableInput(0 号控制器)、2D 惨叫、Multi_Death 让每端弹失败</td><td class="pbc"><span class="tag p0">P0</span>死者仍能操作、惨叫在主机响（A#4）；一人阵亡全员失败（A#7）</td><td>AC_Health 只在服务器扣；HandleDeath 通知 GameMode；拥有者在 OnRep 里关输入</td></tr>
+    <tr><td>血量与死亡</td><td>HP 变量复制，AnyDamage 里扣血；死亡时 DisableInput(0 号控制器)、2D 惨叫、Multi_Death 让每端弹失败</td><td class="pbc"><span class="tag p0">P0</span>死者仍能操作、惨叫在主机响（A#4）；失败判定写在角色组播里（“任一人阵亡即失败”的规则本身是设计，A#7）</td><td>AC_Health 只在服务器扣；HandleDeath 通知 GameMode；拥有者在 OnRep 里关输入</td></tr>
     <tr><td>受击反馈</td><td>Client_PlayHitFX 只发给被打的人 ✓</td><td class="pbc">无（这是原版做对的地方）</td><td>保留（Client_ShowDamageFeedback）</td></tr>
   </table></div>
 

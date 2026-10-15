@@ -5,8 +5,8 @@
     <p class="lead">每条问题都能在 audit/*.txt 中按节点编号查到；“推断”类给出在编辑器里验证的方法。</p>
   </div>
 
-  <h2>A.1 问题全清单（23 条）</h2>
-  <div class="state cur"><span class="sl">当前做法</span><div>“位置”“问题”两列是原 Demo 的当前做法；“修复”列给的是最小修复或理想方案中的对应做法（逐项对照见 K0 表 K0-2）。级别统计：P0 7 条、P1 9 条、P2 6 条、P3 1 条；按后果分成五类的总览见 K0 第 4 节（图 K0-3、表 K0-4），全书其他地方用 “A#编号” 引用本表。</div></div>
+  <h2>A.1 审计全清单（23 条：19 个问题 + 4 条设计取舍）</h2>
+  <div class="state cur"><span class="sl">当前做法</span><div>“位置”“问题”两列是原 Demo 的当前做法；“修复”列给的是最小修复或理想方案中的对应做法（逐项对照见 K0 表 K0-2）。级别统计：19 个问题中 P0 6 条、P1 8 条、P2 4 条、P3 1 条；另有 4 条（#7、#17、#21、#22）是设计取舍——玩法规则、不影响判定的表现差异或工作量妥协——保留编号但不计入问题；按后果分成五类的总览见 K0 第 4 节（图 K0-3、表 K0-4），全书其他地方用 “A#编号” 引用本表。</div></div>
   <div class="tbl"><table>
     <tr><th>#</th><th>级别</th><th>位置</th><th>问题</th><th>修复</th><th>如何验证</th></tr>
     <tr><td>1</td><td><span class="tag p0">P0</span></td><td>BP_Weapon.剩余子弹计算</td><td>false 分支未连 Return，返回 0，换弹吞弹匣</td><td>一次性 take = min(空位, 备弹)</td><td><span class="tag ex">E4</span>；PIE 备弹 7 时换弹</td></tr>
@@ -15,7 +15,7 @@
     <tr><td>4</td><td><span class="tag p0">P0</span></td><td>BP_Player.ReceiveAnyDamage</td><td>在服务器上 DisableInput(GetPlayerController(0)) / PlaySound2D：客户端玩家死时 DisableInput 只报 LogPawn 错误不生效，死者仍能操作；惨叫在主机响</td><td>服务器只改 bIsDead + 校验请求；拥有者客户端在 OnRep 里关输入、播音效</td><td>让客户端玩家先死，看它能否继续移动 / 开火，日志里搜 LogPawn</td></tr>
     <tr><td>5</td><td><span class="tag p0">P0</span></td><td>BP_Player.冲刺 / 瞄准 / 速度计算</td><td>IsRunning 仅服务器、是否瞄准 仅本机；Tick 里各自写 MaxWalkSpeed</td><td>标志进 SavedMove，GetMaxSpeed 统一</td><td><span class="tag ex">E6</span>；p.NetShowCorrections 1</td></tr>
     <tr><td>6</td><td><span class="tag p0">P0</span></td><td>UWB_InGame.计算剩余时间</td><td>倒计时与胜利在每端 UI 自算</td><td>GameState 复制结束时刻，GameMode 判定</td><td>网络模拟下对比两端结算时刻</td></tr>
-    <tr><td>7</td><td><span class="tag p0">P0</span></td><td>BP_Player.Multi_Death</td><td>任一玩家死亡，每端都弹“失败”并暂停</td><td>GameMode 判全灭；死者观战</td><td>客户端先死，看主机界面</td></tr>
+    <tr><td>7</td><td><span class="tag dsn">设计取舍</span></td><td>BP_Player.Multi_Death</td><td>任一玩家死亡，每端都弹“失败”并暂停——这是“任一人阵亡即失败”的玩法规则，规则本身没问题；可改进的只是判定写在角色组播里、不在 GameMode</td><td>不需要修；想改成“全灭才失败 + 观战”时由 GameMode 判定（第 9 章示范的规则变体）</td><td>—</td></tr>
     <tr><td>8</td><td><span class="tag p0">P0</span></td><td>UWB_Pause / UWB_WinOrFail</td><td>SetGamePaused 客户端无效、主机冻结全员；OpenLevel 重开断线</td><td>暂停只开 UI；重开 ServerTravel</td><td>客户端按 Esc / 点重开</td></tr>
     <tr><td>9</td><td><span class="tag p1">P1</span></td><td>BP_Weapon.Server_Fire</td><td>本机表现等多播（≈ RTT + 网络帧）</td><td>本机预测播表现</td><td><span class="tag ex">E1</span></td></tr>
     <tr><td>10</td><td><span class="tag p1">P1</span></td><td>BP_Weapon.Server_Fire</td><td>Multicast_Fire 在 CheckCanFire 之前：空放、打断换弹</td><td>服务器接受后才 BurstCounter+1</td><td><span class="tag ex">E1</span>；换弹时按住开火</td></tr>
@@ -25,12 +25,12 @@
     <tr><td>14</td><td><span class="tag p1">P1</span></td><td>BP_Zombie.Multicast_Death</td><td>ClearTimer("追逐玩家") 名字不存在；FindClosestTarget / 攻击范围检测 仍在跑</td><td>ClearAllTimersForObject + StopLogic</td><td>站在尸体前 5 s 内看是否掉血</td></tr>
     <tr><td>15</td><td><span class="tag p1">P1</span></td><td>关卡蓝图 Server_SetStart</td><td>客户端调用被丢弃；游戏是否开始 非复制，晚加入者永远 false</td><td>GameState.Phase 复制</td><td>日志 “No owning connection”；Allow Late Joining</td></tr>
     <tr><td>16</td><td><span class="tag p1">P1</span></td><td>关卡蓝图 BeginPlay / BP_Player BeginPlay</td><td>绑定 GetPlayerCharacter(0)、Cast GetGameState 依赖复制时序</td><td>在 OnRep_PlayerState / PawnClientRestart / OnRep_Phase 里做</td><td>独立进程 + 网络模拟启动多次</td></tr>
-    <tr><td>17</td><td><span class="tag p2">P2</span></td><td>BP_Player 组件</td><td>只有 1P 手臂；bUseControllerRotationPitch 让胶囊俯仰</td><td>1P + 3P 网格；身体只跟 Yaw</td><td>看对方模型</td></tr>
+    <tr><td>17</td><td><span class="tag dsn">设计取舍</span></td><td>BP_Player 组件</td><td>只有 1P 手臂；bUseControllerRotationPitch 让胶囊俯仰——单机改联机时的工作量妥协，不影响同步正确性</td><td>不必修；要给对方看完整角色时再做 1P + 3P 网格、身体只跟 Yaw（完整版）</td><td>看对方模型</td></tr>
     <tr><td>18</td><td><span class="tag p2">P2</span></td><td>BP_MyGameState.ReadyPlayersList / GM.AddReadyPlayer</td><td>复制 PC 引用（客户端为空）；GameMode 上标 Server RPC</td><td>PlayerState.bReady</td><td>客户端打印数组内容</td></tr>
     <tr><td>19</td><td><span class="tag p2">P2</span></td><td>BP_Bullet / BP_Zombie ApplyDamage</td><td>Instigator / Causer 为空</td><td>填 Controller 与武器</td><td>—</td></tr>
     <tr><td>20</td><td><span class="tag p2">P2</span></td><td>BP_Weapon 复制变量；BP_Player.MouseY</td><td>弹药无条件复制给所有人；MouseY 在客户端写复制变量</td><td>OwnerOnly；本地变量</td><td>Networking Insights 看属性流量</td></tr>
-    <tr><td>21</td><td><span class="tag p1">P1</span></td><td>BP_Zombie.初始化速度和动画</td><td>速度与动画变体只在服务器随机并设置（SwitchHasAuthority 之后），AnimBP 变量不复制</td><td>服务器复制 VariantSeed（Initial Only），各端用同一 Random Stream</td><td>两端并排看冲刺僵尸：客户端是默认跑姿</td></tr>
-    <tr><td>22</td><td><span class="tag p2">P2</span></td><td>BP_Zombie.Multicast_PlayAttackAnim / Multicast_HitReact</td><td>多播里 RandomIntegerInRange 选蒙太奇：各端各自随机，动作不一致；On Completed 里各端写复制变量 正在攻击</td><td>服务器选 Index 放进 AttackInfo 复制；bAttacking 只在服务器由计时器复位</td><td>两端并排看同一只僵尸的攻击动作</td></tr>
+    <tr><td>21</td><td><span class="tag dsn">设计取舍</span></td><td>BP_Zombie.初始化速度和动画</td><td>速度与动画变体只在服务器随机并设置（SwitchHasAuthority 之后），AnimBP 变量不复制——速度随移动复制、各端一致，只有动画姿势客户端用默认值，纯表现差异</td><td>不必修；要求各端画面一致时复制 VariantSeed（Initial Only），各端用同一 Random Stream（完整版）</td><td>两端并排看冲刺僵尸：客户端是默认跑姿</td></tr>
+    <tr><td>22</td><td><span class="tag dsn">设计取舍</span></td><td>BP_Zombie.Multicast_PlayAttackAnim / Multicast_HitReact</td><td>多播里 RandomIntegerInRange 选蒙太奇：各端各自随机，动作不一致；On Completed 里各端写复制变量 正在攻击（客户端只改本地）——伤害判定只在服务器，属于不影响结果的表现差异</td><td>不必修；要求各端一致时服务器选 Index 放进 AttackInfo 复制，bAttacking 只在服务器复位（完整版）</td><td>两端并排看同一只僵尸的攻击动作</td></tr>
     <tr><td>23</td><td><span class="tag p3">P3</span></td><td>多处</td><td>for_server 补丁、空 OnRep、未连接的 servertravel / 计算子弹数量 节点、重复变量 As BP Player_0</td><td>清理；生成时传 Owner</td><td>—</td></tr>
   </table></div>
 

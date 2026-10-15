@@ -12,9 +12,9 @@
   <div class="state ideal"><span class="sl">理想方案</span><div>本章是重构后的僵尸、AIController 与行为树。原 Demo 的 BP_Zombie / BP_ZombieSpawn 是这样做的：</div></div>
   <div class="tbl cmp"><table>
     <tr><th>方面</th><th class="cur">当前做法（原 Demo）</th><th class="prob">存在的问题</th><th class="ideal">理想方案（本章）</th></tr>
-    <tr><td>AI</td><td>服务器计时器：0.5 秒找最近玩家（包括已死亡的）+ SimpleMoveToActor；0.1 秒检测攻击范围</td><td class="pbc">追着已阵亡的玩家；逻辑散在计时器里，看不到当前状态</td><td>AIC_Zombie + BT_Zombie；服务节点过滤已阵亡玩家</td></tr>
-    <tr><td>外观</td><td>速度和动画变体只在服务器随机，客户端用默认值</td><td class="pbc"><span class="tag p1">P1</span>客户端用默认跑姿，和主机不一致（A#21）</td><td>VariantSeed（Initial Only），各端同一随机流</td></tr>
-    <tr><td>攻击 / 受击动作</td><td>Multicast_PlayAttackAnim / Multicast_HitReact，组播里各端各自随机；On Completed 各端都写复制变量“正在攻击”</td><td class="pbc"><span class="tag p2">P2</span>两端动作不同（A#22）；客户端写复制变量只改本地</td><td>AttackInfo / LastHit 计数 + 服务器选好的动作编号</td></tr>
+    <tr><td>AI</td><td>服务器计时器：0.5 秒找最近玩家（包括已死亡的）+ SimpleMoveToActor；0.1 秒检测攻击范围</td><td class="dsc">⚖ 不算问题：计时器 AI 只在服务器运行，本身没错；“追已阵亡的玩家”在“任一人阵亡即失败”的规则下不会发生。行为树是完整版的工程化做法</td><td>AIC_Zombie + BT_Zombie；服务节点过滤已阵亡玩家</td></tr>
+    <tr><td>外观</td><td>速度和动画变体只在服务器随机，客户端用默认值</td><td class="dsc"><span class="tag dsn">设计取舍</span>客户端用默认跑姿：速度一致，只有动画不同，纯表现差异（A#21）</td><td>VariantSeed（Initial Only），各端同一随机流</td></tr>
+    <tr><td>攻击 / 受击动作</td><td>Multicast_PlayAttackAnim / Multicast_HitReact，组播里各端各自随机；On Completed 各端都写复制变量“正在攻击”</td><td class="dsc"><span class="tag dsn">设计取舍</span>两端动作不同，不影响伤害判定（A#22）；客户端写“正在攻击”只改本地，只影响本地是否播受击动作</td><td>AttackInfo / LastHit 计数 + 服务器选好的动作编号</td></tr>
     <tr><td>受伤</td><td>AnyDamage 里扣复制变量“血量”（只在服务器触发）</td><td class="pbc">扣血只在服务器（对）；伤害来源为空（A#19）</td><td>AC_Health.HandleDamage（只在服务器）</td></tr>
     <tr><td>死亡</td><td>服务器调 Multicast_Death：布娃娃、清了一个名字写错的计时器、调用“重新生成”（于是每一端都补刷）</td><td class="pbc"><span class="tag p0">P0</span>补刷每端执行，客户端出现幽灵僵尸（A#3）；<span class="tag p1">P1</span>倒地后仍在寻路和攻击检测（A#14）</td><td>bIsDead RepNotify；服务器停 AI、清全部计时器、通知 GameMode；Multicast_DeathCry 只放惨叫</td></tr>
     <tr><td>刷怪</td><td>BP_ZombieSpawn：开局在 TargetPoint 附近刷 10 只</td><td class="pbc">“重新生成”直接跳到权限判断之后的节点，绕过了 Switch Has Authority</td><td>GM_Coop.SpawnZombie + BP_SpawnPoint</td></tr>
@@ -50,6 +50,7 @@
 "cap":"<b>图 12-0b</b>　AIC_Zombie 的网络规格：整个“灵魂”只在服务器，客户端只看到身体的移动和复制下来的状态"} -->
 
   <h2>2. BeginPlay 与外观变体：服务器只决定一个种子</h2>
+  <div class="state dsn"><span class="sl">可选 · 完整版</span><div>原 Demo 的外观变体只在服务器设置：速度随移动复制，各端一致；动画姿势客户端用默认值。这是纯表现差异，属于可接受的设计取舍（A#21）。本节是“要求各端画面一致”时的做法，不是必须修的问题。</div></div>
 <!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"BP_Zombie · BeginPlay 与外观变体","nodes":[
  {"id":"b0","k":"event","x":0,"y":0,"t":"Event BeginPlay","net":"A"},
  {"id":"b1","k":"func","x":1,"y":0,"t":"Bind OnHit / OnDeadVisual","s":"Target ← AC_Health（各端）","i":["Event ← PlayHitReact / PlayDeath"]},
@@ -69,6 +70,7 @@
   </div>
 
   <h2>3. 攻击：服务器时间窗口判定，各端播同一个动作</h2>
+  <div class="state dsn"><span class="sl">部分可选</span><div>攻击判定只在服务器——这一点原 Demo 已经做对。“各端播同一个攻击动作”（AttackInfo 计数 + 动作编号）是可选项：原 Demo 各端各自随机动作，属于不影响判定的表现差异（A#22）。</div></div>
 <!--bpgraph {"state":"ideal","cols":4,"rg":56,"title":"BP_Zombie · 攻击","nodes":[
  {"id":"a0","k":"cevent","x":0,"y":0,"t":"StartAttack","s":"由 BTT_Attack 调用","net":"S"},
  {"id":"a1","k":"set","x":1,"y":0,"t":"Set bAttacking","i":["← true"],"rep":"L:仅服务器"},

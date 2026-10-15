@@ -18,7 +18,7 @@
   <div class="ans chain">
     <div class="q">链 1　“介绍一下这个 Demo 的架构。”</div>
     <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 只有 GM_MyGame、BP_MyGameState、BP_Player、BP_Weapon、BP_Bullet、BP_Zombie 和关卡蓝图；开局、计时、胜负分散在关卡蓝图和 UI 里，没有 PlayerController / PlayerState 子类。下面讲的是重构后的架构。</div></div>
-    <div class="state prob"><span class="sl">存在的问题</span><div>关卡蓝图是每端各跑一份的上帝对象；没有 PlayerState，PC 引用复制到客户端为空；胜负写在 UI 和角色组播里，一人阵亡两人一起失败。</div></div>
+    <div class="state prob"><span class="sl">存在的问题</span><div>关卡蓝图是每端各跑一份的上帝对象；没有 PlayerState，PC 引用复制到客户端为空；胜负写在 UI 和角色组播里（“任一人阵亡即失败”的规则本身是设计，问题是判定不在服务器的规则类里）。</div></div>
     <p>按“规则 / 状态 / 人 / 灵魂 / 身体 / 工具”讲：GM_Coop 只在服务器，负责登录、开局、刷怪、胜负；GS_Coop 复制比赛阶段和结束时刻；PS_Coop 记准备和击杀；PC_Coop 管本地 UI 和请求；Character 是身体，持有武器；武器挂在 Owner 链上；血量是 AC_Health 组件，玩家和僵尸共用；僵尸的 AI 在服务器的 AIController + 行为树里。（第 7、8 章）</p>
     <div class="q f">追问 1：分数为什么放 PlayerState，不放 Character？</div>
     <p>Character 是一条命，死了就销毁、重生是新的 Actor；PlayerState 跟人走，整局都在，而且总是复制给所有人（GameState.PlayerArray 每端都有），记分板直接读它。</p>
@@ -50,7 +50,7 @@
   <div class="ans chain">
     <div class="q">链 3　“角色、控制器、武器怎么绑定？”</div>
     <div class="state cur"><span class="sl">当前做法</span><div>原 Demo 在角色 BeginPlay 里由服务器生成武器，生成时 Owner 为空、之后补 SetOwner；只有第一人称手臂；输入用 0 号控制器添加。</div></div>
-    <div class="state prob"><span class="sl">存在的问题</span><div>武器 BeginPlay 早于 SetOwner；0 号控制器在服务器上是主机的，客户端玩家死后仍能操作；对方看到漂浮的手臂。</div></div>
+    <div class="state prob"><span class="sl">存在的问题</span><div>武器 BeginPlay 早于 SetOwner；0 号控制器在服务器上是主机的，客户端玩家死后仍能操作。（只有第一人称手臂、对方看到漂浮的手臂是工作量取舍，不算问题。）</div></div>
     <p>服务器 Possess：Pawn 的 Owner = PC；武器在服务器生成，生成参数里 Owner = Pawn、Instigator = Pawn；CurrentWeapon 复制，在 OnRep 里各端挂到 3P 和 1P 网格。（第 3、10 章）</p>
     <div class="q f">追问 1：Owner 和 Instigator 有什么区别？</div>
     <p>Owner 是网络归属：决定谁能发 Server RPC、OwnerOnly 发给谁、相关性；Instigator 是责任归属：这件事是谁造成的，用于伤害统计、友伤、仇恨。武器两者都是持有者，但子弹、榴弹这类抛射物的 Owner 可以是武器，Instigator 仍是开火的 Pawn。</p>
@@ -193,6 +193,8 @@
     <tr><td>“这个 Demo 做得很失败”</td><td>听起来没有收获</td><td>“第一版是单机思维迁移到联机的典型坑，我逐个定位了根因”</td></tr>
     <tr><td>“我在 200 ms 下测过”（其实是模型实验）</td><td>一追问引擎里怎么测就露馅</td><td>“在网络模型实验里……；在引擎里我会用 PIE 网络模拟 + p.NetShowCorrections 验证”</td></tr>
     <tr><td>“全部重构完了”（其实只是设计）</td><td>追问实现细节答不上来</td><td>“重构方案是……；其中 X 已经实现、Y 还是设计”</td></tr>
+    <tr><td>“一人死全员失败也是 bug”“只有手臂也是问题”</td><td>分不清问题和设计取舍</td><td>“一人阵亡即失败是玩法规则，只做第一人称手臂是工作量取舍；真正的问题是判定写在角色组播里、补刷在每一端执行”</td></tr>
+    <tr><td>“我会把它拆成 14 个类”</td><td>像在为拆而拆</td><td>“先做精简版：原来的类够用，问题是职责放错了；要扩展时再拆 PlayerState、PlayerController 子类、行为树”</td></tr>
   </table></div>
 
   <div class="co ver"><span class="h">被问住时怎么办</span>
